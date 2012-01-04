@@ -64,7 +64,8 @@ def onMouseUpObj(self, x, y):
 	self.clicked = False
 def onMouseMoveGroup(self, x, y):
 	pass
-	root.rotation+=0.01
+	#This is for testing rotation. Comment out before any commit!
+	#root.rotation+=0.01
 def onMouseMoveObj(self, x, y):
 	pass
 def onMouseDragGroup(self, x, y):
