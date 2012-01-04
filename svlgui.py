@@ -610,10 +610,20 @@ class Canvas(Widget):
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 					
 				def key_down(self, event):
-					print "Please"
+					keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
+									63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
+									63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
+									63241:"F6",63242:"F7",63243:"F8",}
+					if ord(event.unichars) in keydict:
+						key = keydict[ord(event.unichars)]
+					else:
+						key = event.unichars
+					for i in self.objs:
+						i._onKeyDown(key)
+					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 				
 				def key_up(self, event):
-					print "Thank you!"
+					print ord(event.unichars)
 			self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
 		elif SYSTEM=="html":
@@ -981,6 +991,10 @@ class Shape (object):
 		pass
 	def onMouseMove(self, self1, x, y):
 		pass
+	def onKeyDown(self, self1, key):
+		pass
+	def onKeyUp(self, self1, key):
+		pass
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
@@ -1005,6 +1019,10 @@ class Layer:
 		pass
 	def onMouseMove(self, self1, x, y):
 		pass
+	def onKeyDown(self, self1, key):
+		pass
+	def onKeyUp(self, self1, key):
+		pass
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
@@ -1013,7 +1031,7 @@ class Layer:
 	class frame:
 		class framewrapper (object):
 			#Wraps object per-frame. Allows for changes in position, rotation, scale.
-			def __init__(self, obj, x, y, rot, scalex, scaley):
+			def __init__(self, obj, x, y, rot, scalex, scaley, parent=None):
 				self.obj = obj
 				self.x = obj.x = x
 				self.y = obj.y = y
@@ -1026,6 +1044,7 @@ class Layer:
 				self.linecolor = obj.linecolor
 				self.fillcolor = obj.fillcolor
 				self.name = obj.name
+				self.parent = parent
 			def draw(self,cr,transform):
 				pass
 				self.update()
@@ -1047,6 +1066,10 @@ class Layer:
 				self.obj.onMouseMove(self, x, y)
 			def _onMouseDrag(self, x, y):
 				self.obj.onMouseDrag(self, x, y)
+			def _onKeyDown(self, key):
+				self.obj.onKeyDown(self, key)
+			def _onKeyUp(self, key):
+				self.obj.onKeyUp(self, key)
 			def getminx(self):
 				return self.obj.minx+self.x
 			def getminy(self):
@@ -1071,7 +1094,7 @@ class Layer:
 			self.currentselect=None
 			self.type="Group"
 		def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
-			self.objs.append(self.framewrapper(obj, x, y, rot, scalex, scaley))
+			self.objs.append(self.framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
 		def play(self, group, cr, currentselect,transform,rect):
 			if SYSTEM=="gtk":
 				cr.save()
@@ -1258,6 +1281,22 @@ class Layer:
 			self.onMouseDrag(self, x, y)
 	def onMouseDrag(self, self1, x, y):
 		pass
+	def _onKeyDown(self, key):
+		if self.level and MODE in [" ", "s"]:
+			if self.currentselect:
+				self.currentselect._onKeyDown(key)
+		else:
+			self.onKeyDown(self, key)
+	def onKeyDown(self, self1, key):
+		pass
+	def _onKeyUp(self, key):
+		if self.level and MODE in [" ", "s"]:
+			if self.currentselect:
+				self.currentselect._onKeyUp(key)
+		else:
+			self.onKeyUp(self, key)
+	def onKeyUp(self, self1, key):
+		pass
 	def print_sc(self,defs=True,frams=True):
 		retval = ""
 		if defs:
@@ -1415,6 +1454,22 @@ class Group (object):
 		else:
 			self.onMouseDrag(self, x, y)
 	def onMouseDrag(self, self1, x, y):
+		pass
+	def _onKeyDown(self, key):
+		if self.activelayer.level and MODE in [" ", "s"]:
+			if self.activelayer.currentselect:
+				self.activelayer.currentselect._onKeyDown(key)
+		else:
+			self.onKeyDown(self, key)
+	def onKeyDown(self, self1, key):
+		pass
+	def _onKeyUp(self, key):
+		if self.activelayer.level and MODE in [" ", "s"]:
+			if self.activelayer.currentselect:
+				self.activelayer.currentselect._onKeyUp(key)
+		else:
+			self.onKeyUp(self, key)
+	def onKeyUp(self, self1, key):
 		pass
 	def maxframe(self):
 		frame = 0

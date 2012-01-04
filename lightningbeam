@@ -47,6 +47,7 @@ def onMouseDownGroup(self, x, y):
 		self.cshape.onMouseMove = onMouseMoveObj
 		self.cshape.onMouseDrag = onMouseDragObj
 		self.cshape.onMouseUp = onMouseUpObj
+		self.cshape.onKeyDown = onKeyDownObj
 		self.clicked = True
 def onMouseDownObj(self, x, y):
 	self.clicked = True
@@ -85,7 +86,17 @@ def onMouseDragGroup(self, x, y):
 def onMouseDragObj(self, x, y):
 	self.x = x-self.initx
 	self.y = y-self.inity
-	
+
+def onKeyDownGroup(self, key):
+	pass
+	if key in [" ", "s", "r", "e", "b"]:
+		svlgui.MODE=key
+def onKeyDownObj(self, key):
+	print self
+	if key in ("delete", "backspace"):
+		del self.parent[self.parent.index(self)] # Need to clean up deletion
+	elif key in [" ", "s", "r", "e", "b"]:
+		svlgui.MODE=key
 	
 def create_sc(root):
 	retval = ".flash bbox=500x500 background=#ffffff\n"+root.print_sc()+".end"
@@ -124,11 +135,13 @@ root.onMouseDown = onMouseDownGroup
 root.onMouseUp = onMouseUpGroup
 root.onMouseMove = onMouseMoveGroup
 root.onMouseDrag = onMouseDragGroup
+root.onKeyDown = onKeyDownGroup
 e=ellipse(100,100,10,10,None)
 e.onMouseDown = onMouseDownObj
 e.onMouseMove = onMouseMoveObj
 e.onMouseDrag = onMouseDragObj
 e.onMouseUp = onMouseUpObj
+e.onKeyDown = onKeyDownObj
 root.add(e)
 
 
