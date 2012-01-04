@@ -149,6 +149,7 @@ elif sys.platform=="linux-armv6l":
 	print str(sys.platform)
 elif sys.platform=="darwin":
 	import pickle
+	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
@@ -635,12 +636,14 @@ class Canvas(Widget):
 		obj.x = x
 		obj.y = y
 		self.objs.append(obj)
-		jscommunicate("cchildren["+str(self.tid)+"]="+str(self.objs))
+		if SYSTEM=="html":
+			jscommunicate("cchildren["+str(self.tid)+"]="+str(self.objs))
 	def delete(self, obj):
 		self.objs.remove(obj)
 		del obj
 		self.draw()
-		jscommunicate("cchildren["+str(self.tid)+"]="+str(self.objs))
+		if SYSTEM=="html":
+			jscommunicate("cchildren["+str(self.tid)+"]="+str(self.objs))
 
 class TextView(Widget):
 	def __init__(self,editable=True,width=False,height=False):
