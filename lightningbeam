@@ -1,0 +1,294 @@
+#! /usr/bin/python
+
+#SVLGUI - my custom GUI wrapper to abstract the GUI
+import svlgui
+
+#swift_window - builds the application windows
+import lightningbeam_windows
+
+
+#specify the current version and what version files it can still open
+LIGHTNINGBEAM_VERSION = "1.0-alpha1"
+LIGHTNINGBEAM_COMPAT = ["1.0-alpha1"]
+
+#Global variables. Used to keep stuff together.
+global root
+global layers
+
+def update_date():
+	return "Thu, October 27, 2011"
+
+
+
+def onLoadFrames(self):
+	'''for i in range(2000):
+		if i%5==0:
+			j = box(i*16,0,16,32,svlgui.Color([0.5,0.5,0.5]))
+			self.add(j)
+		else:
+			j = box(i*16,0,16,32,svlgui.Color([1,1,1]))
+			self.add(j)'''
+def onClickFrame(self, x, y):
+	print x, int(x/16)
+	self.activelayer.activeframe = int(x/16)
+def onMouseDownGroup(self, x, y):
+	if svlgui.MODE in [" ", "s"]:
+		if self.hitTest(x, y):
+			self.clicked = True
+	elif svlgui.MODE in ["r", "e"]:
+		if svlgui.MODE=="r":
+			self.cshape = box(x, y, 0, 0)
+		elif svlgui.MODE=="e":
+			self.cshape = ellipse(x, y, 0, 0)
+		#self.cshape.rotation = 5
+		self.cshape.initx,self.cshape.inity = x, y
+		self.add(self.cshape)
+		self.cshape.onMouseDown = onMouseDownObj
+		self.cshape.onMouseMove = onMouseMoveObj
+		self.cshape.onMouseDrag = onMouseDragObj
+		self.cshape.onMouseUp = onMouseUpObj
+		self.clicked = True
+def onMouseDownObj(self, x, y):
+	self.clicked = True
+	self.initx,self.inity = x-self.x, y-self.y
+	if svlgui.MODE == "b":
+		self.filled = True
+		self.fillcolor = svlgui.FILLCOLOR
+def onMouseDownFrame(self, x, y):
+	pass
+def onMouseUpGroup(self, x, y):
+	self.clicked = False
+	if svlgui.MODE in ["r", "e"]:
+		self.cshape = None
+def onMouseUpObj(self, x, y):
+	self.clicked = False
+def onMouseMoveGroup(self, x, y):
+	pass
+	root.rotation+=0.01
+def onMouseMoveObj(self, x, y):
+	pass
+def onMouseDragGroup(self, x, y):
+	if svlgui.MODE in [" ", "s"]:
+		self.x = x
+		self.y = y
+	elif svlgui.MODE == "r":
+		sd = self.cshape.shapedata
+		x=x-self.cshape.initx
+		y=y-self.cshape.inity
+		self.cshape.shapedata = [sd[0],["L",x,sd[0][2]],["L",x,y],["L",sd[0][1],y],sd[4]]
+	elif svlgui.MODE == "e":
+		sd = self.cshape.shapedata
+		x=x-self.cshape.initx
+		y=y-self.cshape.inity
+		self.cshape.shapedata = [["M",x/2,0],["C",4*x/5,0,x,y/5,x,y/2],["C",x,4*y/5,4*x/5,y,x/2,y],["C",x/5,y,0,4*y/5,0,y/2],["C",0,y/5,x/5,0,x/2,0]]
+def onMouseDragObj(self, x, y):
+	self.x = x-self.initx
+	self.y = y-self.inity
+	
+	
+def create_sc(root):
+	retval = ".flash bbox=500x500 background=#ffffff\n"+root.print_sc()+".end"
+	return retval
+def run_file(self=None):
+	global root
+	print "RUNNING"
+	#open("../Desktop/test.sc", "w").write(create_sc(root))
+	
+
+def box(x, y, width, height, fill=None):
+	global objects
+	box = svlgui.Shape(x, y)
+	box.shapedata = [["M",0,0],["L",width,0],["L",width,height],["L",0,height],["L",0,0]]
+	box.onMouseDown = onMouseDownObj
+	box.onMouseUp = onMouseUpObj
+	if fill:
+		box.fillcolor = fill
+		box.linecolor = svlgui.Color([0,0,0,0])
+		box.filled = True
+	return box
+def ellipse(x, y, width, height, fill=svlgui.FILLCOLOR):
+	global objects
+	ellipse = svlgui.Shape(x, y)
+	ellipse.shapedata = [["M",width/2,0],["C",4*width/5,0,width,height/5,width,height/2], ["C",width,4*height/5,4*width/5,height,width/2,height], ["C",width/5,height,0,4*height/5,0,height/2], ["C",0,height/5,width/5,0,width/2,0]]
+
+	# must figure out shapedata...
+	return ellipse
+def shape(x, y, fill):
+	shape = svlgui.Shape()
+	return shape
+
+root = svlgui.Group()
+root.level = True
+root.onMouseDown = onMouseDownGroup
+root.onMouseUp = onMouseUpGroup
+root.onMouseMove = onMouseMoveGroup
+root.onMouseDrag = onMouseDragGroup
+e=ellipse(100,100,10,10,None)
+e.onMouseDown = onMouseDownObj
+e.onMouseMove = onMouseMoveObj
+e.onMouseDrag = onMouseDragObj
+e.onMouseUp = onMouseUpObj
+root.add(e)
+
+
+
+
+if svlgui.SYSTEM == "gtk":
+	overlaywindow = svlgui.OverlayWindow()
+	MainWindow = lightningbeam_windows.MainWindow()
+elif svlgui.SYSTEM=="osx":
+	MainWindow = lightningbeam_windows.MainWindowOSX()
+elif svlgui.SYSTEM=="html":
+	MainWindow = lightningbeam_windows.MainWindowHTML()
+elif svlgui.SYSTEM=="android":
+	MainWindow = lightningbeam_windows.MainWindowAndroid()
+MainWindow.stage.add(root, 0,0)
+layers = svlgui.Group()
+b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1)
+layers.add(b)
+MainWindow.layerbox.add(layers,0,0)
+
+frames = svlgui.Group(onload=onLoadFrames)
+b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1)
+frames.add(b)
+frames.onMouseDown = onClickFrame
+MainWindow.timelinebox.add(frames,0,0)
+
+
+def new_file(widget):
+	global root
+	MainWindow.stage.delete(root)
+	root = svlgui.Group()
+	root.level = True
+	root.onMouseDown = onMouseDownGroup
+	root.onMouseUp = onMouseUpGroup
+	root.onMouseMove = onMouseMoveGroup
+	MainWindow.stage.add(root,0,0)
+def open_file(widget):
+	pass
+def open_sc_file(widget):
+	pass
+def save_file(widget):
+	pass
+def save_file_as(widget):
+	pass
+
+
+def quit(widget):
+	svlgui.quit()
+	
+	
+def add_keyframe(widget=None):
+	root.descendItem().add_frame(True)
+def add_layer(widget=None):
+	root.descendItem().add_layer(root.descendItem()._al)
+	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1))
+	print root.descendItem().layers.index(root.descendItem().activelayer)*32
+	#MainWindow.layerbox.draw()
+def delete_layer(widget=None):
+	root.descendItem().delete_layer(root.descendItem()._al)
+	#layers.delete(box(0,(root.layers.index(root.activelayer))*32,128,32,svlgui.Color("media/object_inactive.png")))
+	MainWindow.timelineref.draw()
+
+def send_to_back(widget=None):
+	rac = root.descendItem().activelayer.currentFrame()
+	index = rac.index(root.descendItem().activelayer.currentselect)
+	if index>0:
+		a = rac[:index]
+		b = rac[index+1:]
+		del rac[:index]
+		del rac[1:]
+		[rac.append(i) for i in a]
+		[rac.append(i) for i in b]
+	print rac
+	MainWindow.stage.draw()
+	
+def send_backward(widget=None):
+	rac = root.descendItem().activelayer.currentFrame()
+	index = rac.index(root.descendItem().activelayer.currentselect)
+	if index>0:
+		rac[index-1], rac[index] = rac[index], rac[index-1]
+	MainWindow.stage.draw()
+	
+def bring_forward(widget=None):
+	rac = root.descendItem().activelayer.currentFrame()
+	print rac
+	index = rac.index(root.descendItem().activelayer.currentselect)
+	if index+1<len(rac):
+		rac[index+1], rac[index] = rac[index], rac[index+1]
+	MainWindow.stage.draw()
+	
+def bring_to_front(widget=None):
+	rac = root.descendItem().activelayer.currentFrame()
+	index = rac.index(root.descendItem().activelayer.currentselect)
+	if index<len(rac):
+		a = rac[index]
+		del rac[index]
+		rac.append(a)
+	MainWindow.stage.draw()
+	
+def about(widget):
+	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
+	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
+
+
+svlgui.menufuncs([["File",
+						("New...", new_file,"<Control>N"),
+						("Open", open_file,"<Control>O"),
+						("Open .sc", open_sc_file),
+						("Save",save_file,"<Control>S"),
+						("Save As", save_file_as,"<Shift><Control>S"),
+						["Import",
+							("Import to Stage"),
+							("Import to Library")],
+						["Export",
+							"Export .swf",
+							"Export HTML5",
+							"Export Native Application",
+							"Export .sc",
+							"Export Image",
+							"Export Video",
+							"Export .pdf",
+							"Export Animated GIF"],
+						"Publish",
+						("Quit",quit,"<Control>Q")],
+					["Edit",
+						"Undo",
+						"Redo",
+						"Cut",
+						"Copy",
+						"Paste",
+						"Delete",
+						"Preferences"],
+					["Timeline",
+						("Add Keyframe",add_keyframe,"F5"),
+						"Add Blank Keyframe",
+						("Add Layer",add_layer,"<Shift><Control>N"),
+						("Delete Layer",delete_layer,"<Shift><Control>Delete")],
+					["Tools",
+						("Execute",run_file,"<Alt>Return")],
+					["Modify",
+						"Document",
+						"Convert to Symbol",
+						("Send to Back",send_to_back,"<Shift><Control>Down"),
+						("Send Backwards",send_backward,"<Control>Down"),
+						("Bring Forwards",bring_forward,"<Control>Up"),
+						("Bring to Front",bring_to_front,"<Shift><Control>Up")], 
+					["Help",
+						"Lightningbeam Help",
+						"Actionscript Reference",
+						("About Lightningbeam...",about)]])
+
+
+#open("/home/skyler/Desktop/test.sc","w").write(create_sc(root))
+
+if not svlgui.SYSTEM=="android":
+	svlgui.main()
+else:
+	import os
+	svlgui.droid.webViewShow('{0}/lightningbeam_ui.html'.format(str(os.curdir)))
+	while True:
+		result = svlgui.droid.eventWaitFor('pythonevent').result
+		svlgui.droid.eventClearBuffer()
+		print result
+		exec result["data"]
