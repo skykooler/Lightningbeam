@@ -25,6 +25,9 @@ SITER=0
 #Currentframe - the frame selected on the timeline. Not necessarily the frame being shown.
 CURRENTFRAME=0
 
+#Object which has the keyboard focus.
+FOCUS = None
+
 
 class Color (object):
 	def __init__(self, val):
@@ -180,10 +183,22 @@ if SYSTEM=="osx":
 			m.bring_to_front.enabled = 1
 			m.send_backward.enabled = 1
 			m.send_to_back.enabled = 1
-		#def create_sc(self):
+        
+        #def create_sc(self):
 		#	pass
 		#def run_file(self):
 		#	pass
+	class LightningbeamWindow(OSXWindow):
+		def __init__(self,*args,**kwargs):
+			OSXWindow.__init__(self,*args,**kwargs)
+		def key_down(self, event):
+			if FOCUS:
+				FOCUS.key_down(event)
+		def key_up(self, event):
+			if FOCUS:
+				FOCUS.key_up(event)
+			
+			
 	app = Lightningbeam()
 elif SYSTEM=="html":
 	app = ""
@@ -235,7 +250,7 @@ class Window:
 			self.window.show_all()
 			self.window.connect("destroy",self.destroy)
 		elif SYSTEM=="osx":
-			self.window = OSXWindow(width=1024,height=500)
+			self.window = LightningbeamWindow(width=1024,height=500)
 			#components = [i._int() for i in args]
 			#self.vbox = GUI.Column(components, equalize="w", expand=0)
 			#self.window.place(self.vbox, left = 0, top = 0, right = 0, bottom = 0, sticky = 'nsew')
@@ -593,7 +608,12 @@ class Canvas(Widget):
 					for i in self.objs:
 						i._onMouseUp(x, y)
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-
+					
+				def key_down(self, event):
+					print "Please"
+				
+				def key_up(self, event):
+					print "Thank you!"
 			self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
 		elif SYSTEM=="html":
@@ -644,6 +664,12 @@ class Canvas(Widget):
 		self.draw()
 		if SYSTEM=="html":
 			jscommunicate("cchildren["+str(self.tid)+"]="+str(self.objs))
+	def key_down(self, event):
+		if SYSTEM=="osx":
+			self.canvas.key_down(event)
+	def key_up(self, event):
+		if SYSTEM=="osx":
+			self.canvas.key_up(event)
 
 class TextView(Widget):
 	def __init__(self,editable=True,width=False,height=False):

@@ -144,6 +144,7 @@ elif svlgui.SYSTEM=="html":
 elif svlgui.SYSTEM=="android":
 	MainWindow = lightningbeam_windows.MainWindowAndroid()
 MainWindow.stage.add(root, 0,0)
+svlgui.FOCUS = MainWindow.stage
 layers = svlgui.Group()
 b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1)
 layers.add(b)
