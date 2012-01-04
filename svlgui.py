@@ -115,7 +115,7 @@ if sys.platform=="linux2":
 	import misc_funcs
 	#SYSTEM="gtk"
 	###   TESTING - gtk should be Linux platform, at least for now  ####
-	'''
+	#'''
 	import pickle
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
@@ -131,7 +131,7 @@ if sys.platform=="linux2":
 	ids = {}
 	jsdefs = []
 	jsfunctions = ""
-	sep = "/"
+	sep = "/"'''
 elif sys.platform=="win32":
 	import pickle
 	import GUI		# Using PyGUI. Experimental.
