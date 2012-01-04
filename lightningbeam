@@ -91,12 +91,16 @@ def onKeyDownGroup(self, key):
 	pass
 	if key in [" ", "s", "r", "e", "b"]:
 		svlgui.MODE=key
+	elif key=="F6":
+		add_keyframe()
+		print "Added keyframe."
 def onKeyDownObj(self, key):
-	print self
 	if key in ("delete", "backspace"):
 		del self.parent[self.parent.index(self)] # Need to clean up deletion
 	elif key in [" ", "s", "r", "e", "b"]:
 		svlgui.MODE=key
+	elif key=="F6":
+		add_keyframe()
 	
 def create_sc(root):
 	retval = ".flash bbox=500x500 background=#ffffff\n"+root.print_sc()+".end"
@@ -195,6 +199,10 @@ def quit(widget):
 	
 def add_keyframe(widget=None):
 	root.descendItem().add_frame(True)
+	print root.descendItem().activeframe*16
+	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1)
+	frames.add(b)
+	frames.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
 	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1))
@@ -215,7 +223,6 @@ def send_to_back(widget=None):
 		del rac[1:]
 		[rac.append(i) for i in a]
 		[rac.append(i) for i in b]
-	print rac
 	MainWindow.stage.draw()
 	
 def send_backward(widget=None):
@@ -227,7 +234,6 @@ def send_backward(widget=None):
 	
 def bring_forward(widget=None):
 	rac = root.descendItem().activelayer.currentFrame()
-	print rac
 	index = rac.index(root.descendItem().activelayer.currentselect)
 	if index+1<len(rac):
 		rac[index+1], rac[index] = rac[index], rac[index+1]

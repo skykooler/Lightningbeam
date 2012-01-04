@@ -1344,11 +1344,14 @@ class Group (object):
 		pass
 	def onMouseMove(self, self1, x, y):
 		pass
+	def getactiveframe(self):
+		return self.activelayer.activeframe
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
 	activelayer = property(getal,setal)
+	activeframe = property(getactiveframe)
 	level = property(getlevel, setlevel)
 	scale = property(fset = setscale)
 	def __init__(self, *args, **kwargs):
@@ -1360,7 +1363,6 @@ class Group (object):
 		self.rotation = 0
 		self.xscale = 1
 		self.yscale = 1
-		print kwargs
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
