@@ -91,6 +91,8 @@ def onKeyDownGroup(self, key):
 	pass
 	if key in [" ", "s", "r", "e", "b"]:
 		svlgui.MODE=key
+		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+				"b":"arrow"}[key], MainWindow.stage)
 	elif key=="F6":
 		add_keyframe()
 		print "Added keyframe."
@@ -99,6 +101,8 @@ def onKeyDownObj(self, key):
 		del self.parent[self.parent.index(self)] # Need to clean up deletion
 	elif key in [" ", "s", "r", "e", "b"]:
 		svlgui.MODE=key
+		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+				"b":"arrow"}[key], MainWindow.stage)
 	elif key=="F6":
 		add_keyframe()
 	
@@ -198,11 +202,12 @@ def quit(widget):
 	
 	
 def add_keyframe(widget=None):
+	svlgui.alert("test alert", True)
 	root.descendItem().add_frame(True)
 	print root.descendItem().activeframe*16
 	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1)
 	frames.add(b)
-	frames.draw()
+	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
 	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1))

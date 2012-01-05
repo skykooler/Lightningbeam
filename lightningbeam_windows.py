@@ -1,6 +1,7 @@
 #! /usr/bin/python
 
 import svlgui
+import misc_funcs
 from misc_funcs import *
 
 class MainWindow:
@@ -183,6 +184,7 @@ class MainWindowOSX:
 		self.window = svlgui.Window("Lightningbeam")
 		self.menu = svlgui.Menu(True, None)
 		self.stage = svlgui.Canvas(800,600)
+		misc_funcs.stage = self.stage
 		self.layerbox = svlgui.Canvas(128,320)
 		self.timelinebox = svlgui.Canvas(2000,320)
 		self.frame = svlgui.Frame()

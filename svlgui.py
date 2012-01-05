@@ -120,7 +120,7 @@ if sys.platform=="linux2":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -130,14 +130,14 @@ if sys.platform=="linux2":
 	SYSTEM="html"
 	ids = {}
 	jsdefs = []
-	jsfunctions = ""
-	sep = "/"'''
+	jsfunctions = ""'''
+	sep = "/"
 elif sys.platform=="win32":
 	import pickle
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -156,7 +156,7 @@ elif sys.platform=="darwin":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -614,10 +614,13 @@ class Canvas(Widget):
 									63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
 									63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
 									63241:"F6",63242:"F7",63243:"F8",}
-					if ord(event.unichars) in keydict:
-						key = keydict[ord(event.unichars)]
+					if not event.unichars=='':
+						if ord(event.unichars) in keydict:
+							key = keydict[ord(event.unichars)]
+						else:
+							key = event.unichars
 					else:
-						key = event.unichars
+						key = event.key.upper()
 					for i in self.objs:
 						i._onKeyDown(key)
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
@@ -1489,11 +1492,23 @@ class Group (object):
 					retval+=j.frames[i].print_sc()
 		return retval
 
+def set_cursor(curs, widget=None):
+	if SYSTEM == "osx":
+		cursdict = {"arrow":StdCursors.arrow, "ibeam":StdCursors.ibeam, 
+			"crosshair":StdCursors.crosshair, "fist":StdCursors.fist,
+			"hand":StdCursors.hand, "finger":StdCursors.finger, "invisible":StdCursors.invisible}
+		if curs in cursdict:
+			if widget:
+				widget._int().cursor = cursdict[curs]
+			else:
+				app.cursor = cursdict[curs]
+		else:
+			print "Sorry, I don't have that cursor."
 
 def alert(text,critical=False):
+	'''Launches an alert window with a given text.
+	If critical is True, closing the alert terminates SWIFT.'''
 	if SYSTEM=="gtk":
-		#Launches an alert window with a given text.
-		#If critical is True, closing the alert terminates SWIFT.
 		def abutton_press_event(widget, event):
 			#Close when "Ok" is pressed
 			alert.destroy()
@@ -1529,6 +1544,13 @@ def alert(text,critical=False):
 		ahbox.show()											# make it visible
 		avbox.show()											# make the vbox visible
 		alert.show()											# make the alert itself visible
+	elif SYSTEM=="osx":
+		#Much simpler. :)
+		if critical:
+			Alerts.stop_alert(text)			# stop_alert is a critical error alert
+			sys.exit(0)						# Exit to OS. Sometimes we can't recover an error.
+		else:
+			Alerts.note_alert(text)			# note_alert is a general alert, i.e. "I'm a computer."
 	elif SYSTEM=="html":
 		jscommunicate("alert("+text+")")
 		if critical:
@@ -1580,6 +1602,7 @@ class OverlayWindow:
 		win.present()
 		gobject.timeout_add(50, expose, win, 'fade-event', time.time())
 		gobject.timeout_add(2000, win.destroy)
+
 		
 class ColorSelectionWindow:
 	def __init__(self,var,dispgrp, dcanv):

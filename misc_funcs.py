@@ -3,24 +3,34 @@ from threading import Event, Thread
 
 def select_any(self):
 	svlgui.MODE = " "
+	svlgui.set_cursor("arrow", stage)
 def resize_any(self):
-	svlgui.MODE = " "
+	svlgui.MODE = "s"
+	svlgui.set_cursor("arrow", stage)
 def lasso(self):
 	svlgui.MODE = "l"
+	svlgui.set_cursor("lasso", stage)
 def text(self):
 	svlgui.MODE = "t"
+	svlgui.set_cursor("text", stage)
 def rectangle(self):
 	svlgui.MODE = "r"
+	svlgui.set_cursor("crosshair", stage)
 def ellipse(self):
 	svlgui.MODE = "e"
+	svlgui.set_cursor("crosshair", stage)
 def curve(self):
 	svlgui.MODE = "c"
+	svlgui.set_cursor("curve", stage)
 def paintbrush(self):
 	svlgui.MODE = "p"
+	svlgui.set_cursor("paintbrush", stage)
 def pen(self):
 	svlgui.MODE = "n"
+	svlgui.set_cursor("pen", stage)
 def paint_bucket(self):
 	svlgui.MODE = "b"
+	svlgui.set_cursor("bucket", stage)
 	
 def box(x, y, width, height, fill):
 	global objects
