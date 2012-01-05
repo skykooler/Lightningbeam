@@ -1213,7 +1213,7 @@ class Layer:
 	def add_frame(self,populate):
 		if self.activeframe>len(self.frames):
 			lastframe = len(self.frames)
-			for i in xrange(self.activeframe-len(self.frames)):
+			for i in xrange((self.activeframe+1)-len(self.frames)):
 				self.frames.append(None)
 		if self.frames[self.activeframe]==None:
 			self.frames[self.activeframe]=self.frame()
@@ -1349,12 +1349,14 @@ class Group (object):
 		pass
 	def getactiveframe(self):
 		return self.activelayer.activeframe
+	def setactiveframe(self, frame):
+		self.activelayer.activeframe = frame
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
 	activelayer = property(getal,setal)
-	activeframe = property(getactiveframe)
+	activeframe = property(getactiveframe, setactiveframe)
 	level = property(getlevel, setlevel)
 	scale = property(fset = setscale)
 	def __init__(self, *args, **kwargs):

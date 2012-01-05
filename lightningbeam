@@ -30,7 +30,7 @@ def onLoadFrames(self):
 			self.add(j)'''
 def onClickFrame(self, x, y):
 	print x, int(x/16)
-	self.activelayer.activeframe = int(x/16)
+	root.descendItem().activeframe = int(x/16)
 def onMouseDownGroup(self, x, y):
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
@@ -202,11 +202,12 @@ def quit(widget):
 	
 	
 def add_keyframe(widget=None):
-	svlgui.alert("test alert", True)
 	root.descendItem().add_frame(True)
+	print root.descendItem().activeframe
 	print root.descendItem().activeframe*16
 	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1)
 	frames.add(b)
+	print [i.x for i in frames.activelayer.frames[0].objs]
 	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
