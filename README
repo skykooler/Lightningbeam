@@ -5,4 +5,7 @@ And it doesn't really run in any other mode yet. To be fixed. (maybe?)
 
 To run: python lightningbeam
 
+I am working on including swfc binaries for all archs necessary. The Mac OSX
+file is a universal binary, and should run on x86, x64 and PPC (untested).
+
 TODO: More info in this file.
