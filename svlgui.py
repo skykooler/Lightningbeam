@@ -130,8 +130,8 @@ if sys.platform=="linux2":
 	SYSTEM="html"
 	ids = {}
 	jsdefs = []
-	jsfunctions = ""
-	sep = "/"'''
+	jsfunctions = ""'''
+	sep = "/"
 elif sys.platform=="win32":
 	import pickle
 	import GUI		# Using PyGUI. Experimental.
@@ -614,10 +614,13 @@ class Canvas(Widget):
 									63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
 									63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
 									63241:"F6",63242:"F7",63243:"F8",}
-					if ord(event.unichars) in keydict:
-						key = keydict[ord(event.unichars)]
+					if not event.unichars=='':
+						if ord(event.unichars) in keydict:
+							key = keydict[ord(event.unichars)]
+						else:
+							key = event.unichars
 					else:
-						key = event.unichars
+						key = event.key.upper()
 					for i in self.objs:
 						i._onKeyDown(key)
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
