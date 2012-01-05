@@ -42,6 +42,10 @@ def box(x, y, width, height, fill):
 	return box
 
 
+def lastval(arr,index):
+	for i in reversed(arr[:index]):
+		if i:
+			return i
 	
 	
 # Timer module - not mine

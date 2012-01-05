@@ -1097,10 +1097,11 @@ class Layer:
 				x = x-self.x
 				y = y-self.y
 				return x,y
-		def __init__(self,duplicate=None):
+		def __init__(self,parent,duplicate=None):
 			self.objs = []
 			self.currentselect=None
 			self.type="Group"
+			self.parent = parent
 		def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
 			self.objs.append(self.framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
 		def play(self, group, cr, currentselect,transform,rect):
@@ -1172,8 +1173,15 @@ class Layer:
 			return nx, ny
 		def print_sc(self):
 			retval = ""
-			for i in self.objs:
-				retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+			if self==self.parent.frames[0]:
+				for i in self.objs:
+					retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+			else:
+				for i in self.objs:
+					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
+						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+					else:
+						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 			return retval
 	def __init__(self, *args):
 		# init is system-independent, oh joy
@@ -1185,7 +1193,7 @@ class Layer:
 		self.objs=[]
 		self.currentframe=0
 		self.activeframe=0	# Frame selected - not necessarily the frame displayed
-		self.frames=[self.frame()]
+		self.frames=[self.frame(self)]
 		self.level = False
 		self.clicked = False
 		self.hidden = False
@@ -1220,7 +1228,7 @@ class Layer:
 			for i in xrange((self.activeframe+1)-len(self.frames)):
 				self.frames.append(None)
 		if self.frames[self.activeframe]==None:
-			self.frames[self.activeframe]=self.frame()
+			self.frames[self.activeframe]=self.frame(self)
 			for i in xrange(self.activeframe-1,-1,-1):
 				if self.frames[i]:
 					lastframe = i
@@ -1230,7 +1238,7 @@ class Layer:
 		else:
 			lastframe = self.activeframe
 			self.activeframe+=1
-			self.frames.insert(self.activeframe,self.frame())
+			self.frames.insert(self.activeframe,self.frame(self))
 		for i in self.frames[lastframe].objs:
 			i.update()
 			self.frames[self.activeframe].add(i.obj, i.x, i.y, i.rot)
@@ -1319,7 +1327,9 @@ class Layer:
 						retval+=".filled "+i.name+" outline="+i.name+"outline fill=#00000000 color="+i.linecolor.rgb+"\n"
 		if frams:
 			for i in self.frames:
-				retval+=".frame "+str(self.frames.index(i)+1)+"\n"+i.print_sc()
+				print i
+				if i:
+					retval+=".frame "+str(self.frames.index(i)+1)+"\n"+i.print_sc()
 		return retval
 
 
@@ -1495,9 +1505,9 @@ class Group (object):
 		for i in self.layers:
 			retval+=i.print_sc(True, False)
 		for i in xrange(self.maxframe()):
-			retval+=".frame "+str(i+1)+"\n"
 			for j in self.layers:
 				if j.frames[i]:
+					retval+=".frame "+str(i+1)+"\n"
 					retval+=j.frames[i].print_sc()
 		return retval
 
@@ -1565,7 +1575,10 @@ def alert(text,critical=False):
 		if critical:
 			# reloading the page is equivalent to force-quitting, right?
 			jscommunicate("window.location.reload()")
-	
+
+def execute(command):
+	os.system(command)
+
 class OverlayWindow:
 	if SYSTEM=="gtk":
 		def expose (widget, event, startime=time.time()):
