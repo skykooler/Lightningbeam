@@ -31,6 +31,7 @@ def onLoadFrames(self):
 def onClickFrame(self, x, y):
 	print x, int(x/16)
 	root.descendItem().activeframe = int(x/16)
+	MainWindow.stage.draw()
 def onMouseDownGroup(self, x, y):
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
@@ -112,7 +113,7 @@ def create_sc(root):
 def run_file(self=None):
 	global root
 	print "RUNNING"
-	#open("../Desktop/test.sc", "w").write(create_sc(root))
+	open("/Users/skyler/Desktop/test.sc", "w").write(create_sc(root))
 	
 
 def box(x, y, width, height, fill=None):

@@ -786,7 +786,7 @@ class Image(object):
 							(src_rect[3]/self.vtiles)*(self.pointer/self.htiles+1)]
 				#src_rect = [16*self.pointer,0,16+16*self.pointer,32]
 				#print [self.x, self.y, self.x+self.image.bounds[2]/self.htiles, self.y+self.image.bounds[3]/self.vtiles]
-				dst_rect = [0, 0, self.image.bounds[2]/self.htiles, self.image.bounds[3]/self.vtiles]
+				dst_rect = [self.x, self.y, self.image.bounds[2]/self.htiles+self.x, self.image.bounds[3]/self.vtiles+self.y]
 				self.image.draw(cr, src_rect, dst_rect)
 			else:
 				src_rect = self.image.bounds
@@ -1026,11 +1026,16 @@ class Layer:
 		pass
 	def onKeyUp(self, self1, key):
 		pass
+	def getcurrentselect(self):
+		return self.frames[self.currentframe].currentselect
+	def setcurrentselect(self, val):
+		self.frames[self.currentframe].currentselect = val
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
 	scale = property(fset = setscale)
+	currentselect = property(getcurrentselect, setcurrentselect)
 	class frame:
 		class framewrapper (object):
 			#Wraps object per-frame. Allows for changes in position, rotation, scale.
@@ -1184,7 +1189,6 @@ class Layer:
 		self.level = False
 		self.clicked = False
 		self.hidden = False
-		self.currentselect = None
 		def parse_obj(obj):
 			self.objs.append(obj)
 			obj.x=obj.x-self.x
@@ -1350,6 +1354,9 @@ class Group (object):
 	def getactiveframe(self):
 		return self.activelayer.activeframe
 	def setactiveframe(self, frame):
+		print self.activelayer.frames
+		if frame<len(self.activelayer.frames) and self.activelayer.frames[frame]:
+			self.activelayer.currentframe = frame
 		self.activelayer.activeframe = frame
 	minx = property(getminx)
 	miny = property(getminy)
