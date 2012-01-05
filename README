@@ -1,7 +1,7 @@
 Lightningbeam is currently under heavy development. Things may change often.
 
 Please note you need a patched version of PyGUI to run in PyGUI mode.
-And it doesn't really run in any other mode yet. To be fixed.
+And it doesn't really run in any other mode yet. To be fixed. (maybe?)
 
 To run: python lightningbeam
 
