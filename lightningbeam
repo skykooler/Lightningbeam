@@ -113,8 +113,8 @@ def create_sc(root):
 def run_file(self=None):
 	global root
 	print "RUNNING"
-	open("/Users/skyler/Desktop/test.sc", "w").write(create_sc(root))
-	svlgui.execute("swfc/swfc_osx /Users/skyler/Desktop/test.sc -o /Users/skyler/Desktop/test.swf")
+	open("test.sc", "w").write(create_sc(root))
+	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" test.sc -o test.swf")
 	
 
 def box(x, y, width, height, fill=None):

@@ -107,6 +107,7 @@ FILLCOLOR = Color("#000000")
 
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
+	PLATFORM="linux32"
 	import gtk
 	import cairo
 	import gobject
@@ -133,6 +134,7 @@ if sys.platform=="linux2":
 	jsfunctions = ""'''
 	sep = "/"
 elif sys.platform=="win32":
+	PLATFORM="win32"
 	import pickle
 	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
@@ -152,6 +154,7 @@ elif sys.platform=="linux-armv6l":
 	sep = "/"
 	print str(sys.platform)
 elif sys.platform=="darwin":
+	PLATFORM="osx"
 	import pickle
 	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
@@ -627,7 +630,7 @@ class Canvas(Widget):
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 				
 				def key_up(self, event):
-					print ord(event.unichars)
+					pass
 			self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
 		elif SYSTEM=="html":
@@ -1578,7 +1581,7 @@ def alert(text,critical=False):
 			jscommunicate("window.location.reload()")
 
 def execute(command):
-	os.system(command)
+	os.system(command.replace("/",sep))
 
 class OverlayWindow:
 	if SYSTEM=="gtk":
