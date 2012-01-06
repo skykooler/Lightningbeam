@@ -134,6 +134,7 @@ if sys.platform=="linux2":
 	sep = "/"
 elif sys.platform=="win32":
 	import pickle
+	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
