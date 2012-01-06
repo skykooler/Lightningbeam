@@ -22,12 +22,14 @@ function MovieClip() {
 	*/
 	this._frames = [[]]
 	this._currentframe = 1;
-	this._draw = function (cr) {
+	this._draw = function () {
 		for (i in this) {
 			if (this._frames[this._currentframe-1][i]) {
-				this[i]._draw(cr, this._frames[this._currentframe-1][i]);
+				this[i]._draw(this._frames[this._currentframe-1][i]);
 			}
 		}
+	}
+	this.play = function () {
 	}
 }
 
@@ -35,7 +37,7 @@ function Shape() {
 	// Not part of the ActionScript spec, but necessary.
 	this._shapedata = []
 	this.fill = "#000000"
-	this._draw = function (cr, frame) {
+	this._draw = function (frame) {
 		this._x = frame._x
 		this._y = frame._y
 		this._xscale = frame._xscale
@@ -70,22 +72,27 @@ var Stage = {
 }
 
 var root = {}
+var cr
 
 function draw() {
 	var canvas = document.getElementById("canvas");
 
 	if (canvas.getContext) {
-		var cr = canvas.getContext("2d");
+		cr = canvas.getContext("2d");
 		
 		cr.strokeSyle = "#0000FF"
 		
 		for (i in root) {
 			if (root[i]._draw) {
-				root[i]._draw(cr)
+				root[i]._draw()
 			}
 		}
 	}
 }
+
+function play() {
+
+	
 
 var a = new Shape()
 a._shapedata = [["M",0,0],["L",400,0],["L",400,200],["L",0,200],["L",0,0]]
@@ -98,14 +105,13 @@ b._frames[0].a._xscale = 1
 b._frames[0].a._xscale = 1
 b._frames[0].a._rotation = 0
 root.b = b
-draw()
-b._frames[0].a = {}
-b._frames[0].a._x = 50
-b._frames[0].a._y = 40
-b._frames[0].a._xscale = 1
-b._frames[0].a._xscale = 1
-b._frames[0].a._rotation = 0
-draw()
+b._frames[1].a = {}
+b._frames[1].a._x = 50
+b._frames[1].a._y = 40
+b._frames[1].a._xscale = 1
+b._frames[1].a._xscale = 1
+b._frames[1].a._rotation = 0
+play()
 
 //-------------------  END OF JAVASCRIPT ------------------------\\
 </script>
