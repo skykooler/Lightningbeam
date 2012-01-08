@@ -133,7 +133,7 @@ if sys.platform=="linux2":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -152,7 +152,7 @@ elif sys.platform=="win32":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -172,7 +172,7 @@ elif sys.platform=="darwin":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -190,6 +190,8 @@ if SYSTEM=="osx":
 				mac_creator = "BLBE", mac_type = "BLOB"), # These are optional)
 		def setup_menus(self, m):
 			m.quit_cmd.enabled = 1
+			m.save_cmd.enabled = 1
+			m.open_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.create_sc.enabled = 1
 			m.add_keyframe.enabled = 1
@@ -207,6 +209,8 @@ if SYSTEM=="osx":
 	class LightningbeamWindow(OSXWindow):
 		def __init__(self,*args,**kwargs):
 			OSXWindow.__init__(self,*args,**kwargs)
+		#def save_cmd(widget=None):
+		#	print "to save"
 		def key_down(self, event):
 			if FOCUS:
 				FOCUS.key_down(event)
@@ -385,6 +389,9 @@ def menufuncs(j):
 				menu = GUI.Menu(i[0],[(k[0],k[1].__name__) for k in i if type(k)==type(())])
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
+			else:
+				cmds={"Save":"save_cmd", "Open":"open_cmd"}
+				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
 	def __init__(self,width=False,height=False,*args):
@@ -1018,42 +1025,8 @@ class Shape (object):
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
-class Layer:
-	def setscale(self, scal):
-		self.xscale = scal
-		self.yscale = scal
-	def getminx(self):
-		return min([i.minx for i in self.currentFrame()])
-	def getminy(self):
-		return min([i.miny for i in self.currentFrame()])
-	def getmaxx(self):
-		return max([i.maxx for i in self.currentFrame()])
-	def getmaxy(self):
-		return max([i.maxy for i in self.currentFrame()])
-	def onMouseDown(self, self1, x, y):
-		pass
-	def onMouseDrag(self, self1, x, y):
-		pass
-	def onMouseUp(self, self1, x, y):
-		pass
-	def onMouseMove(self, self1, x, y):
-		pass
-	def onKeyDown(self, self1, key):
-		pass
-	def onKeyUp(self, self1, key):
-		pass
-	def getcurrentselect(self):
-		return self.frames[self.currentframe].currentselect
-	def setcurrentselect(self, val):
-		self.frames[self.currentframe].currentselect = val
-	minx = property(getminx)
-	miny = property(getminy)
-	maxx = property(getmaxx)
-	maxy = property(getmaxy)
-	scale = property(fset = setscale)
-	currentselect = property(getcurrentselect, setcurrentselect)
-	class frame:
-		class framewrapper (object):
+
+class framewrapper (object):
 			#Wraps object per-frame. Allows for changes in position, rotation, scale.
 			def __init__(self, obj, x, y, rot, scalex, scaley, parent=None):
 				self.obj = obj
@@ -1113,13 +1086,16 @@ class Layer:
 				x = x-self.x
 				y = y-self.y
 				return x,y
+		
+
+class frame:
 		def __init__(self,parent,duplicate=None):
 			self.objs = []
 			self.currentselect=None
 			self.type="Group"
 			self.parent = parent
 		def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
-			self.objs.append(self.framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
+			self.objs.append(framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
 		def play(self, group, cr, currentselect,transform,rect):
 			if SYSTEM=="gtk":
 				cr.save()
@@ -1199,6 +1175,42 @@ class Layer:
 					else:
 						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 			return retval
+	
+
+class Layer:
+	def setscale(self, scal):
+		self.xscale = scal
+		self.yscale = scal
+	def getminx(self):
+		return min([i.minx for i in self.currentFrame()])
+	def getminy(self):
+		return min([i.miny for i in self.currentFrame()])
+	def getmaxx(self):
+		return max([i.maxx for i in self.currentFrame()])
+	def getmaxy(self):
+		return max([i.maxy for i in self.currentFrame()])
+	def onMouseDown(self, self1, x, y):
+		pass
+	def onMouseDrag(self, self1, x, y):
+		pass
+	def onMouseUp(self, self1, x, y):
+		pass
+	def onMouseMove(self, self1, x, y):
+		pass
+	def onKeyDown(self, self1, key):
+		pass
+	def onKeyUp(self, self1, key):
+		pass
+	def getcurrentselect(self):
+		return self.frames[self.currentframe].currentselect
+	def setcurrentselect(self, val):
+		self.frames[self.currentframe].currentselect = val
+	minx = property(getminx)
+	miny = property(getminy)
+	maxx = property(getmaxx)
+	maxy = property(getmaxy)
+	scale = property(fset = setscale)
+	currentselect = property(getcurrentselect, setcurrentselect)
 	def __init__(self, *args):
 		# init is system-independent, oh joy
 		self.x=0
@@ -1209,7 +1221,7 @@ class Layer:
 		self.objs=[]
 		self.currentframe=0
 		self.activeframe=0	# Frame selected - not necessarily the frame displayed
-		self.frames=[self.frame(self)]
+		self.frames=[frame(self)]
 		self.level = False
 		self.clicked = False
 		self.hidden = False
@@ -1244,7 +1256,7 @@ class Layer:
 			for i in xrange((self.activeframe+1)-len(self.frames)):
 				self.frames.append(None)
 		if self.frames[self.activeframe]==None:
-			self.frames[self.activeframe]=self.frame(self)
+			self.frames[self.activeframe]=frame(self)
 			for i in xrange(self.activeframe-1,-1,-1):
 				if self.frames[i]:
 					lastframe = i
@@ -1254,7 +1266,7 @@ class Layer:
 		else:
 			lastframe = self.activeframe
 			self.activeframe+=1
-			self.frames.insert(self.activeframe,self.frame(self))
+			self.frames.insert(self.activeframe,frame(self))
 		for i in self.frames[lastframe].objs:
 			i.update()
 			self.frames[self.activeframe].add(i.obj, i.x, i.y, i.rot)
@@ -1591,6 +1603,16 @@ def alert(text,critical=False):
 		if critical:
 			# reloading the page is equivalent to force-quitting, right?
 			jscommunicate("window.location.reload()")
+
+def file_dialog(mode="open",default=None,types=None,multiple=False):
+	if SYSTEM=="osx":
+		if mode=="open":
+			if multiple:
+				return FileDialogs.request_old_files(default_dir=default,file_types=types)
+			else:
+				return FileDialogs.request_old_file(default_dir=default,file_types=types)
+		elif mode=="save":
+			return FileDialogs.request_new_file(default_dir=default,file_type=types)
 
 def execute(command):
 	os.system(command.replace("/",sep))

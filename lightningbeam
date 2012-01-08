@@ -6,6 +6,8 @@ import svlgui
 #swift_window - builds the application windows
 import lightningbeam_windows
 
+#pickle - used to save and open files
+import pickle
 
 #specify the current version and what version files it can still open
 LIGHTNINGBEAM_VERSION = "1.0-alpha1"
@@ -180,7 +182,7 @@ frames.onMouseDown = onClickFrame
 MainWindow.timelinebox.add(frames,0,0)
 
 
-def new_file(widget):
+def new_file(widget=None):
 	global root
 	MainWindow.stage.delete(root)
 	root = svlgui.Group()
@@ -189,13 +191,22 @@ def new_file(widget):
 	root.onMouseUp = onMouseUpGroup
 	root.onMouseMove = onMouseMoveGroup
 	MainWindow.stage.add(root,0,0)
-def open_file(widget):
+def open_file(widget=None):
+	
+	MainWindow.stage.delete(root)
+	global root
+	thefile = svlgui.file_dialog("open").open("rb")
+	root = pickle.load(thefile)
+	MainWindow.stage.add(root, 0, 0)
+	MainWindow.stage.draw()
+	MainWindow.timelinebox.draw()
+def open_sc_file(widget=None):
 	pass
-def open_sc_file(widget):
-	pass
-def save_file(widget):
-	pass
-def save_file_as(widget):
+def save_file(widget=None):
+	thefile = svlgui.file_dialog("save").open("w")
+	pickle.dump(root, thefile)
+	print thefile
+def save_file_as(widget=None):
 	pass
 
 
