@@ -5,6 +5,7 @@ import sys
 import math
 import random
 import colors
+import platform
 
 '''
 #	Tool mode. Keyboard shortcut is the same key. Modes are:
@@ -107,7 +108,17 @@ FILLCOLOR = Color("#000000")
 
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
-	PLATFORM="linux32"
+	id = platform.machine()
+	if id.startswith('arm'):
+		PLATFORM = 'linuxARM'
+	elif (not id) or (not re.match('(x|i[3-6])86$', id) is None):
+		PLATFORM = 'linux32'
+	elif id == 'x86_64':
+		PLATFORM = 'linux64'
+	elif "ppc" in plid.lower():
+		PLATFORM = "linuxPPC"
+	else:
+		PLATFORM = "error"
 	import gtk
 	import cairo
 	import gobject
