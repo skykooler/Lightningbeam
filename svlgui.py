@@ -6,6 +6,7 @@ import math
 import random
 import colors
 import platform
+import re
 
 '''
 #	Tool mode. Keyboard shortcut is the same key. Modes are:
