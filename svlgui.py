@@ -133,7 +133,8 @@ if sys.platform=="linux2":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -152,7 +153,8 @@ elif sys.platform=="win32":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -172,7 +174,8 @@ elif sys.platform=="darwin":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors, StdCursors, Alerts, FileDialogs
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -722,6 +725,7 @@ class TextView(Widget):
 			self.box.connect("key-press-event",scroll)
 		elif SYSTEM=="osx":
 			self.box = GUI.TextEditor(scrolling="hv")
+			self.box.font = Font("Mono", 12, [])
 		elif SYSTEM=="html":
 			self.box = htmlobj("textarea")
 	def _int(self):
