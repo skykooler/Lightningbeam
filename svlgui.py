@@ -114,7 +114,7 @@ if sys.platform=="linux2":
 		PLATFORM = 'linuxARM'
 	elif (not id) or (not re.match('(x|i[3-6])86$', id) is None):
 		PLATFORM = 'linux32'
-	elif id == 'x86_64':
+	elif id.lower() in ('x86_64', "amd64"):
 		PLATFORM = 'linux64'
 	elif "ppc" in plid.lower():
 		PLATFORM = "linuxPPC"
