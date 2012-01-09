@@ -87,14 +87,14 @@ function MovieClip() {
 	this._frames = [new Frame()]
 	this._currentframe = 1;
 	this._draw = function (sttc) {
-		for (i in this) {
+		for (var i in this) {
 			if (this._frames[this._currentframe-1]==undefined) {
-				for (var j=0; j<this._currentframe; j++) {
+				for (var j=0; j<this._currentframe-1; j++) {
 					if (this._frames[j]) {
 						last = j
 					}
 				}
-				for (var j=this._frames.length; j>this._currentframe; j--) {
+				for (var j=this._frames.length; j>this._currentframe-1; j--) {
 					if (this._frames[j]) {
 						next = j
 					}
@@ -146,11 +146,11 @@ function Shape() {
 			this._yscale = frame._yscale
 			this._rotation = frame._rotation
 		} else {
-			this._x = ave(frame._x, frame2._x, r)
-			this._y = ave(frame._y, frame2._y, r)
-			this._xscale = ave(frame._xscale, frame2._xscale, r)
-			this._yscale = ave(frame._yscale, frame2._yscale, r)
-			this._rotation = ave(frame._rotation ,frame2._rotation, r)
+			this._x = ave(frame2._x, frame._x, r)
+			this._y = ave(frame2._y, frame._y, r)
+			this._xscale = ave(frame2._xscale, frame._xscale, r)
+			this._yscale = ave(frame2._yscale, frame._yscale, r)
+			this._rotation = ave(frame2._rotation ,frame._rotation, r)
 		}
 		//log(this._x)
 		cr.save()
@@ -215,12 +215,16 @@ b.a = a
 b._frames[0].a = {}
 b._frames[0].a._x = 100
 b._frames[0].a._y = 20
-b._frames[0].actions = 'this.a._x = this.a._x + 1'
+//b._frames[0].actions = 'this.a._x = this.a._x + 1'
 root.b = b
 b._frames[50] = new Frame()
 b._frames[50].a = {}
 b._frames[50].a._x = 50
 b._frames[50].a._y = 40
+b._frames[100] = new Frame()
+b._frames[100].a = {}
+b._frames[100].a._x = 75
+b._frames[100].a._y = 120
 b._frames[150] = new Frame()
 b._frames[150].a = {}
 b._frames[150].a._x = 100
