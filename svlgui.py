@@ -1,4 +1,7 @@
 #! /usr/bin/python
+# -*- coding:utf-8 -*-
+# © 2012 Skyler Lehmkuhl
+# Released under the GPLv3. For more information, see gpl.txt.
 
 import os
 import sys
