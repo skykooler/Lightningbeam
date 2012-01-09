@@ -1,11 +1,61 @@
 <html>
 <head>
+<style type="text/css">
+canvas { border: 2px solid #000; position:absolute; top:0;left:0; 
+visibility: hidden; }
+</style>
 </head>
 <body>
-<canvas id="canvas" width=500 height=500></canvas>
+<canvas id="canvas1" width=500 height=500></canvas>
+<canvas id="canvas2" width=500 height=500></canvas>
 <script>
 //--------------------------  BEGIN JAVASCRIPT  --------------------------------\\
 
+var fps = 50
+var cr;
+var canvas;
+
+function _timerBase () {
+	/* This provides the 'tick' by which all animations are run.
+	Playing animations should have their ._draw() method added here;
+	to stop them, call remove() on it. */
+	this.funcs = {}
+	this.add = function (item) {
+		this.funcs[item]=item;
+	}
+	this.remove = function (item) {
+		delete this.funcs[item];
+	}
+	this.iterate = function() {
+		canvas = Buffers[DrawingBuffer];
+
+		if (canvas.getContext) {
+			cr = canvas.getContext("2d");
+			cr.clearRect(0, 0, canvas.width, canvas.height);
+			cr.beginPath()
+
+			DrawingBuffer=1-DrawingBuffer;
+			//canvas = Buffers[DrawingBuffer];
+			draw()
+			for (i in this.funcs){
+				this.funcs[i]._draw()
+			}
+			Buffers[1-DrawingBuffer].style.visibility='hidden';
+			Buffers[DrawingBuffer].style.visibility='visible';
+		}
+	}
+	
+	setInterval('Timer.iterate()', 1000/fps)
+}
+
+var Timer = new _timerBase()
+
+function Frame () {
+	this.actions = ''
+	this.run_script = function() {
+		eval(this.actions)
+	}
+}
 
 function MovieClip() {
 	/* From the ActionScript reference:
@@ -20,16 +70,27 @@ function MovieClip() {
 	The duplicateMovieClip() method allows you to create a movie clip instance based on 
 	another movie clip.
 	*/
-	this._frames = [[]]
+	this._frames = [new Frame()]
 	this._currentframe = 1;
-	this._draw = function () {
+	this._draw = function (sttc) {
 		for (i in this) {
 			if (this._frames[this._currentframe-1][i]) {
 				this[i]._draw(this._frames[this._currentframe-1][i]);
 			}
 		}
+		if (!sttc) {
+			this._frames[this._currentframe-1].run_script()
+			this._currentframe++;
+			if (this._currentframe>this._frames.length) {
+				this._currentframe = 1;
+			}
+		}
 	}
 	this.play = function () {
+		Timer.add(this)
+	}
+	this.stop = function () {
+		Timer.remove(this)
 	}
 }
 
@@ -72,26 +133,30 @@ var Stage = {
 }
 
 var root = {}
-var cr
+
+/*if (canvas.getContext) {
+	cr = canvas.getContext("2d");
+}*/
+
+var Buffers = [document.getElementById("canvas1"), document.getElementById("canvas2")]
+var DrawingBuffer = 0
 
 function draw() {
-	var canvas = document.getElementById("canvas");
-
+	
 	if (canvas.getContext) {
 		cr = canvas.getContext("2d");
 		
-		cr.strokeSyle = "#0000FF"
 		
 		for (i in root) {
 			if (root[i]._draw) {
-				root[i]._draw()
+				//root[i]._draw(true)
 			}
 		}
 	}
 }
 
 function play() {
-
+}
 	
 
 var a = new Shape()
@@ -101,17 +166,14 @@ b.a = a
 b._frames[0].a = {}
 b._frames[0].a._x = 100
 b._frames[0].a._y = 20
-b._frames[0].a._xscale = 1
-b._frames[0].a._xscale = 1
-b._frames[0].a._rotation = 0
+b._frames[0].actions = 'this.a._x = this.a._x + 1'
 root.b = b
+b._frames[1] = new Frame()
 b._frames[1].a = {}
 b._frames[1].a._x = 50
 b._frames[1].a._y = 40
-b._frames[1].a._xscale = 1
-b._frames[1].a._xscale = 1
-b._frames[1].a._rotation = 0
-play()
+
+setTimeout('b.play()',2000)
 
 //-------------------  END OF JAVASCRIPT ------------------------\\
 </script>
