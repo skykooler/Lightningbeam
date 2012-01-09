@@ -85,14 +85,14 @@ class RepeatTimer(Thread):
  
     def run(self):
         count = 0
-        while not self.finished.is_set() and (self.iterations <= 0 or count < self.iterations):
+        while not self.finished.isSet() and (self.iterations <= 0 or count < self.iterations):
 			try:
 				self.finished.wait(self.interval)
-				if not self.finished.is_set():
+				if not self.finished.isSet():
 					#print self.function
 					self.function(*self.args, **self.kwargs)
 					count += 1
-			except Exception as e:
+			except Exception:
 				self.cancel()
  
     def cancel(self):
