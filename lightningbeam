@@ -32,9 +32,12 @@ def onLoadFrames(self):
 			self.add(j)'''
 def onClickFrame(self, x, y):
 	print x, int(x/16)
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	root.descendItem().activeframe = int(x/16)
 	MainWindow.stage.draw()
+	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 def onMouseDownGroup(self, x, y):
+	self.activelayer.frames[self.activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
 			self.clicked = True
@@ -52,7 +55,9 @@ def onMouseDownGroup(self, x, y):
 		self.cshape.onMouseUp = onMouseUpObj
 		self.cshape.onKeyDown = onKeyDownObj
 		self.clicked = True
+		MainWindow.scriptwindow.text = self.activelayer.frames[self.activelayer.currentframe].actions
 def onMouseDownObj(self, x, y):
+	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
 	self.initx,self.inity = x-self.x, y-self.y
 	if svlgui.MODE == "b":

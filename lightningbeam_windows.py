@@ -257,10 +257,12 @@ class MainWindowHTML:
 		self.toolbox.buttons[3][1].onPress = paintbrush
 		self.toolbox.buttons[4][0].onPress = pen
 		self.toolbox.buttons[4][1].onPress = paint_bucket
+		self.scriptwindow = svlgui.TextView()
 		self.frame.layout_self(	[self.toolbox,0,None,0,0,"nws",""],
-								[self.timelinebox,148,0,0,None,"new","hv"],
-								[self.layerbox,140,150,0,None,"n","v"],
-								[self.stage,140,0,2,0,"nsew", "hv"])
+								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
+								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
+								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
+								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
 	
 

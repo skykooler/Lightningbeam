@@ -711,6 +711,13 @@ class Canvas(Widget):
 			self.canvas.key_up(event)
 
 class TextView(Widget):
+	def _gettext(self):
+		if SYSTEM=="osx":
+			return self.box.text
+	def _settext(self, text):
+		if SYSTEM=="osx":
+			self.box.text = text
+	text = property(_gettext, _settext)
 	def __init__(self,editable=True,width=False,height=False):
 		if SYSTEM=="gtk":
 			self.sw=ScrolledWindow()
@@ -1400,12 +1407,20 @@ class Group (object):
 		if frame<len(self.activelayer.frames) and self.activelayer.frames[frame]:
 			self.activelayer.currentframe = frame
 		self.activelayer.activeframe = frame
+	def getcurrentframe(self):
+		return self.activelayer.activeframe
+	def setcurrentframe(self, frame):
+		print self.activelayer.frames
+		if frame<len(self.activelayer.frames) and self.activelayer.frames[frame]:
+			self.activelayer.currentframe = frame
+		self.activelayer.activeframe = frame
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
 	activelayer = property(getal,setal)
 	activeframe = property(getactiveframe, setactiveframe)
+	currentframe = property(getcurrentframe, setcurrentframe)
 	level = property(getlevel, setlevel)
 	scale = property(fset = setscale)
 	def __init__(self, *args, **kwargs):
