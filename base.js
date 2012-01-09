@@ -15,6 +15,14 @@ var fps = 50
 var cr;
 var canvas;
 
+var appendError = function(str){
+   throw new Error("DEBUG: "+str)
+}
+
+function log(str){
+   setTimeout("appendError('"+str+"')", 1)
+}
+
 function _timerBase () {
 	/* This provides the 'tick' by which all animations are run.
 	Playing animations should have their ._draw() method added here;
@@ -50,6 +58,12 @@ function _timerBase () {
 
 var Timer = new _timerBase()
 
+function ave(x, y, fac) {
+	//Weighted average. 
+	//fac is the weight - 0.5 gives a standard average
+	return y - fac*(y-x)
+}
+
 function Frame () {
 	this.actions = ''
 	this.run_script = function() {
@@ -74,16 +88,42 @@ function MovieClip() {
 	this._currentframe = 1;
 	this._draw = function (sttc) {
 		for (i in this) {
-			if (this._frames[this._currentframe-1][i]) {
-				this[i]._draw(this._frames[this._currentframe-1][i]);
+			if (this._frames[this._currentframe-1]==undefined) {
+				for (var j=0; j<this._currentframe; j++) {
+					if (this._frames[j]) {
+						last = j
+					}
+				}
+				for (var j=this._frames.length; j>this._currentframe; j--) {
+					if (this._frames[j]) {
+						next = j
+					}
+				}
+				if (this._frames[last][i]) {
+					this[i]._draw(this._frames[last][i],this._frames[next][i],(this._currentframe-last)/(next-last));
+				}
+			}
+			else {
+				if (this._frames[this._currentframe-1][i]) {
+					this[i]._draw(this._frames[this._currentframe-1][i]);
+				}
 			}
 		}
-		if (!sttc) {
-			this._frames[this._currentframe-1].run_script()
-			this._currentframe++;
-			if (this._currentframe>this._frames.length) {
-				this._currentframe = 1;
+		if (this._frames[this._currentframe-1]) {
+			if (!sttc) {
+				this._frames[this._currentframe-1].run_script()
+				this._currentframe++;
+				if (this._currentframe>this._frames.length) {
+					this._currentframe = 1;
+				}
 			}
+		} else {
+			if (!sttc) {
+				this._currentframe++;
+				if (this._currentframe>this._frames.length) {
+					this._currentframe = 1;
+				}
+			}	
 		}
 	}
 	this.play = function () {
@@ -98,12 +138,21 @@ function Shape() {
 	// Not part of the ActionScript spec, but necessary.
 	this._shapedata = []
 	this.fill = "#000000"
-	this._draw = function (frame) {
-		this._x = frame._x
-		this._y = frame._y
-		this._xscale = frame._xscale
-		this._yscale = frame._yscale
-		this._rotation = frame._rotation
+	this._draw = function (frame,frame2,r) {
+		if (!frame2) {
+			this._x = frame._x
+			this._y = frame._y
+			this._xscale = frame._xscale
+			this._yscale = frame._yscale
+			this._rotation = frame._rotation
+		} else {
+			this._x = ave(frame._x, frame2._x, r)
+			this._y = ave(frame._y, frame2._y, r)
+			this._xscale = ave(frame._xscale, frame2._xscale, r)
+			this._yscale = ave(frame._yscale, frame2._yscale, r)
+			this._rotation = ave(frame._rotation ,frame2._rotation, r)
+		}
+		//log(this._x)
 		cr.save()
 		cr.translate(this._x,this._y)
 		cr.rotate(this._rotation*Math.PI/180)
@@ -168,12 +217,16 @@ b._frames[0].a._x = 100
 b._frames[0].a._y = 20
 b._frames[0].actions = 'this.a._x = this.a._x + 1'
 root.b = b
-b._frames[1] = new Frame()
-b._frames[1].a = {}
-b._frames[1].a._x = 50
-b._frames[1].a._y = 40
+b._frames[50] = new Frame()
+b._frames[50].a = {}
+b._frames[50].a._x = 50
+b._frames[50].a._y = 40
+b._frames[150] = new Frame()
+b._frames[150].a = {}
+b._frames[150].a._x = 100
+b._frames[150].a._y = 20
 
-setTimeout('b.play()',2000)
+setTimeout('b.play()',20)
 
 //-------------------  END OF JAVASCRIPT ------------------------\\
 </script>
