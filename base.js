@@ -14,6 +14,7 @@ visibility: hidden; }
 var fps = 50
 var cr;
 var canvas;
+var _processingobj
 
 var appendError = function(str){
    throw new Error("DEBUG: "+str)
@@ -86,7 +87,10 @@ function MovieClip() {
 	*/
 	this._frames = [new Frame()]
 	this._currentframe = 1;
+	this._playing = true;
+	Timer.add(this)
 	this._draw = function (sttc) {
+		_processingobj = this
 		for (var i in this) {
 			if (this._frames[this._currentframe-1]==undefined) {
 				for (var j=0; j<this._currentframe-1; j++) {
@@ -110,27 +114,31 @@ function MovieClip() {
 			}
 		}
 		if (this._frames[this._currentframe-1]) {
-			if (!sttc) {
+			if (this._playing) {
 				this._frames[this._currentframe-1].run_script()
+			}
+			if (this._playing) {
 				this._currentframe++;
 				if (this._currentframe>this._frames.length) {
 					this._currentframe = 1;
 				}
 			}
 		} else {
-			if (!sttc) {
+			if (this._playing) {
 				this._currentframe++;
 				if (this._currentframe>this._frames.length) {
 					this._currentframe = 1;
 				}
 			}	
 		}
+		this._previousframe = this._currentframe
 	}
 	this.play = function () {
-		Timer.add(this)
+		this._playing = true
 	}
 	this.stop = function () {
-		Timer.remove(this)
+		//Timer.remove(this)
+		this._playing = false
 	}
 }
 
@@ -204,9 +212,16 @@ function draw() {
 	}
 }
 
+/* ------  ACTIONSCRIPT CLASSES  -------- */
+
 function play() {
 }
 	
+function stop() {
+	_processingobj.stop();
+}
+	
+/*--------------------------------------- */
 
 var a = new Shape()
 a._shapedata = [["M",0,0],["L",400,0],["L",400,200],["L",0,200],["L",0,0]]
@@ -215,7 +230,7 @@ b.a = a
 b._frames[0].a = {}
 b._frames[0].a._x = 100
 b._frames[0].a._y = 20
-//b._frames[0].actions = 'this.a._x = this.a._x + 1'
+b._frames[0].actions = 'this.a._x = this.a._x + 1'
 root.b = b
 b._frames[50] = new Frame()
 b._frames[50].a = {}
@@ -224,6 +239,7 @@ b._frames[50].a._y = 40
 b._frames[100] = new Frame()
 b._frames[100].a = {}
 b._frames[100].a._x = 75
+b._frames[100].actions = 'stop();'
 b._frames[100].a._y = 120
 b._frames[150] = new Frame()
 b._frames[150].a = {}
