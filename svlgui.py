@@ -217,12 +217,12 @@ if SYSTEM=="osx":
 			OSXWindow.__init__(self,*args,**kwargs)
 		#def save_cmd(widget=None):
 		#	print "to save"
-		def key_down(self, event):
-			if FOCUS:
-				FOCUS.key_down(event)
-		def key_up(self, event):
-			if FOCUS:
-				FOCUS.key_up(event)
+		#def key_down(self, event):
+		#	if FOCUS:
+		#		FOCUS.key_down(event)
+		#def key_up(self, event):
+		#	if FOCUS:
+		#		FOCUS.key_up(event)
 			
 			
 	app = Lightningbeam()
@@ -615,6 +615,7 @@ class Canvas(Widget):
 						i.draw(canvas)
 
 				def mouse_down(self, event):
+					self.become_target()
 					x, y = event.position
 					for i in self.objs:
 						i._onMouseDown(x, y)
@@ -734,7 +735,11 @@ class TextView(Widget):
 				self.scroll_to_mark(self.get_buffer().get_insert(), 0)
 			self.box.connect("key-press-event",scroll)
 		elif SYSTEM=="osx":
-			self.box = GUI.TextEditor(scrolling="hv")
+			class OSXTextEditor(GUI.TextEditor):
+				
+				def mouse_down(self, event):
+					self.become_target()
+			self.box = OSXTextEditor(scrolling="hv")
 			self.box.font = Font("Mono", 12, [])
 		elif SYSTEM=="html":
 			self.box = htmlobj("textarea")
@@ -1108,6 +1113,7 @@ class frame:
 			self.currentselect=None
 			self.type="Group"
 			self.parent = parent
+			self.actions = ''
 		def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
 			self.objs.append(framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
 		def play(self, group, cr, currentselect,transform,rect):

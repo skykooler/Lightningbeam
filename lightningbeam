@@ -39,7 +39,14 @@ def onClickFrame(self, x, y):
 	root.descendItem().activeframe = int(x/16)
 	MainWindow.stage.draw()
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
+def onKeyDownFrame(self, key):
+	if key=="F6":
+		add_keyframe()
 def onMouseDownGroup(self, x, y):
+	print ">>>", MainWindow.scriptwindow.text
+	print dir(MainWindow.scriptwindow._int())
+	#MainWindow.scriptwindow._int().become_target()
+	print MainWindow.scriptwindow._int().is_target()
 	self.activelayer.frames[self.activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
@@ -187,6 +194,7 @@ frames = svlgui.Group(onload=onLoadFrames)
 b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1)
 frames.add(b)
 frames.onMouseDown = onClickFrame
+frames.onKeyDown = onKeyDownFrame
 MainWindow.timelinebox.add(frames,0,0)
 
 
