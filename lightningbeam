@@ -40,7 +40,11 @@ def onClickFrame(self, x, y):
 	MainWindow.scriptwindow.text = str(root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions)
 def onKeyDownFrame(self, key):
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	if key=="F6":
+	if key in [" ", "s", "r", "e", "b"]:
+		svlgui.MODE=key
+		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+				"b":"arrow"}[key], MainWindow.stage)
+	elif key=="F6":
 		add_keyframe()
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 def onMouseDownGroup(self, x, y):
