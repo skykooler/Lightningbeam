@@ -21,7 +21,7 @@ global root
 global layers
 
 def update_date():
-	return "Thu, October 27, 2011"
+	return "Tue, January 10, 2012"
 
 
 
@@ -222,7 +222,18 @@ def save_file(widget=None):
 	print thefile
 def save_file_as(widget=None):
 	pass
-
+def import_to_stage(widget=None):
+	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp"]).path
+	im = svlgui.Image(thefile)
+	im.onMouseDown = onMouseDownObj
+	im.onMouseMove = onMouseMoveObj
+	im.onMouseDrag = onMouseDragObj
+	im.onMouseUp = onMouseUpObj
+	im.onKeyDown = onKeyDownObj
+	root.descendItem().add(im)
+	MainWindow.stage.draw()
+def import_to_library(widget=None):
+	pass
 
 def quit(widget):
 	svlgui.quit()
@@ -278,7 +289,7 @@ def bring_to_front(widget=None):
 		rac.append(a)
 	MainWindow.stage.draw()
 	
-def about(widget):
+def about(widget=None):
 	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
 	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
 
@@ -289,18 +300,6 @@ svlgui.menufuncs([["File",
 						("Open .sc", open_sc_file),
 						("Save",save_file,"<Control>S"),
 						("Save As", save_file_as,"<Shift><Control>S"),
-						["Import",
-							("Import to Stage"),
-							("Import to Library")],
-						["Export",
-							"Export .swf",
-							"Export HTML5",
-							"Export Native Application",
-							"Export .sc",
-							"Export Image",
-							"Export Video",
-							"Export .pdf",
-							"Export Animated GIF"],
 						"Publish",
 						("Quit",quit,"<Control>Q")],
 					["Edit",
@@ -316,6 +315,18 @@ svlgui.menufuncs([["File",
 						"Add Blank Keyframe",
 						("Add Layer",add_layer,"<Shift><Control>N"),
 						("Delete Layer",delete_layer,"<Shift><Control>Delete")],
+					["Import",
+						("Import to Stage",import_to_stage),
+						("Import to Library",import_to_library)],
+					["Export",
+						"Export .swf",
+						"Export HTML5",
+						"Export Native Application",
+						"Export .sc",
+						"Export Image",
+						"Export Video",
+						"Export .pdf",
+						"Export Animated GIF"],
 					["Tools",
 						("Execute",run_file,"<Alt>Return")],
 					["Modify",

@@ -195,6 +195,7 @@ if SYSTEM=="osx":
 			self.file_type = FileType(name = "Untitled Document", suffix = "changethis", 
 				mac_creator = "BLBE", mac_type = "BLOB"), # These are optional)
 		def setup_menus(self, m):
+			m.about_cmd.enabled = 1
 			m.quit_cmd.enabled = 1
 			m.save_cmd.enabled = 1
 			m.open_cmd.enabled = 1
@@ -207,6 +208,8 @@ if SYSTEM=="osx":
 			m.bring_to_front.enabled = 1
 			m.send_backward.enabled = 1
 			m.send_to_back.enabled = 1
+			m.import_to_stage.enabled = 1
+			m.import_to_library.enabled = 1
         
         #def create_sc(self):
 		#	pass
@@ -396,7 +399,7 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"Save":"save_cmd", "Open":"open_cmd"}
+				cmds={"Save":"save_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -763,7 +766,9 @@ class Image(object):
 		self.filled = True
 		self.linecolor = None
 		self.fillcolor = None
-		self.name = image
+		self.name = image.split(sep)[-1]
+		self.path = image
+		self.type="Image"
 		if animated:
 			self.animated = True
 			self.htiles = htiles
@@ -798,6 +803,7 @@ class Image(object):
 			else:
 				self.maxx = self.x#+self.image.width[2]
 				self.maxy = self.y#+self.image.height[3]
+		self.shapedata = [['M',0,0],['L',self.maxx,0],['L',self.maxx,self.maxy],['L',0,self.maxy],['L',0,0]]
 	def _int(self):
 		return self.image
 	def draw(self, cr=None, parent=None, rect=None):
@@ -838,7 +844,41 @@ class Image(object):
 		elif SYSTEM=="html":
 			cr.save()
 			pass
-
+	def hitTest(self,x,y):
+		hits = False
+		# points "a" and "b" forms the anchored segment.
+		# point "c" is the evaluated point
+		def IsOnLeft(a, b, c):
+			return Area2(a, b, c) > 0
+		def IsOnRight(a, b, c):
+			return Area2(a, b, c) < 0
+		def IsCollinear(a, b, c):
+			return Area2(a, b, c) == 0
+		# calculates the triangle's size (formed by the "anchor" segment and additional point)
+		def Area2(a, b, c):
+			return (b[0]-a[0])*(c[1]-a[1])-(c[0]-a[0])*(b[1]-a[1])
+		def intersects(a,b,c,d):
+			return not (IsOnLeft(a,b,c) != IsOnRight(a,b,d))
+		def ccw(a,b,c):
+			return (c[1]-a[1])*(b[0]-a[0]) > (b[1]-a[1])*(c[0]-a[0])
+		def intersect(a,b,c,d):
+			return ccw(a,c,d) != ccw(b,c,d) and ccw(a,b,c) != ccw(a,b,d)
+		for i in xrange(len(self.shapedata)):
+			hits = hits != intersect(self.shapedata[i-1][1:3],self.shapedata[i][1:3],[x,y],[x,sys.maxint])
+		return hits
+	def onMouseDown(self, self1, x, y):
+		pass
+	def onMouseDrag(self, self1, x, y):
+		pass
+	def onMouseUp(self, self1, x, y):
+		pass
+	def onMouseMove(self, self1, x, y):
+		pass
+	def onKeyDown(self, self1, key):
+		pass
+	def onKeyUp(self, self1, key):
+		pass
+	
 class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
 		global SITER
@@ -1375,6 +1415,8 @@ class Layer:
 						retval+=".filled "+i.name+" outline="+i.name+"outline fill="+i.fillcolor.rgb+" color="+i.linecolor.rgb+"\n"
 					else:
 						retval+=".filled "+i.name+" outline="+i.name+"outline fill=#00000000 color="+i.linecolor.rgb+"\n"
+				elif i.type=="Image":
+					retval+=".png "+i.name+" \""+i.path+"\"\n"
 		if frams:
 			for i in self.frames:
 				print i
@@ -1636,6 +1678,18 @@ def alert(text,critical=False):
 
 def file_dialog(mode="open",default=None,types=None,multiple=False):
 	if SYSTEM=="osx":
+		if types:
+			ntypes = []
+			mactypes = {"txt":'TEXT', "pdf":'PDF ',"mov":'MooV',"mpg":'MPG ',"mp2":'MPG2',
+		"mp4":'M4V ',"m4v":'M4V ',"mp3":'Mp3 ',"gif":'GIFf',"png":'PNGf',"jpg":'JPEG',
+		"bmp":'BMPf',"tiff":'TIFF',"psd":'8BPS',"mid":'Midi',"rtf":'RTF ',"wav":'WAVE',
+		"aif":'AIFF',"ttf":'tfil',"swf":'SWFL'}
+			for i in types:
+				ntypes.append(GUI.Files.FileType())
+				ntypes[-1].suffix = i
+				if i in mactypes:
+					ntypes[-1].mac_type=mactypes[i]
+			types = ntypes
 		if mode=="open":
 			if multiple:
 				return FileDialogs.request_old_files(default_dir=default,file_types=types)
