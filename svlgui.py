@@ -1194,6 +1194,8 @@ class frame:
 						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 					else:
 						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+			if not self.actions.strip()=='':
+				retval = retval + ".action:\n"+self.actions+"\n.end\n"
 			return retval
 	
 

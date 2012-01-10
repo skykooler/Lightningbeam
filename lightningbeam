@@ -34,19 +34,16 @@ def onLoadFrames(self):
 			j = box(i*16,0,16,32,svlgui.Color([1,1,1]))
 			self.add(j)'''
 def onClickFrame(self, x, y):
-	print x, int(x/16)
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	root.descendItem().activeframe = int(x/16)
 	MainWindow.stage.draw()
-	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
+	MainWindow.scriptwindow.text = str(root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions)
 def onKeyDownFrame(self, key):
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	if key=="F6":
 		add_keyframe()
+	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 def onMouseDownGroup(self, x, y):
-	print ">>>", MainWindow.scriptwindow.text
-	print dir(MainWindow.scriptwindow._int())
-	#MainWindow.scriptwindow._int().become_target()
-	print MainWindow.scriptwindow._int().is_target()
 	self.activelayer.frames[self.activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
@@ -130,6 +127,7 @@ def create_sc(root):
 def run_file(self=None):
 	global root
 	print "RUNNING"
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	open("test.sc", "w").write(create_sc(root))
 	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" test.sc -o test.swf")
 	
@@ -232,11 +230,8 @@ def quit(widget):
 	
 def add_keyframe(widget=None):
 	root.descendItem().add_frame(True)
-	print root.descendItem().activeframe
-	print root.descendItem().activeframe*16
 	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1)
 	frames.add(b)
-	print [i.x for i in frames.activelayer.frames[0].objs]
 	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
