@@ -96,7 +96,7 @@ class RepeatTimer(Thread):
 				if not self.finished.isSet():
 					#print self.function
 					self.function(*self.args, **self.kwargs)
-					count += 1
+					count += 1 
 			except Exception:
 				self.cancel()
  
