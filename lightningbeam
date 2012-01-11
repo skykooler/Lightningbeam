@@ -52,11 +52,13 @@ def onMouseDownGroup(self, x, y):
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
 			self.clicked = True
-	elif svlgui.MODE in ["r", "e"]:
+	elif svlgui.MODE in ["r", "e", "p"]:
 		if svlgui.MODE=="r":
 			self.cshape = box(x, y, 0, 0)
 		elif svlgui.MODE=="e":
 			self.cshape = ellipse(x, y, 0, 0)
+		elif svlgui.MODE=="p":
+			self.cshape = shape(x, y)
 		#self.cshape.rotation = 5
 		self.cshape.initx,self.cshape.inity = x, y
 		self.add(self.cshape)
@@ -102,26 +104,28 @@ def onMouseDragGroup(self, x, y):
 		x=x-self.cshape.initx
 		y=y-self.cshape.inity
 		self.cshape.shapedata = [["M",x/2,0],["C",4*x/5,0,x,y/5,x,y/2],["C",x,4*y/5,4*x/5,y,x/2,y],["C",x/5,y,0,4*y/5,0,y/2],["C",0,y/5,x/5,0,x/2,0]]
+	elif svlgui.MODE == "p":
+		self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
 def onMouseDragObj(self, x, y):
 	self.x = x-self.initx
 	self.y = y-self.inity
 
 def onKeyDownGroup(self, key):
 	pass
-	if key in [" ", "s", "r", "e", "b"]:
+	if key in [" ", "s", "r", "e", "b", "p"]:
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
-				"b":"arrow"}[key], MainWindow.stage)
+				"b":"arrow","p":"arrow"}[key], MainWindow.stage)
 	elif key=="F6":
 		add_keyframe()
 		print "Added keyframe."
 def onKeyDownObj(self, key):
 	if key in ("delete", "backspace"):
 		del self.parent[self.parent.index(self)] # Need to clean up deletion
-	elif key in [" ", "s", "r", "e", "b"]:
+	elif key in [" ", "s", "r", "e", "b", "p"]:
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
-				"b":"arrow"}[key], MainWindow.stage)
+				"b":"arrow","p":"arrow"}}[key], MainWindow.stage)
 	elif key=="F6":
 		add_keyframe()
 	
@@ -154,8 +158,9 @@ def ellipse(x, y, width, height, fill=svlgui.FILLCOLOR):
 
 	# must figure out shapedata...
 	return ellipse
-def shape(x, y, fill):
-	shape = svlgui.Shape()
+def shape(x, y, fill=None):
+	shape = svlgui.Shape(x,y)
+	shape.shapedata = [["M",0,0]]
 	return shape
 
 root = svlgui.Group()
