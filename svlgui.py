@@ -283,6 +283,8 @@ class Window:
 			self.window.connect("destroy",self.destroy)
 		elif SYSTEM=="osx":
 			self.window = LightningbeamWindow(width=1024,height=500)
+			if not title=="":
+				self.window.title = title
 			#components = [i._int() for i in args]
 			#self.vbox = GUI.Column(components, equalize="w", expand=0)
 			#self.window.place(self.vbox, left = 0, top = 0, right = 0, bottom = 0, sticky = 'nsew')
@@ -318,6 +320,9 @@ class Window:
 			self.window.title = title
 		elif SYSTEM=="html":
 			jscommunicate("document.title = "+title)
+	def resize(self,x,y):
+		if SYSTEM=="osx":
+			self.window.resize(width=x,height=y)
 			
 # Widget meta-class - to prevent code duplication
 # I don't seem to have any code in here. :(
@@ -398,7 +403,7 @@ def menufuncs(j):
 						if n[1].__name__=="run_file":
 							app.run_file = test'''
 				[setattr(app,k[1].__name__, k[1]) for k in i if type(k)==type(())]
-				menu = GUI.Menu(i[0],[(k[0],k[1].__name__) for k in i if type(k)==type(())])
+				menu = GUI.Menu(i[0],[((k[0]+k[2],k[1].__name__) if (len(k)==3 and "/" in k[2]) else (k[0],k[1].__name__)) for k in i if type(k)==type(())])
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
@@ -747,6 +752,8 @@ class TextView(Widget):
 					self.become_target()
 			self.box = OSXTextEditor(scrolling="hv")
 			self.box.font = Font("Mono", 12, [])
+			if width and height:
+				self.box.size = (width, height)
 		elif SYSTEM=="html":
 			self.box = htmlobj("textarea")
 	def _int(self):
@@ -756,6 +763,9 @@ class TextView(Widget):
 			return self.box
 		elif SYSTEM=="html":
 			return self.box
+	def scroll_bottom(self):
+		if SYSTEM=="osx":
+			self.scroll_page_down();
 
 class Image(object):
 	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1):
@@ -888,7 +898,7 @@ class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
 		global SITER
 		global Library
-		Library.appemd(self)
+		Library.append(self)
 		self.x=x
 		self.y=y
 		self.rotation=rotation

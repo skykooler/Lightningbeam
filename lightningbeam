@@ -12,6 +12,9 @@ import lightningbeam_windows
 #pickle - used to save and open files
 import pickle
 
+#misc_funcs - miscelleneous functions in a separate file so as not to clutter things up too much
+import misc_funcs
+
 #specify the current version and what version files it can still open
 LIGHTNINGBEAM_VERSION = "1.0-alpha1"
 LIGHTNINGBEAM_COMPAT = ["1.0-alpha1"]
@@ -138,6 +141,36 @@ def run_file(self=None):
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	open("test.sc", "w").write(create_sc(root))
 	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" test.sc -o test.swf")
+	logloc = "/Users/skyler/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
+	try:
+		logfile.close()
+	except:
+		pass
+	logfile = open(logloc,"w")
+	logfile.write("")
+	logfile.close()
+	outputwin = svlgui.Window("Output")
+	outputwin.resize(200,500)
+	outputtext = svlgui.TextView(False)
+	outputwin.add(outputtext)
+	logfile = open(logloc, "r")
+	def updatetrace(outputtext):
+		try:
+			outputtext.text+=logfile.readline()
+			outputtext.scroll_bottom()		# this doesn't work
+		except:
+			pass
+	r = misc_funcs.RepeatTimer(0.02, updatetrace, args=[outputtext])
+	print dir(outputwin.window)
+	r.daemon = True
+	r.start()
+	if svlgui.PLATFORM=="osx":
+		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
+		svlgui.execute("open -a "+osx_flash_player_loc+" test.swf")
+	elif svlgui.PLATFORM=='win32':
+	 	svlgui.execute('start '+win_flash_player_loc+" test.swf")
+	elif svlgui.PLATFORM.startswith('linux'):
+	 	svlgui.execute('xdg-open '+linux_flash_player_loc+" test.swf")
 	
 
 def box(x, y, width, height, fill=None):
@@ -336,7 +369,7 @@ svlgui.menufuncs([["File",
 						"Export .pdf",
 						"Export Animated GIF"],
 					["Tools",
-						("Execute",run_file,"<Alt>Return")],
+						("Execute",run_file,"/\r")],
 					["Modify",
 						"Document",
 						"Convert to Symbol",
