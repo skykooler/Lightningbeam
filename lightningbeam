@@ -125,7 +125,7 @@ def onKeyDownObj(self, key):
 	elif key in [" ", "s", "r", "e", "b", "p"]:
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
-				"b":"arrow","p":"arrow"}}[key], MainWindow.stage)
+				"b":"arrow","p":"arrow"}[key], MainWindow.stage)
 	elif key=="F6":
 		add_keyframe()
 	
