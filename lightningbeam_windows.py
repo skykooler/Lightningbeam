@@ -217,6 +217,8 @@ class MainWindowOSX:
 		self.toolbox.buttons[3][1].onPress = paintbrush
 		self.toolbox.buttons[4][0].onPress = pen
 		self.toolbox.buttons[4][1].onPress = paint_bucket
+		self.toolbox.buttons[5][0].onPress = lambda self1: svlgui.ColorSelectionWindow("line")#,linegroup)#,self.linecanvas)
+		self.toolbox.buttons[5][1].onPress = lambda self1: svlgui.ColorSelectionWindow("fill")#,linegroup)#,self.fillcanvas)
 		self.scriptwindow = svlgui.TextView()
 		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
 		def setmode(self):

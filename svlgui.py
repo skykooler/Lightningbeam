@@ -801,7 +801,7 @@ class TextView(Widget):
 				def mouse_down(self, event):
 					self.become_target()
 			self.box = OSXTextEditor(scrolling="hv")
-			self.box.font = Font("Mono", 12, [])
+			self.box.font = Font("Courier", 12, [])
 			if width and height:
 				self.box.size = (width, height)
 		elif SYSTEM=="html":
@@ -1818,7 +1818,7 @@ class OverlayWindow:
 
 		
 class ColorSelectionWindow:
-	def __init__(self,var,dispgrp, dcanv):
+	def __init__(self,var,dispgrp=None, dcanv=None):
 		if SYSTEM=="gtk":
 			win = gtk.Window()
 			win.set_size_request(320,208)
@@ -1862,6 +1862,28 @@ class ColorSelectionWindow:
 			win.connect("button-press-event", close, dispgrp, dcanv)
 			win.set_modal(True)
 			win.present()
+		elif SYSTEM=="osx":
+			win = OSXWindow(width=352,height=226,resizable=False)
+			def onClickRectFill(self,x,y):
+				global FILLCOLOR
+				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+			def onClickRectLine(self,x,y):
+				global LINECOLOR
+				LINECOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+			canvas = Canvas(336,208)
+			group = Group()
+			def dummy(*args):
+				pass
+			group._onMouseMove = dummy
+			canvas.add(group,0,0)
+			im = Image("media/colors.png")
+			group.add(im)
+			if var=="fill":
+				group.onMouseDown = onClickRectFill
+			if var=="line":
+				group.onMouseDown = onClickRectLine
+			win.place(canvas._int(),left=0,top=0,right=0,bottom=0,sticky="news",scrolling="")
+			win.show()
 
 def main():
 	#Executes the main loop for whatever GUI is running
