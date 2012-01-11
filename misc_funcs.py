@@ -105,7 +105,7 @@ def catmullRom2bezier( points ) :
 	return d;
 	
 def simplify_shape(shape,mode,iterations):
-	if mode in ("straight","curve"):
+	if mode in ("straight","smooth"):
 		for i in xrange(iterations):
 			for j in reversed(range(len(shape))):
 				if j>0 and j<len(shape)-1:
@@ -132,11 +132,11 @@ def simplify_shape(shape,mode,iterations):
 						acosB=0
 					if acosB>(165-500/(ab+bc)):	# at least 15 degrees away from straight angle
 						del shape[j]
-		if mode=="curve":
+		if mode=="smooth":
 			shape = catmullRom2bezier([shape[0]]*2+shape+[shape[-1]])
 			print shape
 							
-		return shape#+nshape
+	return shape#+nshape
 	
 # Timer module - not mine
 

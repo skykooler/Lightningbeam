@@ -25,6 +25,10 @@ import re
 #	"b": paint bucket tool
 '''
 MODE="e"
+
+#Painbrush mode
+PMODE = "Draw straight"
+
 SITER=0
 
 #Currentframe - the frame selected on the timeline. Not necessarily the frame being shown.
@@ -139,6 +143,7 @@ if sys.platform=="linux2":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
@@ -159,6 +164,7 @@ elif sys.platform=="win32":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
@@ -180,6 +186,7 @@ elif sys.platform=="darwin":
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
@@ -467,7 +474,50 @@ class HBox(Widget):
 			td = htmlobj("td")
 			td.add(objint)
 			self.tr.add(td)
+class Label(Widget):
+	def _gettext(self):
+		if SYSTEM=="osx":
+			return self.label.text
+	def _settext(self,text):
+		if SYSTEM=="osx":
+			self.label.text=text
+	text = property(_gettext,_settext)
+	def __init__(self, text=""):
+		if SYSTEM=="osx":
+			self.label = OSXLabel()
+			self.label.text = text
+	def _int(self):
+		if SYSTEM=="osx":
+			return self.label
+class RadioGroup(Widget):
+	def __getitem__(self,num):
+		return self.buttons[num]
+	def __init__(self,*args):
+		self.buttons = []
+		for i in args:
+			self.buttons.append(RadioButton(i))
+		self.group = OSXRadioGroup([j._int() for j in self.buttons])
+		self.group.value = args[0]
+		self.group.action = self._action
+	def _int(self):
+		return self.group
+	def _getvalue(self):
+		return self.group.value
+	def _setvalue(self,value):
+		self.group.value = value
+	value = property(_getvalue, _setvalue)
+	def _action(self):
+		self.action(self)
+	def action(self,self1=None):
+		pass
 
+class RadioButton(Widget):
+	def __init__(self,title):
+		if SYSTEM=="osx":
+			self.button = OSXRadioButton(title=title,value=title)
+	def _int(self):
+		return self.button
+			
 class Grid(Widget):
 	def __init__(self,*args):
 		if SYSTEM=="osx":

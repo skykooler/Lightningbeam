@@ -87,7 +87,7 @@ def onMouseUpGroup(self, x, y):
 		self.cshape = None
 	elif svlgui.MODE=="p":
 		print len(self.cshape.shapedata)
-		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, "curve",1)
+		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, svlgui.PMODE.split()[-1],1)
 		print len(self.cshape.shapedata)
 		self.cshape = None
 		MainWindow.stage.draw()

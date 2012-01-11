@@ -218,11 +218,27 @@ class MainWindowOSX:
 		self.toolbox.buttons[4][0].onPress = pen
 		self.toolbox.buttons[4][1].onPress = paint_bucket
 		self.scriptwindow = svlgui.TextView()
-		self.frame.layout_self(	[self.toolbox,0,None,0,0,"nws",""],
+		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
+		def setmode(self):
+			svlgui.PMODE = self.value
+		self.paintgroup.action = setmode
+		self.paintbox = svlgui.Frame()
+		self.pboptions = svlgui.Label("Paintbrush Options")
+		self.paintbox.layout_self([self.pboptions,0,0,0,None,"news",""],
+								[self.paintgroup[0],0,0,self.pboptions._int(),None,"new",""],
+								[self.paintgroup[1],0,0,self.paintgroup[0]._int(),None,"new",""],
+								[self.paintgroup[2],0,0,self.paintgroup[1]._int(),None,"new",""])
+								#)
+		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
+								#[self.paintbox,0,245,0,0,"nws","v"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
+								#[self.timelinebox,self.paintbox._int()+148,-500,0,None,"new","hv"],
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
+								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
-								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
+								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"],
+								[self.paintbox,0,self.stage._int(),self.toolbox._int(),0,"nws","v"] )
+								#[self.stage,self.paintbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
 
 # use mainwindowosx, this is just to comment things out
@@ -261,7 +277,10 @@ class MainWindowHTML:
 		self.toolbox.buttons[4][0].onPress = pen
 		self.toolbox.buttons[4][1].onPress = paint_bucket
 		self.scriptwindow = svlgui.TextView()
-		self.frame.layout_self(	[self.toolbox,0,None,0,0,"nws",""],
+		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
+		self.paintbox = svlgui.VBox([[svlgui.Label("Paintbrush Options")._int()],[self.paintgroup]])
+		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
+								[self.paintbox,0,None,self.toolbox._int(),0,"nws","v"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
