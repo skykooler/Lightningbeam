@@ -5,6 +5,7 @@
 
 import svlgui
 from threading import Event, Thread
+import math
 
 def select_any(self):
 	svlgui.MODE = " "
@@ -52,6 +53,90 @@ def lastval(arr,index):
 		if i:
 			return i
 	
+
+
+
+
+def catmullRom2bezier( points ) :
+	#crp = points.split(/[,\s]/);
+	crp = points
+	d = [["M",points[0][1],points[0][2]]];
+	'''
+	i = 0
+	iLen = len(crp); 
+	while iLen - 2 > i:
+		i+=2
+		p = [];
+		if 0 == i:
+			p.append( [crp[i],   crp[i+1]);
+			p.append( [crp[i],   crp[i+1]);
+			p.append( [crp[i+2], crp[i+3]);
+			p.append( [crp[i+4], crp[i+5]);
+		elif iLen - 4 == i:
+			p.append( [crp[i-2], crp[i-1]]);
+			p.append( [crp[i],   crp[i+1]]);
+			p.append( [crp[i+2], crp[i+3]]);
+			p.append( [crp[i+2], crp[i+3]]);
+		} else {
+			p.append( [crp[i-2], crp[i-1]]);
+			p.append( [crp[i],   crp[i+1]]);
+			p.append( [crp[i+2], crp[i+3]]);
+			p.append( [crp[i+4], crp[i+5]]);
+		}
+		'''
+	for i in range(2,len(crp)-2):
+		p = [ [crp[i-1][1],crp[i-1][2]], [crp[i][1],crp[i][2]], [crp[i+1][1],crp[i+1][2]], [crp[i+2][1],crp[i+2][2]] ]
+
+		# Catmull-Rom to Cubic Bezier conversion matrix 
+		#    0       1       0       0
+		#  -1/6      1      1/6      0
+		#    0      1/6      1     -1/6
+		#    0       0       1       0
+
+		bp = []
+		bp.append( [p[1][0],  p[1][1]] );
+		bp.append( [(-p[0][0]+6*p[1][0]+ p[2][0])/6, ((-p[0][1]+6*p[1][1]+p[2][1])/6)]);
+		bp.append( [(p[1][0]+6*p[2][0]-p[3][0])/6, ((p[1][1]+6*p[2][1]-p[3][1])/6)]);
+		bp.append( [ p[2][0],  p[2][1] ] );
+
+		
+		d.append( ["C", bp[1][0], bp[1][1], bp[2][0], bp[2][1], bp[3][0], bp[3][1]]);
+	
+	return d;
+	
+def simplify_shape(shape,mode,iterations):
+	if mode in ("straight","curve"):
+		for i in xrange(iterations):
+			for j in reversed(range(len(shape))):
+				if j>0 and j<len(shape)-1:
+					pax=shape[j-1][1];
+					pay=shape[j-1][2];
+					pbx=shape[j][1];
+					pby=shape[j][2];
+					pcx=shape[j+1][1];
+					pcy=shape[j+1][2];
+					abx=pax-pbx;
+					aby=pay-pby;
+					#____________calculate ab,bc,ca, Angles A, B, c _________________________
+					ab=math.sqrt(abx*abx+aby*aby);
+					bcx=pbx-pcx;
+					bcy=pby-pcy;
+					bc=math.sqrt(bcx*bcx+bcy*bcy);
+					cax=pcx-pax;
+					cay=pcy-pay;
+					ca=math.sqrt(cax*cax+cay*cay);
+					cosB=-(ca*ca-bc*bc-ab*ab)/(2*bc*ab);
+					try:
+						acosB=math.acos(cosB)*180/math.pi;
+					except ValueError:
+						acosB=0
+					if acosB>(165-500/(ab+bc)):	# at least 15 degrees away from straight angle
+						del shape[j]
+		if mode=="curve":
+			shape = catmullRom2bezier([shape[0]]*2+shape+[shape[-1]])
+			print shape
+							
+		return shape#+nshape
 	
 # Timer module - not mine
 

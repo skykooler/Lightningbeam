@@ -85,6 +85,12 @@ def onMouseUpGroup(self, x, y):
 	self.clicked = False
 	if svlgui.MODE in ["r", "e"]:
 		self.cshape = None
+	elif svlgui.MODE=="p":
+		print len(self.cshape.shapedata)
+		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, "curve",1)
+		print len(self.cshape.shapedata)
+		self.cshape = None
+		MainWindow.stage.draw()
 def onMouseUpObj(self, x, y):
 	self.clicked = False
 def onMouseMoveGroup(self, x, y):
