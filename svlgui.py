@@ -33,6 +33,9 @@ CURRENTFRAME=0
 #Object which has the keyboard focus.
 FOCUS = None
 
+#Library. Contatins all objects whether displayed or not.
+Library = []
+
 
 class Color (object):
 	def __init__(self, val):
@@ -756,6 +759,8 @@ class TextView(Widget):
 
 class Image(object):
 	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1):
+		global Library
+		Library.append(self)
 		self.x = x
 		self.y = y
 		self.minx = x
@@ -882,6 +887,8 @@ class Image(object):
 class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
 		global SITER
+		global Library
+		Library.appemd(self)
 		self.x=x
 		self.y=y
 		self.rotation=rotation
@@ -1477,6 +1484,8 @@ class Group (object):
 	level = property(getlevel, setlevel)
 	scale = property(fset = setscale)
 	def __init__(self, *args, **kwargs):
+		global Library
+		Library.append(self)
 		self.layers = [Layer(*args)]
 		self._al = 0
 		self.clicked = False

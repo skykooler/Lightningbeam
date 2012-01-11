@@ -210,9 +210,8 @@ def new_file(widget=None):
 	root.onMouseMove = onMouseMoveGroup
 	MainWindow.stage.add(root,0,0)
 def open_file(widget=None):
-	
-	MainWindow.stage.delete(root)
 	global root
+	MainWindow.stage.delete(root)
 	thefile = svlgui.file_dialog("open").open("rb")
 	root = pickle.load(thefile)
 	MainWindow.stage.add(root, 0, 0)
