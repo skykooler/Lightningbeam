@@ -1,21 +1,12 @@
-
-<html>
-<head>
-<style type="text/css">
-canvas { border: 2px solid #000; position:absolute; top:0;left:0; 
-visibility: hidden; }
-</style>
-</head>
-<body>
-<canvas id="canvas1" width=500 height=500></canvas>
-<canvas id="canvas2" width=500 height=500></canvas>
-<script>
 //--------------------------  BEGIN JAVASCRIPT  --------------------------------\\
 
 var fps = 50
+//var fps = 10;
 var cr;
 var canvas;
-var _processingobj
+var _processingobj;
+var _lastmouse = [0,0];
+var _global = {};
 
 var appendError = function(str){
    throw new Error("DEBUG: "+str)
@@ -46,12 +37,17 @@ function _timerBase () {
 
 			DrawingBuffer=1-DrawingBuffer;
 			//canvas = Buffers[DrawingBuffer];
-			draw()
+			_root._draw(_rootFrame)
+			if (!(_lastmouse[0]==_root._xmouse&&_lastmouse[1]==_root._ymouse)) {
+				// Mouse moved
+				_root._onMouseMove()
+			}
 			for (i in this.funcs){
-				this.funcs[i]._draw()
+				this.funcs[i].onEnterFrame();
 			}
 			Buffers[1-DrawingBuffer].style.visibility='hidden';
 			Buffers[DrawingBuffer].style.visibility='visible';
+			_lastmouse=[_root._xmouse,_root._ymouse]
 		}
 	}
 	
@@ -64,6 +60,23 @@ function ave(x, y, fac) {
 	//Weighted average. 
 	//fac is the weight - 0.5 gives a standard average
 	return y - fac*(y-x)
+}
+
+
+function getObjectClass(obj) {
+	/* Returns the class name of the argument or undefined if
+	   it's not a valid JavaScript object.
+	*/
+    if (obj && obj.constructor && obj.constructor.toString) {
+        var arr = obj.constructor.toString().match(
+            /function\s*(\w+)/);
+
+        if (arr && arr.length == 2) {
+            return arr[1];
+        }
+    }
+
+    return undefined;
 }
 
 function Frame () {
@@ -86,13 +99,42 @@ function MovieClip() {
 	The duplicateMovieClip() method allows you to create a movie clip instance based on 
 	another movie clip.
 	*/
-	this._frames = [new Frame()]
+	this._layers = [new Layer(this)]
 	this._currentframe = 1;
 	this._playing = true;
+	this._x = 0;
+	this._y = 0;
+	this._xscale = 1;
+	this._yscale = 1;
+	this._rotation = 0;
 	Timer.add(this)
-	this._draw = function (sttc) {
+	
+	
+	
+	///////////////////             TODO: RECAST THIS. ROOT AS MOVIECLIP. DRAW THROUGH HIEREARCHY
+	
+	
+	this._draw = function (frame,frame2,r) {
 		_processingobj = this
-		for (var i in this) {
+		if (!frame2) {
+			this._x = frame._x
+			this._y = frame._y
+			this._xscale = frame._xscale
+			this._yscale = frame._yscale
+			this._rotation = frame._rotation
+		} else {
+			this._x = ave(frame2._x, frame._x, r)
+			this._y = ave(frame2._y, frame._y, r)
+			this._xscale = ave(frame2._xscale, frame._xscale, r)
+			this._yscale = ave(frame2._yscale, frame._yscale, r)
+			this._rotation = ave(frame2._rotation ,frame._rotation, r)
+		}
+		//log(this._x)
+		cr.save()
+		cr.translate(this._x,this._y)
+		cr.rotate(this._rotation*Math.PI/180)
+		cr.scale(this._xscale*1.0, this._yscale*1.0)
+		/*for (var i in this) {
 			if (this._frames[this._currentframe-1]==undefined) {
 				for (var j=0; j<this._currentframe-1; j++) {
 					if (this._frames[j]) {
@@ -113,8 +155,11 @@ function MovieClip() {
 					this[i]._draw(this._frames[this._currentframe-1][i]);
 				}
 			}
+		}*/
+		for (i in this._layers) {
+			this._layers[i]._draw(this._currentframe,this)
 		}
-		if (this._frames[this._currentframe-1]) {
+		/*if (this._frames[this._currentframe-1]) {
 			if (this._playing) {
 				this._frames[this._currentframe-1].run_script()
 			}
@@ -131,8 +176,29 @@ function MovieClip() {
 					this._currentframe = 1;
 				}
 			}	
+		}*/
+		if (this._playing) {
+			var lessthan=false
+			for (var i=0; i<this._layers.length; i++) {
+				if (this._layers[i]._frames.length>this._currentframe) {
+					lessthan=true;
+					this._currentframe++;
+					break;
+				}
+			}
+			if (!lessthan){
+				this._currentframe = 1;
+			}
 		}
+		cr.restore()
 		this._previousframe = this._currentframe
+		if (!frame2) {
+			frame._x = this._x
+			frame._y = this._y
+			frame._xscale = this._xscale
+			frame._yscale = this._yscale
+			frame._rotation = this._rotation
+		}
 	}
 	this.play = function () {
 		this._playing = true
@@ -140,6 +206,104 @@ function MovieClip() {
 	this.stop = function () {
 		//Timer.remove(this)
 		this._playing = false
+	}
+										// Implemented?
+	this.onData = function () {				//No
+	}
+	this.onDragOut = function () {			//No
+	}
+	this.onDragOver = function () {			//No
+	}
+	this.onEnterFrame = function () {		//Yes
+	}
+	this.onKeyDown = function () {			//No
+	}
+	this.onKeyUp = function () {			//No
+	}
+	this.onKillFocus = function () {		//No
+	}
+	this.onLoad = function () {				//No
+	}
+	this._onMouseDown = function () {
+		for (var i in this) {
+			if (getObjectClass(this[i])=='MovieClip') {
+				// TODO: Add bounds checking.
+				this[i]._onMouseDown();
+			}
+		this.onMouseDown()
+		}
+	}
+	this.onMouseDown = function () {		//No
+	}
+	this._onMouseMove = function () {
+		for (var i in this) {
+			if (getObjectClass(this[i])=='MovieClip') {
+				// TODO: Add bounds checking.
+				this[i]._onMouseMove();
+			}
+		this.onMouseMove()
+		}
+	}
+	this.onMouseMove = function () {		//No
+	}
+	this.onMouseUp = function () {			//No
+	}
+	this.onPress = function () {			//No
+	}
+	this.onRelease = function () {			//No
+	}
+	this.onReleaseOutside = function () {	//No
+	}
+	this.onRollOut = function () {			//No
+	}
+	this.onRollOver = function () {			//No
+	}
+	this.onSetFocus = function () {			//No
+	}
+	this.onUnload = function () {			//No
+	}
+}
+
+function Layer (parent) {
+	this._frames = [new Frame()]
+	this._parent = parent;
+	this._draw = function (currentframe) {
+		_processingobj = this
+		cr.save()
+		for (var i in this._parent) {
+			if (this._frames[currentframe-1]==undefined) {
+				for (var j=0; j<currentframe-1; j++) {
+					if (this._frames[j]) {
+						last = j
+					}
+				}
+				for (var j=this._frames.length; j>currentframe-1; j--) {
+					if (this._frames[j]) {
+						next = j
+					}
+				}
+				if (this._frames[last][i]) {
+					this._parent[i]._draw(this._frames[last][i],this._frames[next][i],(currentframe-last)/(next-last));
+				}
+			}
+			else {
+				if (this._frames[currentframe-1][i]) {
+					this._parent[i]._draw(this._frames[currentframe-1][i]);
+				}
+			}
+		}
+		if (this._frames[currentframe-1]) {
+			if (this._parent._playing) {
+				this._frames[currentframe-1].run_script()
+			}
+		}
+		cr.restore()
+	}
+	this.stop = function () {
+		this._parent.stop()
+	}
+	this.play = function () {
+		this._parent.play()
 	}
 }
 
@@ -190,7 +354,12 @@ var Stage = {
 	
 }
 
-var root = {}
+var _rootFrame = new Frame()
+var _root = new MovieClip()
+
+_rootFrame._root = {}
+_rootFrame._root._x = 50
+_rootFrame._root._y = 40
 
 /*if (canvas.getContext) {
 	cr = canvas.getContext("2d");
@@ -205,9 +374,9 @@ function draw() {
 		cr = canvas.getContext("2d");
 		
 		
-		for (i in root) {
-			if (root[i]._draw) {
-				//root[i]._draw(true)
+		for (i in _root) {
+			if (_root[i]._draw) {
+				//_root[i]._draw(true)
 			}
 		}
 	}
@@ -223,33 +392,3 @@ function stop() {
 }
 	
 /*--------------------------------------- */
-
-var a = new Shape()
-a._shapedata = [["M",0,0],["L",400,0],["L",400,200],["L",0,200],["L",0,0]]
-var b = new MovieClip()
-b.a = a
-b._frames[0].a = {}
-b._frames[0].a._x = 100
-b._frames[0].a._y = 20
-b._frames[0].actions = 'this.a._x = this.a._x + 1'
-root.b = b
-b._frames[50] = new Frame()
-b._frames[50].a = {}
-b._frames[50].a._x = 50
-b._frames[50].a._y = 40
-b._frames[100] = new Frame()
-b._frames[100].a = {}
-b._frames[100].a._x = 75
-b._frames[100].actions = 'stop();'
-b._frames[100].a._y = 120
-b._frames[150] = new Frame()
-b._frames[150].a = {}
-b._frames[150].a._x = 100
-b._frames[150].a._y = 20
-
-setTimeout('b.play()',20)
-
-//-------------------  END OF JAVASCRIPT ------------------------\\
-</script>
-</body>
-</html>

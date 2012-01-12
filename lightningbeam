@@ -178,10 +178,31 @@ def run_file(self=None):
 		svlgui.execute("open -a "+osx_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM=='win32':
 		win_flash_player_loc = ""
-	 	svlgui.execute('start '+win_flash_player_loc+" test.swf")
+		svlgui.execute('start '+win_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM.startswith('linux'):
 		linux_flash_player_loc = ""
-	 	svlgui.execute('xdg-open '+linux_flash_player_loc+" test.swf")
+		svlgui.execute('xdg-open '+linux_flash_player_loc+" test.swf")
+def create_html5(root):
+	retval = "<head>\n\
+<style type=\"text/css\">\n\
+canvas { \n\
+border: 2px solid #000; position:absolute; top:0;left:0;\n\
+visibility: hidden; }\n\
+</style>\n\
+</head>\n\
+<body>\n\
+<canvas id=\"canvas1\" width=500 height=500 ></canvas>\n\
+<canvas id=\"canvas2\" width=500 height=500></canvas>\n\
+<script src=\"base.js\">\n\
+</script>\n\
+<script>"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"</script>\n</body>\n</html>"
+	return retval
+def run_html(self=None):
+	global root
+	print "RUNNING"
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
+	open("SDFGHJK.html", "w").write(create_html5(root))
+	
 	
 
 def box(x, y, width, height, fill=None):
@@ -208,6 +229,7 @@ def shape(x, y, fill=None):
 	return shape
 
 root = svlgui.Group()
+root.name = "_root"
 root.level = True
 root.onMouseDown = onMouseDownGroup
 root.onMouseUp = onMouseUpGroup
@@ -237,13 +259,13 @@ elif svlgui.SYSTEM=="android":
 	MainWindow = lightningbeam_windows.MainWindowAndroid()
 MainWindow.stage.add(root, 0,0)
 svlgui.FOCUS = MainWindow.stage
-layers = svlgui.Group()
-b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1)
+layers = svlgui.Group(skipl=True)
+b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1,True)
 layers.add(b)
 MainWindow.layerbox.add(layers,0,0)
 
-frames = svlgui.Group(onload=onLoadFrames)
-b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1)
+frames = svlgui.Group(onload=onLoadFrames,skipl=True)
+b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1,True)
 frames.add(b)
 frames.onMouseDown = onClickFrame
 frames.onKeyDown = onKeyDownFrame
@@ -294,12 +316,12 @@ def quit(widget):
 	
 def add_keyframe(widget=None):
 	root.descendItem().add_frame(True)
-	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1)
+	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1,True)
 	frames.add(b)
 	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
-	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1))
+	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1,True))
 	print root.descendItem().layers.index(root.descendItem().activelayer)*32
 	#MainWindow.layerbox.draw()
 def delete_layer(widget=None):
@@ -381,7 +403,8 @@ svlgui.menufuncs([["File",
 						"Export .pdf",
 						"Export Animated GIF"],
 					["Tools",
-						("Execute",run_file,"/\r")],
+						("Execute",run_file,"/\r"),
+						("Execute as HTML5",run_html,"/\\")],
 					["Modify",
 						"Document",
 						"Convert to Symbol",

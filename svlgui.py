@@ -212,6 +212,7 @@ if SYSTEM=="osx":
 			m.save_cmd.enabled = 1
 			m.open_cmd.enabled = 1
 			m.run_file.enabled = 1
+			m.run_html.enabled = 1
 			m.create_sc.enabled = 1
 			m.add_keyframe.enabled = 1
 			m.add_layer.enabled = 1
@@ -837,9 +838,10 @@ class TextView(Widget):
 			self.scroll_page_down();
 
 class Image(object):
-	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1):
-		global Library
-		Library.append(self)
+	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1,skipl=False):
+		if not skipl:
+			global Library
+			Library.append(self)
 		self.x = x
 		self.y = y
 		self.minx = x
@@ -1170,6 +1172,9 @@ class Shape (object):
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
+	def print_html(self):
+		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
+		return retval
 
 class framewrapper (object):
 			#Wraps object per-frame. Allows for changes in position, rotation, scale.
@@ -1553,6 +1558,8 @@ class Group (object):
 		if frame<len(self.activelayer.frames) and self.activelayer.frames[frame]:
 			self.activelayer.currentframe = frame
 		self.activelayer.activeframe = frame
+	def getobjs(self):
+		return [item for sublist in self.layers for item in sublist.objs]
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
@@ -1562,9 +1569,11 @@ class Group (object):
 	currentframe = property(getcurrentframe, setcurrentframe)
 	level = property(getlevel, setlevel)
 	scale = property(fset = setscale)
+	objs = property(getobjs)
 	def __init__(self, *args, **kwargs):
-		global Library
-		Library.append(self)
+		if not 'skipl' in kwargs:
+			global Library
+			Library.append(self)
 		self.layers = [Layer(*args)]
 		self._al = 0
 		self.clicked = False
@@ -1697,6 +1706,30 @@ class Group (object):
 				if j.frames[i]:
 					retval+=".frame "+str(i+1)+"\n"
 					retval+=j.frames[i].print_sc()
+		return retval
+	def print_html(self):
+		retval = ""
+		for i in self.layers:
+			pass
+			#retval+=i.print_html(True,False)
+		'''for i in xrange(self.maxframe()):
+			for j in self.layers:
+				if j.frames[i]:
+					retval+=".frame "+str(i+1)+"\n"
+					retval+=j.frames[i].print_html()'''
+		print self.objs
+		for i in self.objs:
+			retval += self.name+"."+i.name+" = "+i.name+";\n"
+		for i in range(len(self.layers)):
+			for j in xrange(self.maxframe()):
+				if self.layers[i].frames[j]:
+					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"] = new Frame ();\n"
+					for k in self.layers[i].frames[j].objs:
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+" = {};\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
+						
 		return retval
 
 def set_cursor(curs, widget=None):
