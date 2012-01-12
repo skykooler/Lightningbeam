@@ -146,7 +146,7 @@ if sys.platform=="linux2":
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
@@ -167,7 +167,7 @@ elif sys.platform=="win32":
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
@@ -189,7 +189,7 @@ elif sys.platform=="darwin":
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
-	from GUI import Column, Row, ScrollableView, TextEditor, Colors
+	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
 	from GUI import StdCursors, Alerts, FileDialogs, Font
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
@@ -223,6 +223,7 @@ if SYSTEM=="osx":
 			m.send_to_back.enabled = 1
 			m.import_to_stage.enabled = 1
 			m.import_to_library.enabled = 1
+			m.preferences_cmd.enabled = 1
         
         #def create_sc(self):
 		#	pass
@@ -422,7 +423,8 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"Save":"save_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd"}
+				cmds={"Save":"save_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
+					"Preferences":"preferences_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -1174,6 +1176,7 @@ class Shape (object):
 	maxy = property(getmaxy)
 	def print_html(self):
 		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
+		retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
 		return retval
 
 class framewrapper (object):
@@ -1927,12 +1930,12 @@ class ColorSelectionWindow:
 				self.window.destroy()
 				raise ObjectDeletedError
 			canvas = Canvas(336,208)
-			group = Group()
+			group = Group(skipl=True)
 			def dummy(*args):
 				pass
 			group._onMouseMove = dummy
 			canvas.add(group,0,0)
-			im = Image("media/colors.png")
+			im = Image("media/colors.png",skipl=True)
 			group.add(im)
 			group.window = win
 			group.canvas = canvas
@@ -1942,6 +1945,16 @@ class ColorSelectionWindow:
 				group.onMouseDown = onClickRectLine
 			win.place(canvas._int(),left=0,top=0,right=0,bottom=0,sticky="news",scrolling="")
 			win.show()
+			
+class PreferencesWindow:
+	def __init__(self):
+		if SYSTEM=="osx":
+			win = ModalDialog(closable=True,width=500,height=500)
+			frame = Frame()
+			win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
+			label = Label("Path to Flash Debugger: ")
+			frame.layout_self([label,0,None,0,None,"nw",""])
+			win.present()
 
 def main():
 	#Executes the main loop for whatever GUI is running

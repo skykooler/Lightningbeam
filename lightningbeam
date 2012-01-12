@@ -228,7 +228,7 @@ def shape(x, y, fill=None):
 	shape.shapedata = [["M",0,0]]
 	return shape
 
-root = svlgui.Group()
+root = svlgui.Group(skipl=True)
 root.name = "_root"
 root.level = True
 root.onMouseDown = onMouseDownGroup
@@ -367,6 +367,9 @@ def bring_to_front(widget=None):
 def about(widget=None):
 	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
 	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
+	
+def preferences(widget=None):
+	prefwin = svlgui.PreferencesWindow()
 
 
 svlgui.menufuncs([["File",
@@ -384,7 +387,7 @@ svlgui.menufuncs([["File",
 						"Copy",
 						"Paste",
 						"Delete",
-						"Preferences"],
+						("Preferences",preferences,"")],
 					["Timeline",
 						("Add Keyframe",add_keyframe,"F5"),
 						"Add Blank Keyframe",

@@ -62,6 +62,17 @@ function ave(x, y, fac) {
 	return y - fac*(y-x)
 }
 
+function decimalToHex(d, padding) {
+    var hex = Number(d).toString(16);
+    padding = typeof (padding) === "undefined" || padding === null ? padding = 2 : padding;
+
+    while (hex.length < padding) {
+        hex = "0" + hex;
+    }
+
+    return hex;
+}
+
 
 function getObjectClass(obj) {
 	/* Returns the class name of the argument or undefined if
@@ -310,7 +321,8 @@ function Layer (parent) {
 function Shape() {
 	// Not part of the ActionScript spec, but necessary.
 	this._shapedata = []
-	this.fill = "#000000"
+	this.fill = "#123456"
+	this.line = "#FEDCBAFF".substr(0,7)
 	this._draw = function (frame,frame2,r) {
 		if (!frame2) {
 			this._x = frame._x
@@ -318,19 +330,54 @@ function Shape() {
 			this._xscale = frame._xscale
 			this._yscale = frame._yscale
 			this._rotation = frame._rotation
+			if (frame.fill) {
+				this.filr = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
+				this.filg = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
+				this.filb = parseInt(parseInt(frame.fill.replace("#",""),16))%256
+				this.linr = parseInt(parseInt(frame.line.replace("#",""),16)/65536)
+				this.ling = parseInt(parseInt(frame.line.replace("#",""),16)/256)%256
+				this.linb = parseInt(parseInt(frame.line.replace("#",""),16))%256
+				this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
+				this.line = "#"+decimalToHex(this.linr,2)+decimalToHex(this.ling,2)+decimalToHex(this.linb,2)
+			}
 		} else {
 			this._x = ave(frame2._x, frame._x, r)
 			this._y = ave(frame2._y, frame._y, r)
 			this._xscale = ave(frame2._xscale, frame._xscale, r)
 			this._yscale = ave(frame2._yscale, frame._yscale, r)
 			this._rotation = ave(frame2._rotation ,frame._rotation, r)
+			if (frame2.fill) {
+				this.filr2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/65536)
+				this.filg2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/256)%256
+				this.filb2 = parseInt(parseInt(frame2.fill.replace("#",""),16))%256
+				this.filra = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
+				this.filga = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
+				this.filba = parseInt(parseInt(frame.fill.replace("#",""),16))%256
+				this.filr = parseInt(ave(this.filr2, this.filra, r))
+				this.filg = parseInt(ave(this.filg2, this.filga, r))
+				this.filb = parseInt(ave(this.filb2, this.filba, r))
+				this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
+			}
+			if (frame2.line) {
+				this.linr2 = parseInt(parseInt(frame2.line.replace("#",""),16)/65536)
+				this.ling2 = parseInt(parseInt(frame2.line.replace("#",""),16)/256)%256
+				this.linb2 = parseInt(parseInt(frame2.line.replace("#",""),16))%256
+				this.linra = parseInt(parseInt(frame.line.replace("#",""),16)/65536)
+				this.linga = parseInt(parseInt(frame.line.replace("#",""),16)/256)%256
+				this.linba = parseInt(parseInt(frame.line.replace("#",""),16))%256
+				this.linr = parseInt(ave(this.linr2, this.linra, r))
+				this.ling = parseInt(ave(this.ling2, this.linga, r))
+				this.linb = parseInt(ave(this.linb2, this.linba, r))
+				this.line = "#"+decimalToHex(this.linr,2)+decimalToHex(this.ling,2)+decimalToHex(this.linb,2)
+			}
 		}
 		//log(this._x)
 		cr.save()
 		cr.translate(this._x,this._y)
 		cr.rotate(this._rotation*Math.PI/180)
 		cr.scale(this._xscale*1.0, this._yscale*1.0)
-		cr.fillStyle = this.fill;
+		cr.fillStyle = this.fill.substr(0,7);
+		cr.strokeStyle = this.line.substr(0,7);
 		for (i in this._shapedata) {
 			if (this._shapedata[i][0]=="M") {
 				cr.moveTo(this._shapedata[i][1],this._shapedata[i][2])
@@ -347,6 +394,7 @@ function Shape() {
 			cr.stroke()
 		}
 		cr.restore()
+		cr.beginPath()
 	}
 }
 
