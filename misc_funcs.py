@@ -10,33 +10,50 @@ import math
 def select_any(self):
 	svlgui.MODE = " "
 	svlgui.set_cursor("arrow", stage)
+	update_tooloptions()
 def resize_any(self):
 	svlgui.MODE = "s"
 	svlgui.set_cursor("arrow", stage)
+	update_tooloptions()
 def lasso(self):
 	svlgui.MODE = "l"
 	svlgui.set_cursor("lasso", stage)
+	update_tooloptions()
 def text(self):
 	svlgui.MODE = "t"
 	svlgui.set_cursor("text", stage)
+	update_tooloptions()
 def rectangle(self):
 	svlgui.MODE = "r"
 	svlgui.set_cursor("crosshair", stage)
+	update_tooloptions()
 def ellipse(self):
 	svlgui.MODE = "e"
 	svlgui.set_cursor("crosshair", stage)
+	update_tooloptions()
 def curve(self):
 	svlgui.MODE = "c"
 	svlgui.set_cursor("curve", stage)
+	update_tooloptions()
 def paintbrush(self):
 	svlgui.MODE = "p"
 	svlgui.set_cursor("paintbrush", stage)
+	update_tooloptions()
 def pen(self):
 	svlgui.MODE = "n"
 	svlgui.set_cursor("pen", stage)
+	update_tooloptions()
 def paint_bucket(self):
 	svlgui.MODE = "b"
 	svlgui.set_cursor("bucket", stage)
+	update_tooloptions()
+	
+def update_tooloptions():
+	for i in svlgui.TOOLOPTIONS:
+			if svlgui.MODE==svlgui.TOOLOPTIONS[i]:
+				i.setvisible(True)
+			else:
+				i.setvisible(False)
 	
 def box(x, y, width, height, fill):
 	global objects

@@ -231,6 +231,12 @@ class MainWindowOSX:
 								[self.paintgroup[1],0,0,self.paintgroup[0]._int(),None,"new",""],
 								[self.paintgroup[2],0,0,self.paintgroup[1]._int(),None,"new",""])
 								#)
+		svlgui.TOOLOPTIONS = {self.paintbox:"p"}
+		for i in svlgui.TOOLOPTIONS:
+			if svlgui.MODE==svlgui.TOOLOPTIONS[i]:
+				i.setvisible(True)
+			else:
+				i.setvisible(False)
 		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.paintbox,0,245,0,0,"nws","v"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
@@ -239,7 +245,7 @@ class MainWindowOSX:
 								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
 								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"],
-								[self.paintbox,0,self.stage._int(),self.toolbox._int(),0,"nws","v"] )
+								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
 								#[self.stage,self.paintbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
 

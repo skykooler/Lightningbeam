@@ -47,6 +47,7 @@ def onKeyDownFrame(self, key):
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
 				"b":"arrow"}[key], MainWindow.stage)
+		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
@@ -125,6 +126,7 @@ def onKeyDownGroup(self, key):
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
 				"b":"arrow","p":"arrow"}[key], MainWindow.stage)
+		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
 		print "Added keyframe."
@@ -135,6 +137,7 @@ def onKeyDownObj(self, key):
 		svlgui.MODE=key
 		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
 				"b":"arrow","p":"arrow"}[key], MainWindow.stage)
+		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
 	
@@ -209,12 +212,13 @@ root.onMouseUp = onMouseUpGroup
 root.onMouseMove = onMouseMoveGroup
 root.onMouseDrag = onMouseDragGroup
 root.onKeyDown = onKeyDownGroup
+'''
 e=ellipse(100,100,10,10,None)
 e.onMouseDown = onMouseDownObj
 e.onMouseMove = onMouseMoveObj
 e.onMouseDrag = onMouseDragObj
 e.onMouseUp = onMouseUpObj
-e.onKeyDown = onKeyDownObj
+e.onKeyDown = onKeyDownObj'''
 root.add(e)
 
 

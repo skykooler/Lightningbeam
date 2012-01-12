@@ -24,7 +24,7 @@ import re
 #	"n": pen tool
 #	"b": paint bucket tool
 '''
-MODE="e"
+MODE=" "
 
 #Painbrush mode
 PMODE = "Draw straight"
@@ -618,6 +618,8 @@ class Frame(Widget):
 		if SYSTEM=="osx":
 			for i in args:
 				self.frame.place(i[0]._int(),left=i[1],right=i[2],top=i[3],bottom=i[4],sticky=i[5], scrolling=i[6])
+			self.width = self.frame.width
+			self.height = self.frame.height
 		elif SYSTEM=="html":
 			for i in args:
 				i[0]._int().style["position"]="absolute"
@@ -638,6 +640,13 @@ class Frame(Widget):
 				else:
 					i[0]._int().style["overflow-y"]="hidden"
 				self.frame.add(i[0]._int())
+	def setvisible(self,visible):
+		if SYSTEM=="osx":
+			if visible:
+				self.frame.height = self.height
+			else:
+				self.frame.height = 0
+	
 class Canvas(Widget):
 	def __init__(self,width=False,height=False):
 		self.objs=[]
