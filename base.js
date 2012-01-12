@@ -118,6 +118,7 @@ function MovieClip() {
 	this._xscale = 1;
 	this._yscale = 1;
 	this._rotation = 0;
+	this._visible = true;
 	Timer.add(this)
 	
 	
@@ -127,18 +128,20 @@ function MovieClip() {
 	
 	this._draw = function (frame,frame2,r) {
 		_processingobj = this
-		if (!frame2) {
-			this._x = frame._x
-			this._y = frame._y
-			this._xscale = frame._xscale
-			this._yscale = frame._yscale
-			this._rotation = frame._rotation
-		} else {
-			this._x = ave(frame2._x, frame._x, r)
-			this._y = ave(frame2._y, frame._y, r)
-			this._xscale = ave(frame2._xscale, frame._xscale, r)
-			this._yscale = ave(frame2._yscale, frame._yscale, r)
-			this._rotation = ave(frame2._rotation ,frame._rotation, r)
+		if (this._visible) {
+			if (!frame2) {
+				this._x = frame._x
+				this._y = frame._y
+				this._xscale = frame._xscale
+				this._yscale = frame._yscale
+				this._rotation = frame._rotation
+			} else {
+				this._x = ave(frame2._x, frame._x, r)
+				this._y = ave(frame2._y, frame._y, r)
+				this._xscale = ave(frame2._xscale, frame._xscale, r)
+				this._yscale = ave(frame2._yscale, frame._yscale, r)
+				this._rotation = ave(frame2._rotation ,frame._rotation, r)
+			}
 		}
 		//log(this._x)
 		cr.save()
@@ -225,6 +228,9 @@ function MovieClip() {
 	this.gotoAndStop = function (frame) {
 		this._playing = false;
 		this._currentframe = frame;
+	}
+	this.prevFrame = function () {
+		this.gotoAndStop(this._previousframe)
 	}
 										// Implemented?
 	this.onData = function () {				//No
