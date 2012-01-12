@@ -387,7 +387,7 @@ function Shape() {
 				cr.bezierCurveTo(this._shapedata[i][1],this._shapedata[i][2],this._shapedata[i][3],this._shapedata[i][4],this._shapedata[i][5],this._shapedata[i][6])
 			}
 		}
-		if (self.filled) {
+		if (this.filled) {
 			cr.stroke()
 			cr.fill()
 		} else {

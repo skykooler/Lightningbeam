@@ -1177,6 +1177,7 @@ class Shape (object):
 	def print_html(self):
 		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
 		retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
+		retval += self.name+".filled = "+str(self.filled).lower()+";\n"
 		return retval
 
 class framewrapper (object):
