@@ -218,6 +218,14 @@ function MovieClip() {
 		//Timer.remove(this)
 		this._playing = false
 	}
+	this.gotoAndPlay = function (frame) {
+		this._playing = true;
+		this._currentframe = frame;
+	}
+	this.gotoAndStop = function (frame) {
+		this._playing = false;
+		this._currentframe = frame;
+	}
 										// Implemented?
 	this.onData = function () {				//No
 	}
