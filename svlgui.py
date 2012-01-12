@@ -37,6 +37,8 @@ CURRENTFRAME=0
 #Object which has the keyboard focus.
 FOCUS = None
 
+
+
 #Library. Contatins all objects whether displayed or not.
 Library = []
 
@@ -241,7 +243,12 @@ if SYSTEM=="osx":
 	app = Lightningbeam()
 elif SYSTEM=="html":
 	app = ""
+
 	
+class ObjectDeletedError:
+	def __str__(self):
+		return "Object deleted!"
+
 
 class htmlobj:
 	"""
@@ -687,8 +694,11 @@ class Canvas(Widget):
 				def mouse_down(self, event):
 					self.become_target()
 					x, y = event.position
-					for i in self.objs:
-						i._onMouseDown(x, y)
+					try:
+						for i in self.objs:
+							i._onMouseDown(x, y)
+					except ObjectDeletedError:
+						return
 					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 					
 				def mouse_drag(self, event):
@@ -1614,8 +1624,8 @@ class Group (object):
 				self.activelayer.currentselect._onMouseDown(self.activelayer.currentselect, x, y)
 			else:
 				if MODE in [" ", "s", "b"]:
+					test = False
 					for i in reversed(self.currentFrame()):
-						test = False
 						if i.hitTest(x, y):
 							if MODE in [" ", "s"]:
 								self.activelayer.currentselect = i
@@ -1876,9 +1886,13 @@ class ColorSelectionWindow:
 			def onClickRectFill(self,x,y):
 				global FILLCOLOR
 				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+				self.window.destroy()
+				raise ObjectDeletedError
 			def onClickRectLine(self,x,y):
 				global LINECOLOR
 				LINECOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+				self.window.destroy()
+				raise ObjectDeletedError
 			canvas = Canvas(336,208)
 			group = Group()
 			def dummy(*args):
@@ -1887,6 +1901,8 @@ class ColorSelectionWindow:
 			canvas.add(group,0,0)
 			im = Image("media/colors.png")
 			group.add(im)
+			group.window = win
+			group.canvas = canvas
 			if var=="fill":
 				group.onMouseDown = onClickRectFill
 			if var=="line":

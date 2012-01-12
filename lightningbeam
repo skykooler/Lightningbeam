@@ -177,8 +177,10 @@ def run_file(self=None):
 		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
 		svlgui.execute("open -a "+osx_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM=='win32':
+		win_flash_player_loc = ""
 	 	svlgui.execute('start '+win_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM.startswith('linux'):
+		linux_flash_player_loc = ""
 	 	svlgui.execute('xdg-open '+linux_flash_player_loc+" test.swf")
 	
 
@@ -218,8 +220,8 @@ e.onMouseDown = onMouseDownObj
 e.onMouseMove = onMouseMoveObj
 e.onMouseDrag = onMouseDragObj
 e.onMouseUp = onMouseUpObj
-e.onKeyDown = onKeyDownObj'''
-root.add(e)
+e.onKeyDown = onKeyDownObj
+root.add(e)'''
 
 
 
