@@ -34,6 +34,8 @@ SITER=0
 #Currentframe - the frame selected on the timeline. Not necessarily the frame being shown.
 CURRENTFRAME=0
 
+FRAMERATE=50
+
 #Object which has the keyboard focus.
 FOCUS = None
 
@@ -147,7 +149,7 @@ if sys.platform=="linux2":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -168,7 +170,7 @@ elif sys.platform=="win32":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -190,7 +192,7 @@ elif sys.platform=="darwin":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
@@ -839,6 +841,22 @@ class TextView(Widget):
 		if SYSTEM=="osx":
 			self.scroll_page_down();
 
+class TextEntry(Widget):
+	def __init__(self,text="",password=False):
+		if SYSTEM=="osx":
+			self.entry = TextField(text=text,multiline=False,password=password)
+	def _int(self):
+		if SYSTEM=="osx":
+			return self.entry
+	def set_action(self,action):
+		if SYSTEM=="osx":
+			self.entry.enter_action = action
+	def get_text(self):
+		return self.entry.text
+	def set_text(self, text):
+		self.entry.text = text
+	text = property(get_text, set_text)
+		
 class Image(object):
 	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1,skipl=False):
 		if not skipl:

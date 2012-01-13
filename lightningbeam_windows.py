@@ -237,6 +237,21 @@ class MainWindowOSX:
 				i.setvisible(True)
 			else:
 				i.setvisible(False)
+		
+		self.docbox = svlgui.Frame()
+		self.sizelabel = svlgui.Label("Size: ")
+		self.sizebutton = svlgui.Button(" 500 x 500 pixels ")
+		self.publishlabel = svlgui.Label("Publish: ")
+		self.publishbutton = svlgui.Button(" Settings... ")
+		self.frameratelabel = svlgui.Label("Framerate: ")
+		self.frameratentry = svlgui.TextEntry("50")
+		self.frameratentry.set_action(self.set_framerate)
+		self.docbox.layout_self( [self.sizelabel,0,None,0,None,"nw", ""],
+								[self.sizebutton,self.sizelabel._int(),None,0,None,"nw", ""],
+								[self.publishlabel,0,None,self.sizebutton._int(),None,"nw", ""],
+								[self.publishbutton,self.publishlabel._int(),None,self.sizebutton._int(),None,"nw", ""],
+								[self.frameratelabel,0,None,self.publishbutton._int(),None,"nw", ""],
+								[self.frameratentry,self.frameratelabel._int(),None,self.publishbutton._int(),None,"nw", ""])
 		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.paintbox,0,245,0,0,"nws","v"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
@@ -244,10 +259,14 @@ class MainWindowOSX:
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
-								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"],
+								[self.docbox,self.toolbox._int(),self.scriptwindow._int(),None,0,"wse", ""],
+								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,self.docbox._int(),"nsew", "hv"],
 								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
 								#[self.stage,self.paintbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
+	
+	def set_framerate(self):
+		svlgui.FRAMERATE=int(self.frameratentry.text)
 
 # use mainwindowosx, this is just to comment things out
 class MainWindowHTML:

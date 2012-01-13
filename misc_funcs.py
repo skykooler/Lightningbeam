@@ -48,6 +48,7 @@ def paint_bucket(self):
 	svlgui.set_cursor("bucket", stage)
 	update_tooloptions()
 	
+	
 def update_tooloptions():
 	for i in svlgui.TOOLOPTIONS:
 			if svlgui.MODE==svlgui.TOOLOPTIONS[i]:
