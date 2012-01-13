@@ -171,7 +171,9 @@ function MovieClip() {
 			}
 		}*/
 		for (i in this._layers) {
-			this._layers[i]._draw(this._currentframe,this)
+			if (getObjectClass(this._layers[i])=="Layer"){
+				this._layers[i]._draw(this._currentframe,this)
+			}
 		}
 		/*if (this._frames[this._currentframe-1]) {
 			if (this._playing) {
@@ -412,9 +414,6 @@ function Shape() {
 	}
 }
 
-var Stage = {
-	
-}
 
 var _rootFrame = new Frame()
 var _root = new MovieClip()
@@ -452,5 +451,215 @@ function play() {
 function stop() {
 	_processingobj.stop();
 }
+
+Object.prototype.addProperty = function ( name, getter, setter) {
+	this.__defineGetter__(name,getter)
+	if (setter) {
+		this.__defineSetter__(name,setter)
+	}
+}
+
+Object.prototype.isPropertyEnumerable = function (name) {
+	return this.propertyIsEnumerable(name);
+}
+
+Object.defineProperty( Object.prototype, "addProperty", {enumerable: false});
+Object.defineProperty( Object.prototype, "isPropertyEnumerable", {enumerable: false});
+
+function Point (x, y) {
+	this.x = x
+	this.y = y
+	this.getlength = function () {
+		return Math.sqrt(this.x*this.x + this.y*this.y)
+	}
+	this.addProperty('length',this.getlength)
+	this.add = function (v) {
+		return Point (this.x+v.x, this.y+v.y)
+	}
+	this.clone = function () {
+		return Point (this.x, this.y)
+	}
+	this.equals = function (toCompare) {
+		return (this.x==toCompare.x && this.y==toCompare.y)
+	}
+	this.normalize = function (length) {
+		x = this.x/((this.length*1.0))*length
+		y = this.y/((this.length*1.0))*length
+		this.x = x
+		this.y = y
+	}
+	this.offset = function (dx, dy) {
+		this.x += dx
+		this.y += dy
+	}
+	this.subtract = function (v) {
+		return Point(this.x-v.x, this.y-v.y)
+	}
+	this.toString = function () {
+		return "(x="+this.x+", y="+this.y+")"
+	}
+}
+Point.distance = function (pt1, pt2) {
+	return Math.sqrt((pt2.x-pt1.x)*(pt2.x-pt1.x) + (pt2.y-pt1.y)*(pt2.y-pt1.y))
+}
+Point.interpolate = function (pt1, pt2, f) {
+	return Point(ave (pt1.x, pt2.x, f), ave (pt1.y, pt2.y, f) )
+}
+Point.polar = function (len, angle) {
+	return Point(len*Math.cos(angle), len*Math.sin(angle))
+}
+
+function Rectangle (x, y, width, height) {
+	this.x = x
+	this.y = y
+	this.width = width
+	this.height = height
+	this.getbottom = function () {
+		return this.y+this.height;
+	}
+	this.getbottomRight = function () {
+		return Point(this.x + this.width, this.y + this.height)
+	}
+	this.getsize = function () {
+		return Point(this.width, this.height)
+	}
+	this.getleft = function () {
+		return this.x
+	}
+	this.getright = function () {
+		return this.x + this.width
+	}
+	this.gettop = function () {
+		return this.y
+	}
+	this.gettopLeft = function () {
+		return Point(this.x, this.y)
+	}
+	this.addProperty('bottom',this.getbottom);
+	this.addProperty('bottomRight',this.getbottomRight);
+	this.addProperty('size',this.getsize);
+	this.addProperty('left',this.getleft);
+	this.addProperty('right',this.getright);
+	this.addProperty('top',this.gettop);
+	this.addProperty('topLeft',this.gettopLeft);
+	this.clone = function () {
+		return Rectangle(this.x, this.y, this.width, this.height);
+	}
+	this.contains = function (x, y) {
+		return ((x>this.x && x<this.right) && y>(this.y && y<this.bottom))
+	}
+	this.containsPoint = function (pt) {
+		return ((pt.x>this.x && pt.x<this.right) && (pt.y>this.y && pt.y<this.bottom))
+	}
+	this.containsRectangle = function (rect) {
+		return ((rect.x>this.x && rect.right<this.right) && (rect.y>this.y && rect.bottom<this.bottom))
+	}
+	this.equals = function (toCompare) {
+		return ((toCompare.x==this.x && toCompare.y==this.y) && (toCompare.width==this.width && toCompare.height==this.height))
+	}
+	this.inflate = function (dx, dy) {
+		this.x -= dx;
+		this.width += 2 * dx;
+		this.y -= dy;
+		this.height += 2 * dy;
+	}
+	this.inflatePoint = function (pt) {
+		this.x -= pt.x;
+		this.width += 2 * pt.x;
+		this.y -= pt.y;
+		this.height += 2 * pt.y;
+	}
+	this.intersection = function (toIntersect) {
+		x = Math.max(this.x, toIntersect.x);
+		y = Math.max(this.y, toIntersect.y);
+		right = Math.min(this.right, toIntersect.right)
+		bottom = Math.min(this.bottom, toIntersect.bottom)
+		if (right>x && bottom>y) {
+			return Rectangle(x, y, right-x, bottom-y)
+		} else {
+			return Rectangle (0, 0, 0, 0)
+		}
+	}
+	this.intersects = function (toIntersect) {
+		x = Math.max(this.x, toIntersect.x);
+		y = Math.max(this.y, toIntersect.y);
+		right = Math.min(this.right, toIntersect.right)
+		bottom = Math.min(this.bottom, toIntersect.bottom)
+		if (right>x && bottom>y) {
+			return true
+		} else {
+			return false
+		}
+	}
+	this.isEmpty = function () {
+		if (this.width<=0) {
+			return true
+		} else if (this.height<=0) {
+			return true
+		} else {
+			return false
+		}
+	}
+	this.offset = function (dx, dy) {
+		this.x += dx;
+		this.y += dy;
+	}
+	this.offsetPoint = function (pt) {
+		this.x += pt.x;
+		this.y += pt.y;
+	}
+	this.setEmpty = function () {
+		this.x = 0;
+		this.y = 0;
+		this.width = 0;
+		this.height = 0;
+	}
+	this.toString = function () {
+		return "(x="+this.x+", y="+this.y+", w="+this.width+", h="+this.height+")"
+	}
+	this.union = function (toUnion) {
+		x = Math.min(this.x, toUnion.x);
+		y = Math.min(this.y, toUnion.y);
+		right = Math.max(this.right, toUnion.right)
+		bottom = Math.max(this.bottom, toUnion.bottom)
+		return Rectangle(x, y, right-x, bottom-y)
+	}
+}
+
+var Stage = function () {}
+function getheight () {
+	return canvas.height
+}
+function getwidth () {
+	return canvas.width
+}
+Stage.addProperty('height',getheight)
+Stage.addProperty('width', getwidth)
+//TODO: Various Stage methods
+
+var Key = {}
+Key.BACKSPACE = 8
+Key.CAPSLOCK = 20
+Key.CONTROL = 17
+Key.DELETEKEY = 46
+Key.DOWN = 40
+Key.END = 35
+Key.ENTER = 13
+Key.ESCAPE = 27
+Key.HOME = 36
+Key.INSERT = 45
+Key.LEFT = 37
+Key.PGDN = 34
+Key.PGUP = 33
+Key.RIGHT = 39
+Key.SHIFT = 16
+Key.SPACE = 32
+Key.TAB = 9
+Key.UP = 38
+
+//TODO: ContextMenu
+
+
+
 	
 /*--------------------------------------- */
