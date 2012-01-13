@@ -234,6 +234,7 @@ if SYSTEM=="osx":
 			m.send_to_back.enabled = 1
 			m.import_to_stage.enabled = 1
 			m.import_to_library.enabled = 1
+			m.convert_to_symbol.enabled = 1
 			m.preferences_cmd.enabled = 1
         
         #def create_sc(self):
@@ -999,6 +1000,8 @@ class Image(object):
 		pass
 	def onKeyUp(self, self1, key):
 		pass
+	def print_sc(self):
+		return ".png "+self.name+" \""+self.path+"\"\n"
 	
 class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
@@ -1207,6 +1210,15 @@ class Shape (object):
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
+	def print_sc(self):
+		retval = ""
+		retval+=".outline "+self.name+"outline:\n"
+		retval+=" ".join([" ".join([str(x) for x in a]) for a in self.shapedata])+"\n.end\n"
+		if self.filled:
+			retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.rgb+" color="+self.linecolor.rgb+"\n"
+		else:
+			retval+=".filled "+self.name+" outline="+self.name+"outline fill=#00000000 color="+self.linecolor.rgb+"\n"
+		return retval
 	def print_html(self):
 		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
 		retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
@@ -1224,9 +1236,10 @@ class framewrapper (object):
 				self.scaley = obj.scaley = scaley
 				self.level = False # don't try to descend into a framewrapper
 				self.type = obj.__class__.__name__
-				self.filled = obj.filled
-				self.linecolor = obj.linecolor
-				self.fillcolor = obj.fillcolor
+				if obj.__class__.__name__=="Shape":
+					self.filled = obj.filled
+					self.linecolor = obj.linecolor
+					self.fillcolor = obj.fillcolor
 				self.name = obj.name
 				self.parent = parent
 			def draw(self,cr,transform):
@@ -1239,9 +1252,10 @@ class framewrapper (object):
 				self.obj.rot = self.rot
 				self.obj.scalex = self.scalex
 				self.obj.scaley = self.scaley
-				self.obj.filled = self.filled
-				self.obj.linecolor = self.linecolor
-				self.obj.fillcolor = self.fillcolor
+				if self.type=="Shape":
+					self.obj.filled = self.filled
+					self.obj.linecolor = self.linecolor
+					self.obj.fillcolor = self.fillcolor
 			def _onMouseDown(self, x, y):
 				self.obj.onMouseDown(self,x, y)
 			def _onMouseUp(self, x, y):
@@ -1440,6 +1454,12 @@ class Layer:
 			self.frames[self.currentframe].add(obj, obj.x, obj.y, obj.rotation,0,0)
 			self.objs.append(obj)
 		[parse_obj(obj) for obj in args]
+	def delete(self,*args):
+		for i in args:
+			print "#>>",i
+			for j in self.frames[self.currentframe].objs:
+				if j == i:
+					del self.currentFrame()[self.currentFrame().index(j)]
 	def add_frame(self,populate):
 		if self.activeframe>len(self.frames):
 			lastframe = len(self.frames)
@@ -1535,7 +1555,7 @@ class Layer:
 		if defs:
 			for i in self.objs:
 				if i.type=="Group":
-					retval+=".sprite "+i.name+"\n"+i.print_sc
+					retval+=".sprite "+i.name+"\n"+i.print_sc()+".end\n"
 				elif i.type=="Shape":
 					retval+=".outline "+i.name+"outline:\n"
 					retval+=" ".join([" ".join([str(x) for x in a]) for a in i.shapedata])+"\n.end\n"
@@ -1619,6 +1639,7 @@ class Group (object):
 		self.rotation = 0
 		self.xscale = 1
 		self.yscale = 1
+		self.type = "Group"
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
@@ -1736,16 +1757,22 @@ class Group (object):
 		return frame
 	def print_sc(self):
 		retval = ""
-		for i in self.layers:
-			retval+=i.print_sc(True, False)
+		#for i in self.layers:
+		#	retval+=i.print_sc(True, False)
+		if not self.name=="_root":
+			retval+=".sprite "+self.name+"\n"
 		for i in xrange(self.maxframe()):
 			for j in self.layers:
 				if j.frames[i]:
 					retval+=".frame "+str(i+1)+"\n"
 					retval+=j.frames[i].print_sc()
+		if not self.name=="_root":
+			retval+=".end\n"
 		return retval
 	def print_html(self):
 		retval = ""
+		if not self.name=="_root":
+			retval = retval + "var "+self.name+" = new MovieClip();\n"
 		for i in self.layers:
 			pass
 			#retval+=i.print_html(True,False)
@@ -1984,6 +2011,7 @@ class PreferencesWindow:
 	def __init__(self):
 		if SYSTEM=="osx":
 			win = ModalDialog(closable=True,width=500,height=500)
+			self.win.title = "Preferences"
 			frame = Frame()
 			win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
 			label = Label("Path to Flash Debugger: ")
@@ -1996,6 +2024,7 @@ class SizeWindow:
 			self.width = WIDTH
 			self.height = HEIGHT
 			self.win = ModalDialog(closable=True,width=160,height=70)
+			self.win.title = "Dimensions"
 			frame = Frame()
 			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
 			wlabel = Label("Width: ")
@@ -2027,6 +2056,7 @@ class PublishSettingsWindow:
 	def __init__(self):
 		if SYSTEM=="osx":
 			self.win = ModalDialog(closable=True,width=400,height=300)
+			self.win.title = "Publish Settings"
 			frame = Frame()
 			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
 			plabel = Label("Settings-publish")
@@ -2067,6 +2097,42 @@ class PublishSettingsWindow:
 		global EXPORT_OPTIONS
 		EXPORT_OPTIONS = {"swf":self.c1.value, "html5":self.c2.value, "basehtml":self.c3.value,
 							"fallback":self.c4.value,"pack":self.impack.value}
+		self.win.ok()
+
+class ConvertToSymbolWindow:
+	def __init__(self,root):
+		self.root = root
+		if SYSTEM=="osx":
+			self.win = ModalDialog(closable=True,width=400,height=150)
+			self.win.title = "Convert to symbol"
+			frame = Frame()
+			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
+			nlabel = Label("Name: ")
+			self.ntry = TextEntry("Symbol 1")	#TODO: dynamically generate this
+			self.ntry.set_action(self.confirm)
+			tlabel = Label("Type: ")
+			tgroup = RadioGroup("Movie Clip", "Button", "Group")
+			b1 = DefaultButton()
+			b1.action = self.confirm
+			b2 = CancelButton()
+			frame.layout_self(	[nlabel,5,None,5,None,"nw",""],
+								[self.ntry, nlabel._int()+5,-5,5,None,'new','h'],
+								[tlabel,5,None,self.ntry._int(),None,'nw',''],
+								[tgroup[0],32,None,tlabel._int(),None,'nw',''],
+								[tgroup[1],32,None,tgroup[0]._int(),None,'nw',''],
+								[tgroup[2],32,None,tgroup[1]._int(),None,'nw',''],
+								[Widget(b2),5,None,None,-5,'nw',''],
+								[Widget(b1),None,-5,None,-5,'nw',''])
+			self.win.present()
+	def settype(self,tgroup):
+		self.type = tgroup.value
+	def confirm(self):
+		symbol = Group()
+		symbol.add(self.root.descendItem().activelayer.currentselect.obj)
+		symbol.name = self.ntry.text
+		self.root.descendItem().activelayer.delete(self.root.descendItem().activelayer.currentselect)
+		print self.root.descendItem().activelayer.currentFrame()
+		self.root.descendItem().activelayer.add(symbol)
 		self.win.ok()
 
 class FramesCanvas(Canvas):

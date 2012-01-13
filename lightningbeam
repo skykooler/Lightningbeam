@@ -3,6 +3,8 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
+import os
+
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
 
@@ -51,6 +53,8 @@ def onKeyDownFrame(self, key):
 		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
+	elif key=="F8":
+		convert_to_symbol()
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 def onMouseDownGroup(self, x, y):
 	self.activelayer.frames[self.activelayer.currentframe].actions = MainWindow.scriptwindow.text
@@ -130,7 +134,8 @@ def onKeyDownGroup(self, key):
 		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
-		print "Added keyframe."
+	elif key=="F8":
+		convert_to_symbol()
 def onKeyDownObj(self, key):
 	if key in ("delete", "backspace"):
 		del self.parent[self.parent.index(self)] # Need to clean up deletion
@@ -141,10 +146,14 @@ def onKeyDownObj(self, key):
 		misc_funcs.update_tooloptions()
 	elif key=="F6":
 		add_keyframe()
+	elif key=="F8":
+		convert_to_symbol()
 	
 def create_sc(root):
+	#retval = ".flash bbox="+str(svlgui.WIDTH)+"x"+str(svlgui.HEIGHT)+" background=#ffffff \
+#fps="+str(svlgui.FRAMERATE)+"\n"+root.print_sc()+".end"
 	retval = ".flash bbox="+str(svlgui.WIDTH)+"x"+str(svlgui.HEIGHT)+" background=#ffffff \
-fps="+str(svlgui.FRAMERATE)+"\n"+root.print_sc()+".end"
+fps="+str(svlgui.FRAMERATE)+"\n"+"".join([i.print_sc() for i in svlgui.Library])+root.print_sc()+".end"
 	return retval
 def run_file(self=None):
 	global root
@@ -152,7 +161,8 @@ def run_file(self=None):
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	open("test.sc", "w").write(create_sc(root))
 	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" test.sc -o test.swf")
-	logloc = "/Users/skyler/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
+	#TODO: Make this cross-platform compatible
+	logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
 	try:
 		logfile.close()
 	except:
@@ -205,7 +215,7 @@ def run_html(self=None):
 	global root
 	print "RUNNING"
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	open("SDFGHJK.html", "w").write(create_html5(root))
+	open("test.html", "w").write(create_html5(root))
 	
 	
 
@@ -370,6 +380,14 @@ def bring_to_front(widget=None):
 		rac.append(a)
 	MainWindow.stage.draw()
 	
+def convert_to_symbol(widget=None):
+	if not root.descendItem().activelayer.currentselect:
+		svlgui.alert("No object selected!")
+		return
+	else:
+		svlgui.ConvertToSymbolWindow(root)
+		MainWindow.stage.draw()
+		
 def about(widget=None):
 	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
 	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
@@ -395,7 +413,7 @@ svlgui.menufuncs([["File",
 						"Delete",
 						("Preferences",preferences,"")],
 					["Timeline",
-						("Add Keyframe",add_keyframe,"F5"),
+						("Add Keyframe",add_keyframe,"F6"),
 						"Add Blank Keyframe",
 						("Add Layer",add_layer,"<Shift><Control>N"),
 						("Delete Layer",delete_layer,"<Shift><Control>Delete")],
@@ -416,7 +434,7 @@ svlgui.menufuncs([["File",
 						("Execute as HTML5",run_html,"/\\")],
 					["Modify",
 						"Document",
-						"Convert to Symbol",
+						("Convert to Symbol",convert_to_symbol,"F8"),
 						("Send to Back",send_to_back,"<Shift><Control>Down"),
 						("Send Backwards",send_backward,"<Control>Down"),
 						("Bring Forwards",bring_forward,"<Control>Up"),
