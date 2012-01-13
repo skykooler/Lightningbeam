@@ -189,7 +189,7 @@ class MainWindowOSX:
 		self.stage = svlgui.Canvas(800,600)
 		misc_funcs.stage = self.stage
 		self.layerbox = svlgui.Canvas(128,320)
-		self.timelinebox = svlgui.Canvas(2000,320)
+		self.timelinebox = svlgui.FramesCanvas(2000,320)
 		self.frame = svlgui.Frame()
 		self.toolbox = svlgui.Grid([svlgui.Button("------"),svlgui.Button("------")],
 									[svlgui.Button("------"),svlgui.Button("------")],

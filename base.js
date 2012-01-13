@@ -16,6 +16,11 @@ function log(str){
    setTimeout("appendError('"+str+"')", 1)
 }
 
+function trace(str) {
+	//Placeholder
+	log(str);
+}
+
 function _timerBase () {
 	/* This provides the 'tick' by which all animations are run.
 	Playing animations should have their ._draw() method added here;

@@ -39,6 +39,7 @@ def onLoadFrames(self):
 def onClickFrame(self, x, y):
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	root.descendItem().activeframe = int(x/16)
+	print ">>>>>> ", x, y
 	MainWindow.stage.draw()
 	MainWindow.scriptwindow.text = str(root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions)
 def onKeyDownFrame(self, key):
@@ -264,12 +265,14 @@ b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1,Tru
 layers.add(b)
 MainWindow.layerbox.add(layers,0,0)
 
-frames = svlgui.Group(onload=onLoadFrames,skipl=True)
-b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1,True)
-frames.add(b)
-frames.onMouseDown = onClickFrame
-frames.onKeyDown = onKeyDownFrame
-MainWindow.timelinebox.add(frames,0,0)
+#frames = svlgui.Group(onload=onLoadFrames,skipl=True)
+#b = svlgui.Image("media/keyframe_active.png",0,0,True,MainWindow.timelinebox,16,1,True)
+#frames.add(b)
+#frames.onMouseDown = onClickFrame
+#frames.onKeyDown = onKeyDownFrame
+#MainWindow.timelinebox.add(frames,0,0)
+MainWindow.timelinebox.root = root
+MainWindow.timelinebox.onMouseDown = onClickFrame
 
 
 def new_file(widget=None):
@@ -288,6 +291,7 @@ def open_file(widget=None):
 	root = pickle.load(thefile)
 	MainWindow.stage.add(root, 0, 0)
 	MainWindow.stage.draw()
+	MainWindow.timelinebox.root = root
 	MainWindow.timelinebox.draw()
 def open_sc_file(widget=None):
 	pass
@@ -315,9 +319,8 @@ def quit(widget):
 	
 	
 def add_keyframe(widget=None):
+	print "af> ", root.descendItem().activeframe
 	root.descendItem().add_frame(True)
-	b = svlgui.Image("media/keyframe_active.png",root.descendItem().activeframe*16,0,True,MainWindow.timelinebox,16,1,True)
-	frames.add(b)
 	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)

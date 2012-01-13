@@ -1957,6 +1957,71 @@ class PreferencesWindow:
 			frame.layout_self([label,0,None,0,None,"nw",""])
 			win.present()
 
+class FramesCanvas(Canvas):
+	def __init__(self,w,h):
+		Canvas.__init__(self,w,h)
+		self.pointer = 1
+		if SYSTEM == 'osx':
+			self.canvas.draw = self._draw
+			self.canvas.mouse_down = self.mouse_down
+			self.ackfr = GUI.Image(file = "media/keyframe_active.png")
+			self.inackfr = GUI.Image(file = "media/keyframe_inactive.png")
+			self.acfr = GUI.Image(file = "media/frame_active_tween.png")
+			self.inacfr = GUI.Image(file = "media/frame_inactive_tween.png")
+	def _draw(self,cr,update_rect):
+		for k in xrange(len(self.root.descendItem().layers)):
+			FRAMES = self.root.descendItem().layers[k].frames
+			for i in xrange(len(FRAMES)):
+				cr.gsave()
+				#cr.translate(i*16,k*32)
+				if FRAMES[i]:
+					if self.root.descendItem().currentframe == i:
+						src_rect = self.ackfr.bounds
+						src_rect = [0,0,(16)*(self.pointer%17),32]
+						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
+						print dst_rect
+						self.ackfr.draw(cr, src_rect, dst_rect)
+					else:
+						src_rect = self.inackfr.bounds
+						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
+						self.inackfr.draw(cr, src_rect, dst_rect)
+				else:
+					if self.root.descendItem() == i:
+						src_rect = self.acfr.bounds
+						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
+						self.acfr.draw(cr, src_rect, dst_rect)
+					else:
+						src_rect = self.inacfr.bounds
+						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
+						self.inacfr.draw(cr, src_rect, dst_rect)
+				cr.grestore()
+			print max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)
+			for i in xrange(max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)):
+				cr.newpath()
+				cr.rect([i*16,k*32,i*16+16,k*32+32])
+				if self.root.descendItem().activeframe==i:
+					cr.fillcolor = Color([0.2,0.2,0.2]).pygui
+					cr.fill()
+				elif i%5==0:
+					cr.fillcolor = Color([0.5,0.5,0.5]).pygui
+					cr.fill()
+					print i
+				else:
+					cr.fillcolor = Color([1.0,1.0,1.0]).pygui
+					cr.fill()
+					cr.newpath()
+					cr.fillcolor = Color([0.1,0.1,0.1]).pygui
+					cr.rect([i*16+15,k*32,i*16+16,k*32+32])
+					cr.fill()
+					
+	def mouse_down(self, event):
+		x, y = event.position
+		self.onMouseDown(self,x, y)
+		self.canvas.invalidate_rect([0,0,self.canvas.extent[0],self.canvas.extent[1]])
+	def onMouseDown(self,self1,x, y):
+		print "Nananana"
+	
+	
 def main():
 	#Executes the main loop for whatever GUI is running
 	if SYSTEM=="gtk":
