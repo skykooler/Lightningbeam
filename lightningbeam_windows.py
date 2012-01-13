@@ -241,16 +241,23 @@ class MainWindowOSX:
 		self.docbox = svlgui.Frame()
 		self.sizelabel = svlgui.Label("Size: ")
 		self.sizebutton = svlgui.Button(" 500 x 500 pixels ")
+		def setSize(self):
+			w1 = svlgui.SizeWindow()
+			self.set_text(" "+str(svlgui.WIDTH)+" x "+str(svlgui.HEIGHT)+" pixels ")
+		self.sizebutton.onPress = setSize
 		self.publishlabel = svlgui.Label("Publish: ")
 		self.publishbutton = svlgui.Button(" Settings... ")
+		def publishSettings(self):
+			w1 = svlgui.PublishSettingsWindow()
+		self.publishbutton.onPress = publishSettings
 		self.frameratelabel = svlgui.Label("Framerate: ")
 		self.frameratentry = svlgui.TextEntry("50")
 		self.frameratentry.set_action(self.set_framerate)
-		self.docbox.layout_self( [self.sizelabel,0,None,0,None,"nw", ""],
-								[self.sizebutton,self.sizelabel._int(),None,0,None,"nw", ""],
-								[self.publishlabel,0,None,self.sizebutton._int(),None,"nw", ""],
+		self.docbox.layout_self( [self.sizelabel,10,None,5,None,"nw", ""],
+								[self.sizebutton,self.sizelabel._int(),None,5,None,"nw", ""],
+								[self.publishlabel,10,None,self.sizebutton._int(),None,"nw", ""],
 								[self.publishbutton,self.publishlabel._int(),None,self.sizebutton._int(),None,"nw", ""],
-								[self.frameratelabel,0,None,self.publishbutton._int(),None,"nw", ""],
+								[self.frameratelabel,10,None,self.publishbutton._int(),None,"nw", ""],
 								[self.frameratentry,self.frameratelabel._int(),None,self.publishbutton._int(),None,"nw", ""])
 		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.paintbox,0,245,0,0,"nws","v"],
@@ -264,9 +271,13 @@ class MainWindowOSX:
 								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
 								#[self.stage,self.paintbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
+		if svlgui.SYSTEM=="osx":
+			self.stage._int().become_target();
 	
 	def set_framerate(self):
 		svlgui.FRAMERATE=int(self.frameratentry.text)
+		if svlgui.SYSTEM=="osx":
+			self.stage._int().become_target();
 
 # use mainwindowosx, this is just to comment things out
 class MainWindowHTML:

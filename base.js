@@ -1,6 +1,6 @@
 //--------------------------  BEGIN JAVASCRIPT  --------------------------------\\
 
-var fps = 50
+//var fps = 50
 //var fps = 10;
 var cr;
 var canvas;

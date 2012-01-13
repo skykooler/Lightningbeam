@@ -34,11 +34,17 @@ SITER=0
 #Currentframe - the frame selected on the timeline. Not necessarily the frame being shown.
 CURRENTFRAME=0
 
+#Framerate - speed at which animation is played back
 FRAMERATE=50
+
+#Width and height are the width and height of the document
+WIDTH, HEIGHT = 500, 500
 
 #Object which has the keyboard focus.
 FOCUS = None
 
+#Options for export
+EXPORT_OPTS = {"swf":False,"html5":False,"basehtml":False,"fallback":False,"pack":False}
 
 
 #Library. Contatins all objects whether displayed or not.
@@ -149,8 +155,9 @@ if sys.platform=="linux2":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
+	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
 	#app = GUI.application()
@@ -170,8 +177,9 @@ elif sys.platform=="win32":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
+	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
 	SYSTEM="osx"
@@ -192,8 +200,9 @@ elif sys.platform=="darwin":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
+	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
 	#app = GUI.application()
@@ -344,9 +353,12 @@ class Window:
 			
 # Widget meta-class - to prevent code duplication
 # I don't seem to have any code in here. :(
+# Now used as generic wrapper class
 class Widget(object):
-	def __init__(self):
-		pass
+	def __init__(self,obj):
+		self.obj = obj
+	def _int(self):
+		return self.obj
 	
 class Menu(Widget):
 	def __init__(self, top, menuitems):
@@ -570,6 +582,9 @@ class Button(Widget):
 icate('ids["+str(self.tid)+"]._onPress(ids["+str(self.tid)+"])')"})
 	def _int(self):
 		return self.button
+	def set_text(self, text):
+		if SYSTEM=="osx":
+			self.button.title = text
 	def set_image(self, img):
 		if SYSTEM=="gtk":
 			image=gtk.Image()
@@ -1974,6 +1989,85 @@ class PreferencesWindow:
 			label = Label("Path to Flash Debugger: ")
 			frame.layout_self([label,0,None,0,None,"nw",""])
 			win.present()
+
+class SizeWindow:
+	def __init__(self):
+		if SYSTEM=="osx":
+			self.width = WIDTH
+			self.height = HEIGHT
+			self.win = ModalDialog(closable=True,width=160,height=70)
+			frame = Frame()
+			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
+			wlabel = Label("Width: ")
+			hlabel = Label("Height: ")
+			self.wentry = TextEntry(str(WIDTH))
+			self.hentry = TextEntry(str(HEIGHT))
+			b1 = DefaultButton()
+			b1.action = self.set_size
+			b2 = CancelButton()
+			b2.action = self.restore_size
+			frame.layout_self(	[wlabel,0,None,0,None,"nw",""],
+								[self.wentry,wlabel._int(),None,0,None,"nw",""],
+								[hlabel,0,None,self.wentry._int(),None,"nw",""],
+								[self.hentry,hlabel._int(),None,self.wentry._int(),None,"nw",""],
+								[Widget(b2),0,None,None,0,'nw',''],
+								[Widget(b1),None,0,None,0,'nw',''])
+			self.win.present()
+	def set_size(self):
+		global WIDTH, HEIGHT
+		WIDTH = int(self.wentry.text)
+		HEIGHT = int(self.hentry.text)
+		self.win.ok()
+	def restore_size(self):
+		global WIDTH, HEIGHT
+		WIDTH, HEIGHT = self.width, self.height
+		self.win.cancel()
+		
+class PublishSettingsWindow:
+	def __init__(self):
+		if SYSTEM=="osx":
+			self.win = ModalDialog(closable=True,width=400,height=300)
+			frame = Frame()
+			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
+			plabel = Label("Settings-publish")
+			elabel = Label("Export: ")
+			self.c1 = CheckBox("SWF")
+			self.c2 = CheckBox("HTML5")
+			self.c3 = CheckBox("Base HTML file")
+			self.c3.action = self.deactivate4
+			self.c4 = CheckBox("Setup fallback content")
+			self.c4.action = self.activate3
+			swlabel = Label("SWF:")
+			htlabel = Label("HTML5:")
+			self.impack = CheckBox("Pack Images (Not implemented yet!)")
+			self.impack.action = self.activate3
+			b1 = DefaultButton()
+			b1.action = self.confirm
+			b2 = CancelButton()
+			frame.layout_self(	[plabel,5,None,5,None,"nw",""],
+								[elabel,5,None,plabel._int(),None,"nw",""],
+								[Widget(self.c1),16,None,elabel._int(),None,"nw",""],
+								[Widget(self.c2),self.c1+16,None,elabel._int(),None,"nw",""],
+								[Widget(self.c3),self.c2+16,None,elabel._int(),None,"nw",""],
+								[Widget(self.c4),self.c2+32,None,self.c3,None,"nw",""],
+								[swlabel, 5, None, self.c4, None, "nw", ""],
+								[htlabel, 5, None, swlabel._int(), None, "nw", ""],
+								[Widget(self.impack), 16, None, htlabel._int(), None, "nw", ""],
+								[Widgest(b2),5,None,None,-5,'nw',''],
+								[Widget(b1),None,-5,None,-5,'nw',''])
+			self.win.present()
+	def activate2(self):
+		self.c2.set_value(self.c2.value or self.impack.value)
+	def activate3(self):
+		self.c3.set_value(self.c3.value or self.c4.value)
+	def deactivate4(self):
+		if self.c3.value==False:
+			self.c4.set_value(False)
+	def confirm(self):
+		global EXPORT_OPTIONS
+		EXPORT_OPTIONS = {"swf":self.c1.value, "html5":self.c2.value, "basehtml":self.c3.value,
+							"fallback":self.c4.value,"pack":self.impack.value}
+		self.win.ok()
 
 class FramesCanvas(Canvas):
 	def __init__(self,w,h):

@@ -143,7 +143,8 @@ def onKeyDownObj(self, key):
 		add_keyframe()
 	
 def create_sc(root):
-	retval = ".flash bbox=500x500 background=#ffffff fps="+str(svlgui.FRAMERATE)+"\n"+root.print_sc()+".end"
+	retval = ".flash bbox="+str(svlgui.WIDTH)+"x"+str(svlgui.HEIGHT)+" background=#ffffff \
+fps="+str(svlgui.FRAMERATE)+"\n"+root.print_sc()+".end"
 	return retval
 def run_file(self=None):
 	global root
@@ -187,13 +188,15 @@ def create_html5(root):
 	retval = "<head>\n\
 <style type=\"text/css\">\n\
 canvas { \n\
-border: 2px solid #000; position:absolute; top:0;left:0;\n\
+border: none; position:absolute; top:0;left:0;\n\
 visibility: hidden; }\n\
 </style>\n\
 </head>\n\
 <body>\n\
-<canvas id=\"canvas1\" width=500 height=500 ></canvas>\n\
-<canvas id=\"canvas2\" width=500 height=500></canvas>\n\
+<canvas id=\"canvas1\" width="+str(svlgui.WIDTH)+" height="+str(svlgui.HEIGHT)+" ></canvas>\n\
+<canvas id=\"canvas2\" width="+str(svlgui.WIDTH)+" height="+str(svlgui.HEIGHT)+"></canvas>\n\
+<script>\n\
+//Setup\nvar fps = "+str(svlgui.FRAMERATE)+";\n</script>\n\
 <script src=\"base.js\">\n\
 </script>\n\
 <script>"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"</script>\n</body>\n</html>"
