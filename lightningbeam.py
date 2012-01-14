@@ -5,6 +5,9 @@
 
 import os
 
+#Uncomment to build on OS X
+import objc, AppKit
+
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
 
