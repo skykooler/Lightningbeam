@@ -53,7 +53,7 @@ elif sys.platform == 'win32':
             Mydata_files.append(f2)
     extra_options = dict(
         setup_requires=['py2exe'],
-        windows=[mainscript],
+        windows=[{"script":mainscript,"icon_resources":[(1,"media/icon.ico")]}],
 		other_resources=[("media",["media"]),("gpl.txt",["gpl.txt"]),("swfc",["swfc"]),("GUI",["GUI"])],
         data_files=Mydata_files,
         options=dict(py2exe=dict(packages=["win32ui","win32clipboard","win32api","win32gui","win32process"],
