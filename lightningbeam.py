@@ -6,7 +6,7 @@
 import os
 
 #Uncomment to build on OS X
-import objc, AppKit
+import objc, AppKit, cPickle
 
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
@@ -162,8 +162,8 @@ def run_file(self=None):
 	global root
 	print "RUNNING"
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	open("test.sc", "w").write(create_sc(root))
-	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" test.sc -o test.swf")
+	open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
+	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
 	#TODO: Make this cross-platform compatible
 	logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
 	try:

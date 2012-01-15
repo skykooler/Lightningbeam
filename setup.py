@@ -25,13 +25,13 @@ if sys.platform == 'darwin':
         app=[mainscript],
         # Cross-platform applications generally expect sys.argv to
         # be used for opening files.
-        options=dict(py2app=dict(argv_emulation=True,
+        options=dict(py2app=dict(argv_emulation=False,
         plist=dict(
             #CFBundleDocumentTypes= ,
             CFBundleIdentifyer='org.lightningbeam.lightningbeam',
             #LSPrefersPPC=True,
         ),
-        resources=["media","gpl.txt"],
+        resources=["media","gpl.txt","swfc"],
         iconfile="Lightningbeam.icns"
         )),
     )
@@ -39,6 +39,7 @@ elif sys.platform == 'win32':
     extra_options = dict(
         setup_requires=['py2exe'],
         app=[mainscript],
+        options=dict(py2app=dict(resources=["media","gpl.txt","swfc"],)),
     )
 else:
      extra_options = dict(
