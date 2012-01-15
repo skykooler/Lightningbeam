@@ -6,7 +6,10 @@
 import os
 
 #Uncomment to build on OS X
-import objc, AppKit, cPickle
+#import objc, AppKit, cPickle
+
+#Uncomment to build on Windows
+import ctypes, ctypes.wintypes, win32print
 
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
