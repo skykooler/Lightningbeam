@@ -36,10 +36,28 @@ if sys.platform == 'darwin':
         )),
     )
 elif sys.platform == 'win32':
+    import GUI.py2exe
+    import py2exe
+    import os
+    import win32ui
+    Mydata_files=["gpl.txt",]#"GUI",]
+    for files in os.listdir('media'):
+        f1 = 'media/' + files
+        if os.path.isfile(f1): # skip directories
+            f2 = 'media', [f1]
+            Mydata_files.append(f2)
+    for files in os.listdir('swfc'):
+        f1 = 'swfc/' + files
+        if os.path.isfile(f1): # skip directories
+            f2 = 'swfc', [f1]
+            Mydata_files.append(f2)
     extra_options = dict(
         setup_requires=['py2exe'],
-        app=[mainscript],
-        options=dict(py2app=dict(resources=["media","gpl.txt","swfc","base.js"],)),
+        windows=[{"script":mainscript,"icon_resources":[(1,"media/icon.ico")]}],
+		other_resources=[("media",["media"]),("gpl.txt",["gpl.txt"]),("swfc",["swfc"]),("GUI",["GUI"])],
+        data_files=Mydata_files,
+        options=dict(py2exe=dict(packages=["win32ui","win32clipboard","win32api","win32gui","win32process"],
+		             skip_archive=True,)),
     )
 else:
      extra_options = dict(
