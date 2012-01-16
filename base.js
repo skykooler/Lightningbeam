@@ -27,10 +27,10 @@ function _timerBase () {
 	to stop them, call remove() on it. */
 	this.funcs = {}
 	this.add = function (item) {
-		this.funcs[item]=item;
+		this.funcs[item._id]=item;
 	}
 	this.remove = function (item) {
-		delete this.funcs[item];
+		delete this.funcs[item._id];
 	}
 	this.iterate = function() {
 		canvas = Buffers[DrawingBuffer];
@@ -42,6 +42,12 @@ function _timerBase () {
 
 			DrawingBuffer=1-DrawingBuffer;
 			//canvas = Buffers[DrawingBuffer];
+			for (i in this.funcs){
+				if (!this.funcs[i]._loaded) {
+					this.funcs[i].onLoad();
+					this.funcs[i]._loaded = true;
+				}
+			}
 			_root._draw(_rootFrame)
 			if (!(_lastmouse[0]==_root._xmouse&&_lastmouse[1]==_root._ymouse)) {
 				// Mouse moved
@@ -59,7 +65,24 @@ function _timerBase () {
 	setInterval('Timer.iterate()', 1000/fps)
 }
 
+function _eventBase () {
+	this.funcs = {}
+	this.add = function (item) {
+		this.funcs[item._id]=item;
+	}
+	this.remove = function (item) {
+		delete this.funcs[item._id];
+	}
+	this.doEvent = function (event) {
+		for (i in this.funcs) {
+			this.funcs[i][event]();
+		}
+	}
+}
+
 var Timer = new _timerBase()
+
+var Event = new _eventBase()
 
 function ave(x, y, fac) {
 	//Weighted average. 
@@ -124,7 +147,10 @@ function MovieClip() {
 	this._yscale = 1;
 	this._rotation = 0;
 	this._visible = true;
+	this._id = "MC"+Math.round(Math.random()*1000000000000)
+	this._loaded = false
 	Timer.add(this)
+	Event.add(this)
 	
 	
 	
@@ -661,6 +687,30 @@ Key.SHIFT = 16
 Key.SPACE = 32
 Key.TAB = 9
 Key.UP = 38
+Key.mask = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+Key.press = function (key) {
+	this.keyCode = key.keyCode;
+	this.ascii = key.charCode;
+	this.mask[key.keyCode] = 1;
+}
+Key.release = function (key) {
+	this.mask[key.keyCode] = 0;
+}
+Key.isDown = function (code) {
+	return (this.mask[code]==1)
+}
+Key.getCode = function() {
+	return this.keyCode;
+}
+Key.getAscii = function() {
+	return this.ascii;
+}
+Key.addListener = function(listener) {
+	Event.add(listener)
+}
+Key.removeListener = function(listener) {
+	Event.remove(listener)
+}
 
 //TODO: ContextMenu
 

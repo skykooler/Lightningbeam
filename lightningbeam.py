@@ -3,7 +3,7 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os
+import os, shutil
 
 #Uncomment to build on OS X
 import objc, AppKit, cPickle
@@ -190,7 +190,9 @@ def run_file(self=None):
 	r.start()
 	if svlgui.PLATFORM=="osx":
 		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
-		svlgui.execute("open -a "+osx_flash_player_loc+" test.swf")
+		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		if not success:
+			svlgui.alert("Oops! Didn't work. I probably couldn't find your Flash debugger!")
 	elif svlgui.PLATFORM=='win32':
 		win_flash_player_loc = ""
 		svlgui.execute('start '+win_flash_player_loc+" test.swf")
@@ -218,7 +220,11 @@ def run_html(self=None):
 	global root
 	print "RUNNING"
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	open("test.html", "w").write(create_html5(root))
+	open(os.getenv('HOME')+"/test.html", "w").write(create_html5(root))
+	try:
+		shutil.copyfile("base.js",os.getenv('HOME')+"/base.js")
+	except IOError:
+		svlgui.alert("Couldn't copy base.js to "+os.getenv('HOME')+"/base.js!")
 	
 	
 
