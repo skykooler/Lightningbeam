@@ -31,7 +31,7 @@ if sys.platform == 'darwin':
             CFBundleIdentifyer='org.lightningbeam.lightningbeam',
             #LSPrefersPPC=True,
         ),
-        resources=["media","gpl.txt","swfc"],
+        resources=["media","gpl.txt","swfc","base.js"],
         iconfile="Lightningbeam.icns"
         )),
     )
@@ -39,7 +39,7 @@ elif sys.platform == 'win32':
     extra_options = dict(
         setup_requires=['py2exe'],
         app=[mainscript],
-        options=dict(py2app=dict(resources=["media","gpl.txt","swfc"],)),
+        options=dict(py2app=dict(resources=["media","gpl.txt","swfc","base.js"],)),
     )
 else:
      extra_options = dict(
