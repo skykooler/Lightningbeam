@@ -150,6 +150,7 @@ if sys.platform=="linux2":
 	###   TESTING - gtk should be Linux platform, at least for now  ####
 	#'''
 	import pickle
+	import tarfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
@@ -162,6 +163,7 @@ if sys.platform=="linux2":
 	from GUI.Geometry import offset_rect, rect_sized
 	#app = GUI.application()
 	SYSTEM="osx"
+	TEMPDIR = "/tmp"
 	'''
 	SYSTEM="html"
 	ids = {}
@@ -171,6 +173,7 @@ if sys.platform=="linux2":
 elif sys.platform=="win32":
 	PLATFORM="win32"
 	import pickle
+	import tarfile
 	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
@@ -183,11 +186,14 @@ elif sys.platform=="win32":
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
 	SYSTEM="osx"
+	TEMPDIR="C:\\Windows\\Temp"
 	sep = "\\"
 elif sys.platform=="linux-armv6l":
 	import android
+	import tarfile
 	droid = android.Android()
 	SYSTEM="android"
+	TEMPDIR="/tmp"		# TODO:FIXTHIS
 	tb = ""
 	sep = "/"
 	print str(sys.platform)
@@ -195,6 +201,7 @@ elif sys.platform=="darwin":
 	PLATFORM="osx"
 	import pickle
 	import misc_funcs
+	import tarfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
@@ -207,7 +214,11 @@ elif sys.platform=="darwin":
 	from GUI.Geometry import offset_rect, rect_sized
 	#app = GUI.application()
 	SYSTEM="osx"
+	TEMPDIR="/tmp"
 	sep = "/"
+	
+FILE = tarfile.open(name=TEMPDIR+"/Untitled",mode="w:gz")
+FILE.close()
 	
 __windowlist__=[]
 
@@ -874,6 +885,11 @@ class TextEntry(Widget):
 	text = property(get_text, set_text)
 		
 class Image(object):
+	def __getstate__(self):
+		dict = self.__dict__.copy()
+		print dict
+		dict['image'] = None
+		return dict
 	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1,skipl=False):
 		if not skipl:
 			global Library
@@ -1226,27 +1242,31 @@ class Shape (object):
 		return retval
 
 class framewrapper (object):
-			#Wraps object per-frame. Allows for changes in position, rotation, scale.
-			def __init__(self, obj, x, y, rot, scalex, scaley, parent=None):
-				self.obj = obj
-				self.x = obj.x = x
-				self.y = obj.y = y
-				self.rot = obj.rot = rot
-				self.scalex = obj.scalex = scalex
-				self.scaley = obj.scaley = scaley
-				self.level = False # don't try to descend into a framewrapper
-				self.type = obj.__class__.__name__
-				if obj.__class__.__name__=="Shape":
-					self.filled = obj.filled
-					self.linecolor = obj.linecolor
-					self.fillcolor = obj.fillcolor
-				self.name = obj.name
-				self.parent = parent
-			def draw(self,cr,transform):
+	#def __getstate__(self):
+	#	dict = self.__dict__.copy()
+	#	dict['parent'] = None
+	#	return dict
+	#Wraps object per-frame. Allows for changes in position, rotation, scale.
+	def __init__(self, obj, x, y, rot, scalex, scaley, parent=None):
+		self.obj = obj
+		self.x = obj.x = x
+		self.y = obj.y = y
+		self.rot = obj.rot = rot
+		self.scalex = obj.scalex = scalex
+		self.scaley = obj.scaley = scaley
+		self.level = False # don't try to descend into a framewrapper
+		self.type = obj.__class__.__name__
+		if obj.__class__.__name__=="Shape":
+			self.filled = obj.filled
+			self.linecolor = obj.linecolor
+			self.fillcolor = obj.fillcolor
+		self.name = obj.name
+		self.parent = parent
+	def draw(self,cr,transform):
 				pass
 				self.update()
 				self.obj.draw(cr,transform)
-			def update(self):
+	def update(self):
 				self.obj.x = self.x
 				self.obj.y = self.y
 				self.obj.rot = self.rot
@@ -1256,49 +1276,55 @@ class framewrapper (object):
 					self.obj.filled = self.filled
 					self.obj.linecolor = self.linecolor
 					self.obj.fillcolor = self.fillcolor
-			def _onMouseDown(self, x, y):
+	def _onMouseDown(self, x, y):
 				self.obj.onMouseDown(self,x, y)
-			def _onMouseUp(self, x, y):
+	def _onMouseUp(self, x, y):
 				self.obj.onMouseUp(self,x, y)
-			def _onMouseMove(self, x, y):
+	def _onMouseMove(self, x, y):
 				self.obj.onMouseMove(self, x, y)
-			def _onMouseDrag(self, x, y):
+	def _onMouseDrag(self, x, y):
 				self.obj.onMouseDrag(self, x, y)
-			def _onKeyDown(self, key):
+	def _onKeyDown(self, key):
 				self.obj.onKeyDown(self, key)
-			def _onKeyUp(self, key):
+	def _onKeyUp(self, key):
 				self.obj.onKeyUp(self, key)
-			def getminx(self):
+	def getminx(self):
 				return self.obj.minx+self.x
-			def getminy(self):
+	def getminy(self):
 				return self.obj.miny+self.y
-			def getmaxx(self):
+	def getmaxx(self):
 				return self.obj.maxx
-			def getmaxy(self):
+	def getmaxy(self):
 				return self.obj.maxy
-			minx = property(getminx)
-			miny = property(getminy)
-			maxx = property(getmaxx)
-			maxy = property(getmaxy)
-			def hitTest(self, x, y):
+	minx = property(getminx)
+	miny = property(getminy)
+	maxx = property(getmaxx)
+	maxy = property(getmaxy)
+	def hitTest(self, x, y):
 				x,y = self.transformcoords(x,y)
 				return self.obj.hitTest(x, y)
-			def transformcoords(self,x,y):
+	def transformcoords(self,x,y):
 				x = x-self.x
 				y = y-self.y
 				return x,y
 		
 
 class frame:
-		def __init__(self,parent,duplicate=None):
-			self.objs = []
-			self.currentselect=None
-			self.type="Group"
-			self.parent = parent
-			self.actions = ''
-		def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
+	def __reduce__(self):
+		badvars = (self.parent,self.group)
+		self.parent = None
+		ret = pickle.dumps(self)
+		self.parent, self.group = badvars
+		return ret
+	def __init__(self,parent,duplicate=None):
+		self.objs = []
+		self.currentselect=None
+		self.type="Group"
+		self.parent = parent
+		self.actions = ''
+	def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
 			self.objs.append(framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
-		def play(self, group, cr, currentselect,transform,rect):
+	def play(self, group, cr, currentselect,transform,rect):
 			if SYSTEM=="gtk":
 				cr.save()
 				cr.translate(group.x,group.y)
@@ -1355,17 +1381,17 @@ class frame:
 					tb+="cr.stroke()\n"
 				tb+="cr.restore()\n"
 				jscommunicate(tb)
-		def localtransform(self,x,y):
+	def localtransform(self,x,y):
 			radrot = self.group.rotation*math.pi/180.0
 			nx = x*math.cos(-radrot)-y*math.sin(-radrot)-self.group.x
 			ny = x*math.sin(-radrot)+y*math.cos(-radrot)-self.group.y
 			return nx, ny
-		def revlocaltransform(self,x,y):
+	def revlocaltransform(self,x,y):
 			radrot = self.group.rotation*math.pi/180.0
 			nx = x*math.cos(radrot)-y*math.sin(radrot)-self.group.x
 			ny = x*math.sin(radrot)+y*math.cos(radrot)-self.group.y
 			return nx, ny
-		def print_sc(self):
+	def print_sc(self):
 			retval = ""
 			if self==self.parent.frames[0]:
 				for i in self.objs:
@@ -2190,10 +2216,10 @@ class FramesCanvas(Canvas):
 				cr.newpath()
 				cr.rect([i*16,k*32,i*16+16,k*32+32])
 				if self.root.descendItem().activeframe==i:
-					cr.fillcolor = Color([0.2,0.2,0.2]).pygui
+					cr.fillcolor = Color([0.5,0.5,0.5]).pygui
 					cr.fill()
 				elif i%5==0:
-					cr.fillcolor = Color([0.5,0.5,0.5]).pygui
+					cr.fillcolor = Color([0.8,0.8,0.8]).pygui
 					cr.fill()
 					print i
 				else:
@@ -2226,6 +2252,7 @@ def main():
 
 def quit():
 	#Self-descriptive
+	FILE.close()
 	if SYSTEM=="gtk":
 		gtk.main_quit()
 	elif SYSTEM=="android":

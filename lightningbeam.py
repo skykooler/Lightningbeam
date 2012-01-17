@@ -3,7 +3,7 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os, shutil
+import os, shutil, tarfile, tempfile, StringIO
 
 #Uncomment to build on OS X
 #import objc, AppKit, cPickle
@@ -312,18 +312,37 @@ def new_file(widget=None):
 def open_file(widget=None):
 	global root
 	MainWindow.stage.delete(root)
-	thefile = svlgui.file_dialog("open").open("rb")
-	root = pickle.load(thefile)
+	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
+	basefile = thetarfile.extractfile("basefile")
+	root, svlgui.Library = pickle.load(basefile)
 	MainWindow.stage.add(root, 0, 0)
 	MainWindow.stage.draw()
 	MainWindow.timelinebox.root = root
 	MainWindow.timelinebox.draw()
+	thetarfile.close()
 def open_sc_file(widget=None):
 	pass
 def save_file(widget=None):
-	thefile = svlgui.file_dialog("save").open("w")
-	pickle.dump(root, thefile)
-	print thefile
+	data = pickle.dumps((root,svlgui.Library))
+	tarinfo = tarfile.TarInfo('basefile')
+	tarinfo.size = len(data)
+	if svlgui.FILE.name.startswith(svlgui.TEMPDIR):
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save").open('wb'),mode="w:gz")
+		print thetarfile.name
+	else:
+		thetarfile = tarfile.open(svlgui.FILE.name,mode="w:gz")
+	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
+	#Save the path so we can come back here
+	lastpath = os.path.abspath(".")
+	for i in svlgui.Library:
+		if i.type=="Image":
+			os.chdir(os.sep.join(i.path.split(os.sep)[:-1]))
+			i.path = i.path.split(os.sep)[-1]
+			thetarfile.add(i.path.split(os.sep)[-1])
+			os.chdir(lastpath)
+	thetarfile.close()
+	svlgui.FILE = thetarfile
+	#thetarfile.close()
 def save_file_as(widget=None):
 	pass
 def import_to_stage(widget=None):
@@ -430,7 +449,7 @@ svlgui.menufuncs([["File",
 						("Add Layer",add_layer,"<Shift><Control>N"),
 						("Delete Layer",delete_layer,"<Shift><Control>Delete")],
 					["Import",
-						("Import to Stage",import_to_stage),
+						("Import to Stage",import_to_stage,"/I"),
 						("Import to Library",import_to_library)],
 					["Export",
 						"Export .swf",
