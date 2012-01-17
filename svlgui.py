@@ -960,7 +960,7 @@ class Image(object):
 				self.image.draw(cr, src_rect, dst_rect)
 			else:
 				src_rect = self.image.bounds
-				dst_rect = src_rect
+				dst_rect = [self.x,self.y,self.x+src_rect[2],self.y+src_rect[3]]
 				self.image.draw(cr, src_rect, dst_rect)
 			cr.grestore()
 		elif SYSTEM=="html":
@@ -1755,6 +1755,12 @@ class Group (object):
 		for i in self.layers:
 			frame = max(frame, len(i.frames))
 		return frame
+	def hitTest(self,x,y):
+		for i in self.layers:
+			for j in i.frames[0].objs:
+				if i.hitTest(x, y):
+					return True
+		return False
 	def print_sc(self):
 		retval = ""
 		#for i in self.layers:
@@ -1884,7 +1890,12 @@ def file_dialog(mode="open",default=None,types=None,multiple=False):
 			return FileDialogs.request_new_file(default_dir=default,file_type=types)
 
 def execute(command):
-	os.system(command.replace("/",sep))
+	rv = os.system(command.replace("/",sep))
+	if PLATFORM == "osx":
+		if rv==0:
+			return True
+		else:
+			return False
 
 class OverlayWindow:
 	if SYSTEM=="gtk":
@@ -1979,18 +1990,19 @@ class ColorSelectionWindow:
 			win.set_modal(True)
 			win.present()
 		elif SYSTEM=="osx":
-			win = OSXWindow(width=352,height=226,resizable=False)
+			win = ModalDialog(width=336,height=208,resizable=False)
 			def onClickRectFill(self,x,y):
 				global FILLCOLOR
 				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
-				self.window.destroy()
+				self.window.dismiss()
 				raise ObjectDeletedError
 			def onClickRectLine(self,x,y):
 				global LINECOLOR
 				LINECOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
-				self.window.destroy()
+				self.window.dismiss()
 				raise ObjectDeletedError
 			canvas = Canvas(336,208)
+			canvas._int().scrolling = ''
 			group = Group(skipl=True)
 			def dummy(*args):
 				pass
@@ -2005,7 +2017,7 @@ class ColorSelectionWindow:
 			if var=="line":
 				group.onMouseDown = onClickRectLine
 			win.place(canvas._int(),left=0,top=0,right=0,bottom=0,sticky="news",scrolling="")
-			win.show()
+			win.present()
 			
 class PreferencesWindow:
 	def __init__(self):

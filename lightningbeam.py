@@ -9,7 +9,7 @@ import os, shutil
 #import objc, AppKit, cPickle
 
 #Uncomment to build on Windows
-import ctypes, ctypes.wintypes, win32print
+#import ctypes, ctypes.wintypes, win32print
 
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
