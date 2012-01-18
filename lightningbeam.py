@@ -312,9 +312,16 @@ def new_file(widget=None):
 def open_file(widget=None):
 	global root
 	MainWindow.stage.delete(root)
+	shutil.rmtree(svlgui.SECURETEMPDIR)
 	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
 	basefile = thetarfile.extractfile("basefile")
 	root, svlgui.Library = pickle.load(basefile)
+	svlgui.SECURETEMPDIR = tempfile.mkdtemp()
+	thetarfile.extractall(path=svlgui.SECURETEMPDIR)
+	for i in svlgui.Library:
+		if i.type=="Image":
+			i.path = svlgui.SECURETEMPDIR+"/"+i.path.split(os.sep)[-1]
+			i.set_image(i.path)
 	MainWindow.stage.add(root, 0, 0)
 	MainWindow.stage.draw()
 	MainWindow.timelinebox.root = root

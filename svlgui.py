@@ -151,6 +151,7 @@ if sys.platform=="linux2":
 	#'''
 	import pickle
 	import tarfile
+	import tempfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
@@ -174,6 +175,7 @@ elif sys.platform=="win32":
 	PLATFORM="win32"
 	import pickle
 	import tarfile
+	import tempfile
 	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
@@ -191,6 +193,7 @@ elif sys.platform=="win32":
 elif sys.platform=="linux-armv6l":
 	import android
 	import tarfile
+	import tempfile
 	droid = android.Android()
 	SYSTEM="android"
 	TEMPDIR="/tmp"		# TODO:FIXTHIS
@@ -202,6 +205,7 @@ elif sys.platform=="darwin":
 	import pickle
 	import misc_funcs
 	import tarfile
+	import tempfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
@@ -219,6 +223,9 @@ elif sys.platform=="darwin":
 	
 FILE = tarfile.open(name=TEMPDIR+"/Untitled",mode="w:gz")
 FILE.close()
+
+#Used for storing images, sounds, etc.
+SECURETEMPDIR = tempfile.mkdtemp()
 	
 __windowlist__=[]
 
@@ -982,6 +989,9 @@ class Image(object):
 		elif SYSTEM=="html":
 			cr.save()
 			pass
+	def set_image(self,img):
+		if SYSTEM=="osx":
+			self.image = GUI.Image(file = img)
 	def hitTest(self,x,y):
 		hits = False
 		# points "a" and "b" forms the anchored segment.
@@ -2121,7 +2131,7 @@ class PublishSettingsWindow:
 								[swlabel, 5, None, self.c4, None, "nw", ""],
 								[htlabel, 5, None, swlabel._int(), None, "nw", ""],
 								[Widget(self.impack), 16, None, htlabel._int(), None, "nw", ""],
-								[Widgest(b2),5,None,None,-5,'nw',''],
+								[Widget(b2),5,None,None,-5,'nw',''],
 								[Widget(b1),None,-5,None,-5,'nw',''])
 			self.win.present()
 	def activate2(self):
