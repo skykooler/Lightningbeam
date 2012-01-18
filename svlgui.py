@@ -1310,6 +1310,7 @@ class Text (object):
 		self.border = False
 		self.width = self.font.width(self.text)
 		self.height = self.font.height
+		self.iname = None
 		self.type="Text"
 		self.name = "t"+str(int(random.random()*10000))+str(SITER)
 		SITER+=1
@@ -1556,11 +1557,17 @@ class frame:
 			retval = ""
 			if self==self.parent.frames[0]:
 				for i in self.objs:
-					retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+					if i.obj.iname:
+						retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+					else:
+						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 			else:
 				for i in self.objs:
 					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
-						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+						if i.obj.iname:
+							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+						else:
+							retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 					else:
 						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 			if not self.actions.strip()=='':
