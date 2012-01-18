@@ -46,6 +46,8 @@ FOCUS = None
 #Options for export
 EXPORT_OPTS = {"swf":False,"html5":False,"basehtml":False,"fallback":False,"pack":False}
 
+#Editing - whether the user is editing text
+EDITING = True
 
 #Library. Contatins all objects whether displayed or not.
 Library = []
@@ -125,7 +127,8 @@ def hex2rgb(hex):
 
 
 LINECOLOR = Color("#990099")
-FILLCOLOR = Color("#000000")
+FILLCOLOR = Color("#00FF00")
+TEXTCOLOR = Color("#000000")
 
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
@@ -216,6 +219,10 @@ elif sys.platform=="darwin":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	import Cocoa
+	SYSTEM_FONTS = list(Cocoa.NSFontManager.sharedFontManager().availableFontFamilies())
+	FONT_PATH = "/Library/Fonts/"
+	FONT = u'Times New Roman'
 	#app = GUI.application()
 	SYSTEM="osx"
 	TEMPDIR="/tmp"
@@ -762,7 +769,7 @@ class Canvas(Widget):
 					keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
 									63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
 									63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
-									63241:"F6",63242:"F7",63243:"F8",}
+									63241:"F6",63242:"F7",63243:"F8",27:"escape"}
 					if not event.unichars=='':
 						if ord(event.unichars) in keydict:
 							key = keydict[ord(event.unichars)]
@@ -1251,6 +1258,116 @@ class Shape (object):
 		retval += self.name+".filled = "+str(self.filled).lower()+";\n"
 		return retval
 
+class Text (object):
+	def __init__(self,text="",x=0,y=0):
+		global SITER
+		global Library
+		Library.append(self)
+		self.text = text
+		self.x = x
+		self.y = y
+		self.rotation = 0
+		self.xscale = 1
+		self.yscale = 1
+		self.fill = TEXTCOLOR
+		self.font = Font(FONT,24)
+		self.dynamic = False
+		self.variable = None
+		self.password = False
+		self.wordwrap = False
+		self.multiline = False
+		self.html = False
+		self.editable = False
+		self.selectable = True
+		self.border = False
+		self.width = self.font.width(self.text)
+		self.height = self.font.height
+		self.type="Text"
+		self.name = "t"+str(int(random.random()*10000))+str(SITER)
+		SITER+=1
+	def draw(self,cr=None,parent=None,rect=None):
+		if SYSTEM=="osx":
+			cr.font = self.font
+			cr.textcolor = self.fill.pygui
+			cr.gsave()
+			#cr.moveto(self.x,self.y)
+			if sep=="\\":
+				# Very ugly hack for Windows. :(
+				# Windows doesn't respect coordinate transformations
+				# with respect to translation, so we have to do this
+				# bit ourselves.
+				
+				# Rotation in radians
+				radrot = parent.group.rotation*math.pi/180 
+				# Coordinate transform: multiplication by a rotation matrix
+				cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+			else:
+				cr.translate(self.x,self.y)
+			cr.newpath()
+			cr.moveto(0,0)
+			cr.show_text(self.text)
+			cr.grestore()
+	def hitTest(self, x, y):
+		self.width = self.font.width(self.text)
+		self.height = self.font.height
+		if 0<x<self.width and -self.height<y<0:
+			return True
+	def getminx(self):
+		return 0
+	def getminy(self):
+		return -self.height
+	def getmaxx(self):
+		return self.width
+	def getmaxy(self):
+		return 0
+	minx = property(getminx)
+	miny = property(getminy)
+	maxx = property(getmaxx)
+	maxy = property(getmaxy)
+	def onMouseDown(self, self1, x, y):
+		pass
+	def onMouseDrag(self, self1, x, y):
+		pass
+	def onMouseUp(self, self1, x, y):
+		pass
+	def onMouseMove(self, self1, x, y):
+		pass
+	def onKeyDown(self, self1, key):
+		pass
+	def onKeyUp(self, self1, key):
+		pass
+	def print_sc(self):
+		retval = ".font "+''.join(self.font.family.split(' '))+self.name+" filename=\""\
+			+FONT_PATH+self.font.family+".ttf\"\n"
+		if self.dynamic:
+			retval+=".edittext "+self.name+" width="+str(self.width)+" height="+str(self.height)\
+				+" font="+''.join(self.font.family.split(' '))+self.name+" text=\""+self.text\
+				+"\" color="+self.fill.rgb+" size="+str(self.font.size)+"pt"
+			if self.variable:
+				retval+=" variable="+self.variable
+			if self.password:
+				retval+=" password"
+			if self.wordwrap:
+				retval+=" wordwrap"
+			if self.multiline:
+				retval+=" multiline"
+			if self.html:
+				retval+=" html"
+			if self.border:
+				retval+=" border"
+			if self.editable:
+				retval+="\n"
+			if not self.selectable:
+				retval+=" noselect"
+			else:
+				retval+=" readonly\n"
+		else:
+			retval+=".text "+self.name+" font="+''.join(self.font.family.split(' '))+self.name\
+			+" text=\""+self.text+"\" color="+self.fill.rgb+" size="+str(self.font.size)\
+			+"pt\n"
+		return retval
+	
+
 class framewrapper (object):
 	#def __getstate__(self):
 	#	dict = self.__dict__.copy()
@@ -1358,7 +1475,6 @@ class frame:
 					tb+="cr.stroke()\n"
 				tb+="cr.restore()\n"
 			elif SYSTEM=="osx":
-				pass
 				self.group = group
 				cr.gsave()
 				cr.rotate(group.rotation)
@@ -1842,7 +1958,8 @@ def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":
 		cursdict = {"arrow":StdCursors.arrow, "ibeam":StdCursors.ibeam, 
 			"crosshair":StdCursors.crosshair, "fist":StdCursors.fist,
-			"hand":StdCursors.hand, "finger":StdCursors.finger, "invisible":StdCursors.invisible}
+			"hand":StdCursors.hand, "finger":StdCursors.finger, 
+			"invisible":StdCursors.invisible, "text":StdCursors.ibeam}
 		if curs in cursdict:
 			if widget:
 				widget._int().cursor = cursdict[curs]

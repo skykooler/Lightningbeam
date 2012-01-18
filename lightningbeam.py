@@ -69,6 +69,7 @@ def onMouseDownGroup(self, x, y):
 			self.clicked = True
 	elif svlgui.MODE in ["r", "e", "p"]:
 		if svlgui.MODE=="r":
+			#I can't remember what the 'c' stands for...
 			self.cshape = box(x, y, 0, 0)
 		elif svlgui.MODE=="e":
 			self.cshape = ellipse(x, y, 0, 0)
@@ -84,6 +85,13 @@ def onMouseDownGroup(self, x, y):
 		self.cshape.onKeyDown = onKeyDownObj
 		self.clicked = True
 		MainWindow.scriptwindow.text = self.activelayer.frames[self.activelayer.currentframe].actions
+	elif svlgui.MODE in ["t"]:
+		self.ctext = svlgui.Text("Mimimi",x,y)
+		self.ctext.onMouseDown = onMouseDownText
+		self.ctext.onMouseDrag = onMouseDragText
+		self.ctext.onMouseUp = onMouseUpText
+		self.add(self.ctext)
+		self.ctext = None
 def onMouseDownObj(self, x, y):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
@@ -91,6 +99,11 @@ def onMouseDownObj(self, x, y):
 	if svlgui.MODE == "b":
 		self.filled = True
 		self.fillcolor = svlgui.FILLCOLOR
+def onMouseDownText(self,x,y):
+	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
+	self.clicked = True
+	self.initx, self.inity = x-self.x, y-self.y
+	#svlgui.alert('235')
 def onMouseDownFrame(self, x, y):
 	pass
 def onMouseUpGroup(self, x, y):
@@ -104,6 +117,8 @@ def onMouseUpGroup(self, x, y):
 		self.cshape = None
 		MainWindow.stage.draw()
 def onMouseUpObj(self, x, y):
+	self.clicked = False
+def onMouseUpText(self, x, y):
 	self.clicked = False
 def onMouseMoveGroup(self, x, y):
 	pass
@@ -130,18 +145,26 @@ def onMouseDragGroup(self, x, y):
 def onMouseDragObj(self, x, y):
 	self.x = x-self.initx
 	self.y = y-self.inity
+def onMouseDragText(self, x, y):
+	self.x = x-self.initx
+	self.y = y-self.inity
 
 def onKeyDownGroup(self, key):
-	pass
-	if key in [" ", "s", "r", "e", "b", "p"]:
-		svlgui.MODE=key
-		svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
-				"b":"arrow","p":"arrow"}[key], MainWindow.stage)
-		misc_funcs.update_tooloptions()
-	elif key=="F6":
-		add_keyframe()
-	elif key=="F8":
-		convert_to_symbol()
+	if not svlgui.EDITING:
+		if key in [" ", "s", "r", "e", "b", "p"]:
+			svlgui.MODE=key
+			svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+					"b":"arrow","p":"arrow"}[key], MainWindow.stage)
+			misc_funcs.update_tooloptions()
+		elif key=="F6":
+			add_keyframe()
+		elif key=="F8":
+			convert_to_symbol()
+	else:
+		if not key=="escape":
+			pass
+		else:
+			svlgui.EDITING=False
 def onKeyDownObj(self, key):
 	if key in ("delete", "backspace"):
 		del self.parent[self.parent.index(self)] # Need to clean up deletion
