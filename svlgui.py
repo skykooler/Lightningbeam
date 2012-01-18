@@ -49,6 +49,8 @@ EXPORT_OPTS = {"swf":False,"html5":False,"basehtml":False,"fallback":False,"pack
 #Editing - whether the user is editing text
 EDITING = True
 
+CURRENTTEXT = None
+
 #Library. Contatins all objects whether displayed or not.
 Library = []
 
@@ -160,7 +162,7 @@ if sys.platform=="linux2":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -185,7 +187,7 @@ elif sys.platform=="win32":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -214,7 +216,7 @@ elif sys.platform=="darwin":
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -539,6 +541,10 @@ class Label(Widget):
 	def _int(self):
 		if SYSTEM=="osx":
 			return self.label
+	def disable(self):
+		self.label.enabled = False
+	def enable(self):
+		self.label.enabled = True
 class RadioGroup(Widget):
 	def __getitem__(self,num):
 		return self.buttons[num]
@@ -699,6 +705,24 @@ class Frame(Widget):
 				self.frame.height = self.height
 			else:
 				self.frame.height = 0
+
+class Scale(Widget):
+	def __init__(self,min,val,max):
+		if SYSTEM=="osx":
+			self.scale = Slider('h')
+			self.scale.min_value = min
+			self.scale.max_value = max
+			self.scale.value = val
+	def _int(self):
+		return self.scale
+	def set_action(self,action):
+		if SYSTEM=="osx":
+			self.scale.action = action
+	def getval(self):
+		return self.scale.value
+	def setval(self, val):
+		self.scale.value = val
+	value = property(getval, setval)
 	
 class Canvas(Widget):
 	def __init__(self,width=False,height=False):
@@ -889,6 +913,10 @@ class TextEntry(Widget):
 	def _int(self):
 		if SYSTEM=="osx":
 			return self.entry
+	def disable(self):
+		self.entry.enabled = False
+	def enable(self):
+		self.entry.enabled = True
 	def set_action(self,action):
 		if SYSTEM=="osx":
 			self.entry.enter_action = action
@@ -1270,7 +1298,7 @@ class Text (object):
 		self.xscale = 1
 		self.yscale = 1
 		self.fill = TEXTCOLOR
-		self.font = Font(FONT,24)
+		self.font = Font(FONT,16)
 		self.dynamic = False
 		self.variable = None
 		self.password = False
@@ -1320,10 +1348,17 @@ class Text (object):
 		return self.width
 	def getmaxy(self):
 		return 0
+	def getsize(self):
+		return self.font.size
+	def setsize(self,size):
+		self.font = Font(self.font.family,size,self.font.style)
+		self.width = self.font.width(self.text)
+		self.height = self.font.height
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
+	size = property(getsize,setsize)
 	def onMouseDown(self, self1, x, y):
 		pass
 	def onMouseDrag(self, self1, x, y):

@@ -92,6 +92,9 @@ def onMouseDownGroup(self, x, y):
 		self.ctext.onMouseUp = onMouseUpText
 		self.add(self.ctext)
 		self.ctext = None
+	MainWindow.docbox.setvisible(True)
+	MainWindow.textbox.setvisible(False)
+
 def onMouseDownObj(self, x, y):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
@@ -103,7 +106,10 @@ def onMouseDownText(self,x,y):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
 	self.initx, self.inity = x-self.x, y-self.y
-	#svlgui.alert('235')
+	MainWindow.docbox.setvisible(False)
+	MainWindow.textbox.setvisible(True)
+	svlgui.CURRENTTEXT = self.obj
+	print "Height", MainWindow.textbox.height
 def onMouseDownFrame(self, x, y):
 	pass
 def onMouseUpGroup(self, x, y):

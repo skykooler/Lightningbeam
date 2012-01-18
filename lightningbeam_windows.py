@@ -4,6 +4,7 @@
 # Released under the GPLv3. For more information, see gpl.txt.
 
 import svlgui
+import math
 import misc_funcs
 from misc_funcs import *
 
@@ -259,17 +260,74 @@ class MainWindowOSX:
 								[self.publishbutton,self.publishlabel._int(),None,self.sizebutton._int(),None,"nw", ""],
 								[self.frameratelabel,10,None,self.publishbutton._int(),None,"nw", ""],
 								[self.frameratentry,self.frameratelabel._int(),None,self.publishbutton._int(),None,"nw", ""])
+		self.textbox = svlgui.Frame()
+		self.tgroup = svlgui.RadioGroup("Static text", "Dynamic text", "Input text")
+		def setmode(self):
+			if self.value=="Static text":
+				svlgui.CURRENTTEXT.dynamic = False
+				self.textvarentry.text = ""
+				self.textvarentry.disable()
+				self.tinstancename.disable()
+				self.tinstancename.text = "<Instance Name>"
+				self.tinstancename._int().color = svlgui.Color("#AAAAAA").pygui
+			elif self.value=="Input text":
+				svlgui.CURRENTTEXT.dynamic = True
+				svlgui.CURRENTTEXT.editable = False
+				self.textvarentry.enable()
+				self.tinstancename.enable()
+			else:
+				svlgui.CURRENTTEXT.dynamic = True
+				svlgui.CURRENTTEXT.editable = True
+				self.textvarentry.enable()
+				self.tinstancename.enable()
+		self.tgroup.action = setmode
+		self.tfontlabel =  svlgui.Label("Font:")
+		self.tfontbutton = svlgui.Button("Times New Roman")
+		self.mlgroup = svlgui.RadioGroup("Single line","Multiline","Multiline no wrap")
+		self.fontsizelabel = svlgui.Label("Size:")
+		self.fontsizentry = svlgui.TextEntry("16.0")
+		self.fontsizentry.set_action(self.editFontSizeText)
+		self.fontsizescale = svlgui.Scale(1,4,20)
+		self.fontsizescale.set_action(self.editFontSizeScale)
+		self.textvarlabel = svlgui.Label("Var:")
+		self.textvarentry = svlgui.TextEntry("                          ")
+		self.textvarentry.set_action(self.setFontVar)
+		self.textvarentry.disable()
+		self.tgroup.textvarentry = self.textvarentry
+		self.tinstancename = svlgui.TextEntry("<Instance Name>")
+		self.tgroup.tinstancename = self.tinstancename
+		self.tinstancename.original_color = self.tinstancename._int().color
+		self.tinstancename._int().color = svlgui.Color("#aaaaaa").pygui
+		self.tinstancename._int().mouse_down = self.darkentinstance
+		self.tinstancename.set_action(self.setFontInstanceName)
+		self.textbox.layout_self([self.tgroup[0],10,None,5,None,"nw",""],
+								[self.tgroup[1],10,None,self.tgroup[0]._int(),None,"nw",""],
+								[self.tgroup[2],10,None,self.tgroup[1]._int(),None,"nw",""],
+								[self.tinstancename,10,None,self.tgroup[2]._int(),None,"nw",""],
+								[self.tfontlabel,self.tinstancename._int(),None,5,None,"nw",""],
+								[self.tfontbutton,self.tfontlabel._int(),None,5,None,"nw",""],
+								[self.mlgroup[0],self.tinstancename._int(),None,self.tfontbutton._int(),None,"nw",""],
+								[self.mlgroup[1],self.tinstancename._int(),None,self.mlgroup[0]._int(),None,"nw",""],
+								[self.mlgroup[2],self.tinstancename._int(),None,self.mlgroup[1]._int(),None,"nw",""],
+								[self.fontsizelabel,self.tfontbutton._int(),None,5,None,"nw",""],
+								[self.fontsizentry,self.fontsizelabel._int(),None,5,None,"nw",""],
+								[self.fontsizescale,self.fontsizentry._int(),None,5,None,"nw",""],
+								[self.textvarlabel,self.tfontbutton._int(),None,self.fontsizentry._int()+3,None,"nw",""],
+								[self.textvarentry,self.textvarlabel._int(),None,self.fontsizentry._int()+3,None,"nw",""])
+		self.textvarentry.text=""
 		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.paintbox,0,245,0,0,"nws","v"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
 								#[self.timelinebox,self.paintbox._int()+148,-500,0,None,"new","hv"],
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
-								[self.scriptwindow,self.timelinebox._int(),0,0,0,"nse", "hv"],
-								[self.docbox,self.toolbox._int(),self.scriptwindow._int(),None,0,"wse", ""],
+								[self.docbox,self.toolbox._int(),0,None,0,"wse", ""],
+								[self.textbox,self.toolbox._int(),0,None,0,"wse", ""],
+								[self.scriptwindow,self.timelinebox._int(),0,0,self.docbox._int(),"nse", "hv"],
 								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,self.docbox._int(),"nsew", "hv"],
 								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
 								#[self.stage,self.paintbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
+		self.textbox.setvisible(False)
 		self.window.add(self.frame)
 		if svlgui.SYSTEM=="osx":
 			self.stage._int().become_target();
@@ -278,6 +336,33 @@ class MainWindowOSX:
 		svlgui.FRAMERATE=int(self.frameratentry.text)
 		if svlgui.SYSTEM=="osx":
 			self.stage._int().become_target();
+	def editFontSizeScale(self):
+		self.fontsizentry.text = str(int(self.fontsizescale.value**2)*1.0)
+		svlgui.CURRENTTEXT.size = int(self.fontsizescale.value**2)*1.0
+		self.stage.draw()
+	def editFontSizeText(self):
+		self.fontsizescale.value = math.sqrt(float(self.fontsizentry.text))
+		if svlgui.SYSTEM=="osx":
+			self.stage._int().become_target();
+		svlgui.CURRENTTEXT.size = int(self.fontsizescale.value**2)*1.0
+	def setFontVar(self):
+		if self.tgroup.value=="Static text":
+			self.tgroup.value="Dynamic text"
+		svlgui.CURRENTTEXT.variable = self.textvarentry.text
+		if svlgui.SYSTEM=="osx":
+			self.stage._int().become_target();
+	def setFontInstanceName(self):
+		if not self.tinstancename.text.strip() == "":
+			svlgui.CURRENTTEXT.iname = self.tinstancename.text
+			self.stage._int().become_target();
+		else:
+			self.tinstancename.text = "<Instance Name>"
+			self.tinstancename._int().color = svlgui.Color("#AAAAAA").pygui
+			self.stage._int().become_target()
+	def darkentinstance(self,*args):
+		self.tinstancename._int().color = self.tinstancename.original_color
+		if self.tinstancename.text == "<Instance Name>":
+			self.tinstancename.text = ""
 
 # use mainwindowosx, this is just to comment things out
 class MainWindowHTML:
