@@ -170,6 +170,7 @@ if sys.platform=="linux2":
 	#app = GUI.application()
 	SYSTEM="osx"
 	TEMPDIR = "/tmp"
+	FONT = u'Times New Roman'
 	'''
 	SYSTEM="html"
 	ids = {}
@@ -703,8 +704,14 @@ class Frame(Widget):
 		if SYSTEM=="osx":
 			if visible:
 				self.frame.height = self.height
+				# Setting the height to 0 doesn't work on Linux, so we hack around it
+				if PLATFORM.startswith("linux"):
+					self.frame._gtk_inner_widget.set_visible(True)
 			else:
 				self.frame.height = 0
+				if PLATFORM.startswith("linux"):
+					self.frame._gtk_inner_widget.set_visible(False)
+			print "visible:",visible
 
 class Scale(Widget):
 	def __init__(self,min,val,max):
@@ -1401,6 +1408,9 @@ class Text (object):
 			retval+=".text "+self.name+" font="+''.join(self.font.family.split(' '))+self.name\
 			+" text=\""+self.text+"\" color="+self.fill.rgb+" size="+str(self.font.size)\
 			+"pt\n"
+		return retval
+	def print_html(self):
+		retval = "var "+self.name+" = new Text();\n"+self.name+".text = \""+self.text+";\n"
 		return retval
 	
 

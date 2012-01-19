@@ -300,6 +300,7 @@ class MainWindowOSX:
 		self.tinstancename._int().color = svlgui.Color("#aaaaaa").pygui
 		self.tinstancename._int().mouse_down = self.darkentinstance
 		self.tinstancename.set_action(self.setFontInstanceName)
+		self.tinstancename.disable()
 		self.textbox.layout_self([self.tgroup[0],10,None,5,None,"nw",""],
 								[self.tgroup[1],10,None,self.tgroup[0]._int(),None,"nw",""],
 								[self.tgroup[2],10,None,self.tgroup[1]._int(),None,"nw",""],
@@ -321,8 +322,8 @@ class MainWindowOSX:
 								#[self.timelinebox,self.paintbox._int()+148,-500,0,None,"new","hv"],
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
-								[self.docbox,self.toolbox._int(),0,None,0,"wse", ""],
-								[self.textbox,self.toolbox._int(),0,None,0,"wse", ""],
+								[self.docbox,self.toolbox._int(),0,-200,0,"wse", ""],
+								[self.textbox,self.toolbox._int(),0,-200,0,"wse", ""],
 								[self.scriptwindow,self.timelinebox._int(),0,0,self.docbox._int(),"nse", "hv"],
 								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,self.docbox._int(),"nsew", "hv"],
 								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
