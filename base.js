@@ -445,6 +445,23 @@ function Shape() {
 	}
 }
 
+function TextField() {
+	/*From the ActionScript reference:
+	
+	To create a text field dynamically, you do not use the new operator.
+	Instead, you use MovieClip.createTextField(). The default size for a
+	text field is 100 x 100 pixels. 
+	 
+	*/
+	this._x = 0;
+	this._y = 0;
+	this.textHeight = 100;
+	this.textWidth = 100;
+	this.text = "";
+	this.draw = function(frame,frame2,r) {
+		
+	}
+}
 
 var _rootFrame = new Frame()
 var _root = new MovieClip()

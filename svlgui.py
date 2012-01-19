@@ -1408,6 +1408,9 @@ class Text (object):
 			+" text=\""+self.text+"\" color="+self.fill.rgb+" size="+str(self.font.size)\
 			+"pt\n"
 		return retval
+	def print_html(self):
+		retval = "var "+self.name+" = new Text();\n"+self.name+".text = \""+self.text+";\n"
+		return retval
 	
 
 class framewrapper (object):
