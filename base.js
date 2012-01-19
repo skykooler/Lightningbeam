@@ -458,7 +458,129 @@ function TextField() {
 	this.textHeight = 100;
 	this.textWidth = 100;
 	this.text = "";
-	this.draw = function(frame,frame2,r) {
+	this.textColor = "#000000"
+	this.borderColor = "#000000"
+	this.backgroundColor = "#FFFFFF"
+	this.border = false
+	this.hwaccel = true		// Use the browser function for drawing text (faster)
+	this._documentObject = document.createElement('div')
+	document.getElementById('events').appendChild(this._documentObject)
+	this._documentObject.style.zIndex = 10
+	this._documentObject.style.position = 'absolute'
+	//this._documentObject.style.color = 'rgba(255,255,255,0)'
+	this._documentObject.innerHTML = this.text
+	this._textFormat = new TextFormat()
+	this._textFormat.size = 12
+	this._draw = function(frame,frame2,r) {
+		this._documentObject.innerHTML = this.text;
+		this._width = this._documentObject.clientWidth
+		this._height = this._documentObject.clientHeight
+		this._documentObject.style.fontSize=this._textFormat.size+"px"
+		if (!frame2) {
+			this._x = frame._x
+			this._y = frame._y
+			this._xscale = frame._xscale
+			this._yscale = frame._yscale
+			this._rotation = frame._rotation
+			if (frame.textColor) {
+				this.tcolr = parseInt(parseInt(frame.textColor.replace("#",""),16)/65536)
+				this.tcolg = parseInt(parseInt(frame.textColor.replace("#",""),16)/256)%256
+				this.tcolb = parseInt(parseInt(frame.textColor.replace("#",""),16))%256
+				this.bcolr = parseInt(parseInt(frame.borderColor.replace("#",""),16)/65536)
+				this.bcolg = parseInt(parseInt(frame.borderColor.replace("#",""),16)/256)%256
+				this.bcolb = parseInt(parseInt(frame.borderColor.replace("#",""),16))%256
+				this.textColor = "#"+decimalToHex(this.tcolr,2)+decimalToHex(this.tcolg,2)+decimalToHex(this.tcolb,2)
+				this.borderColor = "#"+decimalToHex(this.bcolr,2)+decimalToHex(this.bcolg,2)+decimalToHex(this.bcolb,2)
+			}
+		} 
+		else {
+			this._x = ave(frame2._x, frame._x, r)
+			this._y = ave(frame2._y, frame._y, r)
+			this._xscale = ave(frame2._xscale, frame._xscale, r)
+			this._yscale = ave(frame2._yscale, frame._yscale, r)
+			this._rotation = ave(frame2._rotation ,frame._rotation, r)
+			if (frame2.textColor) {
+				this.tcolr2 = parseInt(parseInt(frame2.textColor.replace("#",""),16)/65536)
+				this.tcolg2 = parseInt(parseInt(frame2.textColor.replace("#",""),16)/256)%256
+				this.tcolb2 = parseInt(parseInt(frame2.textColor.replace("#",""),16))%256
+				this.tcolra = parseInt(parseInt(frame.textColor.replace("#",""),16)/65536)
+				this.tcolga = parseInt(parseInt(frame.textColor.replace("#",""),16)/256)%256
+				this.tcolba = parseInt(parseInt(frame.textColor.replace("#",""),16))%256
+				this.tcolr = parseInt(ave(this.tcolr2, this.tcolra, r))
+				this.tcolg = parseInt(ave(this.tcolg2, this.tcolga, r))
+				this.tcolb = parseInt(ave(this.tcolb2, this.tcolba, r))
+				this.textColor = "#"+decimalToHex(this.tcolr,2)+decimalToHex(this.tcolg,2)+decimalToHex(this.tcolb,2)
+			}
+			if (frame2.borderColor) {
+				this.bcolr2 = parseInt(parseInt(frame2.line.replace("#",""),16)/65536)
+				this.bcolg2 = parseInt(parseInt(frame2.line.replace("#",""),16)/256)%256
+				this.bcolb2 = parseInt(parseInt(frame2.line.replace("#",""),16))%256
+				this.bcolra = parseInt(parseInt(frame.line.replace("#",""),16)/65536)
+				this.bcolga = parseInt(parseInt(frame.line.replace("#",""),16)/256)%256
+				this.bcolba = parseInt(parseInt(frame.line.replace("#",""),16))%256
+				this.bcolr = parseInt(ave(this.bcolr2, this.bcolra, r))
+				this.bcolg = parseInt(ave(this.bcolg2, this.bcolga, r))
+				this.bcolb = parseInt(ave(this.bcolb2, this.bcolba, r))
+				this.borderColor = "#"+decimalToHex(this.bcolr,2)+decimalToHex(this.bcolg,2)+decimalToHex(this.bcolb,2)
+			}
+		}
+		if (!this.hwaccel) {
+			this._documentObject.style.color = 'rgba(255,255,255,0)'
+			cr.save()
+			cr.translate(this._x,this._y)
+			cr.rotate(this._rotation*Math.PI/180)
+			cr.scale(this._xscale*1.0, this._yscale*1.0)
+			cr.fillStyle = this.textColor.substr(0,7);
+			cr.strokeStyle = this.borderColor.substr(0,7);
+			cr.textBaseline = 'top'
+			if (this._textFormat.font) {
+				if (this._textFormat.size){
+					cr.font = this._textFormat.size+"pt "+this._textFormat.font;
+					this._documentObject.style.font = this._textFormat.size+"pt "+this._textFormat.font;
+				} else {
+					cr.font = "12pt "+this._textFormat.font;
+					this._documentObject.style.font = "12pt "+this._textFormat.font;
+				}
+			} else if (this._textFormat.size){
+				cr.font = this._textFormat.size+"pt Times New Roman"
+				this._documentObject.style.font = this._textFormat.size+"pt Times New Roman"
+			} else {
+				cr.font = "12pt Times New Roman"
+				this._documentObject.style.font = "12pt Times New Roman"
+			}
+			cr.fillText(this.text, 0, 0)
+			if (this.border) {
+				cr.beginPath()
+				cr.moveTo(0,0)
+				cr.lineTo(this._width,0)
+				cr.lineTo(this._width,this._height)
+				cr.lineTo(0,this._height)
+				cr.lineTo(0,0)
+				cr.stroke()
+			}
+			cr.restore()
+			cr.beginPath()
+		}
+		else {
+			if (this._textFormat.font) {
+				if (this._textFormat.size){
+					cr.font = this._textFormat.size+"pt "+this._textFormat.font;
+					this._documentObject.style.font = this._textFormat.size+"pt "+this._textFormat.font;
+				} else {
+					cr.font = "12pt "+this._textFormat.font;
+					this._documentObject.style.font = "12pt "+this._textFormat.font;
+				}
+			} else if (this._textFormat.size){
+				cr.font = this._textFormat.size+"pt Times New Roman"
+				this._documentObject.style.font = this._textFormat.size+"pt Times New Roman"
+			} else {
+				cr.font = "12pt Times New Roman"
+				this._documentObject.style.font = "12pt Times New Roman"
+			}
+		}
+		this._documentObject.style.left = this._x
+		this._documentObject.style.top = this._y
+		
 		
 	}
 }
@@ -727,6 +849,27 @@ Key.addListener = function(listener) {
 }
 Key.removeListener = function(listener) {
 	Event.remove(listener)
+}
+
+function TextFormat () {
+	this.align="left"	//Yes, I know it's supposed to be 'undefined', but that defaults to 'left'
+	this.blockIndent=0
+	this.bold = false
+	this.bullet = null
+	this.color = 0x000000	//hmm...
+	this.font = null
+	this.indent = 0
+	this.italic = false
+	this.kerning = false // And I doubt I will implement it since even Adobe doesn't on OSX...
+	this.leading = 0 // TODO: research this in CSS
+	this.leftMargin = 0
+	this.letterSpacing = 0
+	this.rightMargin = 0
+	this.size = null // Default value is null? WTF?
+	this.tabStops = new Array()
+	this.target = "_self" //ActionScript docs specify no default value - find out what it is
+	this.underline = false
+	this.url = null
 }
 
 //TODO: ContextMenu

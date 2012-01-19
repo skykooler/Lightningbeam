@@ -243,13 +243,15 @@ visibility: hidden; }\n\
 </style>\n\
 </head>\n\
 <body>\n\
+<div id='events'>\n\
 <canvas id=\"canvas1\" width="+str(svlgui.WIDTH)+" height="+str(svlgui.HEIGHT)+" ></canvas>\n\
 <canvas id=\"canvas2\" width="+str(svlgui.WIDTH)+" height="+str(svlgui.HEIGHT)+"></canvas>\n\
+</div>\n\
 <script>\n\
 //Setup\nvar fps = "+str(svlgui.FRAMERATE)+";\n</script>\n\
 <script src=\"base.js\">\n\
 </script>\n\
-<script>"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"\n\
+<script>\n"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"\n\
 document.onmousemove = function(e){_root._xmouse=e.pageX;_root._ymouse=e.pageY}\n\
 document.onmousedown = function(e){Event.doEvent(\"onMouseDown\")}\n\
 document.onkeydown = function(e){Key.press(e);Event.doEvent(\"onKeyDown\")}\n\

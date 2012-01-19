@@ -301,6 +301,8 @@ class MainWindowOSX:
 		self.tinstancename._int().mouse_down = self.darkentinstance
 		self.tinstancename.set_action(self.setFontInstanceName)
 		self.tinstancename.disable()
+		self.thwaccel = svlgui.CheckBox("Draw on top (improves performance under HTML5)")
+		self.thwaccel.action = self.setFontHWAccel
 		self.textbox.layout_self([self.tgroup[0],10,None,5,None,"nw",""],
 								[self.tgroup[1],10,None,self.tgroup[0]._int(),None,"nw",""],
 								[self.tgroup[2],10,None,self.tgroup[1]._int(),None,"nw",""],
@@ -314,7 +316,8 @@ class MainWindowOSX:
 								[self.fontsizentry,self.fontsizelabel._int(),None,5,None,"nw",""],
 								[self.fontsizescale,self.fontsizentry._int(),None,5,None,"nw",""],
 								[self.textvarlabel,self.tfontbutton._int(),None,self.fontsizentry._int()+3,None,"nw",""],
-								[self.textvarentry,self.textvarlabel._int(),None,self.fontsizentry._int()+3,None,"nw",""])
+								[self.textvarentry,self.textvarlabel._int(),None,self.fontsizentry._int()+3,None,"nw",""],
+								[self.thwaccel,self.tfontbutton._int(),None,self.textvarlabel._int()+3,None,"nw",""])
 		self.textvarentry.text=""
 		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.paintbox,0,245,0,0,"nws","v"],
@@ -364,6 +367,8 @@ class MainWindowOSX:
 		self.tinstancename._int().color = self.tinstancename.original_color
 		if self.tinstancename.text == "<Instance Name>":
 			self.tinstancename.text = ""
+	def setFontHWAccel(self):
+		svlgui.CURRENTTEXT.hwaccel = self.thwaccel.value
 
 # use mainwindowosx, this is just to comment things out
 class MainWindowHTML:

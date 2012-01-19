@@ -159,10 +159,10 @@ if sys.platform=="linux2":
 	import tempfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
-	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -185,10 +185,10 @@ elif sys.platform=="win32":
 	import misc_funcs
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
-	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -214,10 +214,10 @@ elif sys.platform=="darwin":
 	import tempfile
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
-	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid
+	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
 	from GUI import Label as OSXLabel, RadioGroup as OSXRadioGroup, RadioButton as OSXRadioButton
 	from GUI import Column, Row, ScrollableView, TextEditor, Colors, ModalDialog
-	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, CheckBox, Slider
+	from GUI import StdCursors, Alerts, FileDialogs, Font, TextField, Slider
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
@@ -730,6 +730,24 @@ class Scale(Widget):
 	def setval(self, val):
 		self.scale.value = val
 	value = property(getval, setval)
+	
+class CheckBox(Widget):
+	def __init__(self,text):
+		if SYSTEM=="osx":
+			self.box = OSXCheckBox(text)
+			self.box.action = self._action
+	def _int(self):
+		return self.box
+	def _action(self):
+		self.action()
+	def action(self):
+		pass
+	def get_value(self):
+		return self.box.value
+	def set_value(self, value):
+		self.box.value = value
+	value = property(get_value, set_value)
+		
 	
 class Canvas(Widget):
 	def __init__(self,width=False,height=False):
@@ -1318,6 +1336,7 @@ class Text (object):
 		self.width = self.font.width(self.text)
 		self.height = self.font.height
 		self.iname = None
+		self.hwaccel = None
 		self.type="Text"
 		self.name = "t"+str(int(random.random()*10000))+str(SITER)
 		SITER+=1
@@ -1410,7 +1429,8 @@ class Text (object):
 			+"pt\n"
 		return retval
 	def print_html(self):
-		retval = "var "+self.name+" = new Text();\n"+self.name+".text = \""+self.text+";\n"
+		retval = "var "+self.name+" = new TextField();\n"+self.name+".text = \""+self.text\
+			+"\";\n"+self.name+".hwaccel = "+str(self.hwaccel).lower()+"\n"
 		return retval
 	
 
@@ -2278,15 +2298,15 @@ class PublishSettingsWindow:
 			self.win.place(frame._int(), left=0, top=0, right=0, bottom=0, sticky="nsew")
 			plabel = Label("Settings-publish")
 			elabel = Label("Export: ")
-			self.c1 = CheckBox("SWF")
-			self.c2 = CheckBox("HTML5")
-			self.c3 = CheckBox("Base HTML file")
+			self.c1 = OSXCheckBox("SWF")
+			self.c2 = OSXCheckBox("HTML5")
+			self.c3 = OSXCheckBox("Base HTML file")
 			self.c3.action = self.deactivate4
-			self.c4 = CheckBox("Setup fallback content")
+			self.c4 = OSXCheckBox("Setup fallback content")
 			self.c4.action = self.activate3
 			swlabel = Label("SWF:")
 			htlabel = Label("HTML5:")
-			self.impack = CheckBox("Pack Images (Not implemented yet!)")
+			self.impack = OSXCheckBox("Pack Images (Not implemented yet!)")
 			self.impack.action = self.activate3
 			b1 = DefaultButton()
 			b1.action = self.confirm
