@@ -20,6 +20,9 @@ import lightningbeam_windows
 #pickle - used to save and open files
 import pickle
 
+#webbrowser - used to launch HTML5
+import webbrowser
+
 #misc_funcs - miscelleneous functions in a separate file so as not to clutter things up too much
 import misc_funcs
 
@@ -246,7 +249,12 @@ visibility: hidden; }\n\
 //Setup\nvar fps = "+str(svlgui.FRAMERATE)+";\n</script>\n\
 <script src=\"base.js\">\n\
 </script>\n\
-<script>"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"</script>\n</body>\n</html>"
+<script>"+"".join([i.print_html() for i in svlgui.Library])+root.print_html()+"\n\
+document.onmousemove = function(e){_root._xmouse=e.pageX;_root._ymouse=e.pageY}\n\
+document.onmousedown = function(e){Event.doEvent(\"onMouseDown\")}\n\
+document.onkeydown = function(e){Key.press(e);Event.doEvent(\"onKeyDown\")}\n\
+document.onkeyup = function(e){Key.release(e);Event.doEvent(\"onKeyUp\")}\n\
+</script>\n</body>\n</html>"
 	return retval
 def run_html(self=None):
 	global root
@@ -257,6 +265,7 @@ def run_html(self=None):
 		shutil.copyfile("base.js",os.getenv('HOME')+"/base.js")
 	except IOError:
 		svlgui.alert("Couldn't copy base.js to "+os.getenv('HOME')+"/base.js!")
+	webbrowser.open("file://"+os.getenv('HOME')+"/test.html")
 	
 	
 
