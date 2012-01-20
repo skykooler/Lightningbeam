@@ -26,6 +26,12 @@ import webbrowser
 #misc_funcs - miscelleneous functions in a separate file so as not to clutter things up too much
 import misc_funcs
 
+#If we can import this, we are in the install directory. Mangle media paths accordingly.
+try:
+	from distpath import media_path
+except:
+	media_path = ""
+
 #specify the current version and what version files it can still open
 LIGHTNINGBEAM_VERSION = "1.0-alpha1"
 LIGHTNINGBEAM_COMPAT = ["1.0-alpha1"]
@@ -326,7 +332,7 @@ elif svlgui.SYSTEM=="android":
 MainWindow.stage.add(root, 0,0)
 svlgui.FOCUS = MainWindow.stage
 layers = svlgui.Group(skipl=True)
-b = svlgui.Image("media/object_active.png",0,0,True,MainWindow.layerbox,16,1,True)
+b = svlgui.Image(media_path+"media/object_active.png",0,0,True,MainWindow.layerbox,16,1,True)
 layers.add(b)
 MainWindow.layerbox.add(layers,0,0)
 
@@ -415,7 +421,7 @@ def add_keyframe(widget=None):
 	MainWindow.timelinebox.draw()
 def add_layer(widget=None):
 	root.descendItem().add_layer(root.descendItem()._al)
-	layers.add(svlgui.Image("media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1,True))
+	layers.add(svlgui.Image(media_path+"media/object_active.png",0,root.descendItem().layers.index(root.descendItem().activelayer)*32,True,MainWindow.layerbox,16,1,True))
 	print root.descendItem().layers.index(root.descendItem().activelayer)*32
 	#MainWindow.layerbox.draw()
 def delete_layer(widget=None):

@@ -167,6 +167,12 @@ if sys.platform=="linux2":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	
+	#If we can import this, we are in the install directory. Mangle media paths accordingly.
+	try:
+		from distpath import media_path
+	except:
+		media_path = ""
 	#app = GUI.application()
 	SYSTEM="osx"
 	TEMPDIR = "/tmp"
@@ -2140,7 +2146,7 @@ class OverlayWindow:
 			# Clear background to transparent black
 			cr.set_source_rgba(0.0,0.0,0.0,2.0-(time.time()-startime))
 			cr.paint()
-			image = "media/logo-transparent.png"
+			image = media_path+"media/logo-transparent.png"
 			surface = cairo.ImageSurface.create_from_png(image)
 			pat = cairo.SurfacePattern(surface)
 			cr.set_source(pat)
@@ -2233,7 +2239,7 @@ class ColorSelectionWindow:
 				pass
 			group._onMouseMove = dummy
 			canvas.add(group,0,0)
-			im = Image("media/colors.png",skipl=True)
+			im = Image(media_path+"media/colors.png",skipl=True)
 			group.add(im)
 			group.window = win
 			group.canvas = canvas
@@ -2379,10 +2385,10 @@ class FramesCanvas(Canvas):
 		if SYSTEM == 'osx':
 			self.canvas.draw = self._draw
 			self.canvas.mouse_down = self.mouse_down
-			self.ackfr = GUI.Image(file = "media/keyframe_active.png")
-			self.inackfr = GUI.Image(file = "media/keyframe_inactive.png")
-			self.acfr = GUI.Image(file = "media/frame_active_tween.png")
-			self.inacfr = GUI.Image(file = "media/frame_inactive_tween.png")
+			self.ackfr = GUI.Image(file = media_path+"media/keyframe_active.png")
+			self.inackfr = GUI.Image(file = media_path+"media/keyframe_inactive.png")
+			self.acfr = GUI.Image(file = media_path+"media/frame_active_tween.png")
+			self.inacfr = GUI.Image(file = media_path+"media/frame_inactive_tween.png")
 	def _draw(self,cr,update_rect):
 		for k in xrange(len(self.root.descendItem().layers)):
 			FRAMES = self.root.descendItem().layers[k].frames
