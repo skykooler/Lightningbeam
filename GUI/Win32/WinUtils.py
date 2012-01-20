@@ -85,8 +85,9 @@ class WinMessageReflector(object):
         try:
             code = HIWORD(wParam)
             id = LOWORD(wParam)
-            if id:
-                self._win_menu_command(id)
+            if id != 0:
+				if self != win_none_wrapper:
+					self._win_menu_command(id)
             else:
                 name = win_command_map.get(code)
                 if name:
