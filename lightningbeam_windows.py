@@ -208,6 +208,8 @@ class MainWindowOSX:
 		self.toolbox.buttons[3][1].set_image("media/paintbrush.png")
 		self.toolbox.buttons[4][0].set_image("media/pen.png")
 		self.toolbox.buttons[4][1].set_image("media/paintbucket.png")
+		self.toolbox.buttons[5][0].set_image("media/line_color.png")	# TODO: make these canvases
+		self.toolbox.buttons[5][1].set_image("media/fill_color.png")
 		self.toolbox.buttons[0][0].onPress = select_any
 		self.toolbox.buttons[0][1].onPress = lasso
 		self.toolbox.buttons[1][0].onPress = resize_any
@@ -220,6 +222,10 @@ class MainWindowOSX:
 		self.toolbox.buttons[4][1].onPress = paint_bucket
 		self.toolbox.buttons[5][0].onPress = lambda self1: svlgui.ColorSelectionWindow("line")#,linegroup)#,self.linecanvas)
 		self.toolbox.buttons[5][1].onPress = lambda self1: svlgui.ColorSelectionWindow("fill")#,linegroup)#,self.fillcanvas)
+		self.toolbox.buttons[0][1]._int().enabled = False
+		self.toolbox.buttons[1][0]._int().enabled = False
+		self.toolbox.buttons[3][0]._int().enabled = False
+		self.toolbox.buttons[4][0]._int().enabled = False
 		self.scriptwindow = svlgui.TextView()
 		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
 		def setmode(self):
