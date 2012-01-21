@@ -143,13 +143,21 @@ def simplify_shape(shape,mode,iterations):
 					cax=pcx-pax;
 					cay=pcy-pay;
 					ca=math.sqrt(cax*cax+cay*cay);
-					cosB=-(ca*ca-bc*bc-ab*ab)/(2*bc*ab);
+					try:
+						cosB=-(ca*ca-bc*bc-ab*ab)/(2*bc*ab);
+					except ZeroDivisionError:
+						cosB=-1 # Two of the points overlap; the best thing to do is delete one.
 					try:
 						acosB=math.acos(cosB)*180/math.pi;
 					except ValueError:
 						acosB=0
-					if acosB>(165-500/(ab+bc)):	# at least 15 degrees away from straight angle
-						del shape[j]
+					try:
+						if acosB>(165-500/(ab+bc)):	# at least 15 degrees away from straight angle
+							del shape[j]
+					except ZeroDivisionError:
+						# Either both points overlap or one is imaginary. Kudos to you if you manage
+						# to create a point with an imaginary coordinate in Lightningbeam.
+						del shape[j]	
 		if mode=="smooth":
 			shape = catmullRom2bezier([shape[0]]*2+shape+[shape[-1]])
 			print shape
