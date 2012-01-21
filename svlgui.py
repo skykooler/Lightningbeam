@@ -1,4 +1,4 @@
-#! /usr/bin/python
+﻿#! /usr/bin/python
 # -*- coding:utf-8 -*-
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
@@ -199,6 +199,7 @@ elif sys.platform=="win32":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	media_path = ""
 	SYSTEM="osx"
 	TEMPDIR="C:\\Windows\\Temp"
 	sep = "\\"
@@ -209,6 +210,7 @@ elif sys.platform=="linux-armv6l":
 	droid = android.Android()
 	SYSTEM="android"
 	TEMPDIR="/tmp"		# TODO:FIXTHIS
+	media_path = ""
 	tb = ""
 	sep = "/"
 	print str(sys.platform)
@@ -232,6 +234,7 @@ elif sys.platform=="darwin":
 	SYSTEM_FONTS = list(Cocoa.NSFontManager.sharedFontManager().availableFontFamilies())
 	FONT_PATH = "/Library/Fonts/"
 	FONT = u'Times New Roman'
+	media_path = ""
 	#app = GUI.application()
 	SYSTEM="osx"
 	TEMPDIR="/tmp"
