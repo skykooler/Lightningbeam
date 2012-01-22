@@ -1113,6 +1113,7 @@ class Shape (object):
 		self.shapedata=[]
 		self.filled=False
 		self.type="Shape"
+		self.iname = None
 		####################-----TEMPORARY-----#########################
 		self.name = "s"+str(int(random.random()*10000))+str(SITER)
 		SITER+=1
