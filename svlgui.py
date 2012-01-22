@@ -715,11 +715,11 @@ class Frame(Widget):
 				self.frame.height = self.height
 				# Setting the height to 0 doesn't work on Linux, so we hack around it
 				if PLATFORM.startswith("linux"):
-					self.frame._gtk_inner_widget.set_visible(True)
+					self.frame._gtk_inner_widget.set_property('visible', True)
 			else:
 				self.frame.height = 0
 				if PLATFORM.startswith("linux"):
-					self.frame._gtk_inner_widget.set_visible(False)
+					self.frame._gtk_inner_widget.set_property('visible', False)
 			print "visible:",visible
 
 class Scale(Widget):
