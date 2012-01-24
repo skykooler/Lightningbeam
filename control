@@ -2,8 +2,12 @@ Package: lightningbeam
 Version: 1.0.0-alpha2
 Section: graphics
 Priority: optional
-Architecture: any
+Architecture: all
 Installed-size: 27000
+<<<<<<< HEAD
 Depends: bash, python, libc
+=======
+Depends: bash, python, python-imaging
+>>>>>>> 783687aeb3bb92c515f31f44b919bb0102d64d2f
 Maintainer: skycooler@gmail.com
 Description: Lightningbeam is an open-source animated content creation tool.
