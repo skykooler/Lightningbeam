@@ -185,6 +185,10 @@ class MainWindowAndroid:
 									
 class MainWindowOSX:
 	def __init__(self):
+		if process_exists("unity"):
+			unity = True
+		else:
+			unity = False
 		self.window = svlgui.Window("Lightningbeam")
 		self.menu = svlgui.Menu(True, None)
 		self.stage = svlgui.Canvas(800,600)
@@ -325,12 +329,20 @@ class MainWindowOSX:
 								[self.textvarentry,self.textvarlabel._int(),None,self.fontsizentry._int()+3,None,"nw",""],
 								[self.thwaccel,self.tfontbutton._int(),None,self.textvarlabel._int()+3,None,"nw",""])
 		self.textvarentry.text=""
-		self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
-								#[self.paintbox,0,245,0,0,"nws","v"],
+		if unity:
+			self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
+								#[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
+								[self.timelinebox,self.toolbox._int()+148,-500,0,100,"new","hv"],
+								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,100,"n","v"],
+								[self.docbox,self.toolbox._int(),0,-200,0,"wse", ""],
+								[self.textbox,self.toolbox._int(),0,-200,0,"wse", ""],
+								[self.scriptwindow,self.timelinebox._int(),0,0,self.docbox._int(),"nse", "hv"],
+								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,self.docbox._int(),"nsew", "hv"],
+								[self.paintbox,0,self.stage._int(),self.toolbox._int(),None,"nw","v"] )
+		else:
+			self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
-								#[self.timelinebox,self.paintbox._int()+148,-500,0,None,"new","hv"],
 								[self.layerbox,self.toolbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
-								#[self.layerbox,self.paintbox._int(),self.toolbox._int().width+150,0,None,"n","v"],
 								[self.docbox,self.toolbox._int(),0,-200,0,"wse", ""],
 								[self.textbox,self.toolbox._int(),0,-200,0,"wse", ""],
 								[self.scriptwindow,self.timelinebox._int(),0,0,self.docbox._int(),"nse", "hv"],
