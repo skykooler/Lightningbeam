@@ -881,6 +881,7 @@ function SharedObject () {
 	this.data = {}
 	this.flush = function () {
 		localStorage.setItem(this._name, this.data)
+		//TODO: onStatus
 	}
 	this.clear = function () {
 		localStorage.removeItem(this._name)
@@ -919,6 +920,52 @@ SharedObject.getLocal = function (name, localPath, secure) {
 		return so
 	}
 	//TODO: localPath should allow changing domain access; secure should force HTTPS.
+}
+
+function LoadVars () {
+	this.onData = function () {}
+	this.onHTTPStatus = function () {}
+	this.onLoad = function () {}
+	this.send = function (url, target, method) {
+		if (!method){
+			method="POST"
+		}
+		var xmlhttp;
+		xmlhttp=new XMLHttpRequest();
+		xmlhttp.onreadystatechange=function() {
+			if (xmlhttp.readyState==4 && xmlhttp.status==200) {
+				if (target=="_self"){
+					//TODO
+				}
+				else if (target=="_blank"){
+					consoleRef=window.open('','Response','scrollbars=1,resizable=1')
+					consoleRef.document.writeln(xmlhttp.responseText)
+				}
+			}
+		}
+		xmlhttp.open(method,url,true);
+		xmlhttp.send();
+	}
+	this.sendAndLoad = function (url, target, method) {
+		if (!method){
+			method="POST"
+		}
+		var xmlhttp;
+		xmlhttp=new XMLHttpRequest();
+		xmlhttp.onreadystatechange=function() {
+			if (xmlhttp.readyState==4 && xmlhttp.status==200) {
+				//TODO: parse response, load into current object
+			}
+		}
+		xmlhttp.open(method,url,true);
+		xmlhttp.send();
+	}
+	
+	Object.defineProperty(this, 'onData', {enumerable:false})
+	Object.defineProperty(this, 'onHTTPStatus', {enumerable:false})
+	Object.defineProperty(this, 'onLoad', {enumerable:false})
+	Object.defineProperty(this, 'send', {enumerable:false})
+	Object.defineProperty(this, 'sendAndLoad', {enumerable:false})
 }
 
 //TODO: ContextMenu
