@@ -877,6 +877,50 @@ function TextFormat () {
 	this.url = null
 }
 
+function SharedObject () {
+	this.data = {}
+	this.flush = function () {
+		localStorage.setItem(this._name, this.data)
+	}
+	this.clear = function () {
+		localStorage.removeItem(this._name)
+		for (i in this) {
+			this[i] = undefined
+		}
+	}
+	this.getSize = function () {
+		//This may not be byte-exact, but it should be close enough.
+		return JSON.stringify(this.data).length
+	}
+	this.setFps = function () {
+		//TODO: first understand this. Then, implement it!
+	}
+	Object.defineProperty(this, 'flush', {enumerable:false})
+	Object.defineProperty(this, 'clear', {enumerable:false})
+	Object.defineProperty(this, '_name', {enumerable:false})
+	Object.defineProperty(this, 'getSize', {enumerable:false})
+	Object.defineProperty(this, 'setFps', {enumerable:false})
+}
+SharedObject.list = {}
+for (var i in localStorage) {
+	SharedObject.list[i] = new SharedObject()
+	SharedObject.list[i]._name = i
+	SharedObject.list[i].data = localStorage[i]
+}
+//TODO: Remote shared objects
+SharedObject.getLocal = function (name, localPath, secure) {
+	if (name in SharedObject.list) {
+		return SharedObject.list[name]
+	}
+	else {
+		var so = new SharedObject()
+		so._name = name
+		SharedObject.list[name] = so
+		return so
+	}
+	//TODO: localPath should allow changing domain access; secure should force HTTPS.
+}
+
 //TODO: ContextMenu
 
 
