@@ -32,6 +32,7 @@ function _timerBase () {
 	this.remove = function (item) {
 		delete this.funcs[item._id];
 	}
+	this.nextime = new Date().getTime()
 	this.iterate = function() {
 		canvas = Buffers[DrawingBuffer];
 
@@ -59,10 +60,14 @@ function _timerBase () {
 			Buffers[1-DrawingBuffer].style.visibility='hidden';
 			Buffers[DrawingBuffer].style.visibility='visible';
 			_lastmouse=[_root._xmouse,_root._ymouse]
+			this.nextime = this.nextime+1000/fps
+			setTimeout('Timer.iterate()', this.nextime-new Date().getTime())
 		}
 	}
 	
-	setInterval('Timer.iterate()', 1000/fps)
+	setTimeout('Timer.iterate()', 1000/fps)
+	
+	//setInterval('Timer.iterate()', 1000/fps)
 }
 
 function _eventBase () {
