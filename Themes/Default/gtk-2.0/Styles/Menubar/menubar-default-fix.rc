@@ -1,0 +1,18 @@
+include						"Styles/Menubar/menubar-fix.rc"
+
+style "menubar-fix"				= "default"	
+{
+	xthickness				= 3
+	ythickness				= 2
+	bg_pixmap[NORMAL]			 = "Fixes/foobix.png"
+}
+
+widget_class "*<GtkMenuBar>"	           	style "menubar-fix"
+
+style "inkscape-menubar"
+{
+	bg[NORMAL]				= @bg_color
+	bg_pixmap[NORMAL]			 = "Fixes/gradient-alt.png"
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget*GtkMenuBar"	style:highest "inkscape-menubar"

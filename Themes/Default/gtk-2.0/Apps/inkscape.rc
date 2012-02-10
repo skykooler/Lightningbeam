@@ -1,0 +1,46 @@
+style "inkscape-spin"				= "spinbutton"
+{
+	xthickness				= 3
+	ythickness				= 3
+}
+
+style "inkscape-statusbar" 			= "shadows-fix"	
+{
+	xthickness 				= 0
+	ythickness 				= 0
+	
+	engine "pixmap" 
+	{
+		image
+		{
+			function		= RESIZE_GRIP
+			recolorable		= TRUE
+			detail			= "statusbar"
+			overlay_file		= "Handles/resize_grip.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+		}
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/text-entry.png"
+			border			= { 4, 4, 5, 4}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "gtkmm__GtkWindow.SPDesktopWidget.*<GtkStatusbar>*"	style:highest "inkscape-statusbar"
+#widget_class "gtkmm__GtkWindow.SPDesktopWidget.*<GtkStatusbar>*<GtkEventBox>.GtkTable.*" style:highest "inkscape-spin"

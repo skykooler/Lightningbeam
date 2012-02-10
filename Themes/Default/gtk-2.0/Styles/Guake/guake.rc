@@ -1,0 +1,32 @@
+style "guake-window"
+{
+
+	engine "pixmap"
+	{
+		image
+		{
+			function 		= FLAT_BOX
+			file 			= "Apps/Guake/guake.png"
+			border			= { 0, 0, 245, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "guake-frame"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function 		= FLAT_BOX
+			file 			= "Apps/Guake/patch.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+
+widget "window_root" 				style "guake-window"
+widget "window_root.*.event_tabs"		style "guake-frame"

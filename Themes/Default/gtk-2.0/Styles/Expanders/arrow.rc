@@ -1,0 +1,118 @@
+style "expander"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= EXPANDED
+			state			= NORMAL
+			file			= "Expander/expander-expanded.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= EXPANDED
+			state			= PRELIGHT
+			file			= "Expander/expander-expanded.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= EXPANDED
+			state			= ACTIVE
+			file			= "Expander/expander-expanded-active.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_EXPANDED
+			state			= NORMAL
+			file			= "Expander/expander-semi.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_EXPANDED
+			state			= PRELIGHT
+			file			= "Expander/expander-semi.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_EXPANDED
+			state			= ACTIVE
+			file			= "Expander/expander-semi-active.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= COLLAPSED
+			state			= NORMAL
+			file			= "Expander/expander-collapsed.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= COLLAPSED
+			state			= PRELIGHT
+			file			= "Expander/expander-collapsed.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= COLLAPSED
+			state			= ACTIVE
+			file			= "Expander/expander-collapsed-active.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_COLLAPSED
+			state			= NORMAL
+			file			= "Expander/expander-semi.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_COLLAPSED
+			state			= PRELIGHT
+			file			= "Expander/expander-semi.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			expander_style		= SEMI_COLLAPSED
+			state			= ACTIVE
+			file			= "Expander/expander-semi-active.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkExpander" 	style "expander"
+class "GtkTreeView" 	style "expander"
+class "GtkCTree" 	style "expander"

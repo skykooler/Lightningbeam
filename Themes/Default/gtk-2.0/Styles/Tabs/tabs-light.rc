@@ -1,0 +1,109 @@
+include						"Styles/Tabs/Mozilla/tabs-light.rc"
+
+style "tabs-exaile"				= "default"
+{
+	xthickness    		        	= 8
+	ythickness    		        	= 6
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs_alt/tab-active-top.png"
+			border			= { 6, 6, 14, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs_alt/tab-active-bottom.png"
+			border			= { 6, 6, 8, 6}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-left.png"
+			border			= { 14, 6, 8, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-right.png"
+			border			= { 6, 14, 8, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+style "foobix-add-button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Tabs_alt/foobix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkVBox.GtkNotebook.GtkEventBox" style "foobix-add-button"
+
+widget_class "*<GtkNotebook>"			style:highest "tabs-light"
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkNotebook"	style:highest "tabs-exaile"

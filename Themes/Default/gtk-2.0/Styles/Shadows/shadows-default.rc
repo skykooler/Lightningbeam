@@ -1,0 +1,22 @@
+include						"Styles/Shadows/shadows.rc"
+
+style "shadow-with-background"			= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-in-15.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+#fix for white background bellow transparent shadows
+class "GtkViewport"				style "shadow-with-background"
+#calendar widget fix
+widget_class "*.<GtkCalendar>" 			style "shadow-with-background"

@@ -1,0 +1,89 @@
+style "tabs-smooth-flat"			= "default"
+{
+	GtkNotebook::tab-overlap 		= 3
+
+	xthickness    		        	= 6
+	ythickness    		        	= 3
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-bottom.png"
+			border			= { 8, 11, 1, 7}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-top.png"
+			border			= { 8, 11, 7, 1}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-left.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-right.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-top-flat.png"
+			border			= { 8, 8, 11, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-bottom-flat.png"
+			border			= { 8, 8, 0, 11}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-left-flat.png"
+			border			= { 11, 9, 8, 12}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-right-flat.png"
+			border			= { 9, 11, 8, 12}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+widget "MozillaGtkWidget*Notebook"		style:highest "tabs-smooth-flat"

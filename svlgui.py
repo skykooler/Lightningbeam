@@ -220,6 +220,7 @@ elif sys.platform=="darwin":
 	import misc_funcs
 	import tarfile
 	import tempfile
+	#'''
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
@@ -230,13 +231,17 @@ elif sys.platform=="darwin":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	SYSTEM="osx"
+	'''
+	import pyglet	# Using Pyglet. Even more experimental. As in doesn't work yet.
+	SYSTEM="pyglet"
+	'''  # comment these out to use pyglet
 	import Cocoa
 	SYSTEM_FONTS = list(Cocoa.NSFontManager.sharedFontManager().availableFontFamilies())
 	FONT_PATH = "/Library/Fonts/"
 	FONT = u'Times New Roman'
 	media_path = ""
 	#app = GUI.application()
-	SYSTEM="osx"
 	TEMPDIR="/tmp"
 	sep = "/"
 	
@@ -356,6 +361,8 @@ class Window:
 			self.window.show()
 		elif SYSTEM=="html":
 			self.window = htmlobj("div")
+		elif SYSTEM=="pyglet":
+			self.window = pyglet.window.Window(resizable=True)
 
 	def add(self, obj,expand=False):
 		objint = obj._int()		#Internal representation
@@ -368,6 +375,8 @@ class Window:
 			objint.data["width"] = "100%"
 			objint.data["height"] = "100%"
 			self.window.add(objint)
+		elif SYSTEM=="pyglet":
+			pass	# how to do?
 	def destroy(self,data=None):
 		__windowlist__.remove(self)
 		if __windowlist__==[]:
@@ -378,6 +387,8 @@ class Window:
 	def maximize(self):
 		if SYSTEM=="gtk":
 			self.window.maximize()
+		elif SYSTEM=="pyglet":
+			self.window.maximize()
 	def set_title(self, title):
 		if SYSTEM=="gtk":
 			self.window.set_title(title)
@@ -385,9 +396,13 @@ class Window:
 			self.window.title = title
 		elif SYSTEM=="html":
 			jscommunicate("document.title = "+title)
+		elif SYSTEM=="pyglet":
+			self.window.set_caption(title)
 	def resize(self,x,y):
 		if SYSTEM=="osx":
 			self.window.resize(width=x,height=y)
+		elif SYSTEM=="pyglet":
+			self.window.set_size(width=x, height=y)
 			
 # Widget meta-class - to prevent code duplication
 # I don't seem to have any code in here. :(
@@ -437,6 +452,9 @@ class Menu(Widget):
 		elif SYSTEM=="html":
 			pass
 			# I need to figure out how the menus work here.
+		elif SYSTEM=="pyglet":
+			pass
+			#Ditto.
 	def _int(self):		# Returns internal GUI-specific item 
 		return self.mb
 
@@ -491,6 +509,8 @@ class VBox(Widget):
 			self.vbox=GUI.Column(seq)
 		elif SYSTEM=="html":
 			self.vbox = htmlobj("table")
+		elif SYSTEM=="pyglet":
+			self.vbox=None	#TODO
 	def _int(self):		# Returns internal GUI-specific item 
 		return self.vbox
 	def add(self,obj,expand=False,fill=True):
@@ -523,6 +543,8 @@ class HBox(Widget):
 			self.hbox = htmlobj("table")
 			self.tr = htmlobj("tr")
 			self.hbox.add(self.tr)
+		elif SYSTEM=="pyglet":
+			self.hbox=None	#TODO
 	def _int(self):		# Returns internal GUI-specific item 
 		return self.hbox
 	def add(self,obj,expand=False,fill=False):
@@ -540,21 +562,32 @@ class Label(Widget):
 	def _gettext(self):
 		if SYSTEM=="osx":
 			return self.label.text
+		elif SYSTEM=="pyglet":
+			return self.label.text
 	def _settext(self,text):
 		if SYSTEM=="osx":
+			self.label.text=text
+		elif SYSTEM=="pyglet":
 			self.label.text=text
 	text = property(_gettext,_settext)
 	def __init__(self, text=""):
 		if SYSTEM=="osx":
 			self.label = OSXLabel()
 			self.label.text = text
+		elif SYSTEM=="pyglet":
+			self.label = pyglet.text.Label(text)
 	def _int(self):
-		if SYSTEM=="osx":
-			return self.label
+		return self.label
 	def disable(self):
-		self.label.enabled = False
+		if SYSTEM=="osx":
+			self.label.enabled = False
+		elif SYSTEM=="pyglet":
+			self.label.color = (0, 0, 0, 100)
 	def enable(self):
-		self.label.enabled = True
+		if SYSTEM=="osx":
+			self.label.enabled = True
+		elif SYSTEM=="pyglet":
+			self.label.color = (0, 0, 0, 255)
 class RadioGroup(Widget):
 	def __getitem__(self,num):
 		return self.buttons[num]
@@ -622,6 +655,8 @@ class Button(Widget):
 #nicate('ids["+self.tid+"]._onPress('+event.pageX+','+event.pageY+')')"})
 			self.button = htmlobj("button",{"onmousedown":"pythoncommun\
 icate('ids["+str(self.tid)+"]._onPress(ids["+str(self.tid)+"])')"})
+		elif SYSTEM=="pyglet":
+			self.button = None	#TODO
 	def _int(self):
 		return self.button
 	def set_text(self, text):
@@ -663,16 +698,49 @@ class ButtonBox(Widget):
 		self.vbox.add(obj)
 		
 class ScrolledWindow(Widget):
+	if SYSTEM=="pyglet":
+		scroll_imgs =  [pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/horizontal_trough.png"),
+						pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/scrollbar_horizontal.png"),
+						pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/scrollbar_horizontal_prelight.png"),
+						pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/vertical_trough.png"),
+						pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/scrollbar_vertical.png"),
+						pyglet.image.load("Themes/Default/gtk-2.0/Scrollbar/scrollbar_vertical_prelight.png")]
 	#sch controls the horizontal scrollbar, scv controls the vertical one
 	def __init__(self,sch=True,scv=True):
 		if SYSTEM=="gtk":
 			self.sw = gtk.ScrolledWindow()
 			self.sw.set_policy(gtk.POLICY_ALWAYS if sch else gtk.POLICY_AUTOMATIC, gtk.POLICY_ALWAYS if scv else gtk.POLICY_AUTOMATIC)
+		elif SYSTEM=="pyglet":
+			self.x = 0
+			self.y = 0
+			self.clickedhoriz = False
+			self.clickedvert = False
+			self.xoffset = 0	# Offset from mouse click point
+			self.yoffset = 0	#
+			self.hx = 0		# Scroll distance
+			self.vy = 0
+			self.horiztrough = pyglet.sprite.Sprite(self.scroll_imgs[0])
+			self.vertrough = pyglet.sprite.Sprite(self.scroll_imgs[3])
+			self.horizbar = pyglet.sprite.Sprite(self.scroll_imgs[1])
+			self.vertbar = pyglet.sprite.Sprite(self.scroll_imgs[4])
+			pass 	# TODO: Content.					
 	def _int(self):
 		return self.sw
 	def add(self,obj):
 		objint = obj._int()
 		self.sw.add_with_viewport(objint)
+	def draw(self):
+		#Pyglet-specific.
+		if not SYSTEM=="pyglet":
+			print "Called from wrong GUI!"
+			return
+		self.horiztrough.set_position(self.x, self.y)
+		self.horiztrough.draw()
+		if self.clickedhoriz:
+			self.clickedvert = False # we should never be dragging two scrollbars at the same time!
+			self.horizbar.image = self.scroll_imgs[2]
+			self.horizbar.set_postion(self.x+self.hx, self.y)
+			
 
 class Frame(Widget):
 	# PyGUI, HTML only right now
@@ -745,6 +813,8 @@ class CheckBox(Widget):
 		if SYSTEM=="osx":
 			self.box = OSXCheckBox(text)
 			self.box.action = self._action
+		elif SYSTEM=="pyglet":
+			self.checked = False
 	def _int(self):
 		return self.box
 	def _action(self):
@@ -2458,6 +2528,8 @@ def main():
 	elif SYSTEM=="html":
 		print __windowlist__[0].window
 		pass
+	elif SYSTEM=="pyglet":
+		pyglet.app.run()
 
 def quit():
 	#Self-descriptive

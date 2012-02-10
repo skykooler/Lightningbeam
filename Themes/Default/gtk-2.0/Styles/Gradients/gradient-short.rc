@@ -1,0 +1,6 @@
+include						"Styles/Surfaces/surfaces-short.rc"
+include						"Styles/Banshee/banshee-short.rc"
+include						"Styles/Shadows/shadows-short.rc"
+include 					"Styles/check-radio.rc"
+include 					"Styles/button.rc"
+include						"Styles/Entry/entry-short.rc"

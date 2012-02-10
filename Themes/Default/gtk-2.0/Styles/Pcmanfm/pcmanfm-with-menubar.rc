@@ -1,0 +1,20 @@
+include						"Styles/Pcmanfm/pcmanfm.rc"
+
+style "pcmanfm-window"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/pcmanfm/pcmanfm.png"
+			border			= { 0, 0, 50, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+#PCMANFM
+class "FmMainWin"				style:highest "pcmanfm-window"

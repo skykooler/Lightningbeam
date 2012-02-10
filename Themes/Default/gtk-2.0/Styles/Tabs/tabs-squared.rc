@@ -1,0 +1,215 @@
+style "tabs-squared"				= "default"
+{
+
+	xthickness    		        	= 8
+	ythickness    		        	= 2
+
+	GtkNotebook::tab-overlap 		= 12
+	GtkNotebook::tab-curvature		= 2
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/htab.png"
+			border			= { 8, 8, 6, 5}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/htab.png"
+			border			= {  8, 8, 6, 5}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/vtab.png"
+			border			= {  6, 6, 9, 7}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/vtab.png"
+			border			= { 6, 6, 9, 7}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-top-squared.png"
+			border			= { 12, 12, 12, 12}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-bottom-squared.png"
+			border			= { 12, 12, 12, 12}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-left-squared.png"
+			border			= { 17, 10, 12, 10}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-right-squared.png"
+			border			= { 10, 17, 12, 10}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+style "tabs-exaile"				= "default"
+{
+
+	xthickness    		        	= 8
+	ythickness    		        	= 6
+
+	GtkNotebook::tab-overlap 		= 12
+	GtkNotebook::tab-curvature		= 2
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/htab.png"
+			border			= { 8, 8, 6, 5}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/htab.png"
+			border			= {  8, 8, 6, 5}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/vtab.png"
+			border			= {  6, 6, 9, 7}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs/vtab.png"
+			border			= { 6, 6, 9, 7}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs/tab-active-top-squared.png"
+			border			= { 12, 12, 16, 12}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs/tab-active-bottom-squared.png"
+			border			= { 12, 12, 12, 16}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-left-squared.png"
+			border			= { 17, 10, 12, 10}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs/tab-active-right-squared.png"
+			border			= { 10, 17, 12, 10}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+style "notebook-text"
+{
+	GtkWidget::interior-focus		= 0
+	fg[ACTIVE] 				= "#f0f0f0"
+}
+
+style "foobix-add-button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Tabs/foobix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkVBox.GtkNotebook.GtkEventBox" style "foobix-add-button"
+
+widget_class "*<GtkNotebook>"					style:highest "tabs-squared"
+
+widget_class "GeditWindow*<GtkNotebook>*GeditTab*<GtkLabel>"	style "notebook-text"
+widget_class "*.<GtkNotebook>.<GtkLabel>"			style "notebook-text"
+widget_class "*.<GtkNotebook>.<GtkHBox>.<GtkLabel>"		style "notebook-text"
+widget_class "*.<GtkNotebook>.*<GtkEventBox>*<GtkLabel>" 	style "notebook-text"
+
+#foobix tabs text
+widget_class "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkVBox.GtkNotebook.GtkHBox.GtkHBox.GtkLabel" style "notebook-text"
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkNotebook"	style:highest "tabs-exaile"

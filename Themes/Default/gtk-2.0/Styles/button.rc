@@ -1,0 +1,328 @@
+
+style "button" 					= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkButton::inner-border			= { 4, 4, 2, 4}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Button/button-focus.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "buttondefault"
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Button/button-normal.png"
+			border			={ 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Button/button-prelight.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= IN
+			file			= "Button/button-pressed-prelight.png"
+			border			= { 9, 9, 7, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= OUT
+			file			= "Button/button-inactive.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= IN
+			file			= "Button/button-inactive.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= ACTIVE
+			file			= "Button/button-pressed.png"
+			border			= { 9, 9, 7, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+class "GtkButton"				style "button"
+
+style "toolbutton"				= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Button/button-normal.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkToolbar>*<GtkToggleButton>"	style "toolbutton"
+widget_class "*<GtkToolbar>.*<GtkButton>"	style "toolbutton"
+
+style "combo" 					= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Button/button-prelight.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= VLINE
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			state			= INSENSITIVE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			overlay_file		= "Arrows/arrow-down-insens.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+widget_class "*<GtkComboBox>*<GtkToggleButton>*"	style "combo"
+
+style "optionmenu" 				= "button"
+{
+	xthickness 				= 4
+	ythickness 				= 4
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= TAB
+			state			= INSENSITIVE
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-down-insens.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+		}
+		image
+		{
+			function		= TAB
+			recolorable		= TRUE
+			state			= NORMAL
+			overlay_file		= "Arrows/arrow-down.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+		}
+		image
+		{
+			function		= TAB
+			recolorable		= TRUE
+			state			= PRELIGHT
+			overlay_file		= "Arrows/arrow-down.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+class "GtkOptionMenu"				style "optionmenu"
+
+style "list-header"				= "button"
+{
+	GtkButton::inner-border			= { 2, 2, 0, 2}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+
+	xthickness				= 0
+	ythickness				= 0
+
+	engine "pixmap" 
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		# Normal
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			shadow          	= OUT
+			state			= NORMAL
+			file            	= "Button/list_header.png"
+			border         		= { 2, 2, 0, 2}
+			stretch         	= TRUE
+		}
+		# Prelight / Mouseover
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= PRELIGHT
+			file            	= "Button/list_header-prelight.png"
+			border          	= { 2, 2, 0, 2}
+			stretch         	= TRUE
+		}
+		# Active
+		image
+		{
+			function       		= BOX
+			recolorable     	= TRUE
+			state			= ACTIVE
+			file			= "Button/list_header-pressed.png"
+			border          	= { 2, 2, 0, 2}
+			stretch         	= TRUE
+		}
+		# Selected
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= SELECTED
+			file			= "Button/list_header.png"
+			border          	= { 2, 2, 0, 2}
+			stretch         	= TRUE
+		}
+		# Inactive
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= INSENSITIVE
+			file			= "Button/list_header.png"
+			border          	= { 2, 2, 0, 2}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*.<GtkTreeView>.<GtkButton>" 	style:highest "list-header"
+widget_class "*.<GtkCTree>.<GtkButton>"    	style:highest "list-header"
+widget_class "*.<GtkList>.<GtkButton>"     	style:highest "list-header"
+widget_class "*.<GtkCList>.<GtkButton>"    	style:highest "list-header"
+
+# Workarounds for Evolution
+widget_class "EShellWindow*.ECanvas"    	style "list-header"
+
+style "no-shadow-on-buttons"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= OUT
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= ETCHED_IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= ETCHED_OUT
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*.<GtkButton>.*"			style "no-shadow-on-buttons"
+
+style "no-focus"				= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+#widget_class "*<GtkToolButton>"			style "no-focus"
+#widget_class "*<GtkToggleButton>"		style "no-focus"

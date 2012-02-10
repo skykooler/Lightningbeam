@@ -1,0 +1,79 @@
+style "nautilus-breadcrumbs"
+{
+	xthickness 				= 12
+	ythickness 				= 0
+	
+	GtkButton::child-displacement-y		= 0
+	GtkButton::inner-border			= { 0, 0, 0, 2}
+
+	engine "pixmap"
+	{	
+		image
+		{
+			function        	= BOX
+			shadow			= OUT
+			recolorable     	= TRUE
+			state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/Default/breadcrumb_prelight.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}		
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			shadow			= IN
+			state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/Default/breadcrumb_prelight.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= NORMAL
+			file			= "Apps/nautilus-elementary/Default/breadcrumb.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/Default/breadcrumb.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= ACTIVE
+			file			= "Apps/nautilus-elementary/Default/breadcrumb.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}  
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= INSENSITIVE
+			file			= "Apps/nautilus-elementary/Default/breadcrumb.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		} 
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= SELECTED
+			file			= "Apps/nautilus-elementary/Default/breadcrumb.png"
+			border			= { 0, 12, 3, 6}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*NautilusPathBar.*ToggleButton*" 	style:highest "nautilus-breadcrumbs"

@@ -1,0 +1,150 @@
+style "shadow-in-text"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-in.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+class "GtkScrolledWindow"			style "shadow-in-text"
+class "GtkText*"				style "shadow-in-text"
+
+
+#this removes shadow in where it's called
+style "shadows-fix"
+{
+	xthickness				= 0
+	ythickness				= 0
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+#widget_class "*GtkNotebook*GtkScrolledWindow"  style "shadows-fix"
+#gimp fixes
+widget_class "*GimpColorSelection*GtkFrame"	style "shadows-fix"
+class "GimpFgBgEditor"				style "shadows-fix"
+widget "MathWindow.GtkVBox.GtkVBox.GtkScrolledWindow.GtkViewport" 				style "shadows-fix"
+widget "GeanyMainWindow.GtkVBox.GtkVPaned.GtkScrolledWindow.GtkViewport" 			style "shadows-fix"
+widget "GeanyMainWindow.GtkVBox.GtkVPaned.GtkHPaned.GtkNotebook.GtkScrolledWindow.GtkViewport"	style "shadows-fix"
+#gmpc album view
+widget "GtkWindow.GtkVBox.GtkVBox.GtkHPaned.GtkVPaned.GtkVBox.GtkEventBox.GtkVBox.GtkHBox.GtkScrolledWindow.GtkViewport" style "shadows-fix"
+
+style "shadow-transparent"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-etched-in.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+#thickness for gnome-screenshot and other apps
+class "GtkAspectFrame"				style "shadow-transparent"
+widget_class "MailCappletShell.*GtkViewport" 	style "shadow-transparent"
+widget_class "GtkWindow.*.softwarecenter+view+softwarepane+SoftwarePane" 		style "shadow-transparent"#"shadows-fix"
+#widget "GeanyMainWindow.GtkVBox.GtkVPaned.GtkScrolledWindow" style "shadow-transparent"
+widget "GeanyMainWindow.GtkVBox.GtkVPaned.GtkHPaned.GtkNotebook.GtkScrolledWindow"	style "shadow-transparent"
+#inkscape color picker
+widget "gtkmm__GtkWindow.SPDesktopWidget*GtkViewport" 					style:highest "shadow-transparent"
+
+style "shadow-in-as-etched-in"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= ETCHED_IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-in.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+#fix for Gconf-editor. It  uses etched in instead of in shadows.
+widget_class "GConfEditorWindow.*GtkScrolledWindow" style "shadow-in-as-etched-in"
+
+#fix for Nautilus icons and details views  
+widget "NautilusNavigationWindow.*FM*View" 	style:highest "shadow-in-as-etched-in"
+
+style "frame-shadow"
+{
+	xthickness				= 3
+	ythickness				= 3
+}
+
+widget "*gwibber+gwui+Input"			style "frame-shadow"
+#shotwell fix
+widget "LibraryWindow.*.GtkFrame"		style "frame-shadow"
+
+style "ubuntu-tweak"
+{
+	xthickness				= 0
+	ythickness				= 0
+	
+
+	text[INSENSITIVE]			= "#00ffff"#shade (1.5, @bg_color)
+
+	engine "pixmap" 
+	{
+		# Normal
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			shadow          	= IN
+			state			= NORMAL
+			file            	= "Progress/progressbar.png"
+			border          	= { 3, 3, 4, 2}
+			stretch         	= TRUE
+		}
+		# Prelight / Mouseover
+		image
+		{
+			function        	= BOX
+		}
+		image
+		{
+			function 		= FLAT_BOX
+			state    		= SELECTED
+			border   		= { 2, 2, 2, 2}
+			file     		= "Handles/list-header-highlight.png"
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "*.ubuntutweak+modules+TweakModule.*GtkViewport.*GtkScrolledWindow.GtkTree*" style "ubuntu-tweak"
+

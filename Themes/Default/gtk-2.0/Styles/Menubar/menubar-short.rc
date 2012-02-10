@@ -1,0 +1,38 @@
+include						"Styles/Menubar/menubar.rc"
+
+style "menubar-short"				= "default"	
+{
+	xthickness				= 3
+	ythickness				= 2
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			file			= "Fixes/gradient-alt.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+widget_class "*<GtkMenuBar>"	           	style "menubar-short"
+
+style "inkscape-menubar"
+{
+	bg[NORMAL]				= @bg_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			file			= "Fixes/gradient-alt.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget*GtkMenuBar"	style:highest "inkscape-menubar"

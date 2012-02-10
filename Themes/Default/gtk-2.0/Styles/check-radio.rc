@@ -1,0 +1,232 @@
+style "checkradiobutton"
+{
+	engine "pixmap" 
+	{
+		image 
+		{
+			function 		= FOCUS
+			recolorable 		= TRUE
+			file 			= "Lines/line-h.png"
+			border 			= { 0, 0, 0, 2}
+			stretch 		= TRUE
+		}
+	}
+}
+
+style "checkbutton" 				= "checkradiobutton"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function 		= FOCUS
+			recolorable 		= TRUE
+			file 			= "Check-Radio/highlight.png"
+			border 			= { 20, 0, 0, 2}
+			stretch 		= TRUE
+		}
+		# Unchecked
+		image 
+		{
+			function 		= CHECK
+			recolorable 		= TRUE
+			state 			= NORMAL
+			shadow 			= OUT
+			overlay_file 		= "Check-Radio/check1.png"
+			overlay_stretch 	= FALSE
+		}
+		# Unchecked (mouse over)
+		image 
+		{
+			function 		= CHECK
+			recolorable 		= TRUE
+			state 			= PRELIGHT
+			shadow 			= OUT
+			overlay_file 		= "Check-Radio/check2.png"
+			overlay_stretch 	= FALSE
+		}
+		# Unchecked
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= ACTIVE
+			shadow          	= OUT
+			overlay_file   		= "Check-Radio/check3.png"
+			overlay_stretch 	= FALSE
+		}
+		# Unchecked 
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow          	= OUT
+			overlay_file    	= "Check-Radio/check4.png"
+			overlay_stretch 	= FALSE
+		}
+		# Checked
+		image 
+		{
+			function        	= CHECK
+			recolorable    		= TRUE
+			state 			= NORMAL
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/check5.png"
+			overlay_stretch 	= FALSE
+		}
+		# Checked (mouse over)
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check6.png"
+			overlay_stretch 	= FALSE
+		}
+		# Checked
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= ACTIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/check3.png"
+			overlay_stretch 	= FALSE
+		}
+		# Unchecked
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state			= INSENSITIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/check7.png"
+			overlay_stretch 	= FALSE
+		}
+		#Use this image to draw the highlight when a line with a check box
+		#is moused over.
+		image 
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			stretch			= TRUE
+			file           		= "Check-Radio/checklight.png"
+			border			= { 2, 2, 2, 2 }
+		}
+	}
+}
+
+class "GtkCheckButton"     			style "checkbutton"
+class "GtkCheckMenuItem"   			style "checkbutton"
+
+
+style "radiobutton" 				= "checkradiobutton"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+	engine "pixmap" 
+	{
+		# Not selected
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state			= NORMAL
+			shadow          	= OUT
+			overlay_file    	= "Check-Radio/option1.png"
+			overlay_stretch 	= FALSE
+		}
+		# Not selected (mouse over)
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= OUT
+			overlay_file    	= "Check-Radio/option2.png"
+			overlay_stretch 	= FALSE
+		}
+		# Not selected
+		image 
+		{
+			function        	= OPTION
+			recolorable    		= TRUE
+			state 			= ACTIVE
+			shadow          	= OUT
+			overlay_file    	= "Check-Radio/option3.png"
+			overlay_stretch 	= FALSE
+		}
+		# Insensitive
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow          	= OUT
+			overlay_file    	= "Check-Radio/option6.png"
+			overlay_stretch 	= FALSE
+		}
+		# Selected
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= NORMAL
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option4.png"
+			overlay_stretch 	= FALSE
+		}
+		# Selected (mouse over)
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option5.png"
+			overlay_stretch 	= FALSE
+		}
+		# Selected
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= ACTIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option3.png"
+			overlay_stretch 	= FALSE
+		}
+		# Insensitive
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option7.png"
+			overlay_stretch 	= FALSE
+		}
+		#Use this image to draw the highlight when a line with a radiobutton
+		#is moused over.
+		image 
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			stretch			= TRUE
+			file            	= "Check-Radio/checklight.png"
+			border          	= { 2, 2, 2, 2 }
+		}
+	}
+}
+
+class "GtkRadioButton"     				style "radiobutton"
+class "GtkRadioMenuItem"    				style "radiobutton"
+
+
+#class "GtkRadioButton" 					style "checkradiobutton"
+#class "GtkCheckButton" 					style "checkradiobutton"

@@ -1,0 +1,89 @@
+
+style "chrome-toolbar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "chrome/toolbar.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "chrome-bookmarks"
+{
+		engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "chrome/bookmarks.png"
+			border			= { 0, 0, 0, 3}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "chrome-entry"				= "entry"
+{
+	GtkWidget::interior_focus		= 1
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	engine "pixmap"
+	{
+		# Text-entry 
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			shadow			= OUT
+			state			= NORMAL
+			file			= "Apps/chrome/chrome-entry.png"
+			border			= { 4, 4, 5, 4}
+			stretch			= TRUE
+		}	
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Apps/chrome/chrome-entry.png"
+			border			= { 4, 4, 5, 4}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "chrome-statusbar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/chrome/chrome-statusbar.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-toolbar"						style "chrome-toolbar"
+
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-toolbar.*-button"					style "toolbutton"
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-toolbar.*chrome-app-menu"				style "toolbutton"
+
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-bookmark-bar*chrome-bookmark-bar-other-bookmarks" style "toolbutton"
+
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-bookmark-bar"					style "chrome-bookmarks"
+widget "GtkWindow.chrome-custom-frame-border.*.chrome-find-in-page-entry"				style "chrome-entry"
+widget_class "GtkEntry"											style "chrome-entry"
+widget "GtkWindow.chrome-custom-frame-border.*GtkExpandedContainer.GtkEventBox.GtkVBox.GtkEventBox"	style:highest "chrome-statusbar"

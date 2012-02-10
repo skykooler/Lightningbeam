@@ -1,0 +1,51 @@
+include						"Styles/Panel/panel-light.rc"
+
+style "panel"
+{
+	xthickness				= 1
+	ythickness				= 0
+
+	bg_pixmap[NORMAL]			= "/Panel/panel.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "xfce4-tray"				= "panel-dark"
+{
+	bg_pixmap[NORMAL]			= "Panel/tray.png"
+		
+}
+
+widget "Panel.*.XfceTrayWidget.GtkSocket" 	style:highest "xfce4-tray"
+
+class "PanelApp*"				style "panel"
+class "PanelToplevel*"				style "panel"
+class "*Xfce*Panel*"				style "panel"
+
+widget "*fast-user-switch*"			style "panel"
+widget "PanelToplevel*PanelAppletFrame"		style "panel"
+widget "PanelToplevel*PanelMenuBar"		style "panel"
+widget "PanelToplevel*PanelWidget*"		style "panel"
+widget "*Xfce*Panel*"				style "panel"
+
+widget_class "BonoboPlug*Panel*"		style "panel"
+widget_class "*tray*"				style "panel"
+
+widget "*PanelApplet*"				style "panel"
+
+widget_class "Panel*<GtkButton>"		style "panel-button"
+widget_class "BonoboPlug*Applet*<GtkButton>"	style "panel-button"
+
+widget_class "*Tasklist.*<GtkButton>"		style:highest "taskbar-button"
+
+include						"Styles/Panel/panel.rc"

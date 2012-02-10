@@ -1,0 +1,19 @@
+style "opera-menu"				= "default"
+{
+	xthickness				= 1
+	ythickness				= 1
+
+	engine "pixmap"
+	{
+		image
+		{
+			function 		= BOX
+			recolorable     	= TRUE
+			file			= "Menu/opera-menu.png"
+			border			= { 1, 1, 1, 1}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkMenu"              			style "opera-menu"

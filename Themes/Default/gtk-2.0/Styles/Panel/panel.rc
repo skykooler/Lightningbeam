@@ -1,0 +1,92 @@
+style "pager"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+class "WnckPager"				style "pager"
+widget "*FishApplet*"				style "pager"
+
+style "panel-text"
+{
+	fg[NORMAL]				= "#4D4D4D"
+	fg[PRELIGHT]				= "#5D5D5D"
+	fg[ACTIVE]				= "#ffffff"
+	text[NORMAL]				= "#4D4D4D"
+	text[PRELIGHT]				= "#4D4D4D"
+	text[ACTIVE]				= "#ffffff"
+}
+
+style "panel-handle" 
+{
+    engine "pixmap"
+    {    
+        image
+        {
+		function 			= HANDLE
+        }    
+ 
+	image
+        {
+        	function 			= HANDLE
+        }
+    }
+}
+
+class "PanelAppletFrame" 			style:highest "panel-handle"
+
+#this removes the annoying arrow from the panel menu button.
+style "panel-menu-arrow"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Fixes/none.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= DOWN
+		}
+	}
+}
+
+widget "PanelToplevel*PanelMenuButton"		style "panel-menu-arrow"
+
+style "xfce4-tray-frame"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+		}
+	}
+}
+
+widget "Panel.XfceItembar.XfceInternalPanelPlugin.GtkFrame"	style "xfce4-tray-frame"
+
+style "xfce4-panel-progressbar"
+{
+	engine "murrine"
+	{
+	}
+}
+
+widget "XfceExternalPanelPlugin*GtkEventBox*GtkProgressBar" style "xfce4-panel-progressbar"

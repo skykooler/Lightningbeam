@@ -1,0 +1,40 @@
+widget_class "GtkWindow.*.Widgets+inputBox" 					style "text-view"
+#widget_class "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkVPaned.GtkHBox.GtkHPaned.GtkVBox.GtkScrolledWindow*" style "im-entry-fix"
+widget_class "GtkWindow.*.GtkNotebook.*.GtkScrolledWindow*" 			style "text-view"
+
+style "emesene-button"				= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "MainWindow+MainWindow.GtkVBox.GtkVBox.GtkHBox.GtkHBox.GtkVBox.GtkHBox.GtkButton" style "emesene-button"
+
+
+style "button-wide"
+{
+GtkButton::inner-border	= {0,0,0,0}
+}
+
+widget "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkVBox.GtkStatusbar.GtkFrame.GtkHBox.GtkHBox.GtkToggleButton*" style "button-wide"
+#xchat
+widget "GtkWindow.GtkTable.GtkVBox.GtkHPaned.GtkHPaned.GtkNotebook.GtkVBox.GtkHBox.GtkHBox.GtkToggleButton*" style "button-wide"
+
+style "emesene-connect"				= "default"
+{
+	fg[NORMAL]				= "#e0e0e0"
+	fg[ACTIVE]				= "#e0e0e0"
+	fg[SELECTED]				= "#e0e0e0"
+	fg[PRELIGHT]				= "#f0f0f0"
+}
+
+widget "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkVPaned.GtkHBox.GtkHPaned.GtkVBox.GtkEventBox*" style "emesene-connect"

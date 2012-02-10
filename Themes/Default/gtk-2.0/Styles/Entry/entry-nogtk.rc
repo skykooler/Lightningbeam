@@ -1,0 +1,268 @@
+style "text-entry-nogtk"			= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/No-Gtk/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkEntry"		style "text-entry-nogtk"
+widget "MozillaGtkWidget*GtkEntry"		style "text-entry-nogtk"
+
+style "comboentry-nogtk"			= "default"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::interior_focus		= 0
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/No-Gtk/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "GtkWindow.GtkFixed*GtkCombo*GtkEntry"		style "comboentry-nogtk"
+widget_class "MozillaGtkWidget.GtkFixed*GtkCombo*GtkEntry"	style "comboentry-nogtk"
+
+style "combobutton-nogtk"			= "default"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	GtkButton::inner-border			= { 0, 4, 0, 0}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Entry/No-Gtk/entry-end.png"
+			border			= { 0, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "GtkWindow.GtkFixed.*GtkComboBoxEntry.*GtkToggleButton"	style "combobutton-nogtk"
+widget_class "GtkWindow.GtkFixed.*GtkCombo.*GtkButton"			style "combobutton-nogtk"
+widget_class "MozillaGtkWidget.GtkFixed.*GtkComboBoxEntry.*GtkToggleButton"	style "combobutton-nogtk"
+widget_class "MozillaGtkWidget.GtkFixed.*GtkCombo.*GtkButton"			style "combobutton-nogtk"
+
+style "spinbutton-nogtk"			= "default"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkSpinButton::inner-border		= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/No-Gtk/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Up
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/No-Gtk/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkSpinButton"	style:highest "spinbutton-nogtk"
+widget "MozillaGtkWidget.GtkFixed.GtkSpinButton"	style:highest "spinbutton-nogtk"

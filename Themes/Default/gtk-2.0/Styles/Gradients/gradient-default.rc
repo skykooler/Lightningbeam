@@ -1,0 +1,6 @@
+include						"Styles/Surfaces/surfaces-default.rc"
+include						"Styles/Banshee/banshee.rc"
+include						"Styles/Shadows/shadows-default.rc"
+include 					"Styles/check-radio.rc"
+include 					"Styles/button.rc"
+include						"Styles/Entry/entry-default.rc"
