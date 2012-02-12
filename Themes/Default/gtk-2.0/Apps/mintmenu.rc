@@ -1,0 +1,221 @@
+style "mint-base"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable		= TRUE
+			file			= "Menu/opera-menu.png"
+			border			= { 1, 1, 1, 1}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-trans"
+{
+	bg_pixmap[NORMAL]			= "Fixes/none.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 1, 1, 1, 1}
+			stretch			= TRUE
+		}
+
+	}
+}
+
+style "mint-base-dark"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable		= TRUE
+			file			= "Menu/opera-menu-dark.png"
+			border			= { 1, 1, 1, 1}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-dark"				= "panel-dark-text"
+{
+	bg[NORMAL] = "#3a3a3a"
+		engine "pixmap"
+	{
+		image
+		{
+			function		= VLINE
+			recolorable		= TRUE
+			file			= "Lines/line-v-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= HLINE
+			recolorable		= TRUE
+			file			= "Lines/line-h-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= FLAT_BOX
+			file			= "Fixes/mint.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint"
+{
+	fg[PRELIGHT]				= @selected_fg_color
+	fg[SELECTED]				= @selected_fg_color
+	fg[ACTIVE]				= @selected_fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= FOCUS
+
+		}
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Menu/menuitem.png"
+			border			= { 12, 12, 8, 8}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-squared"
+{
+	fg[PRELIGHT]				= @selected_fg_color
+	fg[SELECTED]				= @selected_fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= FOCUS
+
+		}
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Menu/menuitem-squared.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-simple"
+{
+	fg[PRELIGHT]				= @selected_fg_color
+	fg[SELECTED]				= @selected_fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= FOCUS
+
+		}
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Handles/list-header-highlight.png"
+			border			= { 2, 2, 2, 2}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-dark-round"
+{
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= FOCUS
+
+		}
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Menu/dark-round-menu-item.png"
+			border			= { 12, 12, 8, 8}
+			stretch			= TRUE
+		}
+	}
+}
+
+
+style "mint-dark-squared"
+{
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= FOCUS
+
+		}
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Menu/dark-squared-menu-item.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "mint-entry"
+{
+	engine "pixmap"
+	{
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= FLAT_BOX
+			recolorable		= TRUE
+			file			= "Fixes/white.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "mintmenu" 				style "mint-base"
+widget "mintmenu.border.paneholder.*viewport?*" style "mint-trans"

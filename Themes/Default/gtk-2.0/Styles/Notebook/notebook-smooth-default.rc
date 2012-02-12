@@ -1,0 +1,96 @@
+include						"Styles/Notebook/notebook.rc"
+include						"Styles/Notebook/notebook-smooth.rc"
+
+style "notebook-viewport"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/viewport.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-in-viewport.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "notebook-smooth-fix"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Notebook/notebook-bg.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook_smooth/notebook-fix.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-smooth"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar.png"
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/Deluge/smooth/smooth.png"
+			border			= { 0, 0, 4, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-smooth-options"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar.png"
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook_smooth/notebook-fix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkNotebook>*<GtkEventBox>"	style "notebook-smooth-fix"
+widget_class "*<GtkNotebook>*<GtkDrawingArea>"	style "notebook-smooth-fix"
+widget_class "*<GtkNotebook>*<GtkLayout>"	style "notebook-smooth-fix"
+
+widget "main_window*torrent_info.*viewport?"	style "deluge-smooth"
+widget "main_window*torrent_info.*viewport3"	style "deluge-smooth-options"
+
+widget_class "*<GtkNotebook>*<GtkViewport>"	style "notebook-viewport"

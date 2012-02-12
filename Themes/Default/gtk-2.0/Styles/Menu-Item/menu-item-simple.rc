@@ -1,0 +1,201 @@
+style "menu-item-simple"			= "default"
+{
+	xthickness				= 1
+	ythickness				= 3
+
+	fg[PRELIGHT]				= @selected_fg_color
+	fg[SELECTED]				= @selected_fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+	bg[SELECTED]				= shade (0.90, @selected_bg_color)
+
+	engine "pixmap"
+	{
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Handles/list-header-highlight.png"
+			border			= { 2, 2, 2, 2}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			state			= PRELIGHT
+			overlay_file		= "Arrows/arrow-right-prelight.png"
+			overlay_stretch		= FALSE
+			arrow_direction		= RIGHT
+		}
+		image 
+		{
+			function 		= CHECK
+			state 			= NORMAL
+			shadow 			= OUT
+		}
+		# fix for checkbutton
+		image 
+		{
+			function        	= CHECK
+			state 			= NORMAL
+			shadow          	= OUT
+		}
+		image 
+		{
+			function 		= CHECK
+			recolorable 		= TRUE
+			state 			= PRELIGHT
+			shadow 			= OUT
+			overlay_file 		= "Check-Radio/check2-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= CHECK
+			state 			= INSENSITIVE
+			shadow          	= OUT
+		}
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= NORMAL
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check5-light.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check6-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= CHECK
+			state 			= INSENSITIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/check7-light.png"
+			overlay_stretch 	= FALSE
+		}
+		#Fix for radiobutton
+		image 
+		{
+			function        	= OPTION
+			state 			= NORMAL
+			shadow         		= OUT
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= OUT
+			overlay_file    	= "Check-Radio/option2-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			state 			= INSENSITIVE
+			shadow         		= OUT
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= NORMAL
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option4-light.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option5-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option7-light.png"
+			overlay_stretch 	= FALSE
+		}
+	}
+}
+
+style "menubar-item"				= "default"
+{
+	xthickness				= 1
+	ythickness				= 3
+
+	fg[NORMAL]				= @fg_color
+	fg[PRELIGHT]				= @fg_color
+	fg[SELECTED]				= @fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Panel/menu-item-light.png"
+			border			= { 6, 6, 6, 0}
+			stretch			= TRUE
+		}		
+	}
+}
+
+style "chrome-custom-button"			= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Button/button-normal.png"
+			border			={ 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Apps/chrome/chrome-button.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "menuitem-text-is-fg-color-workaround"
+{
+	text[NORMAL]        			= @fg_color
+	text[PRELIGHT]      			= @selected_fg_color
+	text[SELECTED]      			= @selected_fg_color
+	text[ACTIVE]        			= @fg_color
+	text[INSENSITIVE]   			= darker (@bg_color)
+}
+
+widget_class "*<GtkMenuItem>*"          	style "menu-item-simple"
+widget_class "*<GtkMenuBar>*<GtkMenuItem>*"	style "menubar-item"
+widget_class "*<GtkMenuItem>.*.<GtkScale>" 	style "range"
+#chrome
+widget "*GtkCustomMenu.GtkCustomMenuItem.GtkHBox.GtkHBox"	style "chrome-custom-button"
+widget "*.gtk-combobox-popup-menu.*"   				style "menuitem-text-is-fg-color-workaround"

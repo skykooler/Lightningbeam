@@ -1,0 +1,11 @@
+style "pcmanfm-sidebar"
+{
+	ythickness				= 3
+	xthickness				= 3
+
+	GtkTreeView::horizontal_separator	= 15
+	base[NORMAL]				= shade( 0.902, @bg_color)
+}
+
+
+widget "FmMainWin.*.FmPlacesView" 		style "pcmanfm-sidebar"

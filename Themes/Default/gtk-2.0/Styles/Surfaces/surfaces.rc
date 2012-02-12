@@ -1,0 +1,136 @@
+style "window-flat" 				= "default"
+{
+	base[NORMAL]				= @base_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+#gnome-control-center fix
+widget "My*.ShellWindow"		style "window-flat"
+
+
+style "toolbar"					= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= BOX
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkToolbar"   				style "toolbar" 
+
+style "frame" 					= "default"
+{
+	xthickness 				= 10
+	ythickness 				= 8
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-etched-in.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+		image
+		{
+	    		function		= SHADOW_GAP
+	    		recolorable		= TRUE
+	    		file			= "Shadows/frame.png"
+	    		border			= { 4, 4, 6, 0}
+	    		stretch			= TRUE
+	    		gap_start_file		= "Shadows/frame-gap-start.png"
+	    		gap_start_border	= { 7, 0, 6, 0}
+	    		gap_end_file		= "Shadows/frame-gap-end.png"
+	    		gap_end_border		= { 0, 7, 6, 0}
+	    		gap_side		= TOP
+		}
+	}
+}
+
+class "GtkFrame"				style "frame"
+
+style "frame-autocomplete"			= "frame"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "GtkWindow.GtkFrame"		style "frame-autocomplete"
+
+style "frame-title"
+{
+	fg[NORMAL] 				= lighter (@fg_color)
+}
+
+widget_class "*.<GtkFrame>.<GtkLabel>" 		style "frame-title"
+
+style "statusbar" 				= "shadows-fix"	
+{
+	xthickness 				= 0
+	ythickness 				= 0
+	
+	engine "pixmap" 
+	{
+		image
+		{
+			function		= RESIZE_GRIP
+			recolorable		= TRUE
+			detail			= "statusbar"
+			overlay_file		= "Handles/resize_grip.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*"  		style "statusbar"
+
+#rhythmbox playlist frame
+style "rhythm-playlist"
+{
+	xthickness = 3
+	ythickness = 3
+}
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkHPaned.GtkVBox.GtkVBox.GtkFrame" style "rhythm-playlist"

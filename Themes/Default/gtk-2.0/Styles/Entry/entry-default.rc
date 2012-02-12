@@ -1,0 +1,1196 @@
+style "text-entry"				= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+class "GtkEntry"				style "text-entry"
+class "GtkEditable"				style "text-entry"
+class "GtkOldEditable" 				style "text-entry"
+
+style "text-view"
+{	
+	xthickness				= 3
+	ythickness				= 3
+
+	bg[NORMAL]				= @base_color
+}
+
+
+class "GtkTextView"				style "text-view"
+
+style "comboentry"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::interior_focus		= 0
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkComboBoxEntry>*<GtkEntry>"	style "comboentry"
+widget_class "*<GtkCombo>*<GtkEntry>"		style "comboentry"
+widget "Gimp*GimpScaleComboBox*<GtkEntry>"	style:highest "comboentry"
+
+style "combobutton"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	GtkButton::inner-border			= { 0, 4, 0, 0}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Entry/entry-end.png"
+			border			= { 0, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkComboBoxEntry>*<GtkToggleButton>"	style "combobutton"
+widget_class "*<GtkCombo>*<GtkButton>"			style "combobutton"
+
+style "spinbutton"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkSpinButton::inner-border		= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Up
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+class "GtkSpinButton"   	 			style:highest "spinbutton"
+widget "gtkmm__GtkWindow.SPDesktopWidget*GtkSpinButton"	style:highest "spinbutton"
+
+############################################################
+# Statusbar                                                #
+############################################################
+
+style "text-entry-statusbar"			= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry 
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Statusbar/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*<GtkEntry>"	style "text-entry-statusbar"
+widget_class "*<GtkStatusbar>*<GtkEditable>"	style "text-entry-statusbar"
+widget_class "*<GtkStatusbar>*<GtkOldEditable>"	style "text-entry-statusbar"
+
+#gimp
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*GtkEntry"			style "text-entry-statusbar"
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*GimpContainerEntry"	style "text-entry-statusbar"
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*GimpNumberPairEntry"	style "text-entry-statusbar"
+
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GimpColorHexEntry"	style "text-entry-statusbar"
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GimpContainerEntry"	style "text-entry-statusbar"
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GimpNumberPairEntry"	style "text-entry-statusbar"
+
+#exaile
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkHBox.GtkEntry"			style "text-entry-statusbar"
+
+style "comboentry-statusbar"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::interior_focus		= 0
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Statusbar/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*<GtkComboBoxEntry>*<GtkEntry>"	style "comboentry-statusbar"
+widget_class "*<GtkStatusbar>*<GtkCombo>*<GtkEntry>"		style "comboentry-statusbar"
+
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*.GtkComboBoxEntry.*GtkEntry"	style "comboentry-statusbar"
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*.GtkCombo.*GtkEntry"		style "comboentry-statusbar"
+
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GtkComboBoxEntry.*GtkEntry"	style "comboentry-statusbar"
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GtkCombo.*GtkEntry"		style "comboentry-statusbar"
+
+style "combobutton-statusbar"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	GtkButton::inner-border			= { 0, 4, 0, 0}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Entry/Statusbar/entry-end.png"
+			border			= { 0, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*<GtkComboBoxEntry>*<GtkToggleButton>"	style "combobutton-statusbar"
+widget_class "*<GtkStatusbar>*<GtkCombo>*<GtkButton>"			style "combobutton-statusbar"
+
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*.GtkComboBoxEntry.*GtkToggleButton"	style "combobutton-statusbar"
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*.GtkCombo.*GtkButton"			style "combobutton-statusbar"
+
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GtkComboBoxEntry.*GtkToggleButton"	style "combobutton-statusbar"
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GtkCombo.*GtkButton"			style "combobutton-statusbar"
+
+style "spinbutton-statusbar"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkSpinButton::inner-border		= { 0, 0, 0, 0}
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Statusbar/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Up
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Statusbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*<GtkSpinButton>"	style:highest "spinbutton-statusbar"
+
+widget "gimp-dock-2.*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport*GtkSpinButton"	style:highest "spinbutton-statusbar"
+widget "gimp-dock-1.*.GimpDockbook.GimpDockable.GimpColor*.GtkSpinButton"		style:highest "spinbutton-statusbar"
+
+############################################################
+# Dialogs                                                  #
+############################################################
+
+style "text-entry-dialog"			= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry 
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Dialog/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*?ialog*<GtkEntry>"		style "text-entry-dialog"
+widget_class "*?ialog*<GtkEditable>"		style "text-entry-dialog"
+widget_class "*?ialog*<GtkOldEditable>"		style "text-entry-dialog"
+
+widget_class "*<GtkToolbar>*<GtkEntry>"		style "text-entry-dialog"
+widget_class "*<GtkToolbar>*<GtkEditable>"	style "text-entry-dialog"
+widget_class "*<GtkToolbar>*<GtkOldEditable>"	style "text-entry-dialog"
+
+#synaptic
+widget "*.entry_fast_search"			style "text-entry-dialog"
+
+#ccsm
+widget "GtkWindow.GtkHBox.GtkVBox.GtkVBox.GtkEntry"	style "text-entry-dialog"
+
+#software-center
+widget "*softwarecenter+view+widgets+searchentry+SearchEntry"	style "text-entry-dialog"
+
+#gmusicbrowser
+widget "shimmer.VBMain.VBTop.HBTop.VBSearchBox.SimpleSearch.GtkEntry"	style "text-entry-dialog"
+
+#glade search input
+widget "GladeWindow.GtkVBox.GtkHPaned.GtkVPaned.GtkNotebook.GladeInspector.GtkEntry"	style "text-entry-dialog"
+
+style "comboentry-dialog"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::interior_focus		= 0
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Dialog/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*?ialog*<GtkComboBoxEntry>*<GtkEntry>"		style "comboentry-dialog"
+widget_class "*?ialog*<GtkCombo>*<GtkEntry>"			style "comboentry-dialog"
+
+widget_class "*<GtkToolbar>*<GtkComboBoxEntry>*<GtkEntry>"	style "comboentry-dialog"
+widget_class "*<GtkToolbar>*<GtkCombo>*<GtkEntry>"		style "comboentry-dialog"
+
+style "combobutton-dialog"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	GtkButton::inner-border			= { 0, 4, 0, 0}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Entry/Dialog/entry-end.png"
+			border			= { 0, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*?ialog*<GtkComboBoxEntry>*<GtkToggleButton>"	style "combobutton-dialog"
+widget_class "*?ialog*<GtkCombo>*<GtkButton>"			style "combobutton-dialog"
+
+widget_class "*<GtkToolbar>*<GtkComboBoxEntry>*<GtkToggleButton>"	style "combobutton-dialog"
+widget_class "*<GtkToolbar>*<GtkCombo>*<GtkButton>"			style "combobutton-dialog"
+
+style "spinbutton-dialog"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkSpinButton::inner-border		= { 0, 0, 0, 0}
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Dialog/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Up
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Dialog/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+widget_class "*<GtkToolbar>*<GtkSpinButton>"	style:highest "spinbutton-dialog"
+widget_class "*?ialog*<GtkSpinButton>"		style:highest "spinbutton-dialog"
+#Layers dock spinbutton
+widget_class "GimpMenuDock.*GimpLayerTreeView.*.GtkSpinButton"	style:highest "spinbutton-dialog"
+
+############################################################
+# Special Toolbars                                         #
+############################################################
+
+style "text-entry-toolbar"			= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry 
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Toolbar/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+#Inkscape
+widget_class "gtkmm__GtkWindow.SPDesktopWidget*<GtkToolbar>*<GtkEntry>"		style "text-entry-toolbar"
+#PcmanFM
+widget "FmMainWin.GtkVBox.toolbar.GtkToolItem.FmPathEntry"			style:highest "text-entry-toolbar"
+
+style "comboentry-toolbar"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::interior_focus		= 0
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Toolbar/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable*<GtkComboBoxEntry>*<GtkEntry>"	style "comboentry-toolbar"
+widget_class "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable*<GtkCombo>*<GtkEntry>"		style "comboentry-toolbar"
+
+style "combobutton-toolbar"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+
+	GtkButton::inner-border			= { 0, 4, 0, 0}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+	GtkWidget::focus-line-width		= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Entry/Toolbar/entry-end.png"
+			border			= { 0, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable*<GtkComboBoxEntry>*<GtkToggleButton>"	style "combobutton-toolbar"
+widget_class "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable*<GtkCombo>*<GtkButton>"			style "combobutton-toolbar"
+
+style "spinbutton-toolbar"
+{
+
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkSpinButton::inner-border		= { 0, 0, 0, 0}
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/entry-in.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Toolbar/entry.png"
+			border			= { 5, 0, 5, 5}
+			stretch			= TRUE
+		}
+		# Up
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Up (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_up"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-up.png"
+			border			= { 5, 5, 5, 0}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-up-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down
+		image
+		{
+			function		= BOX
+			state 			= NORMAL
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= PRELIGHT
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (disabled)
+		image
+		{
+			function		= BOX
+			state 			= INSENSITIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-disable.png"
+			overlay_stretch		= FALSE
+		}
+		# Down (mouse over)
+		image
+		{
+			function		= BOX
+			state 			= ACTIVE
+			detail			= "spinbutton_down"
+			recolorable		= TRUE
+			file			= "Spin/Toolbar/spinbutton-down.png"
+			border			= { 5, 5, 0, 5}
+			stretch			= TRUE
+			overlay_file		= "Spin/spin-down-prelight.png"
+			overlay_stretch		= FALSE
+		}
+	}
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable*GtkSpinButton" style:highest "spinbutton-toolbar"
+
+############################################################
+# Banshee                                                  #
+############################################################
+
+style "text-entry-banshee"			= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Flat/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "*__gtksharp_28_Banshee_Widgets_SearchEntry+2bFramelessEntry"		style "text-entry-banshee"
+
+#emerald-theme-manager
+widget "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkNotebook.GtkVBox.GtkVBox.GtkHBox.GtkEntry"	style "text-entry-banshee"
+
+#nautilus properties dialog
+widget "FMPropertiesWindow.GtkVBox.GtkNotebook.GtkHBox.GtkVBox.GtkTable.NautilusEntry"	style "text-entry-banshee"
+
+#software-center
+widget "*softwarecenter+view+widgets+searchentry+SearchEntry" style "text-entry-banshee"
+
+include								"Styles/Entry/entry-nogtk.rc"

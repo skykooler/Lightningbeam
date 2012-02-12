@@ -1,0 +1,95 @@
+style "tabs-non-gtk-reversed"			= "default"
+{
+	xthickness    		        	= 8
+	ythickness    		        	= 2
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab-active-top.png"
+			border			= { 6, 6, 10, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab-active-bottom.png"
+			border			= { 6, 6, 8, 2}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab-active-left.png"
+			border			= { 14, 6, 8, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/No-Gtk/Reversed/tab-active-right.png"
+			border			= { 6, 14, 8, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/No-Gtk/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkNotebook" 	style:highest "tabs-non-gtk-reversed"

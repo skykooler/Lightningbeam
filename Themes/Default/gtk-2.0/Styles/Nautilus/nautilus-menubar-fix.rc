@@ -1,0 +1,6 @@
+style "nautilus-menubar-fix"
+{
+	bg_pixmap[NORMAL]			= "Apps/nautilus-elementary/nautilus.png"
+}
+
+widget_class "NautilusNavigationWindow.*<GtkMenuBar>"		style "nautilus-menubar-fix"

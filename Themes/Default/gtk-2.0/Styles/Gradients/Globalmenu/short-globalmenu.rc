@@ -1,0 +1,62 @@
+include						"Styles/Gradients/gradient-short.rc"
+include 					"Styles/Pcmanfm/pcmanfm-without-menubar.rc"
+
+style "synaptic-toolbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	bg_pixmap[NORMAL]			= "Fixes/gradient-alt.png"
+	bg_pixmap[INSENSITIVE]			= "Fixes/gradient-alt.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			recolorable		= FALSE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "window_main*handlebox_button_toolbar"	style "synaptic-toolbar"
+widget "GtkWindow.GtkVBox.GtkHandleBox" 	style "synaptic-toolbar"
+
+style "inkscape-toolbar-color"
+{
+	bg[NORMAL]				= @bg_color
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox*"	style:highest "inkscape-toolbar-color"
+
+
+style "inkscape-toolbar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/nautilus-no-menu.png"
+			border			= { 0, 0, 36, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/nautilus-no-menu.png"
+			border			= { 0, 0, 36, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox"	style:highest "inkscape-toolbar"
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable.gtkmm*" style:highest "inkscape-toolbar"

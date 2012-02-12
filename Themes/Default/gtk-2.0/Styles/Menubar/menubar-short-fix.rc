@@ -1,0 +1,26 @@
+include						"Styles/Menubar/menubar-fix.rc"
+
+style "menubar-short-fix"			= "default"	
+{
+	xthickness				= 3
+	ythickness				= 2
+
+	bg_pixmap[NORMAL]			 = "Fixes/gradient-alt.png"
+}
+
+style "foobnix-menubar"				= "default"	
+{
+	bg_pixmap[NORMAL]			= "Fixes/foobix-short.png"
+}
+
+widget "GtkWindow.GtkVBox.GtkHBox.GtkMenuBar" 	style "foobnix-menubar"
+
+widget_class "*<GtkMenuBar>"	           	style "menubar-short-fix"
+
+style "inkscape-menubar"
+{
+	bg[NORMAL]				= @bg_color
+	bg_pixmap[NORMAL]			 = "Fixes/gradient-alt.png"
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget*GtkMenuBar"	style:highest "inkscape-menubar"

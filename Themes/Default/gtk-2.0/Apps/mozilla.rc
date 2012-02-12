@@ -1,0 +1,24 @@
+style "mozilla"
+{
+	bg_pixmap[NORMAL]			= "Apps/mozilla/mozilla-bg.png"
+}	
+
+#widget "MozillaGtkWidget"			style "mozilla"
+
+style "mozilla-toolbar"
+{
+	engine "pixmap"
+	{
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Fixes/gradient.png"
+			border			= {  0, 0, 240, 0}
+			stretch			= TRUE
+		}
+	}
+
+}			
+
+#widget "MozillaGtkWidget.GtkFixed.GtkHandleBox.GtkToolbar"	style "mozilla-toolbar"

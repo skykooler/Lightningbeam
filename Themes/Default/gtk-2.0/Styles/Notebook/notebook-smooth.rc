@@ -1,0 +1,75 @@
+include						"Styles/Notebook/notebook.rc"
+
+style "notebook-smooth"				= "default"
+{
+	xthickness				= 6
+	ythickness				= 3
+
+	engine "pixmap" 
+	{
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook_smooth/notebook-smooth-top.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_file		= "Notebook_smooth/gap-top.png"
+			gap_border     		= { 4, 7, 2, 0}
+			gap_start_file		= "Notebook_smooth/gap-top-start.png"
+			gap_start_border     	= { 6, 6, 6, 6}
+			gap_end_file		= "Notebook_smooth/gap-top-stop.png"
+			gap_end_border     	= { 6, 6, 6, 6}
+			gap_side		= TOP
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook_smooth/notebook-smooth-bottom.png" 
+			border			= { 10, 10, 0, 7}
+			stretch			= TRUE
+			gap_file		= "Notebook_smooth/gap-bottom.png"
+			gap_border     		= { 4, 7, 0, 2}
+			gap_start_file		= "Notebook_smooth/gap-bottom-start.png"
+			gap_start_border     	= { 6, 6, 6, 6}
+			gap_end_file		= "Notebook_smooth/gap-bottom-stop.png"
+			gap_end_border     	= { 6, 6, 6, 6}
+			gap_side		= BOTTOM
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		# How to draw the box of a notebook when it isnt attached to a tab
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Notebook/notebook.png"
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			#gap_side		= TOP
+		}
+	}
+}
+
+class "GtkNotebook"				style "notebook-smooth"

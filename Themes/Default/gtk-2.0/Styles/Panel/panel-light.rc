@@ -1,0 +1,166 @@
+style "panel-menu-item"				#= "panel"
+{
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Panel/menu-item.png"
+			border			= { 6, 6, 6, 0}
+			stretch			= TRUE
+		}		
+	}
+}
+
+style "panel-button" 				#= "default"
+{
+	GtkButton::inner-border			= { 4, 4, 2, 2}
+	GtkButton::outside-border 		= { 0, 0, 0, 0}
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "buttondefault"
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			={ 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Panel/button-normal.png"
+			border			= { 7, 7, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= IN
+			file			= "Panel/button-active-prelight.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= OUT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= IN
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= ACTIVE
+			file			= "Panel/button-active.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "taskbar-button" 				#= "default"
+{
+	GtkButton::inner-border			= { 3, 3, 2, 2}
+	GtkButton::child-displacement-y		= 0
+
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "buttondefault"
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Panel/button-normal.png"
+			border			= { 7, 7, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Panel/button-prelight.png"
+			border			= { 7, 7, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= IN
+			file			= "Panel/button-active-prelight.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= OUT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= IN
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= ACTIVE
+			file			= "Panel/button-active.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+#Guake
+include "Styles/Guake/guake.rc"

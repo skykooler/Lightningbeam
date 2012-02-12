@@ -1,0 +1,89 @@
+style "tabs-light-reversed"			= "default"
+{
+	#GtkNotebook::tab-curvature		= 3
+
+	xthickness    		        	= 8
+	ythickness    		        	= 2
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/Reversed/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/Reversed/tab-active-top.png"
+			border			= { 6, 6, 10, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/Reversed/tab-active-bottom.png"
+			border			= { 6, 6, 8, 2}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/Reversed/tab-active-left.png"
+			border			= { 14, 6, 8, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/Reversed/tab-active-right.png"
+			border			= { 6, 14, 8, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+widget "MozillaGtkWidget*Notebook"		style:highest "tabs-light-reversed"

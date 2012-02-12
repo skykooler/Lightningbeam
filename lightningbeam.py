@@ -327,6 +327,8 @@ elif svlgui.SYSTEM=="osx":
 	MainWindow = lightningbeam_windows.MainWindowOSX()
 elif svlgui.SYSTEM=="html":
 	MainWindow = lightningbeam_windows.MainWindowHTML()
+elif svlgui.SYSTEM=="pyglet":
+	MainWindow = lightningbeam_windows.MainWindowOSX()
 elif svlgui.SYSTEM=="android":
 	MainWindow = lightningbeam_windows.MainWindowAndroid()
 MainWindow.stage.add(root, 0,0)

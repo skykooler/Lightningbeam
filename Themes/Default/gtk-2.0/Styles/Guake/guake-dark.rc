@@ -1,0 +1,127 @@
+style "guake-window-dark"
+{
+
+	bg[NORMAL]				= "#555555"
+	bg[PRELIGHT]				= "#7a7a7a"
+	bg[SELECTED]				= "#7a7a7a"
+	bg[INSENSITIVE]				= "#7a7a7a"
+	bg[ACTIVE]				= "#7a7a7a"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function 		= FLAT_BOX
+			file 			= "Apps/Guake/guake.png"
+			border			= { 0, 0, 245, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "guake-frame-dark"
+{
+
+	bg[NORMAL]				= "#555555"
+	bg[PRELIGHT]				= "#7a7a7a"
+	bg[SELECTED]				= "#7a7a7a"
+	bg[INSENSITIVE]				= "#7a7a7a"
+	bg[ACTIVE]				= "#7a7a7a"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function 		= FLAT_BOX
+			file 			= "Apps/Guake/patch.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "guake-button-dark"
+{
+	GtkButton::inner-border			= { 3, 3, 2, 0}
+	GtkButton::child-displacement-y		= 0
+
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "buttondefault"
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Panel/button-normal-dark.png"
+			border			= { 7, 7, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= OUT
+			file			= "Panel/button-prelight-dark.png"
+			border			= { 7, 7, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			state			= PRELIGHT
+			shadow			= IN
+			file			= "Panel/button-active-prelight-dark-alt.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= OUT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= INSENSITIVE
+			shadow			= IN
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			state			= ACTIVE
+			file			= "Panel/button-active-dark.png"
+			border			= { 9, 9, 7, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "window_root" 				style "guake-window-dark"
+widget "window_root.*.event_tabs"		style "guake-frame-dark"
+widget "window_root*" 				style "guake-button-dark"

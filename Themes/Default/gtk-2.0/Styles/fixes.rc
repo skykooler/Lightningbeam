@@ -1,0 +1,175 @@
+style "black"					= "default"
+{
+
+bg_pixmap[NORMAL]		= "Fixes/black.png"
+	engine "pixmap"
+	{
+
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= HANDLE
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= ARROW
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			recolorable     	= TRUE
+			expander_style		= EXPANDED#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= EXPANDER
+			recolorable     	= TRUE
+			expander_style		= COLLAPSED#state			= PRELIGHT
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function        	= SHADOW
+			file			= "Fixes/black.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "evo-new-button-workaround" 
+{
+	engine "murrine" 
+	{
+		toolbarstyle 			= 0
+	}
+}
+
+style "combobox-text-color-workaround"
+{
+	text[NORMAL]      			= @fg_color
+	text[PRELIGHT]    			= @fg_color
+	text[SELECTED]    			= @selected_fg_color
+	text[ACTIVE]      			= @fg_color
+	text[INSENSITIVE] 			= darker (@bg_color)
+}
+
+style "fg-is-text-color-workaround"
+{
+	fg[NORMAL]      			= @text_color
+	fg[PRELIGHT]   				= @text_color
+	fg[ACTIVE]      			= @selected_fg_color
+	fg[SELECTED]    			= @selected_fg_color
+	fg[INSENSITIVE] 			= darker (@bg_color)
+}
+
+style "label"
+{
+	engine "murrine"
+	{
+	}
+}
+
+style "murrine-tooltips"
+{
+	xthickness = 8
+	ythickness = 5
+
+	bg[NORMAL] = @tooltip_bg_color
+	bg[SELECTED] = "#000000"
+	fg[NORMAL] = @tooltip_fg_color
+
+	engine "murrine"
+	{
+		roundness	= 0
+		trough_shades	= { 0.15, 0.3 }
+	}
+}
+
+style "notebook-workaround"
+{
+	
+	fg[NORMAL]				= @fg_color
+	fg[PRELIGHT]				= @fg_color
+	fg[SELECTED]				= @fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+}
+
+style "ubuntu-tweak-menu-item"
+{
+	fg[PRELIGHT]				= "#7a7a7a"#@selected_fg_color
+	
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+		}
+	}
+}
+
+#Ubuntu tweak title
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkNotebook.GtkVBox.GtkMenuItem*" style "ubuntu-tweak-menu-item"
+
+widget "shimmer.*.PluginArtistinfo.*.GtkEventBox.*.GtkRadioButton.GtkLabel" style "notebook-workaround"
+
+# FIXME: This will not work if one embeds eg. a button into the tooltip.
+widget "gtk-tooltip*" 						style "murrine-tooltips"
+
+widget_class "EShellWindow.GtkVBox.BonoboDock.BonoboDockBand.BonoboDockItem.InternalToolbar" style "evo-new-button-workaround"
+
+widget_class "*.<GtkComboBox>.<GtkCellView>"			style "combobox-text-color-workaround"
+
+widget_class "*<GtkListItem>*" 					style "fg-is-text-color-workaround"
+widget_class "*<GtkCList>" 					style "fg-is-text-color-workaround"
+
+widget_class "*<GtkLabel>"		style "label"
+widget_class "*Gnomenu*Label"		style "label"
+
+class "GtkImage"			style:highest "label"
+class "GtkLabel"			style:highest "label"
+#class "GtkComboBox"			style:highest "label"
+class "GtkCellView"			style:highest "label"
+widget_class "*.<GtkButton>.<GtkLabel>"		style:highest "label"
+#widget_class "*.<GtkComboBox>.<GtkCellView>"	style:highest "label"
+widget_class "*<GtkImage>*" 			style:highest "label"
+widget_class "*Panel*Label*"			style:highest "label"
+
+
+widget_class "PanelDItemEditor*<GtkButton>"  	style "button"
+widget "*live_installer*"			style "default"
+
+#widget "*GtkEntry.*"	style "black"

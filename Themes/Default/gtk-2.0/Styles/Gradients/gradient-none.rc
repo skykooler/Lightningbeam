@@ -1,0 +1,5 @@
+include						"Styles/Surfaces/surfaces-flat.rc"
+include						"Styles/Shadows/shadows-flat.rc"
+include 					"Styles/check-radio.rc"
+include 					"Styles/button.rc"
+include						"Styles/Entry/entry-flat.rc"

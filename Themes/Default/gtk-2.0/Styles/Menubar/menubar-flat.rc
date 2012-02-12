@@ -1,0 +1,3 @@
+include						"Styles/Menubar/menubar.rc"
+
+widget_class "*<GtkMenuBar>"	           	style "menubar-flat"

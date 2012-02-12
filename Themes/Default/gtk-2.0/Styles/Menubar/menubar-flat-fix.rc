@@ -1,0 +1,10 @@
+include						"Styles/Menubar/menubar-fix.rc"
+
+style "foobnix-menubar"				= "default"	
+{
+	bg_pixmap[NORMAL]			= "Fixes/bg.png"
+}
+
+widget "GtkWindow.GtkVBox.GtkHBox.GtkMenuBar" 	style "foobnix-menubar"
+
+widget_class "*<GtkMenuBar>"	           	style "menubar-flat-fix"

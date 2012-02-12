@@ -1,0 +1,41 @@
+include					"Styles/Shadows/shadows.rc"
+
+style "shadow-with-background-flat"		= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-in-flat.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+#fix for white background bellow transparent shadows
+class "GtkViewport"				style "shadow-with-background-flat"
+#calendar widget fix
+widget_class "*.<GtkCalendar>" 			style "shadow-with-background-flat"
+
+style "synaptic-toolbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			recolorable		= FALSE
+			file			= "Shadows/shadow-none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "window_main*handlebox_button_toolbar"	style "synaptic-toolbar"

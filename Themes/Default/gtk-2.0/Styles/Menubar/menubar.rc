@@ -1,0 +1,28 @@
+include 					"Styles/Pcmanfm/pcmanfm-menubar.rc"
+
+style "menubar-flat"				= "default"	
+{
+	xthickness				= 3
+	ythickness				= 2
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+style "foobnix-menubar"				= "default"	
+{
+	bg_pixmap[NORMAL]			= "Fixes/bg.png"
+}
+
+widget "GtkWindow.GtkVBox.GtkHBox.GtkMenuBar" 	style "foobnix-menubar"
+
+widget "MozillaGtkWidget*MenuBar"		style "menubar-flat"
+widget "*__gtksharp_13_Banshee_Gui_Widgets_MainMenu.MainMenu" style "menubar-flat"
