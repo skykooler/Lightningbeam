@@ -1110,6 +1110,7 @@ class Shape (object):
 		self.yscale = 1
 		self.linecolor = linecolor if linecolor else LINECOLOR
 		self.fillcolor = fillcolor if fillcolor else FILLCOLOR
+		self.linewidth = 2
 		self.shapedata=[]
 		self.filled=False
 		self.type="Shape"
@@ -1125,6 +1126,7 @@ class Shape (object):
 			cr.rotate(self.rotation*math.pi/180)
 			cr.scale(self.xscale*1.0, self.yscale*1.0)
 			cr.set_source(self.linecolor.cairo)
+			cr.set_line_width(max(self.linewidth,1))
 			for i in self.shapedata:
 				if i[0]=="M":
 					cr.move_to(i[1],i[2])
@@ -1145,6 +1147,7 @@ class Shape (object):
 			tb+="cr.translate("+str(self.x)+","+str(self.y)+")\n"
 			tb+="cr.rotate("+str(self.rotation*math.pi/180)+")\n"
 			tb+="cr.scale("+str(self.xscale)+"*1.0, "+str(self.yscale)+"*1.0)\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
 			if type(self.fill)==type([]):
 				tb+="cr.fillStyle = \""+rgb2hex(self.fill[0],self.fill[1],self.fill[2])+"\"\n"
 			for i in self.shapedata:
@@ -1179,6 +1182,7 @@ class Shape (object):
 			cr.newpath()
 			cr.pencolor = self.linecolor.pygui
 			cr.fillcolor = self.fillcolor.pygui
+			cr.pensize = max(max(self.linewidth,1))
 			for i in self.shapedata:
 				if i[0]=="M":
 					point = (i[1], i[2])
@@ -1204,6 +1208,7 @@ class Shape (object):
 			tb+="cr.translate("+str(self.x)+","+str(self.y)+")\n"
 			tb+="cr.rotate("+str(self.rotation*math.pi/180)+")\n"
 			tb+="cr.scale("+str(self.xscale)+"*1.0, "+str(self.yscale)+"*1.0)\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
 			if type(self.fill)==type([]):
 				tb+="cr.fillStyle = \""+rgb2hex(self.fill[0],self.fill[1],self.fill[2])+"\"\n"
 			for i in self.shapedata:
@@ -1311,9 +1316,9 @@ class Shape (object):
 		retval+=".outline "+self.name+"outline:\n"
 		retval+=" ".join([" ".join([str(x) for x in a]) for a in self.shapedata])+"\n.end\n"
 		if self.filled:
-			retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.rgb+" color="+self.linecolor.rgb+"\n"
+			retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.rgb+" color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
 		else:
-			retval+=".filled "+self.name+" outline="+self.name+"outline fill=#00000000 color="+self.linecolor.rgb+"\n"
+			retval+=".filled "+self.name+" outline="+self.name+"outline fill=#00000000 color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
 		return retval
 	def print_html(self):
 		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
