@@ -1252,7 +1252,7 @@ class Shape (object):
 			cr.newpath()
 			cr.pencolor = self.linecolor.pygui
 			cr.fillcolor = self.fillcolor.pygui
-			cr.pensize = max(max(self.linewidth,1))
+			cr.pensize = max(self.linewidth,1)
 			for i in self.shapedata:
 				if i[0]=="M":
 					point = (i[1], i[2])
