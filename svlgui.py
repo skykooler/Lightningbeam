@@ -40,6 +40,9 @@ FRAMERATE=50
 #Width and height are the width and height of the document
 WIDTH, HEIGHT = 500, 500
 
+#Whether we are using OpenGL for rendering.
+USING_GL = True
+
 #Object which has the keyboard focus.
 FOCUS = None
 
@@ -166,6 +169,9 @@ if sys.platform=="linux2":
 	from GUI.StdMenus import basic_menus, file_cmds, print_cmds
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
+	if USING_GL:
+		from OpenGL.GL import *
+		from GUI import GL
 	from GUI.Geometry import offset_rect, rect_sized
 	
 	#If we can import this, we are in the install directory. Mangle media paths accordingly.
@@ -789,59 +795,76 @@ class Canvas(Widget):
 			self.canvas.connect("button-release-event", onMouseUp)
 			self.canvas.connect("motion_notify_event", onMouseMove)
 		elif SYSTEM=="osx":
-			class OSXCanvas (ScrollableView):
-				def draw(self, canvas, update_rect):
-					canvas.erase_rect(update_rect)
-					for i in self.objs:
-						i.draw(canvas)
-
-				def mouse_down(self, event):
-					self.become_target()
-					x, y = event.position
-					try:
+			if USING_GL:
+				class OSXCanvas(GL.GLView):
+					def init_context(self):
+						glViewport(0, 0, width, height);
+					def init_projection(self):
+						glEnable( GL_TEXTURE_2D );
+						glEnable (GL_BLEND);
+						glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+					def render(self):
+						glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+						glLoadIdentity();
+						gluOrtho2D(0, width, 0, height); #TODO: width, height
+						glMatrixMode(GL_MODELVIEW);
 						for i in self.objs:
-							i._onMouseDown(x, y)
-					except ObjectDeletedError:
-						return
-					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-					
-				def mouse_drag(self, event):
-					x, y = event.position
-					for i in self.objs:
-						i._onMouseDrag(x, y)
-					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-					
-				def mouse_move(self, event):
-					x, y = event.position
-					for i in self.objs:
-						i._onMouseMove(x, y)
-					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-					
-				def mouse_up(self, event):
-					x, y = event.position
-					for i in self.objs:
-						i._onMouseUp(x, y)
-					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-					
-				def key_down(self, event):
-					keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
-									63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
-									63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
-									63241:"F6",63242:"F7",63243:"F8",27:"escape"}
-					if not event.unichars=='':
-						if ord(event.unichars) in keydict:
-							key = keydict[ord(event.unichars)]
+							i.draw(None)
+				self.canvas = OSXCanvas(double_buffer=True,multisample=True,samples_per_pixel=8)
+			else:
+				class OSXCanvas (ScrollableView):
+					def draw(self, canvas, update_rect):
+						canvas.erase_rect(update_rect)
+						for i in self.objs:
+							i.draw(canvas)
+
+					def mouse_down(self, event):
+						self.become_target()
+						x, y = event.position
+						try:
+							for i in self.objs:
+								i._onMouseDown(x, y)
+						except ObjectDeletedError:
+							return
+						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
+						
+					def mouse_drag(self, event):
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseDrag(x, y)
+						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
+						
+					def mouse_move(self, event):
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseMove(x, y)
+						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
+						
+					def mouse_up(self, event):
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseUp(x, y)
+						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
+						
+					def key_down(self, event):
+						keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
+										63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
+										63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
+										63241:"F6",63242:"F7",63243:"F8",27:"escape"}
+						if not event.unichars=='':
+							if ord(event.unichars) in keydict:
+								key = keydict[ord(event.unichars)]
+							else:
+								key = event.unichars
 						else:
-							key = event.unichars
-					else:
-						key = event.key.upper()
-					for i in self.objs:
-						i._onKeyDown(key)
-					self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
-				
-				def key_up(self, event):
-					pass
-			self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
+							key = event.key.upper()
+						for i in self.objs:
+							i._onKeyDown(key)
+						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
+					
+					def key_up(self, event):
+						pass
+				self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
 		elif SYSTEM=="html":
 			global ids
@@ -1161,43 +1184,46 @@ class Shape (object):
 				tb+="cr.stroke()\n"
 			tb+="cr.restore()\n"
 		elif SYSTEM=="osx":
-			cr.gsave()
-			if sep=="\\":
-				# Very ugly hack for Windows. :(
-				# Windows doesn't respect coordinate transformations
-				# with respect to translation, so we have to do this
-				# bit ourselves.
-				
-				# Rotation in radians
-				radrot = parent.group.rotation*math.pi/180 
-				# Coordinate transform: multiplication by a rotation matrix
-				cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+			if USING_GL:
+				pass
 			else:
-				cr.translate(self.x,self.y)
-			cr.rotate(self.rotation)
-			cr.scale(self.xscale*1.0, self.yscale*1.0)
-			cr.newpath()
-			cr.pencolor = self.linecolor.pygui
-			cr.fillcolor = self.fillcolor.pygui
-			for i in self.shapedata:
-				if i[0]=="M":
-					point = (i[1], i[2])
-					cr.moveto(point[0],point[1])
-				elif i[0]=="L":
-					point = (i[1], i[2])
-					cr.lineto(point[0],point[1])
-				elif i[0]=="C":
-					pointa = (i[1], i[2])
-					pointb = (i[3], i[4])
-					pointc = (i[5], i[6])
-					### Mac OSX needs custom PyGUI for this to work ###
-					cr.curveto((pointa[0],pointa[1]),(pointb[0],pointb[1]),(pointc[0],pointc[1]))
-			if self.filled:
-				cr.closepath()
-				cr.fill_stroke()
-			else:
-				cr.stroke()
-			cr.grestore()
+				cr.gsave()
+				if sep=="\\":
+					# Very ugly hack for Windows. :(
+					# Windows doesn't respect coordinate transformations
+					# with respect to translation, so we have to do this
+					# bit ourselves.
+					
+					# Rotation in radians
+					radrot = parent.group.rotation*math.pi/180 
+					# Coordinate transform: multiplication by a rotation matrix
+					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+				else:
+					cr.translate(self.x,self.y)
+				cr.rotate(self.rotation)
+				cr.scale(self.xscale*1.0, self.yscale*1.0)
+				cr.newpath()
+				cr.pencolor = self.linecolor.pygui
+				cr.fillcolor = self.fillcolor.pygui
+				for i in self.shapedata:
+					if i[0]=="M":
+						point = (i[1], i[2])
+						cr.moveto(point[0],point[1])
+					elif i[0]=="L":
+						point = (i[1], i[2])
+						cr.lineto(point[0],point[1])
+					elif i[0]=="C":
+						pointa = (i[1], i[2])
+						pointb = (i[3], i[4])
+						pointc = (i[5], i[6])
+						### Mac OSX needs custom PyGUI for this to work ###
+						cr.curveto((pointa[0],pointa[1]),(pointb[0],pointb[1]),(pointc[0],pointc[1]))
+				if self.filled:
+					cr.closepath()
+					cr.fill_stroke()
+				else:
+					cr.stroke()
+				cr.grestore()
 		elif SYSTEM=="html":
 			tb = ""
 			tb+="cr.save()\n"
