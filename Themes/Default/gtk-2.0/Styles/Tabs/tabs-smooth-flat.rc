@@ -1,0 +1,111 @@
+include 					"Styles/Tabs/Mozilla/tabs-smooth-flat.rc"
+
+style "tabs-exaile"				= "default"
+{
+	GtkNotebook::tab-overlap 		= 3
+
+	xthickness    		        	= 6
+	ythickness    		        	= 6
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-bottom.png"
+			border			= { 8, 11, 1, 7}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-top.png"
+			border			= { 8, 11, 7, 1}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-left.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/tab-right.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs_smooth/tab-active-top-flat.png"
+			border			= { 8, 8, 11, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Apps/Exaile/Tabs_smooth/tab-active-bottom.png"
+			border			= { 8, 8, 0, 11}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-left.png"
+			border			= { 11, 9, 8, 12}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/tab-active-right.png"
+			border			= { 9, 11, 8, 12}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+style "foobix-add-button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Tabs_smooth/foobix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkVBox.GtkNotebook.GtkEventBox" style "foobix-add-button"
+
+widget_class "*<GtkNotebook>"			style:highest "tabs-smooth-flat"
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkNotebook"	style:highest "tabs-exaile"

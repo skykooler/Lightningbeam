@@ -1,0 +1,6 @@
+style "nogtk-menubar-fix"
+{
+	bg_pixmap[NORMAL]			 = "Fixes/gradient.png"
+}
+
+widget "GtkWindow.GtkFixed.GtkMenuBar"		style "nogtk-menubar-fix"

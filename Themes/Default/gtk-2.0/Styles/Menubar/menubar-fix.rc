@@ -1,0 +1,12 @@
+include 					"Styles/Pcmanfm/pcmanfm-menubar-fix.rc"
+
+style "menubar-flat-fix"			= "default"	
+{
+	xthickness				= 3
+	ythickness				= 2
+
+	bg_pixmap[NORMAL]			 = "Fixes/none.png"
+}
+
+widget "MozillaGtkWidget*MenuBar"		style "menubar-flat-fix"
+widget "*__gtksharp_13_Banshee_Gui_Widgets_MainMenu.MainMenu" style "menubar-flat-fix"

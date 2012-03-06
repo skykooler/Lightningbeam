@@ -1,0 +1,99 @@
+include						"Styles/Notebook/notebook.rc"
+include						"Styles/Notebook/notebook-smooth.rc"
+
+style "notebook-viewport-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/viewport-short.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-in-viewport-short.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "notebook-smooth-fix-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+
+	bg_pixmap[NORMAL]			= "Notebook/notebook-bg-short.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook_smooth/notebook-fix.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-smooth-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar-10.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/Deluge/smooth/smooth.png"
+			border			= { 0, 0, 4, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-smooth-options-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar-10.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook_smooth/notebook-fix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkNotebook>*<GtkEventBox>"	style "notebook-smooth-fix-short"
+widget_class "*<GtkNotebook>*<GtkDrawingArea>"	style "notebook-smooth-fix-short"
+widget_class "*<GtkNotebook>*<GtkLayout>"	style "notebook-smooth-fix-short"
+
+widget "main_window*torrent_info.*viewport?"	style "deluge-smooth-short"
+widget "main_window*torrent_info.*viewport3"	style "deluge-smooth-options-short"
+
+widget_class "*<GtkNotebook>*<GtkViewport>"	style "notebook-viewport-short"

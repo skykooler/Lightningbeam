@@ -1,0 +1,223 @@
+style "range" = "default"
+{
+	GtkScale::slider-length			= 17
+	GtkRange::trough_border			= 0
+	GtkRange::slider_width			= 17
+	GtkRange::stepper_size			= 17
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Range/trough-horizontal.png"
+			border			= { 4, 4, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Range/trough-vertical.png"
+			border			= { 0, 0, 4, 4}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		# the sliders
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Range/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Range/slider-horiz-prelight.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Range/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		# vertical
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Range/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Range/slider-horiz-prelight.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Range/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+ 			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+	}
+}
+
+class "GtkScale"       				style "range"
+widget_class "*<GtkMenuItem>.*.<GtkScale>" 	style "range"
+
+style "treeview" 				= "default"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	engine "pixmap" 
+	{
+		# Normal
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			shadow          	= IN
+			state			= NORMAL
+			file            	= "Progress/progressbar.png"
+			border          	= { 3, 3, 4, 2}
+			stretch         	= TRUE
+		}
+		# Prelight / Mouseover
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			file            	= "Progress/progressbar-detail.png"
+			border          	= { 2, 2, 2, 2}
+			stretch         	= FALSE
+			overlay_file		= "Progress/progressbar-fill.png"
+			overlay_border		= { 2, 2, 2, 2}
+			overlay_stretch		= TRUE
+		}
+		image
+		{
+			function 		= FLAT_BOX
+			state    		= SELECTED
+			border   		= { 2, 2, 2, 2}
+			file     		= "Handles/list-header-highlight.png"
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*.<GtkTreeView>"        		style "treeview"
+
+style "treeview-color"
+{
+	fg[SELECTED]				= @selected_fg_color
+}
+widget_class "*.<GtkTreeView>*"        		style "treeview-color"
+
+style "iconview"
+{
+	engine "pixmap" 
+	{
+
+		image
+		{
+			function 		= FLAT_BOX
+			state    		= SELECTED
+			file     		= "Handles/icon-view-highlight.png"
+			border   		= { 5, 5, 5, 5}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkIconView>"			style "iconview"
+
+style "progressbar"
+{
+	xthickness 				= 1
+	ythickness 				= 1
+
+	GtkProgressBar::max-horizontal-bar-height = 20
+	GtkProgressBar::min-horizontal-bar-height = 20
+
+	fg[PRELIGHT]				= @selected_fg_color
+
+	engine "pixmap" 
+	{
+		image
+		{
+			function		= BOX
+			detail			= "trough"
+			file			= "Progress/progressbar.png"
+			border			= { 4, 4, 5, 3}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image
+		{
+			function		= BOX
+			detail			= "trough"
+			file			= "Progress/progressbar.png"
+			border			= { 4, 4, 5, 3}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image
+		{
+			function		= BOX
+			detail			= "bar"
+			file			= "Progress/progressbar-detail.png"
+			border			= { 2, 2, 2, 2}
+			stretch			= FALSE
+			overlay_file		= "Progress/progressbar-fill.png"
+			overlay_border		= { 2, 2, 2, 2}
+			overlay_stretch		= TRUE
+      			orientation		= HORIZONTAL
+		} 
+		image
+		{
+			function		= BOX
+			detail			= "bar"
+			file			= "Progress/progressbar-detail.png"
+			border			= { 2, 2, 2, 2}
+			stretch			= FALSE
+			overlay_file		= "Progress/progressbar-fill.png"
+			overlay_border		= { 2, 2, 2, 2}
+			overlay_stretch		= TRUE
+			orientation		= VERTICAL
+		} 
+	}
+}
+
+widget_class "*<GtkProgress>"			style "progressbar"
+widget_class "*<GtkProgressBar>"       		style "progressbar"

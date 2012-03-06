@@ -1,0 +1,6 @@
+style "nogtk-menubar-flat-fix"
+{
+	bg_pixmap[NORMAL]			= "Fixes/none.png"
+}
+
+widget "GtkWindow.GtkFixed.GtkMenuBar"		style "nogtk-menubar-flat-fix"

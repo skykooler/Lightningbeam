@@ -1,0 +1,100 @@
+include						"Styles/Panel/panel-dark.rc"
+
+style "panel-dark"
+{
+	xthickness				= 1
+	ythickness				= 0
+
+	bg[NORMAL]				= "#555555"
+	bg[PRELIGHT]				= "#7a7a7a"
+	bg[SELECTED]				= mix(0.2, "#555555", @selected_bg_color)
+	bg[INSENSITIVE]				= "#555555"
+	bg[ACTIVE]				= "#7a7a7a"
+
+	fg[NORMAL]				= "#e0e0e0"
+	fg[PRELIGHT]				= "#f0f0f0"
+	fg[SELECTED]				= "#e0e0e0"
+	fg[ACTIVE]				= "#e0e0e0"
+	fg[INSENSITIVE]				= "#9b9b9b"
+
+	bg_pixmap[NORMAL]			= "/Panel/panel-dark.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-up-prelight.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= UP
+		}    
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-down-prelight.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= DOWN
+		}    
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-left-prelight.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= LEFT
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-right-prelight.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= RIGHT
+		}
+	}
+}
+
+style "xfce4-tray"				= "panel-dark"
+{
+	bg_pixmap[NORMAL]			= "Panel/tray-dark.png"
+		
+}
+
+widget "Panel.*.XfceTrayWidget.GtkSocket" 	style:highest "xfce4-tray"						
+
+class "PanelApp*"				style "panel-dark"
+class "PanelToplevel*"				style "panel-dark"
+class "*Xfce*Panel*"				style "panel-dark"
+
+widget "*fast-user-switch*"			style "panel-dark"
+widget "PanelToplevel*PanelAppletFrame"		style "panel-dark"
+widget "PanelToplevel*PanelMenuBar"		style "panel-dark"
+widget "PanelToplevel*PanelWidget*"		style "panel-dark"
+widget "?PanelWidget?"				style "panel-dark"
+widget "*Xfce*Panel*"				style "panel-dark"
+
+widget_class "BonoboPlug*Panel*"		style "panel-dark"
+widget_class "*tray*"				style "panel-dark"
+
+widget "*PanelApplet*" 				style "panel-dark"
+
+widget_class "Panel*<GtkButton>"		style "panel-button-dark"
+widget_class "BonoboPlug*Applet*<GtkButton>"	style "panel-button-dark"
+
+widget_class "*Tasklist.*<GtkButton>"		style:highest "taskbar-button-dark"
+
+include						"Styles/Panel/panel.rc"

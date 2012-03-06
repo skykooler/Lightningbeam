@@ -1,0 +1,77 @@
+include						"Styles/Nautilus/nautilus.rc"
+
+style "nautilus-window"				= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/nautilus.png"
+			border			= { 0, 0, 58, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "nautilus-mode-button"
+{
+	engine "pixmap"
+	{	
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= PRELIGHT
+			file			= "Apps/nautilus-elementary/mode_prelight.png"
+			border			= { 3, 13, 3, 3 }
+			stretch         	= TRUE
+		}
+	  
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= NORMAL
+			file			= "Apps/nautilus-elementary/mode_normal.png"
+			border			= { 9, 9, 6, 9}
+			stretch         	= TRUE
+		}
+	
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= ACTIVE
+			file			= "Apps/nautilus-elementary/mode_pressed.png"
+			border			= { 9, 9, 6, 9}
+			stretch         	= TRUE
+		}  
+
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= INSENSITIVE
+			file			= "Apps/nautilus-elementary/mode_normal.png"
+			border			= { 9, 9, 6, 9}
+			stretch         	= TRUE
+		} 
+
+		image
+		{
+			function        	= BOX
+			recolorable     	= TRUE
+			state			= SELECTED
+			file			= "Apps/nautilus-elementary/mode_pressed.png"
+			border			= { 9, 9, 6, 9}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "NautilusNavigationWindow"		style "nautilus-window"
+
+widget "*GtkModeButton*"			style "nautilus-mode-button"

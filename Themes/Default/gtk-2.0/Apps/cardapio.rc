@@ -1,0 +1,47 @@
+style "cardapio"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	base[NORMAL]				= @bg_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/statusbar-10.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-etched-in.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "cardapio-entry"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable		= TRUE
+			file			= "Fixes/white.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "CardapioWindow.*"			style "cardapio"
+widget "CardapioWindow.MainWindowBorder"	style "shadows-fix"
+widget "CardapioWindow.*Entry*"			style "cardapio-entry"

@@ -1,0 +1,113 @@
+include						"Styles/Surfaces/surfaces.rc"
+
+style "window" 					= "default"
+{
+	base[NORMAL]				= @base_color
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/gradient.png"
+			border			= { 0, 0, 245, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkWindow"				style "window"
+
+#nautilus background browser
+widget "NautilusPropertyBrowser.GtkVBox.GtkHBox.GtkScrolledWindow.GtkViewport"	style "window"
+widget "NautilusPropertyBrowser.GtkVBox.GtkHBox.GtkVBox.GtkEventBox"		style "window"
+
+style "statusbar-fix"				= "button"
+{
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/statusbar.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "color-fix"				= "button"
+{
+	bg_pixmap[NORMAL]			= "Fixes/statusbar.png"
+
+}
+
+style "color-short"				= "button"
+{
+	bg_pixmap[NORMAL]			= "Fixes/statusbar-10.png"
+
+}
+style "synaptic-statusbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/statusbar.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "shadow-out-none"
+{
+	bg[NORMAL]				= shade (0.90, @bg_color)
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= OUT
+		}
+	}
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget*"	style "shadow-out-none"
+
+widget_class "*<GtkStatusbar>*<GtkEventBox>"	style "statusbar-fix"
+widget_class "*<GtkStatusbar>*ComboBox"		style "statusbar-fix"
+
+#xchat
+widget "GtkWindow.GtkTable.GtkHBox.GtkHBox.GtkViewport" 		style "statusbar-fix"
+#gmpc
+widget "pl3_win.vbox1.vbox_control.hpaned1.GtkVPaned.GtkEventBox"	style "statusbar-fix"
+widget "GtkWindow.GtkVBox.GtkVBox.GtkHPaned.GtkVPaned.GtkEventBox"	style "statusbar-fix"
+widget "pl3_win.vbox1.hbox1.status-icon-hbox.GtkEventBox"		style "statusbar-fix"
+widget "GtkWindow.GtkVBox.GtkHBox.GtkHBox.GtkEventBox"			style "statusbar-fix"
+
+#gimp
+widget "*GimpToolOptionsEditor.GtkScrolledWindow.GtkViewport"		style "statusbar-fix"
+
+#nautilus background & emblems browser
+widget "NautilusPropertyBrowser.GtkVBox.GtkEventBox"			style "statusbar-fix"
+
+#gimp color picker
+widget_class "*.<GimpFgBgEditor>*"
+					style:highest "color-fix"
+#fix for download frame in emesene 
+widget "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkHBox.GtkLayout" 	style:highest "color-fix"
+
+widget "GtkWindow.GtkVBox.GtkHPaned.GtkVBox.GtkVBox.GtkNotebook.GtkEventBox*" 	style:highest "color-short"
+#synaptic statusbar
+widget "window_main.vbox1.hbox_status.scrolledwindow*.viewport4" 		style "synaptic-statusbar"

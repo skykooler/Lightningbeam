@@ -1,0 +1,3 @@
+include						"Styles/Tabs/Mozilla/tabs-light-reversed.rc"
+
+widget "GtkWindow.GtkFixed.GtkNotebook" 	style:highest "tabs-light-reversed"

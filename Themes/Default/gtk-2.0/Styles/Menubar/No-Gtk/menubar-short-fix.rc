@@ -1,0 +1,6 @@
+style "nogtk-menubar-short-fix"
+{
+	bg_pixmap[NORMAL]			 = "Fixes/gradient-alt.png"
+}
+
+widget "GtkWindow.GtkFixed.GtkMenuBar"		style "nogtk-menubar-short-fix"

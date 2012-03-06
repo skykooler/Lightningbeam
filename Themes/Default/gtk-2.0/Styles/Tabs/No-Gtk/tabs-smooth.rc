@@ -1,0 +1,146 @@
+style "tabs-non-gtk-smooth"				= "default"
+{
+	GtkNotebook::tab-overlap 		= 3
+
+	xthickness    		        	= 6
+	ythickness    		        	= 3
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/No-Gtk/tab-bottom.png"
+			border			= { 8, 11, 1, 7}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/No-Gtk/tab-top.png"
+			border			= { 8, 11, 7, 1}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/No-Gtk/tab-left.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_smooth/No-Gtk/tab-right.png"
+			border			= { 8, 8, 9, 11}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/No-Gtk/tab-active-top.png"
+			border			= { 8, 8, 11, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/No-Gtk/tab-active-bottom.png"
+			border			= { 8, 8, 0, 11}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/No-Gtk/tab-active-left.png"
+			border			= { 11, 9, 8, 12}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_smooth/No-Gtk/tab-active-right.png"
+			border			= { 9, 11, 8, 12}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook_smooth/No-Gtk/notebook-smooth-top.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_file		= "Notebook_smooth/gap-top.png"
+			gap_border     		= { 4, 7, 2, 0}
+			gap_start_file		= "Notebook_smooth/No-Gtk/gap-top-start.png"
+			gap_start_border     	= { 6, 6, 6, 6}
+			gap_side		= TOP
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook_smooth/No-Gtk/notebook-smooth-bottom.png" 
+			border			= { 10, 10, 0, 7}
+			stretch			= TRUE
+			gap_file		= "Notebook_smooth/gap-bottom.png"
+			gap_border     		= { 4, 7, 0, 2}
+			gap_start_file		= "Notebook_smooth/No-Gtk/gap-bottom-start.png"
+			gap_start_border     	= { 6, 6, 6, 6}
+			gap_side		= BOTTOM
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/No-Gtk/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/No-Gtk/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		# How to draw the box of a notebook when it isnt attached to a tab
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Notebook/No-Gtk/notebook.png"
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkNotebook" 	style:highest "tabs-non-gtk-smooth"

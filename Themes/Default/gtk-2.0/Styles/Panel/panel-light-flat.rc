@@ -1,0 +1,41 @@
+include						"Styles/Panel/panel-light.rc"
+
+style "panel-flat"
+{
+	xthickness				= 1
+	ythickness				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+	}
+}
+
+class "PanelApp*"				style "panel-flat"
+class "PanelToplevel*"				style "panel-flat"
+class "*Xfce*Panel*"				style "panel-flat"
+
+widget "*fast-user-switch*"			style "panel-flat"
+widget "PanelToplevel*PanelAppletFrame"		style "panel-flat"
+widget "PanelToplevel*PanelMenuBar"		style "panel-flat"
+widget "PanelToplevel*PanelWidget*"		style "panel-flat"
+widget "*Xfce*Panel*"				style "panel-flat"
+
+widget_class "BonoboPlug*Panel*"		style "panel-flat"
+widget_class "*tray*"				style "panel-flat"
+
+widget "*PanelApplet*"				style "panel-flat"
+
+widget_class "Panel*<GtkButton>"		style "panel-button"
+widget_class "BonoboPlug*Applet*<GtkButton>"	style "panel-button"
+
+widget_class "*Tasklist.*<GtkButton>"		style:highest "taskbar-button"
+
+include						"Styles/Panel/panel.rc"

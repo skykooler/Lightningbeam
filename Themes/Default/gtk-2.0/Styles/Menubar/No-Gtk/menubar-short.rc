@@ -1,0 +1,26 @@
+style "nogtk-menubar-short"
+{
+	bg_pixmap[NORMAL]			 = "Fixes/gradient-alt.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= OUT
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkMenuBar"		style "nogtk-menubar-short"

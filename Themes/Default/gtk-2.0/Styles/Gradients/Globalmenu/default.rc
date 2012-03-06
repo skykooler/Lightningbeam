@@ -1,0 +1,110 @@
+include						"Styles/Gradients/gradient-default.rc"
+include 					"Styles/Pcmanfm/pcmanfm-with-menubar.rc"
+
+style "gmpc-main"				= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/Gmpc/gmpc-globalmenu.png"
+			border			= { 0, 0, 130, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "rhythm-search"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/Rhythmbox/search.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "rhythm-lastfm"				= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Apps/Rhythmbox/lastfm.png"
+			border			= { 0, 0, 121, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+#rhythmbox
+widget "*RBSourceHeader*GtkEventBox"		style "rhythm-search"
+widget "*RBAudioscrobblerProfileSource*GtkScrolledWindow.GtkViewport"	style "rhythm-lastfm"
+#gmpc
+widget "pl3_win.*.browser_container"  		style "gmpc-main"
+widget "GtkWindow.GtkVBox.GtkVBox.GtkHPaned.GtkVPaned.GtkVBox.GtkEventBox"  		style "gmpc-main"
+
+style "synaptic-toolbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	bg_pixmap[NORMAL]			=  "Apps/Synaptic/gradient.png"
+	bg_pixmap[INSENSITIVE]			=  "Apps/Synaptic/gradient.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+		}
+	}
+}
+
+widget "window_main*handlebox_button_toolbar"	style "synaptic-toolbar"
+
+widget "GtkWindow.GtkVBox.GtkHandleBox" 	style "synaptic-toolbar"
+
+style "inkscape-toolbar-color"
+{
+	bg[NORMAL]				= @bg_color
+}
+
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox*"	style:highest "inkscape-toolbar-color"
+
+style "inkscape-toolbar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			recolorable		= FALSE
+			file			= "Apps/Synaptic/gradient-alt.png"
+			border			= { 0, 0, 35, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= FLAT_BOX
+			recolorable		= FALSE
+			file			= "Apps/Synaptic/gradient-alt.png"
+			border			= { 0, 0, 35, 0}
+			stretch			= TRUE
+		}
+	}
+}
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox"	style:highest "inkscape-toolbar"
+widget "gtkmm__GtkWindow.SPDesktopWidget.GtkVBox.GtkHandleBox.GtkVBox.GtkTable.gtkmm*" style:highest "inkscape-toolbar"

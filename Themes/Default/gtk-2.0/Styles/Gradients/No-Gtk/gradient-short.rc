@@ -1,0 +1,15 @@
+style "nogtk-gradient-alt"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			file			= "Fixes/gradient-nogtk-alt.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+widget "GtkWindow.GtkFixed.GtkToolbar" 		style "nogtk-gradient-alt"

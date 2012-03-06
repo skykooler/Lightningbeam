@@ -1,0 +1,265 @@
+style "nautilus-statusbar-fix"
+{
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/nautilus-elementary/statusbar-10.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "nautilus-sidebar"
+{
+	ythickness				= 3
+	xthickness				= 3
+
+	GtkTreeView::horizontal_separator	= 15
+	base[NORMAL]				= shade( 0.902, @bg_color)
+#	engine "murrine"
+#	{
+#		expanderstyle 			= 2
+#	}
+}
+
+style "nautilus-view"
+{
+	xthickness				= 0
+	ythickness				= 0
+}
+
+style "nautilus-handle"
+{
+	GtkPaned::handle-size         		= 6
+	
+	engine "pixmap"
+	{
+		image # for the thin gray line separating the sidepane and viewpane
+		{
+			function		= HANDLE
+			recolorable		= TRUE
+			file			= "Apps/nautilus-elementary/separator.png"
+			stretch			= TRUE
+			border 			= { 3, 0, 0, 0 }
+		}
+	}
+}
+
+style "nautilus-left-slider"
+{
+	xthickness 				= 0
+	ythickness 				= 0
+	
+	GtkButton::inner-border			= { 5, 0, 0, 2}
+
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function 		= BOX
+			file			= "Apps/nautilus-elementary/left_slider_normal.png"
+			border			= { 9, 0, 6, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "nautilus-right-slider"
+{	
+	xthickness = 0
+	ythickness = 0
+
+	GtkButton::inner-border			= { 0, 5, 0, 2}
+	
+	engine "pixmap"
+	{
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+		}
+		image
+		{
+			function 		= BOX
+			file			= "Apps/nautilus-elementary/right_slider_normal.png"
+			border			= { 0, 9, 6, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+
+style "nautilus-entry"				= "default"
+{
+	xthickness 				= 3
+	ythickness 				= 3
+
+	GtkWidget::focus-line-width		= 0
+	GtkWidget::interior-focus		= 0
+
+	GtkEntry::inner_border			= { 0, 0, 0, 0}
+
+	base[INSENSITIVE]			= @base_color
+
+	engine "pixmap"
+	{
+		# Entry (focused)
+		image
+		{
+			function		= FOCUS
+			recolorable		= TRUE
+			file			= "Entry/text-entry-in.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+		# Arrow
+		image
+		{
+			function		= ARROW
+		}
+		# Text-entry 
+		# Text-entry
+		image
+		{
+			function		= SHADOW
+			detail			= "entry"
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Entry/Toolbar/text-entry.png"
+			border			= { 5, 5, 5, 5}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "nautilus-scale"
+{
+	ythickness 				= 0
+	xthickness 				= 0
+
+	GtkScale::slider-length			= 17
+	GtkRange::trough_border			= 0
+	GtkRange::slider_width			= 17
+	GtkRange::stepper_size			= 16
+
+	engine "pixmap" 
+	{
+		image
+		{
+			function		= FOCUS
+		}
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Apps/nautilus-elementary/trough-horizontal.png"
+			border			= { 10, 10, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Apps/nautilus-elementary/trough-vertical.png"
+			border			= { 0, 0, 10, 10}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		# the sliders
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Apps/nautilus-elementary/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Apps/nautilus-elementary/slider-horiz-prelight.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Apps/nautilus-elementary/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		# vertical
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Apps/nautilus-elementary/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Apps/nautilus-elementary/slider-horiz-prelight.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Apps/nautilus-elementary/slider-horiz.png"
+			border			= { 0, 0, 0, 0}
+ 			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+	}
+	
+}
+
+widget "NautilusNavigationWindow*NautilusLocationEntry"		style:highest "nautilus-entry"
+
+widget_class "NautilusNavigationWindow*<GtkStatusbar>*<GtkEventBox>"	style "nautilus-statusbar-fix"
+
+widget "*Nautilus*Splitter"					style "nautilus-handle"
+
+widget_class "*Nautilus*NautilusPane*"				style "nautilus-sidebar"
+widget_class "*<NautilusPlacesSidebar>.GtkTreeView"		style "nautilus-sidebar"
+
+widget "Nautilus*left_slider*" 					style "nautilus-left-slider" 
+widget "Nautilus*right_slider*" 				style "nautilus-right-slider"
+
+widget_class "*Nautilus*Scale*"                 		style:highest "nautilus-scale"

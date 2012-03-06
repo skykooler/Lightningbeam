@@ -1,0 +1,54 @@
+include						"notebook.rc"
+
+style "notebook-no-gradient" 				= "default"
+{
+	engine "pixmap" 
+	{
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/notebook-no-gradient.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+		}
+		# How to draw the box of a notebook when it isnt attached to a tab
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Notebook/notebook-no-gradient.png"
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			#gap_side		= TOP
+		}
+	}
+}
+
+
+style "notebook-fix-no-gradient"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/none.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkNotebook"				style "notebook-no-gradient"
+widget_class "*<GtkNotebook>*<GtkEventBox>"     style "notebook-fix-no-gradient"
+widget_class "*<GtkNotebook>*<GtkDrawingArea>"  style "notebook-fix-no-gradient"
+widget_class "*<GtkNotebook>*<GtkLayout>"       style "notebook-fix-no-gradient"
+widget_class "*<GtkNotebook>*<GtkViewport>"	style "notebook-fix-no-gradient"

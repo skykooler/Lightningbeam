@@ -1,0 +1,103 @@
+style "midori-tabs"				= "default"
+{
+	#GtkNotebook::tab-curvature		= 3
+
+	xthickness    		        	= 8
+	ythickness    		        	= 2
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			state			= ACTIVE
+			file			= "Tabs_alt/tab.png"
+			border			= { 7, 7, 6, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}	
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-top.png"
+			border			= { 6, 6, 10, 0}
+			stretch			= TRUE
+			gap_side		= BOTTOM
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-bottom.png"
+			border			= { 6, 6, 8, 2}
+			stretch			= TRUE
+			gap_side		= TOP
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-left.png"
+			border			= { 14, 6, 8, 0}
+			stretch			= TRUE
+			gap_side		= RIGHT
+		}
+		image 
+		{
+			function		= EXTENSION
+			recolorable		= TRUE
+			file			= "Tabs_alt/tab-active-right.png"
+			border			= { 6, 14, 8, 0}
+			stretch			= TRUE
+			gap_side		= LEFT
+		}
+	}
+}
+
+style "midori-tab-colors"
+{
+	fg[NORMAL]				= @fg_color
+	fg[PRELIGHT]				= @fg_color
+	fg[SELECTED]				= @selected_fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+}
+
+widget "MidoriBrowser.GtkVBox.GtkHPaned.GtkVPaned.GtkNotebook"	style:highest "midori-tabs"
+
+widget_class "MidoriBrowser.GtkVBox.GtkHPaned.GtkVPaned.GtkNotebook.<GtkLabel>"	style "midori-tab-colors"
+widget_class "MidoriBrowser.GtkVBox.GtkHPaned.GtkVPaned.GtkNotebook.<GtkHBox>.<GtkLabel>"	style "midori-tab-colors"
+widget_class "MidoriBrowser.GtkVBox.GtkHPaned.GtkVPaned.GtkNotebook.*<GtkEventBox>*<GtkLabel>" 	style "midori-tab-colors"
+

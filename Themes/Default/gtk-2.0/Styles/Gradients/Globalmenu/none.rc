@@ -1,0 +1,18 @@
+include						"Styles/Gradients/gradient-none.rc"
+include 					"Styles/Pcmanfm/pcmanfm-with-menubar.rc"
+
+style "synaptic-toolbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+		}
+	}
+}
+
+widget "window_main*handlebox_button_toolbar"	style "synaptic-toolbar"
+widget "GtkWindow.GtkVBox.GtkHandleBox" 	style "synaptic-toolbar"

@@ -1,0 +1,36 @@
+style "banshee-toolbar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/banshee/banshee-gradient.png"
+			border			= { 0, 0, 50, 0}
+			stretch         	= TRUE
+		}
+	}
+
+}
+
+widget "__gtksharp_1?_Nereid_PlayerInterface"	style "banshee-toolbar"
+
+style "banshee-events"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/statusbar.png"#"Apps/banshee/banshee-gradient.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+
+}
+
+
+widget "__gtksharp_1?_Nereid_PlayerInterface.GtkVBox.GtkHBox.GtkAlignment.GtkHBox.GtkEventBox"	style "banshee-events"

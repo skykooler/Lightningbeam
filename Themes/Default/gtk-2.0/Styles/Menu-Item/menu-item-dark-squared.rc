@@ -1,0 +1,315 @@
+style "menu-item-dark-squared"			= "menu-dark"
+{
+	xthickness				= 1
+	ythickness				= 3
+
+	bg[NORMAL]				= "#555555"
+	bg[PRELIGHT]				= "#7a7a7a"
+	bg[SELECTED]				= "#7a7a7a"
+	bg[INSENSITIVE]				= "#7a7a7a"
+	bg[ACTIVE]				= "#7a7a7a"
+
+	fg[NORMAL]				= "#e0e0e0"
+	fg[PRELIGHT]				= "#f0f0f0"
+	fg[SELECTED]				= "#e0e0e0"
+	fg[ACTIVE]				= "#e0e0e0"
+	fg[INSENSITIVE]				= "#9b9b9b"
+
+	text[NORMAL]				= "#e0e0e0"
+	text[PRELIGHT]				= "#f0f0f0"
+
+	engine "pixmap"
+	{
+		# Menuitem background (mouse over)
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Menu/dark-squared-menu-item.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			#state			= PRELIGHT
+			overlay_file		= "Arrows/arrow-right-prelight.png"
+			overlay_stretch		= FALSE
+			arrow_direction		= RIGHT
+		}
+		# fix for checkbutton
+		image 
+		{
+			function 		= CHECK
+			state 			= NORMAL
+			shadow         		= OUT
+		}
+		image 
+		{
+			function 		= CHECK
+			recolorable 		= TRUE
+			state 			= PRELIGHT
+			shadow 			= OUT
+			overlay_file 		= "Check-Radio/check2-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function 		= CHECK
+			state 			= INSENSITIVE
+			shadow         		= OUT
+		}
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= NORMAL
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check5-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check6-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= CHECK
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow         		= IN
+			overlay_file    	= "Check-Radio/check2-black.png"
+			overlay_stretch 	= FALSE
+		}
+		#Fix for radiobutton
+		image 
+		{
+			function        	= OPTION
+			state 			= NORMAL
+			shadow         		= OUT
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow         		= OUT
+			overlay_file    	= "Check-Radio/option2-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			state 			= INSENSITIVE
+			shadow         		= OUT
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= NORMAL
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option4-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= PRELIGHT
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option5-black.png"
+			overlay_stretch 	= FALSE
+		}
+		image 
+		{
+			function        	= OPTION
+			recolorable     	= TRUE
+			state 			= INSENSITIVE
+			shadow          	= IN
+			overlay_file    	= "Check-Radio/option2-black.png"
+			overlay_stretch 	= FALSE
+		}
+	}
+}
+
+style "menubar-item"				= "default"
+{
+	xthickness				= 1
+	ythickness				= 3
+
+	fg[NORMAL]				= @fg_color
+	fg[PRELIGHT]				= @fg_color
+	fg[SELECTED]				= @fg_color
+	fg[ACTIVE]				= @fg_color
+	fg[INSENSITIVE]				= darker (@bg_color)
+
+	engine "pixmap"
+	{
+		image
+		{	
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Panel/menu-item-light.png"
+			border			= { 6, 6, 6, 0}
+			stretch			= TRUE
+		}		
+	}
+}
+
+style "range-dark" = "default"
+{
+	GtkScale::slider-length			= 17
+	GtkRange::trough_border			= 0
+	GtkRange::slider_width			= 17
+	GtkRange::stepper_size			= 17
+
+	engine "pixmap" 
+	{
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Range/trough-horizontal.png"
+			border			= { 4, 4, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			detail			= "trough"
+			file			= "Range/trough-vertical.png"
+			border			= { 0, 0, 4, 4}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		# the sliders
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Range/slider-horiz-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Range/slider-horiz-prelight-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Range/slider-horiz-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= HORIZONTAL
+		}
+		# vertical
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= NORMAL
+			file			= "Range/slider-horiz-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= PRELIGHT
+			file			= "Range/slider-horiz-prelight-dark.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+		image 
+		{
+			function		= SLIDER
+			recolorable		= TRUE
+			state           	= INSENSITIVE
+			file			= "Range/slider-horiz-dark.png"
+			border			= { 0, 0, 0, 0}
+ 			stretch			= TRUE
+			orientation		= VERTICAL
+		}
+	}
+}
+
+style "shadow-with-background-dark-menu"	= "default"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= TRUE
+			file			= "Shadows/shadow-in-dark-menu.png"
+			border			= { 5, 5, 6, 6}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= ARROW
+			recolorable		= TRUE
+			overlay_file		= "Arrows/arrow-right.png"
+			overlay_border		= { 0, 0, 0, 0}
+			overlay_stretch		= FALSE
+			arrow_direction		= RIGHT
+		}
+	}
+}
+
+style "chrome-custom-button-dark"		= "button"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			state			= NORMAL
+			recolorable		= TRUE
+			file			= "Apps/chrome/chrome-button-dark.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+		image
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Apps/chrome/chrome-button-dark.png"
+			border			= { 9, 9, 6, 9}
+			stretch			= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkMenuItem>*"          	style "menu-item-dark-squared"
+widget_class "*<GtkMenuBar>*<GtkMenuItem>*"	style "menubar-item"
+widget_class "*<GtkMenuItem>.*.<GtkScale>" 	style "range-dark"
+widget "*.gtk-combobox-popup-menu.*" 		style "menu-item-dark-squared"
+widget_class "*<GtkMenu>*<GtkCalendar>"        	style "shadow-with-background-dark-menu"
+#chrome
+widget "*GtkCustomMenu.GtkCustomMenuItem.GtkHBox.GtkHBox"		style "chrome-custom-button-dark"

@@ -1,0 +1,123 @@
+include						"Styles/Notebook/notebook.rc"
+
+style "notebook" 				= "default"
+{
+	engine "pixmap" 
+	{
+		# How to draw boxes with a gap on one side (ie the page of a notebook)
+		image 
+		{
+			function		= BOX_GAP
+			recolorable		= TRUE
+			file			= "Notebook/notebook.png" 
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+		}
+		# How to draw the box of a notebook when it isnt attached to a tab
+		image 
+		{
+			function		= BOX
+			recolorable		= TRUE
+			file			= "Notebook/notebook.png"
+			border			= { 10, 10, 7, 0}
+			stretch			= TRUE
+			#gap_side		= TOP
+		}
+	}
+}
+
+style "notebook-viewport-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Fixes/viewport-short.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+		image
+		{
+			function		= SHADOW
+			shadow			= IN
+			recolorable		= FALSE
+			file			= "Shadows/shadow-in-viewport-short.png"
+			border			= { 5, 5, 5, 6}
+			stretch			= TRUE
+		}
+	}
+}
+
+style "notebook-fix-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Notebook/notebook-bg-short.png"
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook/notebook-fix-short.png"
+			border			= { 0, 0, 0, 0 }
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar-10.png"
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Apps/Deluge/notebook.png"
+			border			= { 0, 0, 4, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "deluge-options-short"
+{
+	xthickness				= 3
+	ythickness				= 3
+
+	bg_pixmap[NORMAL]			= "Fixes/statusbar-10.png"
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			file			= "Notebook/notebook-fix.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+class "GtkNotebook"				style "notebook"
+
+widget_class "*<GtkNotebook>*<GtkEventBox>"	style "notebook-fix-short"
+widget_class "*<GtkNotebook>*<GtkDrawingArea>"	style "notebook-fix-short"
+widget_class "*<GtkNotebook>*<GtkLayout>"	style "notebook-fix-short"
+
+widget "main_window*torrent_info.*viewport?"	style "deluge-short"
+widget "main_window*torrent_info.*viewport3"	style "deluge-options-short"
+
+widget_class "*<GtkNotebook>*<GtkViewport>"	style "notebook-viewport-short"

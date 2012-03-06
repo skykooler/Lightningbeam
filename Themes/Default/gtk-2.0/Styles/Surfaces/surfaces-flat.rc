@@ -1,0 +1,53 @@
+include						"Styles/Surfaces/surfaces.rc"
+
+style "statusbar-flat"				= "button"
+{
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+style "color-flat"				= "button"
+{
+	bg_pixmap[NORMAL]			= "Fixes/none.png"
+
+}
+
+style "synaptic-statusbar"
+{
+	xthickness				= 0
+	ythickness				= 0
+
+	engine "pixmap"
+	{
+		image
+		{
+			function        	= FLAT_BOX
+			recolorable     	= TRUE
+			#state			= PRELIGHT
+			file			= "Fixes/none.png"
+			border			= { 0, 0, 0, 0}
+			stretch         	= TRUE
+		}
+	}
+}
+
+widget_class "*<GtkStatusbar>*<GtkEventBox>"	style "statusbar-flat"
+widget_class "*<GtkStatusbar>*ComboBox"		style "statusbar-flat"
+
+#gimp color picker
+widget_class "*.<GimpFgBgEditor>*"					style:highest "color-flat"
+#fix for download frame in emesene 
+widget "GtkWindow.GtkVBox.GtkNotebook.GtkVBox.GtkHBox.GtkLayout" 	style:highest "color-flat"
+#synaptic statusbar
+widget "window_main.vbox1.hbox_status.scrolledwindow*.viewport4" 	style "synaptic-statusbar"

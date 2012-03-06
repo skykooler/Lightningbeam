@@ -1,0 +1,15 @@
+style "nautilus-menubar"
+{
+	engine "pixmap"
+	{
+		image
+		{
+			function		= BOX
+			file			= "Apps/nautilus-elementary/nautilus.png"
+			border			= { 0, 0, 0, 0}
+			stretch			= FALSE
+		}
+	}
+}
+
+widget_class "NautilusNavigationWindow.*<GtkMenuBar>"		style "nautilus-menubar"
