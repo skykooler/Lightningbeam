@@ -171,7 +171,12 @@ if sys.platform=="linux2":
 	from GUI.Files import FileType
 	if USING_GL:
 		from OpenGL.GL import *
+		from OpenGL.GLU import *
 		from GUI import GL
+		try:
+			from PIL import Image as PILImage
+		except ImportError as err:
+			import Image as PILImage
 	from GUI.Geometry import offset_rect, rect_sized
 	
 	#If we can import this, we are in the install directory. Mangle media paths accordingly.
@@ -835,7 +840,77 @@ class CheckBox(Widget):
 		self.box.value = value
 	value = property(get_value, set_value)
 		
-	
+class _CR(object):
+	"""Internal use only. This is a class that only exists for GLViews 
+	to pass window dimensions on to their children."""
+	def __init__(self):
+		self.x = 0
+		self.y = 0
+		self.stack = []
+	def save(self):
+		glPushAttrib(GL_ALL_ATTRIB_BITS);
+		glPushMatrix()
+		self.stack.append((self.x, self.y))
+	def restore(self):
+		self.x, self.y = self.stack.pop()
+		glPopMatrix()
+		glPopAttrib()
+	def translate(self, x, y):
+		glTranslatef(x, y, 0);
+	def rotate(self, r):
+		pass
+	def scale(self, sx, sy):
+		pass
+	def drawCurve(self, points, precision=20):
+		npoints = []
+		ave = misc_funcs.ave
+		s = range(0, len(points)-2, 2)
+		for i in s:
+			for j in range(precision):
+				k=1.0*(precision-j)
+				x=ave(	ave(ave(self.x, 
+								points[i][0], 
+								k/precision), 
+							ave(points[i][0], 
+								points[i+1][0], 
+								k/precision), 
+							k/precision),
+						ave(ave(points[i][0],
+								points[i+1][0],
+								k/precision), 
+							ave(points[i+1][0],
+								points[i+2][0], 
+								k/precision), 
+							k/precision),
+						k/precision)
+							
+				
+				y=ave(	ave(ave(self.y, 
+								points[i][1], 
+								k/precision), 
+							ave(points[i][1], 
+								points[i+1][1], 
+								k/precision), 
+							k/precision),
+						ave(ave(points[i][1],
+								points[i+1][1],
+								k/precision), 
+							ave(points[i+1][1],
+								points[i+2][1], 
+								k/precision), 
+							k/precision),
+						k/precision)
+				npoints.append((x, y))
+		glVertex2f(self.x, self.y)
+		glVertex2f(npoints[0][0], npoints[0][1])
+		for i in range(len(npoints)-1):
+			#drawLine(gc, drawable, npoints[i][0], npoints[i][1], npoints[i+1][0], npoints[i+1][1])
+			print npoints[i][0],npoints[i][1],npoints[i+1][0],npoints[i+1][1]
+			glVertex2f(npoints[i][0], npoints[i][1])
+			glVertex2f(npoints[i+1][0], npoints[i+1][1])
+		glVertex2f(npoints[-1][0],npoints[-1][1])
+		glVertex2f(*points[2])
+
 class Canvas(Widget):
 	def __init__(self,width=False,height=False):
 		self.objs=[]
@@ -870,19 +945,26 @@ class Canvas(Widget):
 			if USING_GL:
 				class OSXCanvas(GL.GLView):
 					def init_context(self):
-						glViewport(0, 0, width, height);
+						glClearColor(0.75,0.75,0.75,0.0)
 					def init_projection(self):
+						glViewport(0, 0, width, height);
 						glEnable( GL_TEXTURE_2D );
 						glEnable (GL_BLEND);
+						#glDisable( GL_LIGHTING) 
 						glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 					def render(self):
 						glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 						glLoadIdentity();
 						gluOrtho2D(0, width, 0, height); #TODO: width, height
 						glMatrixMode(GL_MODELVIEW);
+						cr = _CR()
+						cr.width = self.width
+						cr.height = self.height
 						for i in self.objs:
-							i.draw(None)
-				self.canvas = OSXCanvas(double_buffer=True,multisample=True,samples_per_pixel=8)
+							i.draw(cr)
+				
+				self.canvas = OSXCanvas()
+				self.canvas.update()
 			else:
 				class OSXCanvas (ScrollableView):
 					def draw(self, canvas, update_rect):
@@ -1078,6 +1160,10 @@ class Image(object):
 		self.name = image.split(sep)[-1]
 		self.path = image
 		self.type="Image"
+		if USING_GL:
+			# This is an OpenGL texture ID.
+			self.gltexture = self.loadGLImage(file = image)
+			
 		if animated:
 			self.animated = True
 			self.htiles = htiles
@@ -1119,43 +1205,97 @@ class Image(object):
 		if SYSTEM=="android":
 			pass
 		elif SYSTEM=="osx":
-			cr.gsave()
-			if sep=="\\":
-				# Very ugly hack for Windows. :(
-				# Windows doesn't respect coordinate transformations
-				# with respect to translation, so we have to do this
-				# bit ourselves.
+			if USING_GL:
+				pass
+				glEnable(GL_TEXTURE_2D);
+				glColor3f(0.5,0.5,0.5);
+				#self.gltexture.bind()
+				#self.gltexture.gl_tex_image_2d(self.image, with_mipmaps=True)
 				
-				# Rotation in radians
-				radrot = parent.group.rotation*math.pi/180 
-				# Coordinate transform: multiplication by a rotation matrix
-				cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+				glBindTexture(GL_TEXTURE_2D, self.gltexture)
+				
+				if self.animated:
+					src_rect = [(1.0/self.htiles)*(self.pointer%self.htiles),
+								(1.0/self.vtiles)*(self.pointer/self.htiles),
+								(1.0/self.htiles)*(self.pointer%self.htiles+1),
+								(1.0/self.vtiles)*(self.pointer/self.htiles+1)]
+					width = self.image.bounds[2]/self.htiles
+					height = self.image.bounds[3]/self.vtiles
+				else:
+					src_rect = [0.0, 0.0, 1.0, 1.0]
+					width, height = self.image.bounds
+				glBegin(GL_QUADS);
+				glTexCoord2f(0.0, 0.0);
+				#glTexCoord2f(src_rect[0], src_rect[1]);
+				glVertex2f( self.x, cr.height-(self.y));
+				glTexCoord2f(1.0, 0.0);
+				#glTexCoord2f(src_rect[2], src_rect[1]);
+				glVertex2f(width+self.x, cr.height-(self.y));
+				glTexCoord2f(1.0, 1.0);
+				#glTexCoord2f(src_rect[2], src_rect[3]);
+				glVertex2f( width+self.x, cr.height-(height+self.y));
+				glTexCoord2f(0.0, 1.0);
+				#glTexCoord2f(src_rect[0], src_rect[3]);
+				glVertex2f( self.x, cr.height-(height+self.y));
+				print src_rect
+				glEnd();
 			else:
-				cr.translate(self.x,self.y)
-			cr.rotate(self.rotation)
-			cr.scale(self.xscale*1.0, self.yscale*1.0)
-			if self.animated:
-				src_rect = self.image.bounds
-				# (i%4)%6, i/4
-				src_rect = [(src_rect[2]/self.htiles)*(self.pointer%self.htiles),
-							(src_rect[3]/self.vtiles)*(self.pointer/self.htiles),
-							(src_rect[2]/self.htiles)*(self.pointer%self.htiles+1),
-							(src_rect[3]/self.vtiles)*(self.pointer/self.htiles+1)]
-				#src_rect = [16*self.pointer,0,16+16*self.pointer,32]
-				#print [self.x, self.y, self.x+self.image.bounds[2]/self.htiles, self.y+self.image.bounds[3]/self.vtiles]
-				dst_rect = [self.x, self.y, self.image.bounds[2]/self.htiles+self.x, self.image.bounds[3]/self.vtiles+self.y]
-				self.image.draw(cr, src_rect, dst_rect)
-			else:
-				src_rect = self.image.bounds
-				dst_rect = [self.x,self.y,self.x+src_rect[2],self.y+src_rect[3]]
-				self.image.draw(cr, src_rect, dst_rect)
-			cr.grestore()
+				cr.gsave()
+				if sep=="\\":
+					# Very ugly hack for Windows. :(
+					# Windows doesn't respect coordinate transformations
+					# with respect to translation, so we have to do this
+					# bit ourselves.
+					
+					# Rotation in radians
+					radrot = parent.group.rotation*math.pi/180 
+					# Coordinate transform: multiplication by a rotation matrix
+					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+				else:
+					cr.translate(self.x,self.y)
+				cr.rotate(self.rotation)
+				cr.scale(self.xscale*1.0, self.yscale*1.0)
+				if self.animated:
+					src_rect = self.image.bounds
+					# (i%4)%6, i/4
+					src_rect = [(src_rect[2]/self.htiles)*(self.pointer%self.htiles),
+								(src_rect[3]/self.vtiles)*(self.pointer/self.htiles),
+								(src_rect[2]/self.htiles)*(self.pointer%self.htiles+1),
+								(src_rect[3]/self.vtiles)*(self.pointer/self.htiles+1)]
+					#src_rect = [16*self.pointer,0,16+16*self.pointer,32]
+					#print [self.x, self.y, self.x+self.image.bounds[2]/self.htiles, self.y+self.image.bounds[3]/self.vtiles]
+					dst_rect = [self.x, self.y, self.image.bounds[2]/self.htiles+self.x, self.image.bounds[3]/self.vtiles+self.y]
+					self.image.draw(cr, src_rect, dst_rect)
+				else:
+					src_rect = self.image.bounds
+					dst_rect = [self.x,self.y,self.x+src_rect[2],self.y+src_rect[3]]
+					self.image.draw(cr, src_rect, dst_rect)
+				cr.grestore()
 		elif SYSTEM=="html":
 			cr.save()
 			pass
 	def set_image(self,img):
 		if SYSTEM=="osx":
 			self.image = GUI.Image(file = img)
+			if USING_GL:
+				self.gltexture = self.loadGLImage(file = img)
+	def loadGLImage(self, file = None ):
+		"""Load an image file as a 2D texture using PIL"""
+		if not file:
+			file = self.path
+		im = PILImage.open(file)
+		try:
+			ix, iy, image = im.size[0], im.size[1], im.tostring("raw", "RGBA", 0, -1)
+		except SystemError:
+			ix, iy, image = im.size[0], im.size[1], im.tostring("raw", "RGBX", 0, -1)
+		ID = glGenTextures(1)
+		glBindTexture(GL_TEXTURE_2D, ID)
+		glPixelStorei(GL_UNPACK_ALIGNMENT,1)
+		glTexImage2D(
+			GL_TEXTURE_2D, 0, 3, ix, iy, 0,
+			GL_RGBA, GL_UNSIGNED_BYTE, image
+		)
+		return ID
 	def hitTest(self,x,y):
 		hits = False
 		# points "a" and "b" forms the anchored segment.
@@ -1261,44 +1401,39 @@ class Shape (object):
 		elif SYSTEM=="osx":
 
 			if USING_GL:
-				pass
-
-			cr.gsave()
-			if sep=="\\":
-				# Very ugly hack for Windows. :(
-				# Windows doesn't respect coordinate transformations
-				# with respect to translation, so we have to do this
-				# bit ourselves.
+				cr.save()
+				cr.translate(self.x, cr.height-self.y)
+				cr.rotate(self.rotation)
+				cr.scale(self.xscale*1.0, self.yscale*1.0)
 				
-				# Rotation in radians
-				radrot = parent.group.rotation*math.pi/180 
-				# Coordinate transform: multiplication by a rotation matrix
-				cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
-			else:
-				cr.translate(self.x,self.y)
-			cr.rotate(self.rotation)
-			cr.scale(self.xscale*1.0, self.yscale*1.0)
-			cr.newpath()
-			cr.pencolor = self.linecolor.pygui
-			cr.fillcolor = self.fillcolor.pygui
-			cr.pensize = max(self.linewidth,1)
-			for i in self.shapedata:
-				if i[0]=="M":
-					point = (i[1], i[2])
-					cr.moveto(point[0],point[1])
-				elif i[0]=="L":
-					point = (i[1], i[2])
-					cr.lineto(point[0],point[1])
-				elif i[0]=="C":
-					pointa = (i[1], i[2])
-					pointb = (i[3], i[4])
-					pointc = (i[5], i[6])
-					### Mac OSX needs custom PyGUI for this to work ###
-					cr.curveto((pointa[0],pointa[1]),(pointb[0],pointb[1]),(pointc[0],pointc[1]))
-			if self.filled:
-				cr.closepath()
-				cr.fill_stroke()
-
+				#pencolor, fillcolor, pensize
+				#Temporary.
+				glColor3f(1.0,0.0,0.0)
+				
+				glBegin(GL_LINES)
+				for i in self.shapedata:
+					if i[0]=="M":
+						point = (i[1], i[2])
+						#glVertex2f(point[0], cr.height-point[1])
+						cr.x, cr.y = point
+					elif i[0]=="L":
+						point = (i[1], i[2])
+						#glVertex2f(point[0], cr.height-point[1])
+						glVertex2f(cr.x, -cr.y)
+						glVertex2f(point[0], -point[1])
+						cr.x, cr.y = point
+					elif i[0]=="C":
+						pointa = (i[1], i[2])
+						pointb = (i[3], i[4])
+						pointc = (i[5], i[6])
+						#TODO: curve
+						#glVertex2f(pointc[0], -pointc[1])
+						#glVertex2f(pointc[0], -pointc[1])
+						cr.drawCurve([ pointa, pointb, pointc])
+						cr.x, cr.y = pointc
+				glEnd()
+				
+				cr.restore()
 			else:
 				cr.gsave()
 				if sep=="\\":
@@ -1318,6 +1453,7 @@ class Shape (object):
 				cr.newpath()
 				cr.pencolor = self.linecolor.pygui
 				cr.fillcolor = self.fillcolor.pygui
+				cr.pensize = max(self.linewidth,1)
 				for i in self.shapedata:
 					if i[0]=="M":
 						point = (i[1], i[2])
@@ -1334,9 +1470,45 @@ class Shape (object):
 				if self.filled:
 					cr.closepath()
 					cr.fill_stroke()
+
 				else:
-					cr.stroke()
-				cr.grestore()
+					cr.gsave()
+					if sep=="\\":
+						# Very ugly hack for Windows. :(
+						# Windows doesn't respect coordinate transformations
+						# with respect to translation, so we have to do this
+						# bit ourselves.
+						
+						# Rotation in radians
+						radrot = parent.group.rotation*math.pi/180 
+						# Coordinate transform: multiplication by a rotation matrix
+						cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+					else:
+						cr.translate(self.x,self.y)
+					cr.rotate(self.rotation)
+					cr.scale(self.xscale*1.0, self.yscale*1.0)
+					cr.newpath()
+					cr.pencolor = self.linecolor.pygui
+					cr.fillcolor = self.fillcolor.pygui
+					for i in self.shapedata:
+						if i[0]=="M":
+							point = (i[1], i[2])
+							cr.moveto(point[0],point[1])
+						elif i[0]=="L":
+							point = (i[1], i[2])
+							cr.lineto(point[0],point[1])
+						elif i[0]=="C":
+							pointa = (i[1], i[2])
+							pointb = (i[3], i[4])
+							pointc = (i[5], i[6])
+							### Mac OSX needs custom PyGUI for this to work ###
+							cr.curveto((pointa[0],pointa[1]),(pointb[0],pointb[1]),(pointc[0],pointc[1]))
+					if self.filled:
+						cr.closepath()
+						cr.fill_stroke()
+					else:
+						cr.stroke()
+					cr.grestore()
 		elif SYSTEM=="html":
 			tb = ""
 			tb+="cr.save()\n"
@@ -1492,26 +1664,29 @@ class Text (object):
 		SITER+=1
 	def draw(self,cr=None,parent=None,rect=None):
 		if SYSTEM=="osx":
-			cr.font = self.font
-			cr.textcolor = self.fill.pygui
-			cr.gsave()
-			#cr.moveto(self.x,self.y)
-			if sep=="\\":
-				# Very ugly hack for Windows. :(
-				# Windows doesn't respect coordinate transformations
-				# with respect to translation, so we have to do this
-				# bit ourselves.
-				
-				# Rotation in radians
-				radrot = parent.group.rotation*math.pi/180 
-				# Coordinate transform: multiplication by a rotation matrix
-				cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+			if USING_GL:
+				pass
 			else:
-				cr.translate(self.x,self.y)
-			cr.newpath()
-			cr.moveto(0,0)
-			cr.show_text(self.text)
-			cr.grestore()
+				cr.font = self.font
+				cr.textcolor = self.fill.pygui
+				cr.gsave()
+				#cr.moveto(self.x,self.y)
+				if sep=="\\":
+					# Very ugly hack for Windows. :(
+					# Windows doesn't respect coordinate transformations
+					# with respect to translation, so we have to do this
+					# bit ourselves.
+					
+					# Rotation in radians
+					radrot = parent.group.rotation*math.pi/180 
+					# Coordinate transform: multiplication by a rotation matrix
+					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
+				else:
+					cr.translate(self.x,self.y)
+				cr.newpath()
+				cr.moveto(0,0)
+				cr.show_text(self.text)
+				cr.grestore()
 	def hitTest(self, x, y):
 		self.width = self.font.width(self.text)
 		self.height = self.font.height
@@ -1692,23 +1867,42 @@ class frame:
 				tb+="cr.restore()\n"
 			elif SYSTEM=="osx":
 				self.group = group
-				cr.gsave()
-				cr.rotate(group.rotation)
-				cr.translate(group.x,group.y)
-				cr.scale(group.xscale,group.yscale)
-				def dodraw(obj, cr):
-					obj.draw(cr, self)
-				result = [dodraw(obj, cr) for obj in self.objs]
-				if currentselect:
+				if USING_GL:
+					#cr.gsave()
+					#cr.rotate(group.rotation)
+					#cr.translate(group.x,group.y)
+					#cr.scale(group.xscale,group.yscale)
+					def dodraw(obj, cr):
+						obj.draw(cr, self)
+					result = [dodraw(obj, cr) for obj in self.objs]
+					#if currentselect:
+						#cr.gsave()
+						#cr.newpath()
+						#cr.pencolor = Colors.rgb(0,0,1)
+						#cr.rect([currentselect.minx-1,currentselect.miny-1,
+						#				currentselect.maxx+currentselect.x+2,
+						#				currentselect.maxy+currentselect.y+2])
+						#cr.stroke()
+						#cr.grestore()
+					#cr.grestore()
+				else:
 					cr.gsave()
-					cr.newpath()
-					cr.pencolor = Colors.rgb(0,0,1)
-					cr.rect([currentselect.minx-1,currentselect.miny-1,
-									currentselect.maxx+currentselect.x+2,
-									currentselect.maxy+currentselect.y+2])
-					cr.stroke()
+					cr.rotate(group.rotation)
+					cr.translate(group.x,group.y)
+					cr.scale(group.xscale,group.yscale)
+					def dodraw(obj, cr):
+						obj.draw(cr, self)
+					result = [dodraw(obj, cr) for obj in self.objs]
+					if currentselect:
+						cr.gsave()
+						cr.newpath()
+						cr.pencolor = Colors.rgb(0,0,1)
+						cr.rect([currentselect.minx-1,currentselect.miny-1,
+										currentselect.maxx+currentselect.x+2,
+										currentselect.maxy+currentselect.y+2])
+						cr.stroke()
+						cr.grestore()
 					cr.grestore()
-				cr.grestore()
 			elif SYSTEM=="html":
 				tb = ""
 				tb+="cr.save()\n"
