@@ -308,14 +308,14 @@ root.onMouseUp = onMouseUpGroup
 root.onMouseMove = onMouseMoveGroup
 root.onMouseDrag = onMouseDragGroup
 root.onKeyDown = onKeyDownGroup
-'''
-e=ellipse(100,100,10,10,None)
+
+e=ellipse(100,100,100,50,None)
 e.onMouseDown = onMouseDownObj
 e.onMouseMove = onMouseMoveObj
 e.onMouseDrag = onMouseDragObj
 e.onMouseUp = onMouseUpObj
 e.onKeyDown = onKeyDownObj
-root.add(e)'''
+root.add(e)
 
 
 

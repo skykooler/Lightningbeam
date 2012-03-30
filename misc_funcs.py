@@ -59,6 +59,12 @@ def update_tooloptions():
 			else:
 				i.setvisible(False)
 	
+def ave(x, y, fac):
+	"""Weighted average. 
+	fac is the weight - 0.5 gives a standard average"""
+	return y - fac*(y-x)
+
+	
 def box(x, y, width, height, fill):
 	global objects
 	box = svlgui.Shape(x, y)
