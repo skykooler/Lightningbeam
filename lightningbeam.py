@@ -370,6 +370,8 @@ def open_file(widget=None):
 		if i.type=="Image":
 			i.path = svlgui.SECURETEMPDIR+"/"+i.path.split(os.sep)[-1]
 			i.set_image(i.path)
+			if not hasattr(i, 'iname'):
+				i.iname = None
 	MainWindow.stage.add(root, 0, 0)
 	MainWindow.stage.draw()
 	MainWindow.timelinebox.root = root
@@ -391,9 +393,17 @@ def save_file(widget=None):
 	lastpath = os.path.abspath(".")
 	for i in svlgui.Library:
 		if i.type=="Image":
-			os.chdir(os.sep.join(i.path.split(os.sep)[:-1]))
-			i.path = i.path.split(os.sep)[-1]
-			thetarfile.add(i.path.split(os.sep)[-1])
+			print "i.path: ",i.path
+			try:
+				os.chdir(os.sep.join(i.path.split(os.sep)[:-1]) or i.origpath)
+				i.path = i.path.split(os.sep)[-1]
+				thetarfile.add(i.path.split(os.sep)[-1])
+			except OSError:
+				tmpdir = tempfile.mkdtemp()
+				os.chdir(tmpdir)
+				i.pilimage.save(i.path)
+				thetarfile.add(i.path)
+				os.remove(i.path)
 			os.chdir(lastpath)
 	thetarfile.close()
 	svlgui.FILE = thetarfile

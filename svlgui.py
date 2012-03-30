@@ -10,6 +10,10 @@ import random
 import colors
 import platform
 import re
+try:
+	from PIL import Image as PILimage
+except ImportError:
+	GLEnablable = False
 
 '''
 #	Tool mode. Keyboard shortcut is the same key. Modes are:
@@ -1035,6 +1039,7 @@ class Image(object):
 		dict = self.__dict__.copy()
 		print dict
 		dict['image'] = None
+		dict['pilimage'] = None
 		return dict
 	def __init__(self,image,x=0,y=0,animated=False,canvas=None,htiles=1,vtiles=1,skipl=False):
 		if not skipl:
@@ -1051,7 +1056,9 @@ class Image(object):
 		self.linecolor = None
 		self.fillcolor = None
 		self.name = image.split(sep)[-1]
+		self.iname = None
 		self.path = image
+		self.pilimage = PILimage.open(image)
 		self.type="Image"
 		if animated:
 			self.animated = True
@@ -1674,6 +1681,8 @@ class frame:
 			else:
 				for i in self.objs:
 					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
+						if not hasattr(i.obj, "iname"):
+							i.obj.iname = None
 						if i.obj.iname:
 							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
 						else:

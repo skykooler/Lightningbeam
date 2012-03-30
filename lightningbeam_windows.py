@@ -108,7 +108,7 @@ class MainWindow:
 		self.hbox1.add(self.buttonbox)
 		self.vbox1 = svlgui.VBox(700,-1)
 		self.hbox1.add(self.vbox1)
-		self.stage = svlgui.Canvas(800,600)
+		self.stage = svlgui.Canvas(1200,1100)
 		self.timeline = svlgui.Canvas(2048,100)
 		self.timelineref = svlgui.Canvas(128,100)
 		self.timelinehbox = svlgui.HBox()
@@ -191,7 +191,7 @@ class MainWindowOSX:
 			unity = False
 		self.window = svlgui.Window("Lightningbeam")
 		self.menu = svlgui.Menu(True, None)
-		self.stage = svlgui.Canvas(800,600)
+		self.stage = svlgui.Canvas(1200,1100)
 		misc_funcs.stage = self.stage
 		self.layerbox = svlgui.Canvas(128,320)
 		self.timelinebox = svlgui.FramesCanvas(2000,320)
