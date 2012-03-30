@@ -47,7 +47,11 @@ WIDTH, HEIGHT = 500, 500
 
 #Whether we are using OpenGL for rendering. Currently we need PIL for this.
 if GLEnablable:
-	USING_GL = True
+	try:
+		import OpenGL
+		USING_GL = True
+	except ImportError:
+		USING_GL = False
 
 #Object which has the keyboard focus.
 FOCUS = None
@@ -216,6 +220,14 @@ elif sys.platform=="win32":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	if USING_GL:
+		from OpenGL.GL import *
+		from OpenGL.GLU import *
+		from GUI import GL
+		try:
+			from PIL import Image as PILImage
+		except ImportError as err:
+			import Image as PILImage
 	media_path = ""
 	SYSTEM="osx"
 	TEMPDIR="C:\\Windows\\Temp"
@@ -248,6 +260,14 @@ elif sys.platform=="darwin":
 	from GUI.StdButtons import DefaultButton, CancelButton
 	from GUI.Files import FileType
 	from GUI.Geometry import offset_rect, rect_sized
+	if USING_GL:
+		from OpenGL.GL import *
+		from OpenGL.GLU import *
+		from GUI import GL
+		try:
+			from PIL import Image as PILImage
+		except ImportError as err:
+			import Image as PILImage
 	SYSTEM="osx"
 	'''
 	import pyglet	# Using Pyglet. Even more experimental. As in doesn't work yet.
