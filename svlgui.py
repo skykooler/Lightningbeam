@@ -12,6 +12,7 @@ import platform
 import re
 try:
 	from PIL import Image as PILimage
+	GLEnablable = True
 except ImportError:
 	GLEnablable = False
 
@@ -44,8 +45,9 @@ FRAMERATE=50
 #Width and height are the width and height of the document
 WIDTH, HEIGHT = 500, 500
 
-#Whether we are using OpenGL for rendering.
-USING_GL = True
+#Whether we are using OpenGL for rendering. Currently we need PIL for this.
+if GLEnablable:
+	USING_GL = True
 
 #Object which has the keyboard focus.
 FOCUS = None
@@ -1165,9 +1167,9 @@ class Image(object):
 		self.name = image.split(sep)[-1]
 		self.iname = None
 		self.path = image
-		self.pilimage = PILimage.open(image)
 		self.type="Image"
 		if USING_GL:
+			self.pilimage = PILimage.open(image)
 			# This is an OpenGL texture ID.
 			self.gltexture = self.loadGLImage(file = image)
 			
