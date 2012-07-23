@@ -931,7 +931,7 @@ class _CR(object):
 		glVertex2f(npoints[0][0], npoints[0][1])
 		for i in range(len(npoints)-1):
 			#drawLine(gc, drawable, npoints[i][0], npoints[i][1], npoints[i+1][0], npoints[i+1][1])
-			print npoints[i][0],npoints[i][1],npoints[i+1][0],npoints[i+1][1]
+			# print npoints[i][0],npoints[i][1],npoints[i+1][0],npoints[i+1][1]
 			glVertex2f(npoints[i][0], npoints[i][1])
 			glVertex2f(npoints[i+1][0], npoints[i+1][1])
 		glVertex2f(npoints[-1][0],npoints[-1][1])
@@ -988,7 +988,55 @@ class Canvas(Widget):
 						cr.height = self.height
 						for i in self.objs:
 							i.draw(cr)
-				
+
+					def mouse_down(self, event):
+						self.become_target()
+						x, y = event.position
+						try:
+							for i in self.objs:
+								i._onMouseDown(x, y)
+						except ObjectDeletedError:
+							return
+						self.update()
+					def mouse_drag(self, event):
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseDrag(x, y)
+						self.update()
+						
+					def mouse_move(self, event):
+						global MOUSE_X, MOUSE_Y
+						MOUSE_X, MOUSE_Y = event.position
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseMove(x, y)
+						self.update()
+						
+					def mouse_up(self, event):
+						x, y = event.position
+						for i in self.objs:
+							i._onMouseUp(x, y)
+						self.update()
+						
+					def key_down(self, event):
+						keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
+										63235:"right_arrow",63234:"left_arrow",13:"enter",9:"tab",
+										63236:"F1",63237:"F2",63238:"F3",63239:"F4",63240:"F5",
+										63241:"F6",63242:"F7",63243:"F8",27:"escape"}
+						if not event.unichars=='':
+							if ord(event.unichars) in keydict:
+								key = keydict[ord(event.unichars)]
+							else:
+								key = event.unichars
+						else:
+							key = event.key.upper()
+						for i in self.objs:
+							i._onKeyDown(key)
+						self.update()
+					
+					def key_up(self, event):
+						pass
+
 				self.canvas = OSXCanvas()
 				self.canvas.update()
 			else:
@@ -1266,7 +1314,7 @@ class Image(object):
 				glTexCoord2f(0.0, 1.0);
 				#glTexCoord2f(src_rect[0], src_rect[3]);
 				glVertex2f( self.x, cr.height-(height+self.y));
-				print src_rect
+				# print src_rect
 				glEnd();
 			else:
 				cr.gsave()
@@ -1432,6 +1480,7 @@ class Shape (object):
 			if USING_GL:
 				cr.save()
 				cr.translate(self.x, cr.height-self.y)
+				# cr.translate(MOUSE_X, MOUSE_Y)
 				cr.rotate(self.rotation)
 				cr.scale(self.xscale*1.0, self.yscale*1.0)
 				
@@ -1452,9 +1501,9 @@ class Shape (object):
 						glVertex2f(point[0], -point[1])
 						cr.x, cr.y = point
 					elif i[0]=="C":
-						pointa = (i[1], i[2])
-						pointb = (i[3], i[4])
-						pointc = (i[5], i[6])
+						pointa = (i[1], -i[2])
+						pointb = (i[3], -i[4])
+						pointc = (i[5], -i[6])
 						#TODO: curve
 						#glVertex2f(pointc[0], -pointc[1])
 						#glVertex2f(pointc[0], -pointc[1])
@@ -1611,6 +1660,7 @@ class Shape (object):
 			return ccw(a,c,d) != ccw(b,c,d) and ccw(a,b,c) != ccw(a,b,d)
 		for i in xrange(len(self.shapedata)):
 			hits = hits != intersect(self.shapedata[i-1][1:3],self.shapedata[i][1:3],[x,y],[x,sys.maxint])
+		print hits, x, y
 		return hits
 	def localtransform(self, x, y, parent):
 		x,y = parent.localtransform(x,y)
@@ -1901,19 +1951,29 @@ class frame:
 					#cr.rotate(group.rotation)
 					#cr.translate(group.x,group.y)
 					#cr.scale(group.xscale,group.yscale)
+					
 					def dodraw(obj, cr):
 						obj.draw(cr, self)
 					result = [dodraw(obj, cr) for obj in self.objs]
-					#if currentselect:
-						#cr.gsave()
-						#cr.newpath()
-						#cr.pencolor = Colors.rgb(0,0,1)
-						#cr.rect([currentselect.minx-1,currentselect.miny-1,
-						#				currentselect.maxx+currentselect.x+2,
-						#				currentselect.maxy+currentselect.y+2])
-						#cr.stroke()
-						#cr.grestore()
-					#cr.grestore()
+					if currentselect:
+						cr.save()
+						
+						glColor3f(0,0,1)
+						
+						glBegin(GL_LINES)
+						glVertex2f(currentselect.minx-1,cr.height-(currentselect.miny-1))
+						glVertex2f(currentselect.maxx+currentselect.x+2, cr.height-(currentselect.miny-1))
+						glVertex2f(currentselect.maxx+currentselect.x+2, cr.height-(currentselect.miny-1))
+						glVertex2f(currentselect.maxx+currentselect.x+2, cr.height-(currentselect.maxy+currentselect.y+2))
+						glVertex2f(currentselect.maxx+currentselect.x+2, cr.height-(currentselect.maxy+currentselect.y+2))
+						glVertex2f(currentselect.minx-1,cr.height-(currentselect.maxy+currentselect.y+2))
+						glVertex2f(currentselect.minx-1,cr.height-(currentselect.maxy+currentselect.y+2))
+						glVertex2f(currentselect.minx-1,cr.height-(currentselect.miny-1))
+						glEnd()
+						
+						cr.restore()
+						print "selected", currentselect
+					# cr.restore()
 				else:
 					cr.gsave()
 					cr.rotate(group.rotation)
@@ -2769,7 +2829,7 @@ class FramesCanvas(Canvas):
 						src_rect = self.ackfr.bounds
 						src_rect = [0,0,(16)*(self.pointer%17),32]
 						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
-						print dst_rect
+						# print dst_rect
 						self.ackfr.draw(cr, src_rect, dst_rect)
 					else:
 						src_rect = self.inackfr.bounds
@@ -2785,7 +2845,7 @@ class FramesCanvas(Canvas):
 						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
 						self.inacfr.draw(cr, src_rect, dst_rect)
 				cr.grestore()
-			print max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)
+			# print max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)
 			for i in xrange(max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)):
 				cr.newpath()
 				cr.rect([i*16,k*32,i*16+16,k*32+32])
@@ -2795,7 +2855,7 @@ class FramesCanvas(Canvas):
 				elif i%5==0:
 					cr.fillcolor = Color([0.8,0.8,0.8]).pygui
 					cr.fill()
-					print i
+					# print i
 				else:
 					cr.fillcolor = Color([1.0,1.0,1.0]).pygui
 					cr.fill()
