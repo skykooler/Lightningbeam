@@ -53,6 +53,9 @@ if GLEnablable:
 	except ImportError:
 		USING_GL = False
 
+# Disable OpenGL. It's not ready for prime time.
+USING_GL = False
+
 #Object which has the keyboard focus.
 FOCUS = None
 
@@ -1525,6 +1528,7 @@ class Shape (object):
 					# Coordinate transform: multiplication by a rotation matrix
 					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
 				else:
+					pass
 					cr.translate(self.x,self.y)
 				cr.rotate(self.rotation)
 				cr.scale(self.xscale*1.0, self.yscale*1.0)
@@ -1550,43 +1554,8 @@ class Shape (object):
 					cr.fill_stroke()
 
 				else:
-					cr.gsave()
-					if sep=="\\":
-						# Very ugly hack for Windows. :(
-						# Windows doesn't respect coordinate transformations
-						# with respect to translation, so we have to do this
-						# bit ourselves.
-						
-						# Rotation in radians
-						radrot = parent.group.rotation*math.pi/180 
-						# Coordinate transform: multiplication by a rotation matrix
-						cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
-					else:
-						cr.translate(self.x,self.y)
-					cr.rotate(self.rotation)
-					cr.scale(self.xscale*1.0, self.yscale*1.0)
-					cr.newpath()
-					cr.pencolor = self.linecolor.pygui
-					cr.fillcolor = self.fillcolor.pygui
-					for i in self.shapedata:
-						if i[0]=="M":
-							point = (i[1], i[2])
-							cr.moveto(point[0],point[1])
-						elif i[0]=="L":
-							point = (i[1], i[2])
-							cr.lineto(point[0],point[1])
-						elif i[0]=="C":
-							pointa = (i[1], i[2])
-							pointb = (i[3], i[4])
-							pointc = (i[5], i[6])
-							### Mac OSX needs custom PyGUI for this to work ###
-							cr.curveto((pointa[0],pointa[1]),(pointb[0],pointb[1]),(pointc[0],pointc[1]))
-					if self.filled:
-						cr.closepath()
-						cr.fill_stroke()
-					else:
-						cr.stroke()
-					cr.grestore()
+					cr.stroke()
+				cr.grestore()
 		elif SYSTEM=="html":
 			tb = ""
 			tb+="cr.save()\n"
