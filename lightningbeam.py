@@ -309,6 +309,8 @@ root.onMouseMove = onMouseMoveGroup
 root.onMouseDrag = onMouseDragGroup
 root.onKeyDown = onKeyDownGroup
 
+svlgui.root = root
+
 e=ellipse(100,100,100,50,None)
 e.onMouseDown = onMouseDownObj
 e.onMouseMove = onMouseMoveObj

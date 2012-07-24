@@ -1866,6 +1866,7 @@ class framewrapper (object):
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
+
 	def hitTest(self, x, y):
 				x,y = self.transformcoords(x,y)
 				return self.obj.hitTest(x, y)
@@ -2623,11 +2624,18 @@ class ColorSelectionWindow:
 			def onClickRectFill(self,x,y):
 				global FILLCOLOR
 				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+				if root.descendItem().activelayer.currentselect:
+					root.descendItem().activelayer.currentselect.fillcolor = FILLCOLOR
+					root.descendItem().activelayer.currentselect.filled = True
+					root.descendItem().activelayer.currentselect.update()
 				self.window.dismiss()
 				raise ObjectDeletedError
 			def onClickRectLine(self,x,y):
 				global LINECOLOR
 				LINECOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
+				if root.descendItem().activelayer.currentselect:
+					root.descendItem().activelayer.currentselect.linecolor = LINECOLOR
+					root.descendItem().activelayer.currentselect.update()
 				self.window.dismiss()
 				raise ObjectDeletedError
 			canvas = Canvas(336,208)
