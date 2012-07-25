@@ -1953,6 +1953,7 @@ class frame:
 						obj.draw(cr, self)
 					result = [dodraw(obj, cr) for obj in self.objs]
 					if currentselect:
+						print "Currentselect:",currentselect
 						cr.gsave()
 						cr.newpath()
 						cr.pencolor = Colors.rgb(0,0,1)
@@ -2428,7 +2429,7 @@ class Group (object):
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
-					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ")+"\"\n"
+					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
 
 def set_cursor(curs, widget=None):
