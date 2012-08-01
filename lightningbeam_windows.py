@@ -185,10 +185,11 @@ class MainWindowAndroid:
 									
 class MainWindowOSX:
 	def __init__(self):
-		if process_exists("unity"):
-			unity = True
-		else:
-			unity = False
+		try:
+			import gtk
+			ubuntu = True
+		except:
+			ubuntu = False
 		self.window = svlgui.Window("Lightningbeam")
 		self.menu = svlgui.Menu(True, None)
 		self.stage = svlgui.Canvas(1200,1100)
@@ -329,7 +330,7 @@ class MainWindowOSX:
 								[self.textvarentry,self.textvarlabel._int(),None,self.fontsizentry._int()+3,None,"nw",""],
 								[self.thwaccel,self.tfontbutton._int(),None,self.textvarlabel._int()+3,None,"nw",""])
 		self.textvarentry.text=""
-		if unity:
+		if ubuntu:
 			self.frame.layout_self(	[self.toolbox,0,None,0,None,"nw",""],
 								#[self.timelinebox,self.toolbox._int()+148,-500,0,None,"new","hv"],
 								[self.timelinebox,self.toolbox._int()+148,-500,0,100,"new","hv"],
