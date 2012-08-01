@@ -96,6 +96,7 @@ def onMouseDownGroup(self, x, y):
 		MainWindow.scriptwindow.text = self.activelayer.frames[self.activelayer.currentframe].actions
 	elif svlgui.MODE in ["t"]:
 		self.ctext = svlgui.Text("Mimimi",x,y)
+		self.ctext.editing = True
 		self.ctext.onMouseDown = onMouseDownText
 		self.ctext.onMouseDrag = onMouseDragText
 		self.ctext.onMouseUp = onMouseUpText

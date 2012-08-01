@@ -1709,6 +1709,7 @@ class Text (object):
 		self.hwaccel = None
 		self.type="Text"
 		self.name = "t"+str(int(random.random()*10000))+str(SITER)
+		self.editing = False
 		SITER+=1
 	def draw(self,cr=None,parent=None,rect=None):
 		if SYSTEM=="osx":
@@ -1731,6 +1732,20 @@ class Text (object):
 					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
 				else:
 					cr.translate(self.x,self.y)
+				if self.editing:
+					w = self.font.width(self.text)
+					d = self.font.descent
+					h = self.font.height
+					cr.newpath()
+					cr.moveto(0,d)
+					cr.lineto(w,d)
+					cr.lineto(w,-h)
+					cr.lineto(0,-h)
+					cr.lineto(0,d)
+					cr.pencolor = Color([0,0,0]).pygui
+					cr.fillcolor = Color([1,1,1]).pygui
+					cr.fill_stroke()
+					cr.fill()
 				cr.newpath()
 				cr.moveto(0,0)
 				cr.show_text(self.text)
@@ -1768,6 +1783,12 @@ class Text (object):
 	def onMouseMove(self, self1, x, y):
 		pass
 	def onKeyDown(self, self1, key):
+		if key == "\b":
+			self.text = self.text[:-1]
+		elif key == "enter":
+			self.text = self.text+"\n"
+		else:
+			self.text+=str(key)
 		pass
 	def onKeyUp(self, self1, key):
 		pass
