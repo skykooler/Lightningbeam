@@ -436,7 +436,9 @@ function Shape() {
 			} else if (this._shapedata[i][0]=="L") {
 				cr.lineTo(this._shapedata[i][1],this._shapedata[i][2])
 			} else if (this._shapedata[i][0]=="C") {
-				cr.bezierCurveTo(this._shapedata[i][1],this._shapedata[i][2],this._shapedata[i][3],this._shapedata[i][4],this._shapedata[i][5],this._shapedata[i][6])
+				cr.bezierCurveTo(this._shapedata[i][1],this._shapedata[i][2],
+								 this._shapedata[i][3]-1e-5,this._shapedata[i][4]+1e-5,
+								 this._shapedata[i][5]-1e-5,this._shapedata[i][6]+1e-5)
 			}
 		}
 		if (this.filled) {
