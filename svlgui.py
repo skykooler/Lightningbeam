@@ -1045,7 +1045,10 @@ class Canvas(Widget):
 			else:
 				class OSXCanvas (ScrollableView):
 					def draw(self, canvas, update_rect):
+						canvas.backcolor = Color("#888888").pygui
 						canvas.erase_rect(update_rect)
+						canvas.fillcolor = Color("#ffffff").pygui
+						canvas.fill_rect((0,0,WIDTH,HEIGHT))
 						for i in self.objs:
 							i.draw(canvas)
 
@@ -1974,7 +1977,6 @@ class frame:
 						obj.draw(cr, self)
 					result = [dodraw(obj, cr) for obj in self.objs]
 					if currentselect:
-						print "Currentselect:",currentselect
 						cr.gsave()
 						cr.newpath()
 						cr.pencolor = Colors.rgb(0,0,1)
