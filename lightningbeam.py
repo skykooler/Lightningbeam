@@ -163,11 +163,11 @@ def onMouseDragObj(self, x, y):
 		self.x = x-self.initx
 		self.y = y-self.inity
 	elif svlgui.MODE=="s":
-		print ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
-		self.xscale = ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
-		self.yscale = ((self.maxy/2.0+self.miny)-y)/(self.maxy/2.0)
-		# self.x = (self.x+self.maxx/2)-((self.maxx/2)*self.xscale)
-		# self.yscale = y/100.0
+		if svlgui.SCALING:
+			self.xscale = ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
+			self.yscale = ((self.maxy/2.0+self.miny)-y)/(self.maxy/2.0)
+			# self.x = (self.x+self.maxx/2)-((self.maxx/2)*self.xscale)
+			# self.yscale = y/100.0
 def onMouseDragText(self, x, y):
 	self.x = x-self.initx
 	self.y = y-self.inity

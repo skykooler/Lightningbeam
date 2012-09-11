@@ -2369,7 +2369,15 @@ class Group (object):
 			else:
 				if MODE in [" ", "s", "b"]:
 					if self.activelayer.currentselect and MODE=="s":
-						if self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5:
+						global SCALING
+						if (self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5 and \
+						 		self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5) or \
+						(self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5 and \
+								self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy-5<y<self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy+5) or \
+						(self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx-5<x<self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx+5 and \
+								self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy-5<y<self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy+5) or \
+						(self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx-5<x<self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx+5 and \
+								self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5):
 							SCALING = True
 					else:
 						test = False
@@ -2389,6 +2397,7 @@ class Group (object):
 	def onMouseDown(self, self1, x, y):
 		pass 
 	def _onMouseUp(self,x,y):
+		global SCALING
 		SCALING = False
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
