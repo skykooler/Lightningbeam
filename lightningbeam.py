@@ -159,8 +159,15 @@ def onMouseDragGroup(self, x, y):
 	elif svlgui.MODE == "p":
 		self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
 def onMouseDragObj(self, x, y):
-	self.x = x-self.initx
-	self.y = y-self.inity
+	if svlgui.MODE==" ":
+		self.x = x-self.initx
+		self.y = y-self.inity
+	elif svlgui.MODE=="s":
+		print ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
+		self.xscale = ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
+		self.yscale = ((self.maxy/2.0+self.miny)-y)/(self.maxy/2.0)
+		# self.x = (self.x+self.maxx/2)-((self.maxx/2)*self.xscale)
+		# self.yscale = y/100.0
 def onMouseDragText(self, x, y):
 	self.x = x-self.initx
 	self.y = y-self.inity

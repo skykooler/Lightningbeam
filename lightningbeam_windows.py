@@ -228,7 +228,7 @@ class MainWindowOSX:
 		self.toolbox.buttons[5][0].onPress = lambda self1: svlgui.ColorSelectionWindow("line")#,linegroup)#,self.linecanvas)
 		self.toolbox.buttons[5][1].onPress = lambda self1: svlgui.ColorSelectionWindow("fill")#,linegroup)#,self.fillcanvas)
 		self.toolbox.buttons[0][1]._int().enabled = False
-		self.toolbox.buttons[1][0]._int().enabled = False
+		# self.toolbox.buttons[1][0]._int().enabled = False
 		self.toolbox.buttons[3][0]._int().enabled = False
 		self.toolbox.buttons[4][0]._int().enabled = False
 		self.scriptwindow = svlgui.TextView()

@@ -67,6 +67,9 @@ EDITING = True
 
 CURRENTTEXT = None
 
+#Scaling - whether the user is resizing an object
+SCALING = False
+
 #Library. Contatins all objects whether displayed or not.
 Library = []
 
@@ -1532,7 +1535,8 @@ class Shape (object):
 					cr.translate(self.x*math.cos(radrot)-self.y*math.sin(radrot), self.x*math.sin(radrot)+self.y*math.cos(radrot))
 				else:
 					pass
-					cr.translate(self.x,self.y)
+					# cr.translate(self.x,self.y)
+					cr.translate(self.x/(self.xscale*1.0),self.y/(self.yscale*1.0))
 				cr.rotate(self.rotation)
 				cr.scale(self.xscale*1.0, self.yscale*1.0)
 				cr.newpath()
@@ -1593,7 +1597,7 @@ class Shape (object):
 	def scale(self, width, height):
 		try:
 			xfactor = width/self.maxx
-			yfactor = height/maxy
+			yfactor = height/self.maxy
 			def scale_section(section):
 				try:
 					if section[0] in ["M", "L"]:
@@ -1842,8 +1846,8 @@ class framewrapper (object):
 		self.x = obj.x = x
 		self.y = obj.y = y
 		self.rot = obj.rot = rot
-		self.scalex = obj.scalex = scalex
-		self.scaley = obj.scaley = scaley
+		self.scalex = self.xscale = obj.scalex = scalex
+		self.scaley = self.yscale = obj.scaley = scaley
 		self.level = False # don't try to descend into a framewrapper
 		self.type = obj.__class__.__name__
 		if obj.__class__.__name__=="Shape":
@@ -1862,6 +1866,8 @@ class framewrapper (object):
 				self.obj.rot = self.rot
 				self.obj.scalex = self.scalex
 				self.obj.scaley = self.scaley
+				self.obj.xscale = self.xscale
+				self.obj.yscale = self.yscale
 				if self.type=="Shape":
 					self.obj.filled = self.filled
 					self.obj.linecolor = self.linecolor
@@ -1886,6 +1892,7 @@ class framewrapper (object):
 				return self.obj.maxx
 	def getmaxy(self):
 				return self.obj.maxy
+
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
@@ -1913,7 +1920,7 @@ class frame:
 		self.type="Group"
 		self.parent = parent
 		self.actions = ''
-	def add(self, obj, x, y, rot=0, scalex=0, scaley=0):
+	def add(self, obj, x, y, rot=0, scalex=1, scaley=1):
 			self.objs.append(framewrapper(obj, x, y, rot, scalex, scaley, self.objs))
 	def play(self, group, cr, currentselect,transform,rect):
 			if SYSTEM=="gtk":
@@ -1984,6 +1991,19 @@ class frame:
 										currentselect.maxx+currentselect.x+2,
 										currentselect.maxy+currentselect.y+2])
 						cr.stroke()
+						if MODE=="s":
+							cr.newpath()
+							cr.pencolor = Colors.rgb(1,1,1)
+							cr.fillcolor = Colors.rgb(0,0,0)
+							cr.rect([currentselect.minx-5,currentselect.miny-5,
+									 currentselect.minx+5,currentselect.miny+5])
+							cr.rect([currentselect.maxx+currentselect.x-5,currentselect.miny-5,
+									 currentselect.maxx+currentselect.x+5,currentselect.miny+5])
+							cr.rect([currentselect.maxx+currentselect.x-5,currentselect.maxy+currentselect.y-5,
+									 currentselect.maxx+currentselect.x+5,currentselect.maxy+currentselect.y+5])
+							cr.rect([currentselect.minx-5,currentselect.maxy+currentselect.y-5,
+									 currentselect.minx+5,currentselect.maxy+currentselect.y+5])
+							cr.fill_stroke()
 						cr.grestore()
 					cr.grestore()
 			elif SYSTEM=="html":
@@ -2104,7 +2124,7 @@ class Layer:
 		def parse_obj(obj):
 			obj.x=obj.x-self.x
 			obj.y=obj.y-self.y
-			self.frames[self.currentframe].add(obj, obj.x, obj.y, obj.rotation,0,0)
+			self.frames[self.currentframe].add(obj, obj.x, obj.y, obj.rotation,1,1)
 			self.objs.append(obj)
 		[parse_obj(obj) for obj in args]
 	def delete(self,*args):
@@ -2147,16 +2167,20 @@ class Layer:
 				self.currentselect._onMouseDown(self.currentselect, x, y)
 			else:
 				if MODE in [" ", "s", "b"]:
-					for i in reversed(self.currentFrame()):
-						test = False
-						if i.hitTest(x, y):
-							if MODE in [" ", "s"]:
-								self.currentselect = i
-							i._onMouseDown(x, y)
-							test=True
-							break
-					if not test:
-						self.currentselect = None
+					if self.currentselect and MODE=="s":
+						if self.currentselect.minx-5<x<self.currentselect.minx+5:
+							print "hey!"
+					else:
+						for i in reversed(self.currentFrame()):
+							test = False
+							if i.hitTest(x, y):
+								if MODE in [" ", "s"]:
+									self.currentselect = i
+								i._onMouseDown(x, y)
+								test=True
+								break
+						if not test:
+							self.currentselect = None
 				else:
 					self.onMouseDown(self, x, y)
 		else:
@@ -2344,16 +2368,20 @@ class Group (object):
 				self.activelayer.currentselect._onMouseDown(self.activelayer.currentselect, x, y)
 			else:
 				if MODE in [" ", "s", "b"]:
-					test = False
-					for i in reversed(self.currentFrame()):
-						if i.hitTest(x, y):
-							if MODE in [" ", "s"]:
-								self.activelayer.currentselect = i
-								test=True
-							i._onMouseDown(x, y)
-							break
-					if not test:
-						self.activelayer.currentselect = None
+					if self.activelayer.currentselect and MODE=="s":
+						if self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5:
+							SCALING = True
+					else:
+						test = False
+						for i in reversed(self.currentFrame()):
+							if i.hitTest(x, y):
+								if MODE in [" ", "s"]:
+									self.activelayer.currentselect = i
+									test=True
+								i._onMouseDown(x, y)
+								break
+						if not test:
+							self.activelayer.currentselect = None
 				else:
 					self.onMouseDown(self, x, y)
 		else:
@@ -2361,6 +2389,7 @@ class Group (object):
 	def onMouseDown(self, self1, x, y):
 		pass 
 	def _onMouseUp(self,x,y):
+		SCALING = False
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
