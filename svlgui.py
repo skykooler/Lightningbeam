@@ -2035,20 +2035,21 @@ class frame:
 			if self==self.parent.frames[0]:
 				for i in self.objs:
 					if i.obj.iname:
-						retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+						retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 					else:
-						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 			else:
 				for i in self.objs:
 					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
 						if not hasattr(i.obj, "iname"):
 							i.obj.iname = None
 						if i.obj.iname:
-							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 						else:
-							retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+							retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 					else:
 						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
+						retval = retval+".change "+i.name+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 			if not self.actions.strip()=='':
 				retval = retval + ".action:\n"+self.actions+"\n.end\n"
 			return retval
@@ -2379,6 +2380,7 @@ class Group (object):
 						(self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx-5<x<self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx+5 and \
 								self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5):
 							SCALING = True
+							self.activelayer.currentselect._onMouseDown(x, y)
 					else:
 						test = False
 						for i in reversed(self.currentFrame()):
@@ -2490,6 +2492,8 @@ class Group (object):
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.rot)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.rot)+";\n"
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
 
