@@ -5,6 +5,9 @@
 
 import os, shutil, tarfile, tempfile, StringIO
 
+# Workaround for broken menubar under Ubuntu
+os.putenv("UBUNTU_MENUPROXY", "0")
+
 #Uncomment to build on OS X
 #import objc, AppKit, cPickle
 
