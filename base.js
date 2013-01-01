@@ -13,12 +13,36 @@ var appendError = function(str){
 }
 
 function log(str){
-   setTimeout("appendError('"+str+"')", 1)
+   // setTimeout("appendError('"+str+"')", 1)
+   console.log(str)
 }
 
 function trace(str) {
 	//Placeholder
 	log(str);
+}
+
+Object.defineProperty(Object.prototype, '_makeNonEnumerable', {
+  value: function() {
+    var propertyName;
+    var propertyDescriptor;
+
+    for (var i in this) {
+      propertyName = i;
+      propertyDescriptor = Object.getOwnPropertyDescriptor(this, propertyName);
+      propertyDescriptor.enumerable = false;
+      Object.defineProperty(this, propertyName, propertyDescriptor);
+    }
+  },
+  enumerable : false,
+  configurable : true,
+});
+
+function makeNonEnumerable(cls) {
+	obj = cls()
+	for (i in obj) {
+		Object.defineProperty(obj.prototype, i, {value:obj[i], enumerable:false});
+	}
 }
 
 function _timerBase () {
@@ -125,10 +149,27 @@ function getObjectClass(obj) {
 
 function Frame () {
 	this.actions = ''
+	this._x = 0
+	this._y = 0
+	this._rotation = 0
+	this._xscale = 1
+	this._yscale = 1
 	this.run_script = function() {
 		eval(this.actions)
 	}
+	this._makeNonEnumerable()
 }
+// makeNonEnumerable(Frame)
+// Object.defineProperty(Frame.prototype, "actions", {enumerable: false, value: ''})
+// Object.defineProperty(Frame.prototype, "_x", {enumerable: false, value: 0})
+// Object.defineProperty(Frame.prototype, "_y", {enumerable: false, value: 0})
+// Object.defineProperty(Frame.prototype, "_rotation", {enumerable: false, value: 0})
+// Object.defineProperty(Frame.prototype, "_xscale", {enumerable: false, value: 1})
+// Object.defineProperty(Frame.prototype, "_yscale", {enumerable: false, value: 1})
+// Object.defineProperty(Frame.prototype, "run_script", {enumerable: false, value: function () {
+// 																	eval(this.actions)
+// 																}
+// 															})
 
 function MovieClip() {
 	/* From the ActionScript reference:
@@ -145,11 +186,14 @@ function MovieClip() {
 	*/
 	this._layers = [new Layer(this)]
 	this._currentframe = 1;
+	this._previousframe = undefined
 	this._playing = true;
 	this._x = 0;
 	this._y = 0;
 	this._xscale = 1;
 	this._yscale = 1;
+	this._xmouse = undefined;
+	this._ymouse = undefined;
 	this._rotation = 0;
 	this._visible = true;
 	this._id = "MC"+Math.round(Math.random()*1000000000000)
@@ -245,6 +289,7 @@ function MovieClip() {
 		cr.restore()
 		this._previousframe = this._currentframe
 		if (!frame2) {
+			// alert(5)
 			frame._x = this._x
 			frame._y = this._y
 			frame._xscale = this._xscale
@@ -325,7 +370,9 @@ function MovieClip() {
 	}
 	this.onUnload = function () {			//No
 	}
+	this._makeNonEnumerable()
 }
+// makeNonEnumerable(MovieClip);
 
 function Layer (parent) {
 	this._frames = [new Frame()]
@@ -350,11 +397,31 @@ function Layer (parent) {
 				}
 			}
 			else {
-				if (this._frames[currentframe-1][i]) {
-					this._parent[i]._draw(this._frames[currentframe-1][i]);
-				}
+				this._parent[i]._draw(this._frames[currentframe-1][i])
 			}
 		}
+		// for (var i in this._parent) {
+		// 	if (this._frames[currentframe-1]==undefined) {
+		// 		for (var j=0; j<currentframe-1; j++) {
+		// 			if (this._frames[j]) {
+		// 				last = j
+		// 			}
+		// 		}
+		// 		for (var j=this._frames.length; j>currentframe-1; j--) {
+		// 			if (this._frames[j]) {
+		// 				next = j
+		// 			}
+		// 		}
+		// 		if (this._frames[last][i]) {
+		// 			this._parent[i]._draw(this._frames[last][i],this._frames[next][i],(currentframe-last)/(next-last));
+		// 		}
+		// 	}
+		// 	else {
+		// 		if (this._frames[currentframe-1][i]) {
+		// 			this._parent[i]._draw(this._frames[currentframe-1][i]);
+		// 		}
+		// 	}
+		// }
 		if (this._frames[currentframe-1]) {
 			if (this._parent._playing) {
 				this._frames[currentframe-1].run_script()
@@ -368,7 +435,9 @@ function Layer (parent) {
 	this.play = function () {
 		this._parent.play()
 	}
+	this._makeNonEnumerable()
 }
+// makeNonEnumerable(Layer);
 
 function Shape() {
 	// Not part of the ActionScript spec, but necessary.
@@ -451,6 +520,7 @@ function Shape() {
 		cr.beginPath()
 	}
 }
+// makeNonEnumerable(Shape);
 
 function TextField() {
 	/*From the ActionScript reference:
@@ -591,6 +661,7 @@ function TextField() {
 		
 	}
 }
+makeNonEnumerable(TextField);
 
 var _rootFrame = new Frame()
 var _root = new MovieClip()
@@ -598,6 +669,9 @@ var _root = new MovieClip()
 _rootFrame._root = {}
 _rootFrame._root._x = 50
 _rootFrame._root._y = 40
+_rootFrame._root._xscale = 1
+_rootFrame._root._yscale = 1
+_rootFrame._root._rotation = 0
 
 /*if (canvas.getContext) {
 	cr = canvas.getContext("2d");

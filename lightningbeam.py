@@ -221,7 +221,18 @@ def run_file(self=None):
 	open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
 	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
 	#TODO: Make this cross-platform compatible
-	logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
+	if svlgui.PLATFORM=="win32":
+		# Untested.
+		logloc = os.getenv('HOME')+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
+	elif "linux" in svlgui.PLATFORM:
+		if not os.path.exists(os.getenv('HOME')+"/mm.cfg"):
+			# By default, the Flash debugger on Linux does not log traces.
+			# So, we create a configuration file to tell it to do so if  the user hasn't already.
+			with open(os.getenv('HOME')+"/mm.cfg", "w") as mm:
+				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
+		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
+	elif svlgui.PLATFORM=="osx":
+		logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
 	try:
 		logfile.close()
 	except:
@@ -236,7 +247,8 @@ def run_file(self=None):
 	logfile = open(logloc, "r")
 	def updatetrace(outputtext):
 		try:
-			outputtext.text+=logfile.readline()
+			print logfile.readline()
+			# outputtext.text+=logfile.readline()
 			outputtext.scroll_bottom()		# this doesn't work
 		except:
 			pass
@@ -254,7 +266,7 @@ def run_file(self=None):
 		svlgui.execute('start '+win_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM.startswith('linux'):
 		linux_flash_player_loc = ""
-		svlgui.execute('xdg-open '+linux_flash_player_loc+" test.swf")
+		svlgui.execute("xdg-open "+linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
 def create_html5(root):
 	retval = "<head>\n\
 <style type=\"text/css\">\n\

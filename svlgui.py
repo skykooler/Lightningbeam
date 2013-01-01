@@ -1713,7 +1713,7 @@ class Text (object):
 		self.width = self.font.width(self.text)
 		self.height = self.font.height
 		self.iname = None
-		self.hwaccel = None
+		self.hwaccel = False
 		self.type="Text"
 		self.name = "t"+str(int(random.random()*10000))+str(SITER)
 		self.editing = False
@@ -2492,8 +2492,8 @@ class Group (object):
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.rot)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.rot)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.xscale)+";\n"
+						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.yscale)+";\n"
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
 
