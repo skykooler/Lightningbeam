@@ -245,10 +245,13 @@ def run_file(self=None):
 				# Unzip the file. Apparently ditto is better for OSX apps than unzip.
 				os.system('ditto -V -x -k --sequesterRsrc --rsrc fp.app.zip .')
 				shutil.move('Flash Player Debugger.app', '/Applications')
+				# Generally it is not recognized until it is opened
 				os.system('open -a "/Applications/Flash Player Debugger.app"')
+				# Set Flash Player Debugger as the default app for .swf files
 				os.system('defaults write com.apple.LaunchServices LSHandlers -array-add "<dict><key>LSHandlerContentTag</key><string>swf</string><key>LSHandlerContentTagClass</key><string>public.filename-extension</string><key>LSHandlerRoleAll</key><string>com.macromedia.flash player debugger.app</string></dict>"')
 				os.system("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -kill -r -domain local -domain system -domain user")
 				svlgui.alert("Downloaded!")
+		# mm.cfg is the debugger's configuration file - we're telling it to log output
 		if not os.path.exists(os.getenv('HOME')+'/mm.cfg'):
 			with open(os.getenv('HOME')+'/mm.cfg', "w") as mm:
 				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
