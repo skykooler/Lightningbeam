@@ -1000,14 +1000,14 @@ class Canvas(Widget):
 						x, y = event.position
 						try:
 							for i in self.objs:
-								i._onMouseDown(x, y)
+								i._onMouseDown(x, y, button={"left":1,"right":2,"middle":3}[event.button], clicks=event.num_clicks)
 						except ObjectDeletedError:
 							return
 						self.update()
 					def mouse_drag(self, event):
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseDrag(x, y)
+							i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
 						self.update()
 						
 					def mouse_move(self, event):
@@ -1015,13 +1015,13 @@ class Canvas(Widget):
 						MOUSE_X, MOUSE_Y = event.position
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseMove(x, y)
+							i._onMouseMove(x, y, button={"left":1,"right":2,"middle":3}[event.button])
 						self.update()
 						
 					def mouse_up(self, event):
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseUp(x, y)
+							i._onMouseUp(x, y, button={"left":1,"right":2,"middle":3}[event.button])
 						self.update()
 						
 					def key_down(self, event):
@@ -1060,7 +1060,7 @@ class Canvas(Widget):
 						x, y = event.position
 						try:
 							for i in self.objs:
-								i._onMouseDown(x, y)
+								i._onMouseDown(x, y, button={"left":1,"right":2,"middle":3}[event.button], clicks=event.num_clicks)
 						except ObjectDeletedError:
 							return
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
@@ -1068,7 +1068,7 @@ class Canvas(Widget):
 					def mouse_drag(self, event):
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseDrag(x, y)
+							i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 						
 					def mouse_move(self, event):
@@ -1080,7 +1080,7 @@ class Canvas(Widget):
 					def mouse_up(self, event):
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseUp(x, y)
+							i._onMouseUp(x, y, button={"left":1,"right":2,"middle":3}[event.button], clicks=event.num_clicks)
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 						
 					def key_down(self, event):
@@ -1183,6 +1183,7 @@ class TextView(Widget):
 				
 				def mouse_down(self, event):
 					self.become_target()
+					GUI.TextEditor.mouse_down(self, event)
 			self.box = OSXTextEditor(scrolling="hv")
 			self.box.font = Font("Courier", 12, [])
 			if width and height:
@@ -1404,13 +1405,13 @@ class Image(object):
 		for i in xrange(len(self.shapedata)):
 			hits = hits != intersect(self.shapedata[i-1][1:3],self.shapedata[i][1:3],[x,y],[x,sys.maxint])
 		return hits
-	def onMouseDown(self, self1, x, y):
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseDrag(self, self1, x, y):
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseUp(self, self1, x, y):
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1, clicks=1):
 		pass
 	def onKeyDown(self, self1, key):
 		pass
@@ -1657,13 +1658,13 @@ class Shape (object):
 		return max([i[1] for i in self.shapedata])
 	def getmaxy(self):
 		return max([i[2] for i in self.shapedata])
-	def onMouseDown(self, self1, x, y):
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseDrag(self, self1, x, y):
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseUp(self, self1, x, y):
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1, clicks=1):
 		pass
 	def onKeyDown(self, self1, key):
 		pass
@@ -1710,13 +1711,14 @@ class Text (object):
 		self.editable = False
 		self.selectable = True
 		self.border = False
-		self.width = self.font.width(self.text)
+		# self.width = self.font.width(self.text)
 		self.height = self.font.height
 		self.iname = None
 		self.hwaccel = False
 		self.type="Text"
 		self.name = "t"+str(int(random.random()*10000))+str(SITER)
 		self.editing = False
+		self.cursorpos = len(self.text)
 		SITER+=1
 	def draw(self,cr=None,parent=None,rect=None):
 		if SYSTEM=="osx":
@@ -1743,25 +1745,36 @@ class Text (object):
 					w = self.font.width(self.text)
 					d = self.font.descent
 					h = self.font.height
+					lines = self.text.count('\n')
 					cr.newpath()
-					cr.moveto(0,d)
-					cr.lineto(w,d)
+					cr.moveto(0,d+h*lines)
+					cr.lineto(w,d+h*lines)
 					cr.lineto(w,-h)
 					cr.lineto(0,-h)
-					cr.lineto(0,d)
+					cr.lineto(0,d+h*lines)
 					cr.pencolor = Color([0,0,0]).pygui
 					cr.fillcolor = Color([1,1,1]).pygui
 					cr.fill_stroke()
 					cr.fill()
+					if '\n' in self.text[:self.cursorpos]:
+						cw = self.font.width(self.text[self.text.rindex('\n',0,self.cursorpos):self.cursorpos])
+					else:
+						cw = self.font.width(self.text[:self.cursorpos])
+					cr.newpath()
+					elines = self.text[:self.cursorpos].count('\n')
+					cr.moveto(cw,d+h*elines)
+					cr.lineto(cw,-h+h*elines)
+					cr.stroke()
 				cr.newpath()
 				cr.moveto(0,0)
 				cr.show_text(self.text)
 				cr.grestore()
 	def hitTest(self, x, y):
-		self.width = self.font.width(self.text)
 		self.height = self.font.height
 		if 0<x<self.width and -self.height<y<0:
 			return True
+	def getwidth(self):
+		return self.font.width(self.text)
 	def getminx(self):
 		return 0
 	def getminy(self):
@@ -1774,28 +1787,64 @@ class Text (object):
 		return self.font.size
 	def setsize(self,size):
 		self.font = Font(self.font.family,size,self.font.style)
-		self.width = self.font.width(self.text)
 		self.height = self.font.height
 	minx = property(getminx)
 	miny = property(getminy)
 	maxx = property(getmaxx)
 	maxy = property(getmaxy)
 	size = property(getsize,setsize)
-	def onMouseDown(self, self1, x, y):
+	width= property(getwidth)
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseDrag(self, self1, x, y):
+	def onMouseDrag(self, self1, x, y, button=1):
 		pass
-	def onMouseUp(self, self1, x, y):
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1):
 		pass
 	def onKeyDown(self, self1, key):
 		if key == "\b":
 			self.text = self.text[:-1]
 		elif key == "enter":
-			self.text = self.text+"\n"
+			self.text = self.text[:self.cursorpos]+"\n"+self.text[self.cursorpos:]
+			self.height = self.font.height*(self.text.count('\n')+1)
+			self.cursorpos += 1
+		elif key == "backspace":
+			if self.cursorpos>0:
+				self.text = self.text[:self.cursorpos-1]+self.text[self.cursorpos:]
+				self.cursorpos -= 1
+		elif key == "delete":
+			if self.cursorpos<len(self.text):
+				self.text = self.text[:self.cursorpos]+self.text[self.cursorpos+1:]
+		elif key == "left_arrow":
+			if self.cursorpos>0:
+				self.cursorpos -= 1
+		elif key == "right_arrow":
+			if self.cursorpos<len(self.text):
+				self.cursorpos += 1
+		elif key == "up_arrow":
+			if '\n' in self.text[:self.cursorpos]:
+				lpos = self.text[:self.cursorpos].rindex('\n', 0, self.cursorpos)
+				if '\n' in self.text[:lpos]:
+					llpos = self.text[:lpos].rindex('\n',0,lpos)
+				else:
+					llpos = -1 # to account for no \n preceding it
+				self.cursorpos = min(self.cursorpos-lpos+llpos,lpos)
+		elif key == "down_arrow":
+			if '\n' in self.text[self.cursorpos:]:
+				if '\n' in self.text[:self.cursorpos]:
+					lpos = self.text[:self.cursorpos].rindex('\n', 0, self.cursorpos)
+				else:
+					lpos = -1
+				npos = self.text[self.cursorpos:].index('\n')
+				if '\n' in self.text[self.cursorpos+npos+1:]:
+					nnpos = self.text[self.cursorpos+npos+1:].index('\n')
+				else:
+					nnpos = len(self.text[self.cursorpos:])
+				self.cursorpos = min(self.cursorpos+npos+self.cursorpos-lpos,self.cursorpos+npos+nnpos+1)
 		else:
-			self.text+=str(key)
+			self.text=self.text[:self.cursorpos]+str(key)+self.text[self.cursorpos:]
+			self.cursorpos += 1
 		pass
 	def onKeyUp(self, self1, key):
 		pass
@@ -1872,14 +1921,14 @@ class framewrapper (object):
 					self.obj.filled = self.filled
 					self.obj.linecolor = self.linecolor
 					self.obj.fillcolor = self.fillcolor
-	def _onMouseDown(self, x, y):
-				self.obj.onMouseDown(self,x, y)
-	def _onMouseUp(self, x, y):
-				self.obj.onMouseUp(self,x, y)
-	def _onMouseMove(self, x, y):
-				self.obj.onMouseMove(self, x, y)
-	def _onMouseDrag(self, x, y):
-				self.obj.onMouseDrag(self, x, y)
+	def _onMouseDown(self, x, y, button=1, clicks=1):
+				self.obj.onMouseDown(self,x, y, button, clicks)
+	def _onMouseUp(self, x, y, button=1, clicks=1):
+				self.obj.onMouseUp(self,x, y, button)
+	def _onMouseMove(self, x, y, button=1):
+				self.obj.onMouseMove(self, x, y, button)
+	def _onMouseDrag(self, x, y, button=1):
+				self.obj.onMouseDrag(self, x, y, button)
 	def _onKeyDown(self, key):
 				self.obj.onKeyDown(self, key)
 	def _onKeyUp(self, key):
@@ -2067,13 +2116,13 @@ class Layer:
 		return max([i.maxx for i in self.currentFrame()])
 	def getmaxy(self):
 		return max([i.maxy for i in self.currentFrame()])
-	def onMouseDown(self, self1, x, y):
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseDrag(self, self1, x, y):
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseUp(self, self1, x, y):
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1):
 		pass
 	def onKeyDown(self, self1, key):
 		pass
@@ -2162,10 +2211,10 @@ class Layer:
 			return self
 	def currentFrame(self):
 		return self.frames[self.currentframe].objs
-	def _onMouseDown(self, x, y):
+	def _onMouseDown(self, x, y, button=1, clicks=1):
 		if self.level:
 			if self.currentselect and self.currentselect.level:
-				self.currentselect._onMouseDown(self.currentselect, x, y)
+				self.currentselect._onMouseDown(self.currentselect, x, y, button=button, clicks=clicks)
 			else:
 				if MODE in [" ", "s", "b"]:
 					if self.currentselect and MODE=="s":
@@ -2177,43 +2226,43 @@ class Layer:
 							if i.hitTest(x, y):
 								if MODE in [" ", "s"]:
 									self.currentselect = i
-								i._onMouseDown(x, y)
+								i._onMouseDown(x, y, button=button, clicks=clicks)
 								test=True
 								break
 						if not test:
 							self.currentselect = None
 				else:
-					self.onMouseDown(self, x, y)
+					self.onMouseDown(self, x, y, button=button, clicks=clicks)
 		else:
-			self.onMouseDown(self, x, y)
-	def onMouseDown(self, self1, x, y):
+			self.onMouseDown(self, x, y, button=button, clicks=clicks)
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def _onMouseUp(self,x,y):
+	def _onMouseUp(self,x,y, button=1, clicks=1):
 		if self.level and MODE in [" ", "s"]:
 			if self.currentselect:
-				self.currentselect._onMouseUp(x, y)
+				self.currentselect._onMouseUp(x, y, button=1)
 		else:
-			self.onMouseUp(self, x, y)
-	def onMouseUp(self, self1, x, y):
+			self.onMouseUp(self, x, y, button=button)
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def _onMouseMove(self,x,y):
+	def _onMouseMove(self,x,y, button=1):
 		if self.level and MODE in [" ", "s"]:
 			if self.currentselect:
-				self.currentselect._onMouseMove(x, y)
+				self.currentselect._onMouseMove(x, y, button=button)
 		else:
 			self.onMouseMove(self, x, y)
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1):
 		pass
-	def _onMouseDrag(self, x, y):
+	def _onMouseDrag(self, x, y, button=1):
 		if self.level and MODE in [" ", "s"]:
 			if self.currentselect:
-				self.currentselect._onMouseDrag(x, y)
+				self.currentselect._onMouseDrag(x, y, button=button)
 		else:
-			self.onMouseDrag(self, x, y)
-	def onMouseDrag(self, self1, x, y):
+			self.onMouseDrag(self, x, y, button=button)
+	def onMouseDrag(self, self1, x, y, button=1):
 		pass
 	def _onKeyDown(self, key):
-		if self.level and MODE in [" ", "s"]:
+		if self.level and MODE in [" ", "s", "t"]:
 			if self.currentselect:
 				self.currentselect._onKeyDown(key)
 		else:
@@ -2221,7 +2270,7 @@ class Layer:
 	def onKeyDown(self, self1, key):
 		pass
 	def _onKeyUp(self, key):
-		if self.level and MODE in [" ", "s"]:
+		if self.level and MODE in [" ", "s", "t"]:
 			if self.currentselect:
 				self.currentselect._onKeyUp(key)
 		else:
@@ -2271,13 +2320,13 @@ class Group (object):
 		return max([i.maxx for i in self.layers])
 	def getmaxy(self):
 		return max([i.maxy for i in self.layers])
-	def onMouseDown(self, self1, x, y):
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseDrag(self, self1, x, y):
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseUp(self, self1, x, y):
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def onMouseMove(self, self1, x, y):
+	def onMouseMove(self, self1, x, y, button=1, clicks=1):
 		pass
 	def getactiveframe(self):
 		return self.activelayer.activeframe
@@ -2362,7 +2411,7 @@ class Group (object):
 		return nx, ny
 	def onLoad(self, self1):
 		pass
-	def _onMouseDown(self, x, y):
+	def _onMouseDown(self, x, y, button=1, clicks=1):
 		x, y = self.localtransform(x, y)
 		if self.level:
 			if self.activelayer.currentselect and self.activelayer.currentselect.level:
@@ -2380,7 +2429,7 @@ class Group (object):
 						(self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx-5<x<self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx+5 and \
 								self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5):
 							SCALING = True
-							self.activelayer.currentselect._onMouseDown(x, y)
+							self.activelayer.currentselect._onMouseDown(x, y, button=button, clicks=clicks)
 					else:
 						test = False
 						for i in reversed(self.currentFrame()):
@@ -2388,47 +2437,47 @@ class Group (object):
 								if MODE in [" ", "s"]:
 									self.activelayer.currentselect = i
 									test=True
-								i._onMouseDown(x, y)
+								i._onMouseDown(x, y, button=button, clicks=clicks)
 								break
 						if not test:
 							self.activelayer.currentselect = None
 				else:
-					self.onMouseDown(self, x, y)
+					self.onMouseDown(self, x, y, button=button, clicks=clicks)
 		else:
-			self.onMouseDown(self, x, y)
-	def onMouseDown(self, self1, x, y):
+			self.onMouseDown(self, x, y, button=button, clicks=clicks)
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass 
-	def _onMouseUp(self,x,y):
+	def _onMouseUp(self,x,y, button=1, clicks=1):
 		global SCALING
 		SCALING = False
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
-				self.activelayer.currentselect._onMouseUp(x, y)
+				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
 		else:
-			self.onMouseUp(self, x, y)
-	def onMouseUp(self, self1, x, y):
+			self.onMouseUp(self, x, y, button=button, clicks=clicks)
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		pass
-	def _onMouseMove(self,x,y):
+	def _onMouseMove(self,x,y,button=1,clicks=1):
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
-				self.activelayer.currentselect._onMouseMove(x, y)
+				self.activelayer.currentselect._onMouseMove(x, y, button=button)
 		else:
-			self.onMouseMove(self, x, y)
-	def onMouseMove(self, self1, x, y):
+			self.onMouseMove(self, x, y, button=button)
+	def onMouseMove(self, self1, x, y, button=1, clicks=1):
 		pass
-	def _onMouseDrag(self, x, y):
+	def _onMouseDrag(self, x, y, button=1, clicks=1):
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
-				self.activelayer.currentselect._onMouseDrag(x, y)
+				self.activelayer.currentselect._onMouseDrag(x, y, button=button)
 		else:
-			self.onMouseDrag(self, x, y)
-	def onMouseDrag(self, self1, x, y):
+			self.onMouseDrag(self, x, y, button=button)
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
 		pass
 	def _onKeyDown(self, key):
-		if self.activelayer.level and MODE in [" ", "s"]:
+		if self.activelayer.level and MODE in [" ", "s", "t"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onKeyDown(key)
 		else:
@@ -2436,7 +2485,7 @@ class Group (object):
 	def onKeyDown(self, self1, key):
 		pass
 	def _onKeyUp(self, key):
-		if self.activelayer.level and MODE in [" ", "s"]:
+		if self.activelayer.level and MODE in [" ", "s", "t"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onKeyUp(key)
 		else:

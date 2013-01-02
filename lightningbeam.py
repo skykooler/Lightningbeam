@@ -56,7 +56,7 @@ def onLoadFrames(self):
 		else:
 			j = box(i*16,0,16,32,svlgui.Color([1,1,1]))
 			self.add(j)'''
-def onClickFrame(self, x, y):
+def onClickFrame(self, x, y,button=1,clicks=1):
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	root.descendItem().activeframe = int(x/16)
 	print ">>>>>> ", x, y
@@ -74,7 +74,7 @@ def onKeyDownFrame(self, key):
 	elif key=="F8":
 		convert_to_symbol()
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
-def onMouseDownGroup(self, x, y):
+def onMouseDownGroup(self, x, y,button=1,clicks=1):
 	self.activelayer.frames[self.activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
@@ -100,32 +100,35 @@ def onMouseDownGroup(self, x, y):
 	elif svlgui.MODE in ["t"]:
 		self.ctext = svlgui.Text("Mimimi",x,y)
 		self.ctext.editing = True
+		svlgui.CURRENTTEXT = self.ctext
 		self.ctext.onMouseDown = onMouseDownText
 		self.ctext.onMouseDrag = onMouseDragText
 		self.ctext.onMouseUp = onMouseUpText
 		self.add(self.ctext)
 		self.ctext = None
+		self.activelayer.currentselect = self.activelayer.frames[self.activelayer.currentframe].objs[-1]
 	MainWindow.docbox.setvisible(True)
 	MainWindow.textbox.setvisible(False)
 
-def onMouseDownObj(self, x, y):
+def onMouseDownObj(self, x, y,button=1,clicks=1):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
 	self.initx,self.inity = x-self.x, y-self.y
 	if svlgui.MODE == "b":
 		self.filled = True
 		self.fillcolor = svlgui.FILLCOLOR
-def onMouseDownText(self,x,y):
+def onMouseDownText(self,x,y,button=1,clicks=1):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
 	self.initx, self.inity = x-self.x, y-self.y
 	MainWindow.docbox.setvisible(False)
 	MainWindow.textbox.setvisible(True)
 	svlgui.CURRENTTEXT = self.obj
-	print "Height", MainWindow.textbox.height
-def onMouseDownFrame(self, x, y):
+	if clicks>1:
+		self.obj.editing = True
+def onMouseDownFrame(self, x, y,button=1,clicks=1):
 	pass
-def onMouseUpGroup(self, x, y):
+def onMouseUpGroup(self, x, y,button=1,clicks=1):
 	self.clicked = False
 	if svlgui.MODE in ["r", "e"]:
 		self.cshape = None
@@ -135,17 +138,17 @@ def onMouseUpGroup(self, x, y):
 		print len(self.cshape.shapedata)
 		self.cshape = None
 		MainWindow.stage.draw()
-def onMouseUpObj(self, x, y):
+def onMouseUpObj(self, x, y,button=1,clicks=1):
 	self.clicked = False
-def onMouseUpText(self, x, y):
+def onMouseUpText(self, x, y,button=1,clicks=1):
 	self.clicked = False
-def onMouseMoveGroup(self, x, y):
+def onMouseMoveGroup(self, x, y,button=1):
 	pass
 	#This is for testing rotation. Comment out before any commit!
 	#root.rotation+=0.01
-def onMouseMoveObj(self, x, y):
+def onMouseMoveObj(self, x, y,button=1):
 	pass
-def onMouseDragGroup(self, x, y):
+def onMouseDragGroup(self, x, y,button=1,clicks=1):
 	if svlgui.MODE in [" ", "s"]:
 		self.x = x
 		self.y = y
@@ -161,7 +164,7 @@ def onMouseDragGroup(self, x, y):
 		self.cshape.shapedata = [["M",x/2,0],["C",4*x/5,0,x,y/5,x,y/2],["C",x,4*y/5,4*x/5,y,x/2,y],["C",x/5,y,0,4*y/5,0,y/2],["C",0,y/5,x/5,0,x/2,0]]
 	elif svlgui.MODE == "p":
 		self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
-def onMouseDragObj(self, x, y):
+def onMouseDragObj(self, x, y,button=1,clicks=1):
 	if svlgui.MODE==" ":
 		self.x = x-self.initx
 		self.y = y-self.inity
@@ -175,7 +178,7 @@ def onMouseDragObj(self, x, y):
 			self.xscale = ((self.maxx/2.0+self.minx)-x)/((self.maxx/2.0+self.minx)-self.initx)
 			self.yscale = ((self.maxy/2.0+self.miny)-y)/((self.maxy/2.0+self.miny)-self.inity)
 
-def onMouseDragText(self, x, y):
+def onMouseDragText(self, x, y,button=1,clicks=1):
 	self.x = x-self.initx
 	self.y = y-self.inity
 
