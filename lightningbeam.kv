@@ -1,0 +1,32 @@
+#:kivy 1.0
+
+<Lightningbeam>:
+	do_default_tab: False
+	TabbedPanelItem:
+		text: 'Drawing'
+		BoxLayout:
+			orientation: "Vertical"
+			
+	TabbedPanelItem:
+		text: 'Tools'
+		GridLayout:
+			cols: 5
+			Button:
+				text: "Select"
+			Button:
+				text: "Lasso"
+			Button:
+				text: "Resize"
+			Button:
+				text: "Text"
+			Button:
+				text: "Rectangle"
+			Button:
+				text: "Ellipse"
+			Button:
+				text: "Painbrush"
+	TabbedPanelItem:
+		text: 'ActionScript'
+		TextInput:
+			multiline: True
+			font_name: 'UbuntuMono-R.ttf'
