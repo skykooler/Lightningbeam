@@ -387,7 +387,7 @@ class htmlobj:
 		return str(self)
 
 class Window:
-	def __init__(self, title=""):
+	def __init__(self, title="", closable=True):
 		__windowlist__.append(self)
 		if SYSTEM=="gtk":
 			self.window = gtk.Window()
@@ -396,7 +396,7 @@ class Window:
 			self.window.show_all()
 			self.window.connect("destroy",self.destroy)
 		elif SYSTEM=="osx":
-			self.window = LightningbeamWindow(width=1024,height=500)
+			self.window = LightningbeamWindow(width=1024,height=500, closable=closable)
 			if not title=="":
 				self.window.title = title
 			#components = [i._int() for i in args]
@@ -2511,7 +2511,7 @@ def set_cursor(curs, widget=None):
 		else:
 			print "Sorry, I don't have that cursor."
 
-def alert(text,critical=False):
+def alert(text,critical=False,confirm=False,async=False):
 	'''Launches an alert window with a given text.
 	If critical is True, closing the alert terminates SWIFT.'''
 	if SYSTEM=="gtk":
@@ -2556,7 +2556,17 @@ def alert(text,critical=False):
 			Alerts.stop_alert(text)			# stop_alert is a critical error alert
 			sys.exit(0)						# Exit to OS. Sometimes we can't recover an error.
 		else:
-			Alerts.note_alert(text)			# note_alert is a general alert, i.e. "I'm a computer."
+			if confirm:
+				return Alerts.confirm(text)
+			else:
+				if async:
+					a = ModalDialog()
+					a.place(OSXLabel(text=text),left=0,top=0,right=0,bottom=0,sticky="nesw")
+					a.show()
+					a.present()
+					return a
+				else:
+					Alerts.note_alert(text)			# note_alert is a general alert, i.e. "I'm a computer."
 	elif SYSTEM=="html":
 		jscommunicate("alert("+text+")")
 		if critical:

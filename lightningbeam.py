@@ -3,7 +3,7 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os, shutil, tarfile, tempfile, StringIO
+import os, shutil, tarfile, tempfile, StringIO, urllib
 
 # Workaround for broken menubar under Ubuntu
 os.putenv("UBUNTU_MENUPROXY", "0")
@@ -233,6 +233,28 @@ def run_file(self=None):
 		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
 	elif svlgui.PLATFORM=="osx":
 		logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
+		if not os.path.exists('/Applications/Flash Player Debugger.app'):
+			# check for Flash Player
+			result = svlgui.alert("You do not have a Flash debugger installed. Install one?", confirm=True)
+			if not result:
+				svlgui.alert("Aborting.")
+				return
+			else:
+				svlgui.alert("The file will download when you click Ok.\nThis may take some time.")
+				urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.app.zip", "fp.app.zip")
+				# Unzip the file. Apparently ditto is better for OSX apps than unzip.
+				os.system('ditto -V -x -k --sequesterRsrc --rsrc fp.app.zip .')
+				shutil.move('Flash Player Debugger.app', '/Applications')
+				os.system('open -a "/Applications/Flash Player Debugger.app"')
+				os.system('defaults write com.apple.LaunchServices LSHandlers -array-add "<dict><key>LSHandlerContentTag</key><string>swf</string><key>LSHandlerContentTagClass</key><string>public.filename-extension</string><key>LSHandlerRoleAll</key><string>com.macromedia.flash player debugger.app</string></dict>"')
+				os.system("/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -kill -r -domain local -domain system -domain user")
+				svlgui.alert("Downloaded!")
+		if not os.path.exists(os.getenv('HOME')+'/mm.cfg'):
+			with open(os.getenv('HOME')+'/mm.cfg', "w") as mm:
+				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
+			os.mkdir(os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs")
+			with open(logloc, "w") as f:
+				f.write("")
 	try:
 		logfile.close()
 	except:
@@ -247,8 +269,8 @@ def run_file(self=None):
 	logfile = open(logloc, "r")
 	def updatetrace(outputtext):
 		try:
-			print logfile.readline()
-			# outputtext.text+=logfile.readline()
+			# print logfile.readline()
+			outputtext.text+=logfile.readline()
 			outputtext.scroll_bottom()		# this doesn't work
 		except:
 			pass
