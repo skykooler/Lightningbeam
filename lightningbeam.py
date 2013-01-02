@@ -441,7 +441,7 @@ def save_file(widget=None):
 	tarinfo = tarfile.TarInfo('basefile')
 	tarinfo.size = len(data)
 	if svlgui.FILE.name.startswith(svlgui.TEMPDIR):
-		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save").open('wb'),mode="w:gz")
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
 		print thetarfile.name
 	else:
 		thetarfile = tarfile.open(svlgui.FILE.name,mode="w:gz")

@@ -301,8 +301,8 @@ if SYSTEM=="osx":
 	class Lightningbeam(GUI.Application):
 		def __init__(self):
 			GUI.Application.__init__(self)
-			self.file_type = FileType(name = "Untitled Document", suffix = "changethis", 
-				mac_creator = "BLBE", mac_type = "BLOB"), # These are optional)
+			self.file_type = FileType(name = "Untitled Document", suffix = "beam", 
+				mac_creator = "LNBM", mac_type = "BEAM"), # These are optional)
 		def setup_menus(self, m):
 			m.about_cmd.enabled = 1
 			m.quit_cmd.enabled = 1
@@ -2622,7 +2622,7 @@ def alert(text,critical=False,confirm=False,async=False):
 			# reloading the page is equivalent to force-quitting, right?
 			jscommunicate("window.location.reload()")
 
-def file_dialog(mode="open",default=None,types=None,multiple=False):
+def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 	if SYSTEM=="osx":
 		if types:
 			ntypes = []
@@ -2642,7 +2642,7 @@ def file_dialog(mode="open",default=None,types=None,multiple=False):
 			else:
 				return FileDialogs.request_old_file(default_dir=default,file_types=types)
 		elif mode=="save":
-			return FileDialogs.request_new_file(default_dir=default,file_type=types)
+			return FileDialogs.request_new_file(default_name=name,default_dir=default,file_type=types)
 
 def execute(command):
 	rv = os.system(command.replace("/",sep))
