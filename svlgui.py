@@ -309,6 +309,8 @@ if SYSTEM=="osx":
 			m.save_cmd.enabled = 1
 			m.save_as_cmd.enabled = 1
 			m.open_cmd.enabled = 1
+			m.undo_cmd.enabled = 1
+			m.redo_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
 			m.create_sc.enabled = 1
@@ -539,7 +541,7 @@ def menufuncs(j):
 				menus.append(menu)
 			else:
 				cmds={"Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
-					"Preferences":"preferences_cmd"}
+					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -2747,7 +2749,7 @@ class ColorSelectionWindow:
 			win.present()
 		elif SYSTEM=="osx":
 			win = ModalDialog(width=336,height=208,resizable=False)
-			def onClickRectFill(self,x,y):
+			def onClickRectFill(self,x,y,button=None,clicks=None):
 				global FILLCOLOR
 				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
 				if root.descendItem().activelayer.currentselect:
@@ -2756,7 +2758,7 @@ class ColorSelectionWindow:
 					root.descendItem().activelayer.currentselect.update()
 				self.window.dismiss()
 				raise ObjectDeletedError
-			def onClickRectLine(self,x,y):
+			def onClickRectLine(self,x,y,button=None,clicks=None):
 				global LINECOLOR
 				LINECOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
 				if root.descendItem().activelayer.currentselect:

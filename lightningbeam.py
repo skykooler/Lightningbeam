@@ -42,11 +42,31 @@ LIGHTNINGBEAM_COMPAT = ["1.0-alpha1"]
 #Global variables. Used to keep stuff together.
 global root
 global layers
+global undo_stack
+global redo_stack
+undo_stack = []
+redo_stack = []
+
+def clear(arr):
+	arr.__delslice__(0,len(arr))
 
 def update_date():
 	return "Tue, January 10, 2012"
 
+class edit:
+	def __init__(self, type, obj, from_attrs, to_attrs):
+		self.type = type
+		self.obj = obj
+		self.from_attrs = from_attrs
+		self.to_attrs = to_attrs
 
+class maybe:
+	def __init__(self, type, obj, from_attrs):
+		self.edit = edit(type, obj, from_attrs, from_attrs)
+		self.type = type
+	def complete(self, to_attrs):
+		self.edit.to_attrs = to_attrs
+		return self.edit
 
 def onLoadFrames(self):
 	'''for i in range(2000):
@@ -81,7 +101,7 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 			self.clicked = True
 	elif svlgui.MODE in ["r", "e", "p"]:
 		if svlgui.MODE=="r":
-			#I can't remember what the 'c' stands for...
+			# 'c' stands for 'current'
 			self.cshape = box(x, y, 0, 0)
 		elif svlgui.MODE=="e":
 			self.cshape = ellipse(x, y, 0, 0)
@@ -95,6 +115,7 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 		self.cshape.onMouseDrag = onMouseDragObj
 		self.cshape.onMouseUp = onMouseUpObj
 		self.cshape.onKeyDown = onKeyDownObj
+		undo_stack.append(maybe("add_object", self, {"frame":self.activelayer.currentframe, "layer":self.activelayer}))
 		self.clicked = True
 		MainWindow.scriptwindow.text = self.activelayer.frames[self.activelayer.currentframe].actions
 	elif svlgui.MODE in ["t"]:
@@ -106,6 +127,9 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 		self.ctext.onMouseUp = onMouseUpText
 		self.add(self.ctext)
 		self.ctext = None
+		undo_stack.append(edit("add_object", self, {"frame":self.activelayer.currentframe, "layer":self.activelayer}, \
+												   {"frame":self.activelayer.currentframe, "layer":self.activelayer, \
+													"obj":self.activelayer.frames[self.activelayer.currentframe].objs[-1]}))
 		self.activelayer.currentselect = self.activelayer.frames[self.activelayer.currentframe].objs[-1]
 	MainWindow.docbox.setvisible(True)
 	MainWindow.textbox.setvisible(False)
@@ -114,7 +138,14 @@ def onMouseDownObj(self, x, y,button=1,clicks=1):
 	MainWindow.scriptwindow.text = root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions
 	self.clicked = True
 	self.initx,self.inity = x-self.x, y-self.y
-	if svlgui.MODE == "b":
+	if svlgui.MODE == " ":
+		undo_stack.append(maybe("move", self, {"x":self.x, "y":self.y}))
+	elif svlgui.MODE == "s":
+		undo_stack.append(maybe("scale", self, {"x":self.x, "y":self.y, "xscale":self.xscale, "yscale":self.yscale}))
+	elif svlgui.MODE == "b":
+		if not (self.fillcolor.val == svlgui.FILLCOLOR.val and self.filled==True):
+			undo_stack.append(edit("fill", self, {"filled":self.filled, "fillcolor":self.fillcolor}, {"filled":True, "fillcolor":svlgui.FILLCOLOR}))
+			clear(redo_stack)
 		self.filled = True
 		self.fillcolor = svlgui.FILLCOLOR
 def onMouseDownText(self,x,y,button=1,clicks=1):
@@ -132,6 +163,12 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 	self.clicked = False
 	if svlgui.MODE in ["r", "e"]:
 		self.cshape = None
+		cobj = self.activelayer.frames[self.activelayer.currentframe].objs[-1]
+		if isinstance(undo_stack[-1], maybe):
+			if undo_stack[-1].edit.obj==self:
+				if undo_stack[-1].type=="add_object":
+					undo_stack[-1] = undo_stack[-1].complete({"obj":cobj, "frame":self.activelayer.currentframe, "layer":self.activelayer})
+					clear(redo_stack)
 	elif svlgui.MODE=="p":
 		print len(self.cshape.shapedata)
 		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, svlgui.PMODE.split()[-1],1)
@@ -140,6 +177,21 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 		MainWindow.stage.draw()
 def onMouseUpObj(self, x, y,button=1,clicks=1):
 	self.clicked = False
+	if isinstance(undo_stack[-1], maybe):
+		if undo_stack[-1].edit.obj==self:
+			if undo_stack[-1].type=="move":
+				if abs(self.x-undo_stack[-1].edit.from_attrs["x"])>0 or abs(self.y-undo_stack[-1].edit.from_attrs["y"])>0:
+					undo_stack[-1] = undo_stack[-1].complete({"x":self.x, "y":self.y})
+					clear(redo_stack)
+				else:
+					del undo_stack[-1]
+			elif undo_stack[-1].type=="scale":
+				if abs(self.x-undo_stack[-1].edit.from_attrs["x"])>0 or abs(self.y-undo_stack[-1].edit.from_attrs["y"])>0 \
+						or abs(self.xscale-undo_stack[-1].edit.from_attrs["xscale"])>0 or abs(self.yscale-undo_stack[-1].edit.from_attrs["yscale"])>0:
+					undo_stack[-1] = undo_stack[-1].complete({"x":self.x, "y":self.y, "xscale":self.xscale, "yscale":self.yscale})
+					clear(redo_stack)
+				else:
+					del undo_stack[-1]
 def onMouseUpText(self, x, y,button=1,clicks=1):
 	self.clicked = False
 def onMouseMoveGroup(self, x, y,button=1):
@@ -520,6 +572,51 @@ def import_to_library(widget=None):
 def quit(widget):
 	svlgui.quit()
 	
+def undo(widget=None):
+	if len(undo_stack)>0:
+		if isinstance(undo_stack[-1], edit):
+			e = undo_stack.pop()
+			print e.from_attrs
+			print e.to_attrs
+			if e.type=="move":
+				e.obj.x = e.from_attrs["x"]
+				e.obj.y = e.from_attrs["y"]
+			elif e.type=="scale":
+				e.obj.x = e.from_attrs["x"]
+				e.obj.y = e.from_attrs["y"]
+				e.obj.xscale = e.from_attrs["xscale"]
+				e.obj.yscale = e.from_attrs["yscale"]
+			elif e.type=="fill":
+				e.obj.filled = e.from_attrs["filled"]
+				e.obj.fillcolor = e.from_attrs["fillcolor"]
+			elif e.type=="add_object":
+				if e.from_attrs["layer"].currentselect==e.to_attrs["obj"]:
+					e.from_attrs["layer"].currentselect = None
+				del e.from_attrs["layer"].frames[e.from_attrs["frame"]].objs[e.from_attrs["layer"].frames[e.from_attrs["frame"]].objs.index(e.to_attrs["obj"])]
+			redo_stack.append(e)
+		MainWindow.stage.draw()
+
+def redo(widget=None):
+	if len(redo_stack)>0:
+		if isinstance(redo_stack[-1], edit):
+			e = redo_stack.pop()
+			print e.from_attrs
+			print e.to_attrs
+			if e.type=="move":
+				e.obj.x = e.to_attrs["x"]
+				e.obj.y = e.to_attrs["y"]
+			elif e.type=="scale":
+				e.obj.x = e.to_attrs["x"]
+				e.obj.y = e.to_attrs["y"]
+				e.obj.xscale = e.to_attrs["xscale"]
+				e.obj.yscale = e.to_attrs["yscale"]
+			elif e.type=="fill":
+				e.obj.filled = e.to_attrs["filled"]
+				e.obj.fillcolor = e.to_attrs["fillcolor"]
+			elif e.type=="add_object":
+				e.to_attrs["layer"].frames[e.from_attrs["frame"]].objs.append(e.to_attrs["obj"])
+			undo_stack.append(e)
+		MainWindow.stage.draw()
 	
 def add_keyframe(widget=None):
 	print "af> ", root.descendItem().activeframe
@@ -595,8 +692,8 @@ svlgui.menufuncs([["File",
 						"Publish",
 						("Quit",quit,"<Control>Q")],
 					["Edit",
-						"Undo",
-						"Redo",
+						("Undo", undo, "/z"),
+						("Redo", redo, "/^z"),
 						"Cut",
 						"Copy",
 						"Paste",
