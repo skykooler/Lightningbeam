@@ -2,8 +2,7 @@
 #
 # swfc(1) File format specification
 #
-# Warning: not all of this is actually implemented yet- if there's a
-# "TODO" behind a command, it has yet to be integrated into swfc.
+# As interpreted from swfc error output.
 #
 # ===========================================================================
 
@@ -124,8 +123,9 @@
     .put obj1 x=0 y=0 #object starts at (0,0)
 
 .frame 140
-    .change obj1 x+=100 y=0 scale=120% # smoothly move obj1 100 pixels to the right over 40 frames,
-	                               # scaling it to 120% of it's original size
+    .move obj1 x+=100 y=0   # .change to move an object is deprecated for some reason
+    .change obj1 scale=120% # smoothly move obj1 100 pixels to the right over 40 frames,
+	                        # scaling it to 120% of it's original size
 .frame 170
     .jump obj1 x=200 y=200 # make object to suddenly change to 200,200 at frame 70.
 
@@ -242,9 +242,9 @@
 
 .sprite mspr1
     .sprite mspr2
-	.sprite spr3
-	.put ball 100 0
-	.end
+    	.sprite spr3
+        	.put ball 100 0
+    	.end
     .end
 .end
 
