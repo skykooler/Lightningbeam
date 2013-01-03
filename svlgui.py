@@ -307,6 +307,7 @@ if SYSTEM=="osx":
 			m.about_cmd.enabled = 1
 			m.quit_cmd.enabled = 1
 			m.save_cmd.enabled = 1
+			m.save_as_cmd.enabled = 1
 			m.open_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
@@ -537,7 +538,7 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"Save":"save_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
+				cmds={"Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
 					"Preferences":"preferences_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
@@ -2086,7 +2087,7 @@ class frame:
 					if i.obj.iname:
 						retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 					else:
-						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
+						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+"%% scaley="+str(i.yscale*100)+"%%\n"
 			else:
 				for i in self.objs:
 					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:

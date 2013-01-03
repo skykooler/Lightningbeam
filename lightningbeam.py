@@ -170,13 +170,26 @@ def onMouseDragObj(self, x, y,button=1,clicks=1):
 		self.y = y-self.inity
 	elif svlgui.MODE=="s":
 		if svlgui.SCALING:
-			# self.xscale = ((self.maxx/2.0+self.minx)-x)/(self.maxx/2.0)
-			# self.yscale = ((self.maxy/2.0+self.miny)-y)/(self.maxy/2.0)
+			# self.xscale = (x-(self.maxx/2.0+self.minx))/(self.maxx/2.0)
+			# self.yscale = (y-(self.maxy/2.0+self.miny))/(self.maxy/2.0)
+			if self.initx>self.maxx/2:
+				self.xscale = (x-self.x)/self.maxx
+			else:
+				# I don't understand why I need 2*self.maxx instead of just maxx, but it works.
+				self.xscale = (2*self.maxx+self.x-(x-self.initx)-x)/self.maxx
+				self.x = x
+			if self.inity>self.maxy/2:
+				self.yscale = (y-self.y)/self.maxy
+			else:
+				# 3 times?? Why??
+				self.yscale = (3*self.maxy+self.y-(y-self.inity)-y)/self.maxy
+				self.y = y
+
 
 			print self.initx
 
-			self.xscale = ((self.maxx/2.0+self.minx)-x)/((self.maxx/2.0+self.minx)-self.initx)
-			self.yscale = ((self.maxy/2.0+self.miny)-y)/((self.maxy/2.0+self.miny)-self.inity)
+			# self.xscale = ((self.maxx/2.0+self.minx)-x)/((self.maxx/2.0+self.minx)-self.initx)
+			# self.yscale = ((self.maxy/2.0+self.miny)-y)/((self.maxy/2.0+self.miny)-self.inity)
 
 def onMouseDragText(self, x, y,button=1,clicks=1):
 	self.x = x-self.initx
@@ -466,6 +479,30 @@ def save_file(widget=None):
 	svlgui.FILE = thetarfile
 	#thetarfile.close()
 def save_file_as(widget=None):
+	print "HI"
+	data = pickle.dumps((root,svlgui.Library))
+	tarinfo = tarfile.TarInfo('basefile')
+	tarinfo.size = len(data)
+	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
+	#Save the path so we can come back here
+	lastpath = os.path.abspath(".")
+	for i in svlgui.Library:
+		if i.type=="Image":
+			print "i.path: ",i.path
+			try:
+				os.chdir(os.sep.join(i.path.split(os.sep)[:-1]) or i.origpath)
+				i.path = i.path.split(os.sep)[-1]
+				thetarfile.add(i.path.split(os.sep)[-1])
+			except OSError:
+				tmpdir = tempfile.mkdtemp()
+				os.chdir(tmpdir)
+				i.pilimage.save(i.path)
+				thetarfile.add(i.path)
+				os.remove(i.path)
+			os.chdir(lastpath)
+	thetarfile.close()
+	svlgui.FILE = thetarfile
 	pass
 def import_to_stage(widget=None):
 	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp"]).path
@@ -554,7 +591,7 @@ svlgui.menufuncs([["File",
 						("Open", open_file,"<Control>O"),
 						("Open .sc", open_sc_file),
 						("Save",save_file,"<Control>S"),
-						("Save As", save_file_as,"<Shift><Control>S"),
+						("Save As", save_file_as,"/^s"),
 						"Publish",
 						("Quit",quit,"<Control>Q")],
 					["Edit",
