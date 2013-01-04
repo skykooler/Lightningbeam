@@ -1984,7 +1984,7 @@ class Sound:
 		return retval
 	def print_html(self):
 		retval = "var "+self.name.replace(".","_")+" = new Sound();\n"+self.name.replace(".","_")+"._sound = new Audio('"+self.path.split("/")[-1]+"');\n"
-		retval = retval + self.name.replace(".","_")+"._sound.load();\n"+self.name.replace(".","_")+".duration = "+self.name.replace(".","_")+"._sound.duration"
+		retval = retval + self.name.replace(".","_")+"._sound.load();\n"+self.name.replace(".","_")+".duration = "+self.name.replace(".","_")+"._sound.duration\n"
 		return retval
 
 class framewrapper (object):
@@ -2678,21 +2678,22 @@ class Group (object):
 					retval+=j.frames[i].print_html()'''
 		print self.objs
 		for i in self.objs:
-			retval += self.name+"."+i.name+" = "+i.name+";\n"
+			retval += self.name+"."+i.name.replace(".","_")+" = "+i.name.replace(".","_")+";\n"
 		for i in range(len(self.layers)):
 			for j in xrange(self.maxframe()):
 				if self.layers[i].frames[j]:
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"] = new Frame ();\n"
 					for k in self.layers[i].frames[j].objs:
-						if isinstance(k.obj, Sound):
-							retval += self.name+"._layers["+str(i)+"].frames["+str(j)+"]."+k.obj.name.replace(".","_")+".start();\n"
-						else:
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+" = {};\n"
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.xscale)+";\n"
-							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.yscale)+";\n"
+						# if isinstance(k.obj, Sound):
+						# 	retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.obj.name.replace(".","_")+".start();\n"
+						# 	# retval += self.name+"."+k.obj.name.replace(".","_")+".start();\n"
+						# else:
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+" = {};\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+"._x = "+str(k.x)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+"._y = "+str(k.y)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+"._rotation = "+str(k.rot)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+"._xscale = "+str(k.xscale)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name.replace('.',"_")+"._yscale = "+str(k.yscale)+";\n"
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
 
@@ -3167,8 +3168,11 @@ class FramesCanvas(Canvas):
 			for i in xrange(len(FRAMES)):
 				if FRAMES[i]:
 					try:
+						cr.gsave()
+						cr.translate(i*16,0)
 						sounds = [i.obj for i in FRAMES[i].objs if isinstance(i.obj, Sound)]
 						[i.draw_frame(cr, None) for i in sounds]
+						cr.grestore()
 					except:
 						traceback.print_exc()
 			# print max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)

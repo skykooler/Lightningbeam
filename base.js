@@ -738,8 +738,11 @@ function Sound() {
 	this.stop = function () {
 		this._sound.pause();
 	}
+	this._draw = function () {
+		this._sound.play();
+	};
 }
-Sound.addProperty('position', function () {return parseInt(this._sound.position*1000)})
+Sound.addProperty('position', function () {return parseInt(this._sound.currentTime*1000)})
 
 function Point (x, y) {
 	this.x = x
