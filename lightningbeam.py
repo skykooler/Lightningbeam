@@ -574,7 +574,9 @@ def import_to_stage(widget=None):
 	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
 	for i in ("jpg","png","bmp"):
 		if thefile.endswith(i):
-			im = svlgui.Image(thefile)
+			# im = svlgui.Image(thefile)
+			im = box(100,100,200,200,svlgui.Color(thefile))
+			print im.filled
 			im.onMouseDown = onMouseDownObj
 			im.onMouseMove = onMouseMoveObj
 			im.onMouseDrag = onMouseDragObj

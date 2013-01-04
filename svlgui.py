@@ -81,13 +81,15 @@ class Color (object):
 		if type(val)==type([]):
 			self.type = "RGB"
 			self.val = val
-		elif type(val)==type(""):
+		elif isinstance(val, basestring):
 			if val.startswith("#"):
 				self.type = "RGB"
 				self.val = hex2rgb(val)
 			else:
 				self.type = "Image"
 				self.val = val
+				if SYSTEM=="osx":
+					self.image = GUI.Image(file=val)
 	def _getcairo(self):
 		if self.type=="RGB":
 			return cairo.SolidPattern(*self.val)
@@ -98,6 +100,9 @@ class Color (object):
 	def _getpygui(self):
 		if self.type=="RGB":
 			return Colors.rgb(*self.val)
+		elif self.type=="Image":
+			a = Colors.rgb(0,0,0,1,image=True,im=self.image)
+			return a
 	def _getrgb(self):
 		if self.type=="RGB":
 			return rgb2hex(*self.val)

@@ -3,7 +3,7 @@
 #
 
 from array import array
-from Foundation import NSPoint, NSMakeRect, NSString
+from Foundation import NSPoint, NSMakeRect, NSString, NSRect, NSZeroRect
 from AppKit import NSGraphicsContext, NSBezierPath, NSEvenOddWindingRule, \
     NSFontAttributeName, NSForegroundColorAttributeName, \
     NSCompositeCopy, NSCompositeSourceOver, NSAffineTransform
@@ -11,6 +11,7 @@ from GUI import export
 from GUI.StdColors import black, white
 from GUI.GCanvases import Canvas as GCanvas
 import math
+import sys
 
 class Canvas(GCanvas):
 
@@ -67,6 +68,10 @@ class Canvas(GCanvas):
     
     def newpath(self):
         self._ns_path.removeAllPoints()
+        self.minx = sys.maxint
+        self.miny = sys.maxint
+        self.maxx = -sys.maxint/2
+        self.maxy = -sys.maxint/2
         #for i in range(len(self.transformstack)):
         	#j = self.transformstack.pop()
         	#transforms = {"translate":self.translate,"rotate":self.rotate,"scale":self.scale}
@@ -74,6 +79,10 @@ class Canvas(GCanvas):
     
     def moveto(self, x, y):
     	x, y = self._transform(x, y)
+        self.minx = min(self.minx, x)
+        self.miny = min(self.miny, y)
+        self.maxx = max(self.maxx, x)
+        self.maxy = max(self.maxy, y)
         self._ns_path.moveToPoint_((x, y))
     
     def rmoveto(self, dx, dy):
@@ -81,6 +90,10 @@ class Canvas(GCanvas):
 
     def lineto(self, x, y):
     	x, y = self._transform(x, y)
+        self.minx = min(self.minx, x)
+        self.miny = min(self.miny, y)
+        self.maxx = max(self.maxx, x)
+        self.maxy = max(self.maxy, y)
         self._ns_path.lineToPoint_((x, y))
 
     def rlineto(self, dx, dy):
@@ -90,6 +103,10 @@ class Canvas(GCanvas):
         cp1 = self._transform(*cp1)
         cp2 = self._transform(*cp2)
         ep = self._transform(*ep)
+        self.minx = min(self.minx, cp1[0], cp2[0], ep[0])
+        self.miny = min(self.miny, cp1[1], cp2[1], ep[1])
+        self.maxx = max(self.maxx, cp1[0], cp2[0], ep[0])
+        self.maxy = max(self.maxy, cp1[1], cp2[1], ep[1])
         self._ns_path.curveToPoint_controlPoint1_controlPoint2_(
             ep, cp1, cp2)
     
@@ -171,7 +188,12 @@ class Canvas(GCanvas):
 
     def fill(self):
         ns = self._ns_path
-        self._fillcolor._ns_color.set()
+        # self._fillcolor._ns_color.set()
+        if self._fillcolor.image:
+            ns.addClip()
+            self._fillcolor._ns_color.drawInRect_fromRect_operation_fraction_(NSRect((self.minx,self.miny),(self.maxx-self.minx,self.maxy-self.miny)),NSZeroRect,NSCompositeSourceOver,1.0)
+        else:
+            self._fillcolor._ns_color.setFill()
         ns.fill()
     
     def erase(self):
@@ -186,7 +208,12 @@ class Canvas(GCanvas):
         ns = self._ns_path
         self._pencolor._ns_color.set()
         ns.stroke()
-        self._fillcolor._ns_color.set()
+        # self._fillcolor._ns_color.set()
+        if self._fillcolor.image:
+            ns.addClip()
+            self._fillcolor._ns_color.drawInRect_fromRect_operation_fraction_(NSRect((self.minx,self.miny),(self.maxx-self.minx,self.maxy-self.miny)),NSZeroRect,NSCompositeSourceOver,1.0)
+        else:
+            self._fillcolor._ns_color.setFill()
         ns.fill()
     
     def show_text(self, text):

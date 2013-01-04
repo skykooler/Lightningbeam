@@ -18,9 +18,14 @@ class Color(GColor):
     
     _from_ns_color = classmethod(_from_ns_color)
     
-    def __init__(self, red, green, blue, alpha = 1.0):
-        self._ns_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            red, green, blue, alpha)
+    def __init__(self, red, green, blue, alpha = 1.0, image = False, im = ''):
+        self.image = image
+        if image:
+            # self._ns_color = NSColor.colorWithPatternImage_(im._ns_image)
+            self._ns_color = im._ns_image
+        else:
+            self._ns_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                red, green, blue, alpha)
 
     def get_red(self):
         return self._ns_color.redComponent()

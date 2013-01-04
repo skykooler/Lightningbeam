@@ -20,12 +20,14 @@ class Image(GImage):
         if not ns_rep:
             raise ValueError("Unrecognised image file type: %s" % file)
         ns_rep.setSize_((ns_rep.pixelsWide(), ns_rep.pixelsHigh()))
+        self._ns_image = NSImage.alloc().initWithContentsOfFile_(file)
+        # self.ns_image.addRepresentation_(ns_rep)
         self._init_from_ns_rep(ns_rep)
     
     def _init_from_ns_rep(self, ns_rep):
-        ns_image = NSImage.alloc().init()
-        ns_image.addRepresentation_(ns_rep)
+        self._ns_image = NSImage.alloc().init()
+        self._ns_image.addRepresentation_(ns_rep)
         self._ns_bitmap_image_rep = ns_rep
-        self._init_with_ns_image(ns_image, flipped = True)
+        self._init_with_ns_image(self._ns_image, flipped = True)
 
 export(Image)
