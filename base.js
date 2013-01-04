@@ -452,13 +452,17 @@ function Shape() {
 			this._yscale = frame._yscale
 			this._rotation = frame._rotation
 			if (frame.fill) {
-				this.filr = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
-				this.filg = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
-				this.filb = parseInt(parseInt(frame.fill.replace("#",""),16))%256
+				if (frame.fill instanceof Image) {
+					this.fill = cr.createPattern(frame.fill, 'repeat')
+				} else {
+					this.filr = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
+					this.filg = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
+					this.filb = parseInt(parseInt(frame.fill.replace("#",""),16))%256
+					this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
+				}
 				this.linr = parseInt(parseInt(frame.line.replace("#",""),16)/65536)
 				this.ling = parseInt(parseInt(frame.line.replace("#",""),16)/256)%256
 				this.linb = parseInt(parseInt(frame.line.replace("#",""),16))%256
-				this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
 				this.line = "#"+decimalToHex(this.linr,2)+decimalToHex(this.ling,2)+decimalToHex(this.linb,2)
 			}
 		} else {
@@ -468,16 +472,20 @@ function Shape() {
 			this._yscale = ave(frame2._yscale, frame._yscale, r)
 			this._rotation = ave(frame2._rotation ,frame._rotation, r)
 			if (frame2.fill) {
-				this.filr2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/65536)
-				this.filg2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/256)%256
-				this.filb2 = parseInt(parseInt(frame2.fill.replace("#",""),16))%256
-				this.filra = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
-				this.filga = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
-				this.filba = parseInt(parseInt(frame.fill.replace("#",""),16))%256
-				this.filr = parseInt(ave(this.filr2, this.filra, r))
-				this.filg = parseInt(ave(this.filg2, this.filga, r))
-				this.filb = parseInt(ave(this.filb2, this.filba, r))
-				this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
+				if (frame.fill instanceof Image) {
+					this.fill = cr.createPattern(frame.fill, 'repeat')
+				} else {
+					this.filr2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/65536)
+					this.filg2 = parseInt(parseInt(frame2.fill.replace("#",""),16)/256)%256
+					this.filb2 = parseInt(parseInt(frame2.fill.replace("#",""),16))%256
+					this.filra = parseInt(parseInt(frame.fill.replace("#",""),16)/65536)
+					this.filga = parseInt(parseInt(frame.fill.replace("#",""),16)/256)%256
+					this.filba = parseInt(parseInt(frame.fill.replace("#",""),16))%256
+					this.filr = parseInt(ave(this.filr2, this.filra, r))
+					this.filg = parseInt(ave(this.filg2, this.filga, r))
+					this.filb = parseInt(ave(this.filb2, this.filba, r))
+					this.fill = "#"+decimalToHex(this.filr,2)+decimalToHex(this.filg,2)+decimalToHex(this.filb,2)
+				}
 			}
 			if (frame2.line) {
 				this.linr2 = parseInt(parseInt(frame2.line.replace("#",""),16)/65536)
@@ -497,22 +505,56 @@ function Shape() {
 		cr.translate(this._x,this._y)
 		cr.rotate(this._rotation*Math.PI/180)
 		cr.scale(this._xscale*1.0, this._yscale*1.0)
-		cr.fillStyle = this.fill.substr(0,7);
+		if (this.fill instanceof Image) {
+			
+		} else {
+			cr.fillStyle = this.fill.substr(0,7);
+		}
 		cr.strokeStyle = this.line.substr(0,7);
+		xs = []
+		ys = []
 		for (i in this._shapedata) {
 			if (this._shapedata[i][0]=="M") {
 				cr.moveTo(this._shapedata[i][1],this._shapedata[i][2])
+				xs.push(this._shapedata[i][1])
+				ys.push(this._shapedata[i][2])
 			} else if (this._shapedata[i][0]=="L") {
 				cr.lineTo(this._shapedata[i][1],this._shapedata[i][2])
+				xs.push(this._shapedata[i][1])
+				ys.push(this._shapedata[i][2])
 			} else if (this._shapedata[i][0]=="C") {
 				cr.bezierCurveTo(this._shapedata[i][1],this._shapedata[i][2],
 								 this._shapedata[i][3]-1e-5,this._shapedata[i][4]+1e-5,
 								 this._shapedata[i][5]-1e-5,this._shapedata[i][6]+1e-5)
+				xs.push(this._shapedata[i][1])
+				xs.push(this._shapedata[i][3])
+				xs.push(this._shapedata[i][5])
+				ys.push(this._shapedata[i][2])
+				ys.push(this._shapedata[i][4])
+				ys.push(this._shapedata[i][6])
 			}
 		}
 		if (this.filled) {
-			cr.stroke()
-			cr.fill()
+			if (this.fill instanceof Image) {
+				cr.save(); // Save the context before clipping
+				cr.clip(); // Clip to whatever path is on the context
+
+				x = Math.min.apply(null,xs)
+				y = Math.min.apply(null,ys)
+				w = Math.max.apply(null,xs)-x
+				h = Math.max.apply(null,ys)-y
+				var imgHeight = w / this.fill.width * this.fill.height;
+				// if (imgHeight < h){
+				//   cr.fillStyle = '#000';
+				//   cr.fill();
+				// }
+				cr.drawImage(this.fill,x,y,w,imgHeight);
+
+				cr.restore(); // Get rid of the clipping region
+			} else {
+				cr.stroke()
+				cr.fill()
+			}
 		} else {
 			cr.stroke()
 		}

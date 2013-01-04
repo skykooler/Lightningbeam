@@ -1,0 +1,9 @@
++ grouping things & select multiple
++ text
++ undo
++ scale
+scaling of images
+moving keyframes
++ sound
++ moving an object with arrow keys
+movie clips

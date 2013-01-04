@@ -10,6 +10,7 @@ import random
 import colors
 import platform
 import re
+import shutil
 
 import traceback
 try:
@@ -86,10 +87,11 @@ class Color (object):
 				self.type = "RGB"
 				self.val = hex2rgb(val)
 			else:
+				global Library
+				Library.append(self)
 				self.type = "Image"
 				self.val = val
-				if SYSTEM=="osx":
-					self.image = GUI.Image(file=val)
+				self.set_image(val)
 	def _getcairo(self):
 		if self.type=="RGB":
 			return cairo.SolidPattern(*self.val)
@@ -118,6 +120,17 @@ class Color (object):
 	cairo = property(_getcairo)
 	pygui = property(_getpygui)
 	rgb = property(_getrgb, _setrgb)
+	def set_image(self, path):
+		if SYSTEM=="osx":
+			self.image = GUI.Image(file=path)
+	def print_sc(self):
+		retval = ".png "+self.val.split('/')[-1].replace(' ','_').replace('.','_')+" \""+self.val+"\"\n"
+		return retval
+	def print_html(self):
+		shutil.copy(self.val, os.getenv('HOME')+"/"+self.val.split('/')[-1])
+		retval = "var "+self.val.split('/')[-1].replace(' ','_').replace('.','_')+" = new Image();\n"
+		retval = retval+self.val.split('/')[-1].replace(' ','_').replace('.','_')+".src = \""+self.val.split("/")[-1]+"\";\n"
+		return retval
 def rgb2hex(r, g, b, a=1):
 	r=hex(int(r*255)).split("x")[1].zfill(2)
 	g=hex(int(g*255)).split("x")[1].zfill(2)
@@ -1698,13 +1711,19 @@ class Shape (object):
 		retval+=".outline "+self.name+"outline:\n"
 		retval+=" ".join([" ".join([str(x) for x in a]) for a in self.shapedata])+"\n.end\n"
 		if self.filled:
-			retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.rgb+" color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
+			if self.fillcolor.type=="Image":
+				retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.val.split('/')[-1].replace(' ','_').replace('.','_')+" color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
+			else:
+				retval+=".filled "+self.name+" outline="+self.name+"outline fill="+self.fillcolor.rgb+" color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
 		else:
 			retval+=".filled "+self.name+" outline="+self.name+"outline fill=#00000000 color="+self.linecolor.rgb+" line="+str(self.linewidth)+"\n"
 		return retval
 	def print_html(self):
 		retval = "var "+self.name+" = new Shape();\n"+self.name+"._shapedata = "+str(self.shapedata)+";\n"
-		retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
+		if self.fillcolor.type=="Image":
+			retval += self.name+".fill = "+self.fillcolor.val.split('/')[-1].replace(' ','_').replace('.','_')+";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
+		else:
+			retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
 		retval += self.name+".filled = "+str(self.filled).lower()+";\n"
 		return retval
 
