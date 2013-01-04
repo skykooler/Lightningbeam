@@ -68,6 +68,11 @@ class maybe:
 		self.edit.to_attrs = to_attrs
 		return self.edit
 
+svlgui.undo_stack = undo_stack
+svlgui.edit = edit
+svlgui.maybe = maybe
+svlgui.clear = clear
+
 def onLoadFrames(self):
 	'''for i in range(2000):
 		if i%5==0:
@@ -593,6 +598,9 @@ def undo(widget=None):
 				if e.from_attrs["layer"].currentselect==e.to_attrs["obj"]:
 					e.from_attrs["layer"].currentselect = None
 				del e.from_attrs["layer"].frames[e.from_attrs["frame"]].objs[e.from_attrs["layer"].frames[e.from_attrs["frame"]].objs.index(e.to_attrs["obj"])]
+			elif e.type=="text":
+				e.obj.text = e.from_attrs["text"]
+				e.obj.cursorpos = e.from_attrs["cursorpos"]
 			redo_stack.append(e)
 		MainWindow.stage.draw()
 
@@ -615,6 +623,9 @@ def redo(widget=None):
 				e.obj.fillcolor = e.to_attrs["fillcolor"]
 			elif e.type=="add_object":
 				e.to_attrs["layer"].frames[e.from_attrs["frame"]].objs.append(e.to_attrs["obj"])
+			elif e.type=="text":
+				e.obj.text = e.to_attrs["text"]
+				e.obj.cursorpos = e.to_attrs["cursorpos"]
 			undo_stack.append(e)
 		MainWindow.stage.draw()
 	

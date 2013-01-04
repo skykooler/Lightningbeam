@@ -1848,6 +1848,20 @@ class Text (object):
 		else:
 			self.text=self.text[:self.cursorpos]+str(key)+self.text[self.cursorpos:]
 			self.cursorpos += 1
+		if not key=="enter":
+			if len(undo_stack)>0:
+				if isinstance(undo_stack[-1], maybe):
+					if undo_stack[-1].edit.obj==self:
+						undo_stack[-1].edit.to_attrs={"text":self.text, "cursorpos":self.cursorpos}
+					else:
+						undo_stack.append(maybe("text", self, {"text":self.text, "cursorpos":self.cursorpos}))
+				else:
+					undo_stack.append(maybe("text", self, {"text":self.text, "cursorpos":self.cursorpos}))
+			else:
+				undo_stack.append(maybe("text", self, {"text":self.text, "cursorpos":self.cursorpos}))
+		else:
+			undo_stack[-1] = undo_stack[-1].complete({"text":self.text, "cursorpos":self.cursorpos})
+			clear(redo_stack)
 		pass
 	def onKeyUp(self, self1, key):
 		pass
@@ -2116,9 +2130,9 @@ class Layer:
 	def getminy(self):
 		return min([i.miny for i in self.currentFrame()])
 	def getmaxx(self):
-		return max([i.maxx for i in self.currentFrame()])
+		return max([i.maxx+i.x for i in self.currentFrame()])
 	def getmaxy(self):
-		return max([i.maxy for i in self.currentFrame()])
+		return max([i.maxy+i.y for i in self.currentFrame()])
 	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass
 	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
@@ -2370,6 +2384,14 @@ class Group (object):
 		self.xscale = 1
 		self.yscale = 1
 		self.type = "Group"
+		self.startx = 0
+		self.starty = 0
+		self.cx = 0
+		self.cy = 0
+		self.dragging = False
+		self.selecting = False
+		self.tempgroup = None
+		self.name = "g"+str(int(random.random()*10000))+str(SITER)
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
@@ -2381,6 +2403,12 @@ class Group (object):
 				i.xscale = self.xscale
 				i.yscale = self.yscale
 				i.draw(cr,rect=rect)
+		if self.dragging and self.selecting and MODE in (" ", "s"):
+			if SYSTEM=="osx":
+				cr.newpath()
+				cr.pencolor = Color([0,0,1]).pygui
+				cr.stroke_rect([sorted([self.startx,self.cx])[0], sorted([self.starty,self.cy])[0], \
+								sorted([self.startx,self.cx])[1], sorted([self.starty,self.cy])[1]])
 	def add(self, *args):
 		self.activelayer.add(*args)
 	def add_frame(self, populate):
@@ -2437,26 +2465,50 @@ class Group (object):
 						test = False
 						for i in reversed(self.currentFrame()):
 							if i.hitTest(x, y):
+								print i.obj, "is hit"
 								if MODE in [" ", "s"]:
 									self.activelayer.currentselect = i
 									test=True
+								print 'onmousedowning'
 								i._onMouseDown(x, y, button=button, clicks=clicks)
 								break
 						if not test:
+							if self.tempgroup:
+								[self.currentFrame().append(i) for i in self.tempgroup.split()]
+								del self.currentFrame()[self.currentFrame().index(self.tempgroup)]
+								self.tempgroup = None
 							self.activelayer.currentselect = None
+							self.startx, self.starty = x, y
+							self.selecting = True
 				else:
 					self.onMouseDown(self, x, y, button=button, clicks=clicks)
 		else:
+			print "HEYY"
 			self.onMouseDown(self, x, y, button=button, clicks=clicks)
 	def onMouseDown(self, self1, x, y, button=1, clicks=1):
 		pass 
 	def _onMouseUp(self,x,y, button=1, clicks=1):
 		global SCALING
 		SCALING = False
+		self.dragging = False
+		self.selecting = False
 		x, y = self.localtransform(x, y)
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
+			else:
+				objs = []
+				for i in reversed(self.currentFrame()):
+					if self.startx<i.x+i.minx<x or self.startx<i.x+i.maxx<x:
+						if self.starty<i.y+i.miny<y or self.starty<i.y+i.maxy<y:
+							objs.append(i)
+							del self.currentFrame()[self.currentFrame().index(i)]
+				print objs
+				tgroup = TemporaryGroup(skipl=True)
+				[tgroup.add(i.obj) for i in reversed(objs)]
+				self.add(tgroup)
+				self.activelayer.currentselect = tgroup
+				print [i.obj for i in self.currentFrame()]
 		else:
 			self.onMouseUp(self, x, y, button=button, clicks=clicks)
 	def onMouseUp(self, self1, x, y, button=1, clicks=1):
@@ -2472,6 +2524,8 @@ class Group (object):
 		pass
 	def _onMouseDrag(self, x, y, button=1, clicks=1):
 		x, y = self.localtransform(x, y)
+		self.cx, self.cy = x, y
+		self.dragging = True
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseDrag(x, y, button=button)
@@ -2503,7 +2557,7 @@ class Group (object):
 	def hitTest(self,x,y):
 		for i in self.layers:
 			for j in i.frames[0].objs:
-				if i.hitTest(x, y):
+				if j.hitTest(x, y):
 					return True
 		return False
 	def print_sc(self):
@@ -2548,6 +2602,32 @@ class Group (object):
 						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.yscale)+";\n"
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
+
+class TemporaryGroup(Group):
+	"""Created when selecting multiple items, for ease of use."""
+	def __init__(self, *args, **kwargs):
+		super(TemporaryGroup, self).__init__(*args, **kwargs)
+	# def draw(self, cr=None, transform=None, rect=None):
+	# 	super(TemporaryGroup, self).draw(cr, transform, rect)
+	# 	print self.x, self.activelayer.x
+	# 	pass
+	def split(self):
+		return self.currentFrame()
+		pass
+	def onMouseDown(self, self1, x, y, button=1, clicks=1):
+		print "Hihihihihi"
+		if self1.hitTest(x, y):
+			self1.clicked = True
+			self1.initx,self1.inity = x-self1.x, y-self1.y
+	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
+		self1.x = x-self1.initx
+		self1.y = y-self1.inity
+	def onMouseUp(self, self1, x, y, button=1, clicks=1):
+		self.clicked = False
+	# def hitTest(self, x, y):
+	# 	print self.x, self.y, x, y
+	# 	return True
+		
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":
@@ -2753,6 +2833,12 @@ class ColorSelectionWindow:
 				global FILLCOLOR
 				FILLCOLOR = Color(colors.colorArray(int(x/16))[int(y/16)])
 				if root.descendItem().activelayer.currentselect:
+					if not (root.descendItem().activelayer.currentselect.fillcolor.val == FILLCOLOR.val and root.descendItem().activelayer.currentselect.filled==True):
+						undo_stack.append(edit("fill", root.descendItem().activelayer.currentselect, \
+							{"filled":root.descendItem().activelayer.currentselect.filled, \
+									"fillcolor":root.descendItem().activelayer.currentselect.fillcolor}, 
+							{"filled":True, "fillcolor":svlgui.FILLCOLOR}))
+						clear(redo_stack)
 					root.descendItem().activelayer.currentselect.fillcolor = FILLCOLOR
 					root.descendItem().activelayer.currentselect.filled = True
 					root.descendItem().activelayer.currentselect.update()
