@@ -10,6 +10,8 @@ import random
 import colors
 import platform
 import re
+
+import traceback
 try:
 	from PIL import Image as PILimage
 	GLEnablable = True
@@ -1056,22 +1058,31 @@ class Canvas(Widget):
 						canvas.fillcolor = Color("#ffffff").pygui
 						canvas.fill_rect((0,0,WIDTH,HEIGHT))
 						for i in self.objs:
-							i.draw(canvas)
+							try:
+								i.draw(canvas)
+							except:
+								traceback.print_exc()
 
 					def mouse_down(self, event):
 						self.become_target()
 						x, y = event.position
 						try:
-							for i in self.objs:
-								i._onMouseDown(x, y, button={"left":1,"right":2,"middle":3}[event.button], clicks=event.num_clicks)
-						except ObjectDeletedError:
-							return
+							try:
+								for i in self.objs:
+									i._onMouseDown(x, y, button={"left":1,"right":2,"middle":3}[event.button], clicks=event.num_clicks)
+							except ObjectDeletedError:
+								return
+						except:
+							traceback.print_exc()
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 						
 					def mouse_drag(self, event):
 						x, y = event.position
 						for i in self.objs:
-							i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
+							try:
+								i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
+							except:
+								traceback.print_exc()
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 						
 					def mouse_move(self, event):
@@ -2465,7 +2476,6 @@ class Group (object):
 						test = False
 						for i in reversed(self.currentFrame()):
 							if i.hitTest(x, y):
-								print i.obj, "is hit"
 								if MODE in [" ", "s"]:
 									self.activelayer.currentselect = i
 									test=True
@@ -2474,8 +2484,8 @@ class Group (object):
 								break
 						if not test:
 							if self.tempgroup:
+								del self.currentFrame()[[i.obj for i in self.currentFrame()].index(self.tempgroup)]
 								[self.currentFrame().append(i) for i in self.tempgroup.split()]
-								del self.currentFrame()[self.currentFrame().index(self.tempgroup)]
 								self.tempgroup = None
 							self.activelayer.currentselect = None
 							self.startx, self.starty = x, y
@@ -2496,19 +2506,20 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
-			else:
+			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
 				objs = []
 				for i in reversed(self.currentFrame()):
 					if self.startx<i.x+i.minx<x or self.startx<i.x+i.maxx<x:
 						if self.starty<i.y+i.miny<y or self.starty<i.y+i.maxy<y:
 							objs.append(i)
 							del self.currentFrame()[self.currentFrame().index(i)]
-				print objs
-				tgroup = TemporaryGroup(skipl=True)
-				[tgroup.add(i.obj) for i in reversed(objs)]
-				self.add(tgroup)
-				self.activelayer.currentselect = tgroup
-				print [i.obj for i in self.currentFrame()]
+				if objs:
+					tgroup = TemporaryGroup(skipl=True)
+					[tgroup.add(i.obj) for i in reversed(objs)]
+					self.add(tgroup)
+					self.activelayer.currentselect = tgroup
+					self.tempgroup = tgroup
+					print [i.obj for i in self.currentFrame()]
 		else:
 			self.onMouseUp(self, x, y, button=button, clicks=clicks)
 	def onMouseUp(self, self1, x, y, button=1, clicks=1):
@@ -2612,6 +2623,9 @@ class TemporaryGroup(Group):
 	# 	print self.x, self.activelayer.x
 	# 	pass
 	def split(self):
+		for i in self.currentFrame():
+			i.x = i.x+self.x
+			i.y = i.y+self.y
 		return self.currentFrame()
 		pass
 	def onMouseDown(self, self1, x, y, button=1, clicks=1):
@@ -2620,8 +2634,23 @@ class TemporaryGroup(Group):
 			self1.clicked = True
 			self1.initx,self1.inity = x-self1.x, y-self1.y
 	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
-		self1.x = x-self1.initx
-		self1.y = y-self1.inity
+		if MODE==" ":
+			self1.x = x-self1.initx
+			self1.y = y-self1.inity
+		elif MODE=="s":
+			if SCALING:
+				if self1.initx>self1.maxx/2:
+					self1.xscale = (x-self1.x)/self1.maxx
+				else:
+					# I don't understand why I need 2*self1.maxx instead of just maxx, but it works.
+					self1.xscale = (2*self1.maxx+self1.x-(x-self1.initx)-x)/self1.maxx
+					self1.x = x
+				if self1.inity>self1.maxy/2:
+					self1.yscale = (y-self1.y)/self1.maxy
+				else:
+					# 3 times?? Why??
+					self1.yscale = (3*self1.maxy+self1.y-(y-self1.inity)-y)/self1.maxy
+					self1.y = y
 	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		self.clicked = False
 	# def hitTest(self, x, y):
