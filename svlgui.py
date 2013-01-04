@@ -327,8 +327,8 @@ if SYSTEM=="osx":
 			m.import_to_library.enabled = 1
 			m.convert_to_symbol.enabled = 1
 			m.preferences_cmd.enabled = 1
-        
-        #def create_sc(self):
+		
+		#def create_sc(self):
 		#	pass
 		#def run_file(self):
 		#	pass
@@ -1910,7 +1910,82 @@ class Text (object):
 		retval = "var "+self.name+" = new TextField();\n"+self.name+".text = \""+self.text\
 			+"\";\n"+self.name+".hwaccel = "+str(self.hwaccel).lower()+"\n"
 		return retval
-	
+
+class Sound:
+	"""Class for storing sounds in."""
+	def __init__(self, data, name, path, info):
+		global Library
+		Library.append(self)
+		self.data = data
+		self.name = name.replace(" ", "_")
+		self.x = 0
+		self.y = 0
+		self.rotation = 0
+		self.xscale = 0
+		self.yscale = 0
+		self.path = path
+		self.iname = None
+		reading_comments_flag = False
+		other = ''
+		for l in info.splitlines():
+			if( not l.strip() ):
+				continue
+			if( reading_comments_flag and l.strip() ):
+				if( comments ):
+					comments += '\n'
+				comments += l
+			else:
+				if( l.startswith('Input File') ):
+					input_file = l.split(':',1)[1].strip()[1:-1]
+				elif( l.startswith('Channels') ):
+					num_channels = int(l.split(':',1)[1].strip())
+				elif( l.startswith('Sample Rate') ):
+					sample_rate = int(l.split(':',1)[1].strip())
+				elif( l.startswith('Precision') ):
+					bits_per_sample = int(l.split(':',1)[1].strip()[0:-4])
+				elif( l.startswith('Duration') ):
+					tmp = l.split(':',1)[1].strip()
+					tmp = tmp.split('=',1)
+					duration_time = tmp[0]
+					duration_samples = int(tmp[1].split(None,1)[0])
+				elif( l.startswith('Sample Encoding') ):
+					encoding = l.split(':',1)[1].strip()
+				elif( l.startswith('Comments') ):
+					comments = ''
+					reading_comments_flag = True
+				else:
+					if( other ):
+						other += '\n'+l
+					else:
+						other = l
+					print >>sys.stderr, "Unhandled:",l
+		self.sample_rate = int(sample_rate)
+		self.duration_samples = int(duration_samples)
+		self.duration_time = int(duration_time.split(':')[0])*3600+int(duration_time.split(':')[1])*60+float(duration_time.split(':')[2])
+	def draw(self, cr, transform):
+		pass
+	def draw_frame(self, cr, transform):
+		if SYSTEM=="osx":
+			cr.newpath()
+			# cr.moveto(0,16)
+			chunk_size = int(self.duration_samples/(self.duration_time*FRAMERATE*16))
+			print chunk_size
+			print self.duration_samples/chunk_size
+			for i in xrange(self.duration_samples/chunk_size):
+				j = abs(NP.amax(self.data[i*chunk_size:(i+1)*chunk_size])/65536.0)
+				cr.moveto(i,16-j*16)
+				cr.lineto(i,16+j*16)
+			# cr.lineto(self.duration_time*16*FRAMERATE,16)
+			cr.stroke()
+	def hitTest(self, x, y):
+		return False
+	def print_sc(self):
+		retval = ".sound "+self.name+" \""+self.path+"\"\n"
+		return retval
+	def print_html(self):
+		retval = "var "+self.name.replace(".","_")+" = new Sound();\n"+self.name.replace(".","_")+"._sound = new Audio('"+self.path.split("/")[-1]+"');\n"
+		retval = retval + self.name.replace(".","_")+"._sound.load();\n"+self.name.replace(".","_")+".duration = "+self.name.replace(".","_")+"._sound.duration"
+		return retval
 
 class framewrapper (object):
 	#def __getstate__(self):
@@ -2111,22 +2186,26 @@ class frame:
 			retval = ""
 			if self==self.parent.frames[0]:
 				for i in self.objs:
-					if i.obj.iname:
+					if isinstance(i.obj, Sound):
+						retval = retval+".play "+i.obj.name+"\n"
+					elif i.obj.iname:
 						retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
 					else:
-						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+"%% scaley="+str(i.yscale*100)+"%%\n"
+						retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+"% scaley="+str(i.yscale*100)+"%\n"
 			else:
 				for i in self.objs:
-					if not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
+					if isinstance(i.obj, Sound):
+							retval = retval+".play "+i.obj.name+"\n"
+					elif not i.obj in [j.obj for j in misc_funcs.lastval(self.parent.frames,self.parent.frames.index(self)).objs]:
 						if not hasattr(i.obj, "iname"):
 							i.obj.iname = None
 						if i.obj.iname:
-							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
+							retval = retval+".put "+i.obj.iname+"="+i.name+" x="+str(i.x)+" y="+str(i.y)+" scalex="+str(i.xscale*100)+"% scaley="+str(i.yscale*100)+"%\n"
 						else:
-							retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
+							retval = retval+".put "+i.name+" x="+str(i.x)+" y="+str(i.y)+"scalex="+str(i.xscale*100)+"% scaley="+str(i.yscale*100)+"%\n"
 					else:
 						retval = retval+".move "+i.name+" x="+str(i.x)+" y="+str(i.y)+"\n"
-						retval = retval+".change "+i.name+" scalex="+str(i.xscale*100)+" scaley="+str(i.yscale*100)+"\n"
+						retval = retval+".change "+i.name+" scalex="+str(i.xscale*100)+"% scaley="+str(i.yscale*100)+"%\n"
 			if not self.actions.strip()=='':
 				retval = retval + ".action:\n"+self.actions+"\n.end\n"
 			return retval
@@ -2463,7 +2542,7 @@ class Group (object):
 					if self.activelayer.currentselect and MODE=="s":
 						global SCALING
 						if (self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5 and \
-						 		self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5) or \
+								self.activelayer.currentselect.miny-5<y<self.activelayer.currentselect.miny+5) or \
 						(self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5 and \
 								self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy-5<y<self.activelayer.currentselect.miny+self.activelayer.currentselect.maxy+5) or \
 						(self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx-5<x<self.activelayer.currentselect.minx+self.activelayer.currentselect.maxx+5 and \
@@ -2605,12 +2684,15 @@ class Group (object):
 				if self.layers[i].frames[j]:
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"] = new Frame ();\n"
 					for k in self.layers[i].frames[j].objs:
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+" = {};\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.xscale)+";\n"
-						retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.yscale)+";\n"
+						if isinstance(k.obj, Sound):
+							retval += self.name+"._layers["+str(i)+"].frames["+str(j)+"]."+k.obj.name.replace(".","_")+".start();\n"
+						else:
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+" = {};\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._x = "+str(k.x)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._y = "+str(k.y)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._rotation = "+str(k.rot)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._xscale = "+str(k.xscale)+";\n"
+							retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"]."+k.name+"._yscale = "+str(k.yscale)+";\n"
 					retval += self.name+"._layers["+str(i)+"]._frames["+str(j)+"].actions = \""+self.layers[i].frames[j].actions.replace("\n"," ").replace("\\","\\\\").replace("\"","\\\"")+"\"\n"
 		return retval
 
@@ -2639,10 +2721,10 @@ class TemporaryGroup(Group):
 			self1.y = y-self1.inity
 		elif MODE=="s":
 			if SCALING:
+				# Not working yet.
 				if self1.initx>self1.maxx/2:
 					self1.xscale = (x-self1.x)/self1.maxx
 				else:
-					# I don't understand why I need 2*self1.maxx instead of just maxx, but it works.
 					self1.xscale = (2*self1.maxx+self1.x-(x-self1.initx)-x)/self1.maxx
 					self1.x = x
 				if self1.inity>self1.maxy/2:
@@ -2653,9 +2735,26 @@ class TemporaryGroup(Group):
 					self1.y = y
 	def onMouseUp(self, self1, x, y, button=1, clicks=1):
 		self.clicked = False
-	# def hitTest(self, x, y):
-	# 	print self.x, self.y, x, y
-	# 	return True
+	def onKeyDown(self, self1, key):
+		if key in ("delete", "backspace"):
+			del self1.parent[self1.parent.index(self1)] # Need to clean up deletion
+		elif key in [" ", "s", "r", "e", "b", "p"]:
+			svlgui.MODE=key
+			svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+					"b":"arrow","p":"arrow"}[key], MainWindow.stage)
+			misc_funcs.update_tooloptions()
+		elif key=="F6":
+			add_keyframe()
+		elif key=="F8":
+			convert_to_symbol()
+		elif key=="left_arrow":
+			self1.x-=1
+		elif key=="right_arrow":
+			self1.x+=1
+		elif key=="up_arrow":
+			self1.y-=1
+		elif key=="down_arrow":
+			self1.y+=1
 		
 
 def set_cursor(curs, widget=None):
@@ -3065,6 +3164,13 @@ class FramesCanvas(Canvas):
 						dst_rect = [i*16, k*32, 16+i*16, 32+k*32]
 						self.inacfr.draw(cr, src_rect, dst_rect)
 				cr.grestore()
+			for i in xrange(len(FRAMES)):
+				if FRAMES[i]:
+					try:
+						sounds = [i.obj for i in FRAMES[i].objs if isinstance(i.obj, Sound)]
+						[i.draw_frame(cr, None) for i in sounds]
+					except:
+						traceback.print_exc()
 			# print max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)
 			for i in xrange(max(len(FRAMES),int(update_rect[0]/16-1)),int(update_rect[2]/16+1)):
 				cr.newpath()

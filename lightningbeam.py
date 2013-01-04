@@ -3,7 +3,7 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os, shutil, tarfile, tempfile, StringIO, urllib
+import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess
 
 # Workaround for broken menubar under Ubuntu
 os.putenv("UBUNTU_MENUPROXY", "0")
@@ -280,10 +280,19 @@ def onKeyDownObj(self, key):
 		add_keyframe()
 	elif key=="F8":
 		convert_to_symbol()
+	elif key=="left_arrow":
+		self.x-=1
+	elif key=="right_arrow":
+		self.x+=1
+	elif key=="up_arrow":
+		self.y-=1
+	elif key=="down_arrow":
+		self.y+=1
 	
 def create_sc(root):
 	#retval = ".flash bbox="+str(svlgui.WIDTH)+"x"+str(svlgui.HEIGHT)+" background=#ffffff \
 #fps="+str(svlgui.FRAMERATE)+"\n"+root.print_sc()+".end"
+	print svlgui.Library
 	retval = ".flash bbox="+str(svlgui.WIDTH)+"x"+str(svlgui.HEIGHT)+" background=#ffffff \
 fps="+str(svlgui.FRAMERATE)+"\n"+"".join([i.print_sc() for i in svlgui.Library])+root.print_sc()+".end"
 	return retval
@@ -562,14 +571,64 @@ def save_file_as(widget=None):
 	svlgui.FILE = thetarfile
 	pass
 def import_to_stage(widget=None):
-	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp"]).path
-	im = svlgui.Image(thefile)
-	im.onMouseDown = onMouseDownObj
-	im.onMouseMove = onMouseMoveObj
-	im.onMouseDrag = onMouseDragObj
-	im.onMouseUp = onMouseUpObj
-	im.onKeyDown = onKeyDownObj
-	root.descendItem().add(im)
+	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
+	for i in ("jpg","png","bmp"):
+		if thefile.endswith(i):
+			im = svlgui.Image(thefile)
+			im.onMouseDown = onMouseDownObj
+			im.onMouseMove = onMouseMoveObj
+			im.onMouseDrag = onMouseDragObj
+			im.onMouseUp = onMouseUpObj
+			im.onKeyDown = onKeyDownObj
+			root.descendItem().add(im)
+			break
+	else:
+		if thefile.endswith("wav"):
+			if svlgui.PLATFORM=="osx":
+				if not os.path.exists('sox/sox'):
+					try:
+						import numpy as NP
+						result = svlgui.alert("To import sound you must install SoX. This will take about 1 MB of space. Install?", confirm=True)
+						if not result:
+							return
+						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+						os.system('mv sox-14.4.0 sox')
+					except:
+						result = svlgui.alert("To import sound you must install NumPy and SoX. This will take about 10 MB of space. Install?", confirm=True)
+						if not result:
+							return
+						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+						import numpy as NP
+						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+						os.system('mv sox-14.4.0 sox')
+				else:
+					try:
+						import numpy as NP
+					except:
+						result = svlgui.alert("To import sound you must install NumPy. This will take about 9 MB of space. Install?", confirm=True)
+						if not result:
+							return
+						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+						import numpy as NP
+				SOX_EXEC = 'sox/sox'
+			svlgui.NP = NP
+			num_channels = 1
+			out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
+			cmd = [SOX_EXEC,
+				thefile,              # input filename
+				'-t','raw',            # output file type raw
+				'-e','signed-integer', # output encode as signed ints
+				'-L',                  # output little endin
+				'-b',str(out_byps*8),  # output bytes per sample
+				'-']                   # output to stdout]
+			data = NP.fromstring(subprocess.check_output(cmd),'<i%d'%(out_byps))
+			data = data.reshape(len(data)/num_channels, num_channels)
+			info = subprocess.check_output([SOX_EXEC,'--i',thefile])
+			sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=thefile, info=info)
+			root.descendItem().add(sound)
+
 	MainWindow.stage.draw()
 def import_to_library(widget=None):
 	pass

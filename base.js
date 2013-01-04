@@ -661,7 +661,7 @@ function TextField() {
 		
 	}
 }
-makeNonEnumerable(TextField);
+// makeNonEnumerable(TextField);
 
 var _rootFrame = new Frame()
 var _root = new MovieClip()
@@ -716,6 +716,30 @@ Object.prototype.isPropertyEnumerable = function (name) {
 
 Object.defineProperty( Object.prototype, "addProperty", {enumerable: false});
 Object.defineProperty( Object.prototype, "isPropertyEnumerable", {enumerable: false});
+
+
+function Sound() {
+	this._sound = undefined;
+	this.duration = undefined
+	this.getVolume = function () {
+		return parseInt(this._sound.volume*100);
+	}
+	this.loadSound = function (url) {
+		this._sound = new Audio (url);
+		this._sound.load();
+		this.duration = this._sound.duration
+	}
+	this.setVolume = function (vol) {
+		this._sound.volume = vol;
+	}
+	this.start = function () {
+		this._sound.play();
+	}
+	this.stop = function () {
+		this._sound.pause();
+	}
+}
+Sound.addProperty('position', function () {return parseInt(this._sound.position*1000)})
 
 function Point (x, y) {
 	this.x = x
