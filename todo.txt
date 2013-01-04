@@ -2,8 +2,8 @@
 + text
 + undo
 + scale
-scaling of images
-moving keyframes
++ scaling of images
++ moving keyframes
 + sound
 + moving an object with arrow keys
 movie clips

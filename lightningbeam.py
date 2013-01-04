@@ -82,6 +82,7 @@ def onLoadFrames(self):
 			j = box(i*16,0,16,32,svlgui.Color([1,1,1]))
 			self.add(j)'''
 def onClickFrame(self, x, y,button=1,clicks=1):
+	self.clicks = clicks
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	root.descendItem().activeframe = int(x/16)
 	print ">>>>>> ", x, y
@@ -164,6 +165,8 @@ def onMouseDownText(self,x,y,button=1,clicks=1):
 		self.obj.editing = True
 def onMouseDownFrame(self, x, y,button=1,clicks=1):
 	pass
+def onMouseDownMC(self, x, y, button=1, clicks=1):
+	print clicks
 def onMouseUpGroup(self, x, y,button=1,clicks=1):
 	self.clicked = False
 	if svlgui.MODE in ["r", "e"]:
@@ -199,6 +202,22 @@ def onMouseUpObj(self, x, y,button=1,clicks=1):
 					del undo_stack[-1]
 def onMouseUpText(self, x, y,button=1,clicks=1):
 	self.clicked = False
+def onMouseUpFrame(self, x, y, button=1, clicks=1):
+	self.x = None
+	if root.descendItem().activeframe==root.descendItem().activelayer.currentframe:
+		index = int(x/16)
+		if index>len(root.descendItem().activelayer.frames):
+			[root.descendItem().activelayer.frames.append(None) for i in xrange(len(root.descendItem().activelayer.frames),index+1)]
+		if index>root.descendItem().activeframe:
+			print "bigger"
+			root.descendItem().activelayer.frames.insert(index, root.descendItem().activelayer.frames.pop(root.descendItem().activeframe))
+		else:
+			root.descendItem().activelayer.frames.insert(index, root.descendItem().activelayer.frames.pop(root.descendItem().activeframe))			
+			if not any(root.activelayer.frames[index+1:]):
+				root.descendItem().activelayer.frames = root.descendItem().activelayer.frames[:index+1]
+		root.descendItem().currentframe = index
+		print root.descendItem().activelayer.frames
+		
 def onMouseMoveGroup(self, x, y,button=1):
 	pass
 	#This is for testing rotation. Comment out before any commit!
@@ -251,7 +270,9 @@ def onMouseDragObj(self, x, y,button=1,clicks=1):
 def onMouseDragText(self, x, y,button=1,clicks=1):
 	self.x = x-self.initx
 	self.y = y-self.inity
-
+def onMouseDragFrame(self, x, y, button=1, clicks=1):
+	if root.descendItem().activeframe==root.descendItem().activelayer.currentframe:
+		self.x = x
 def onKeyDownGroup(self, key):
 	if not svlgui.EDITING:
 		if key in [" ", "s", "r", "e", "b", "p"]:
@@ -482,6 +503,8 @@ MainWindow.layerbox.add(layers,0,0)
 #MainWindow.timelinebox.add(frames,0,0)
 MainWindow.timelinebox.root = root
 MainWindow.timelinebox.onMouseDown = onClickFrame
+MainWindow.timelinebox.onMouseDrag = onMouseDragFrame
+MainWindow.timelinebox.onMouseUp = onMouseUpFrame
 
 
 def new_file(widget=None):
@@ -764,7 +787,7 @@ def convert_to_symbol(widget=None):
 		svlgui.alert("No object selected!")
 		return
 	else:
-		svlgui.ConvertToSymbolWindow(root)
+		svlgui.ConvertToSymbolWindow(root, onMouseDownMC)
 		MainWindow.stage.draw()
 		
 def about(widget=None):
