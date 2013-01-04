@@ -504,8 +504,12 @@ def open_file(widget=None):
 	thetarfile.extractall(path=svlgui.SECURETEMPDIR)
 	for i in svlgui.Library:
 		if i.type=="Image":
-			i.path = svlgui.SECURETEMPDIR+"/"+i.path.split(os.sep)[-1]
-			i.set_image(i.path)
+			if not hasattr(i,'path'):
+				i.val = svlgui.SECURETEMPDIR+"/"+i.val.split(os.sep)[-1]
+				i.set_image(i.val)
+			else:
+				i.path = svlgui.SECURETEMPDIR+"/"+i.path.split(os.sep)[-1]
+				i.set_image(i.path)
 			if not hasattr(i, 'iname'):
 				i.iname = None
 	MainWindow.stage.add(root, 0, 0)
@@ -529,17 +533,29 @@ def save_file(widget=None):
 	lastpath = os.path.abspath(".")
 	for i in svlgui.Library:
 		if i.type=="Image":
-			print "i.path: ",i.path
-			try:
-				os.chdir(os.sep.join(i.path.split(os.sep)[:-1]) or i.origpath)
-				i.path = i.path.split(os.sep)[-1]
-				thetarfile.add(i.path.split(os.sep)[-1])
-			except OSError:
-				tmpdir = tempfile.mkdtemp()
-				os.chdir(tmpdir)
-				i.pilimage.save(i.path)
-				thetarfile.add(i.path)
-				os.remove(i.path)
+			if not hasattr(i, 'path'):
+				try:
+					os.chdir(os.sep.join(i.val.split(os.sep)[:-1]) or i.origpath)
+					i.val = i.val.split(os.sep)[-1]
+					thetarfile.add(i.val.split(os.sep)[-1])
+				except OSError:
+					tmpdir = tempfile.mkdtemp()
+					os.chdir(tmpdir)
+					i.pilimage.save(i.val)
+					thetarfile.add(i.val)
+					os.remove(i.val)
+			else:
+				print "i.path: ",i.path
+				try:
+					os.chdir(os.sep.join(i.path.split(os.sep)[:-1]) or i.origpath)
+					i.path = i.path.split(os.sep)[-1]
+					thetarfile.add(i.path.split(os.sep)[-1])
+				except OSError:
+					tmpdir = tempfile.mkdtemp()
+					os.chdir(tmpdir)
+					i.pilimage.save(i.path)
+					thetarfile.add(i.path)
+					os.remove(i.path)
 			os.chdir(lastpath)
 	thetarfile.close()
 	svlgui.FILE = thetarfile
@@ -575,6 +591,10 @@ def import_to_stage(widget=None):
 	for i in ("jpg","png","bmp"):
 		if thefile.endswith(i):
 			# im = svlgui.Image(thefile)
+			if svlgui.PLATFORM=="osx":
+				# sips is OSX's built-in image manipulation tool
+				os.system("sips -s format png "+thefile+" --out "+svlgui.SECURETEMPDIR+"/"+thefile.split("/")[-1])
+			thefile = svlgui.SECURETEMPDIR+"/"+thefile.split("/")[-1]
 			im = box(100,100,200,200,svlgui.Color(thefile))
 			print im.filled
 			im.onMouseDown = onMouseDownObj

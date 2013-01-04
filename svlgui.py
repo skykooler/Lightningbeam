@@ -78,6 +78,11 @@ Library = []
 
 
 class Color (object):
+	def __getstate__(self):
+		dict = self.__dict__.copy()
+		print dict
+		dict['image'] = None
+		return dict
 	def __init__(self, val):
 		if type(val)==type([]):
 			self.type = "RGB"
