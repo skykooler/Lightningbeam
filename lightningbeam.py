@@ -359,7 +359,8 @@ def run_file(self=None):
 		if not os.path.exists(os.getenv('HOME')+'/mm.cfg'):
 			with open(os.getenv('HOME')+'/mm.cfg', "w") as mm:
 				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
-			os.mkdir(os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs")
+			if not os.path.exists(os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs"):
+				os.mkdir(os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs")
 			with open(logloc, "w") as f:
 				f.write("")
 	try:
