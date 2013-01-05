@@ -166,7 +166,8 @@ def onMouseDownText(self,x,y,button=1,clicks=1):
 def onMouseDownFrame(self, x, y,button=1,clicks=1):
 	pass
 def onMouseDownMC(self, x, y, button=1, clicks=1):
-	print clicks
+	if clicks==2:
+		self.obj.level = True
 def onMouseUpGroup(self, x, y,button=1,clicks=1):
 	self.clicked = False
 	if svlgui.MODE in ["r", "e"]:
@@ -429,8 +430,8 @@ def run_html(self=None):
 	except IOError:
 		svlgui.alert("Couldn't copy base.js to "+os.getenv('HOME')+"/base.js!")
 	webbrowser.open("file://"+os.getenv('HOME')+"/test.html")
-	
-	
+
+		
 
 def box(x, y, width, height, fill=None):
 	global objects

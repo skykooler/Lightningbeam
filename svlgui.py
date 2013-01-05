@@ -2510,10 +2510,14 @@ class Group (object):
 		self.dragging = False
 		self.selecting = False
 		self.tempgroup = None
+		self.is_mc = False
 		self.name = "g"+str(int(random.random()*10000))+str(SITER)
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
+		if self.is_mc and self.level:
+			cr.fillcolor = Color([1,1,1,0.5]).pygui
+			cr.fill_rect([0,0,1000,1000])
 		for i in self.layers:
 			if not i.hidden:
 				i.x = self.x
@@ -3152,6 +3156,7 @@ class ConvertToSymbolWindow:
 		symbol = Group()
 		symbol.add(self.root.descendItem().activelayer.currentselect.obj)
 		symbol.name = self.ntry.text
+		symbol.is_mc = True
 		self.root.descendItem().activelayer.delete(self.root.descendItem().activelayer.currentselect)
 		print self.root.descendItem().activelayer.currentFrame()
 		self.root.descendItem().activelayer.add(symbol)
