@@ -2572,6 +2572,8 @@ class Group (object):
 				self.activelayer.currentselect._onMouseDown(self.activelayer.currentselect, x, y)
 			else:
 				if MODE in [" ", "s", "b"]:
+					if CURRENTTEXT:
+						CURRENTTEXT.editing = False
 					if self.activelayer.currentselect and MODE=="s":
 						global SCALING
 						if (self.activelayer.currentselect.minx-5<x<self.activelayer.currentselect.minx+5 and \
