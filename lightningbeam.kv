@@ -1,11 +1,12 @@
 #:kivy 1.0
+#:import ActionScriptLexer pygments.lexers.ActionScriptLexer
 
 <Lightningbeam>:
 	do_default_tab: False
 	TabbedPanelItem:
 		text: 'Drawing'
 		BoxLayout:
-			orientation: "Vertical"
+			orientation: "vertical"
 			
 	TabbedPanelItem:
 		text: 'Tools'
@@ -27,6 +28,7 @@
 				text: "Painbrush"
 	TabbedPanelItem:
 		text: 'ActionScript'
-		TextInput:
+		CodeInput:
 			multiline: True
+			lexer: ActionScriptLexer()
 			font_name: 'UbuntuMono-R.ttf'
