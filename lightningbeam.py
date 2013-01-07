@@ -3,7 +3,11 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess
+import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess, sys
+
+if sys.version_info < (2, 6):
+	# Python 2.5
+	from __future__ import with_statement
 
 # Workaround for broken menubar under Ubuntu
 os.putenv("UBUNTU_MENUPROXY", "0")
@@ -344,11 +348,11 @@ def run_file(self=None):
 				svlgui.alert("Aborting.")
 				return
 			else:
-				svlgui.alert("The file will download when you click Ok.\nThis may take some time.")
+				svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
 				urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.app.zip", "fp.app.zip")
 				# Unzip the file. Apparently ditto is better for OSX apps than unzip.
 				os.system('ditto -V -x -k --sequesterRsrc --rsrc fp.app.zip .')
-				shutil.move('Flash Player Debugger.app', '/Applications')
+				shutil.move('Flash Player Debugger.app', '/Applications/Flash Player Debugger.app')
 				# Generally it is not recognized until it is opened
 				os.system('open -a "/Applications/Flash Player Debugger.app"')
 				# Set Flash Player Debugger as the default app for .swf files
