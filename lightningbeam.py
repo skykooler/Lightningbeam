@@ -3,11 +3,10 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
+from __future__ import with_statement
+
 import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess, sys
 
-if sys.version_info < (2, 6):
-	# Python 2.5
-	from __future__ import with_statement
 
 # Workaround for broken menubar under Ubuntu
 os.putenv("UBUNTU_MENUPROXY", "0")
