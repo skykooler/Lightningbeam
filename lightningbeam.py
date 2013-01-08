@@ -331,7 +331,7 @@ def run_file(self=None):
 	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
 	if sys.version_info < (2, 6):
 		if x==5:	# which is the error value returned when linking libjpeg fails
-			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True)
+			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
 				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
 				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
 				if x==5:
