@@ -216,7 +216,7 @@ if sys.platform=="linux2":
 		from GUI import GL
 		try:
 			from PIL import Image as PILImage
-		except ImportError as err:
+		except ImportError:
 			import Image as PILImage
 	from GUI.Geometry import offset_rect, rect_sized
 	
@@ -257,7 +257,7 @@ elif sys.platform=="win32":
 		from GUI import GL
 		try:
 			from PIL import Image as PILImage
-		except ImportError as err:
+		except ImportError:
 			import Image as PILImage
 	media_path = ""
 	SYSTEM="osx"
@@ -297,7 +297,7 @@ elif sys.platform=="darwin":
 		from GUI import GL
 		try:
 			from PIL import Image as PILImage
-		except ImportError as err:
+		except ImportError:
 			import Image as PILImage
 	SYSTEM="osx"
 	'''
@@ -2739,7 +2739,7 @@ class Group (object):
 class TemporaryGroup(Group):
 	"""Created when selecting multiple items, for ease of use."""
 	def __init__(self, *args, **kwargs):
-		super(TemporaryGroup, self).__init__(*args, **kwargs)
+		(TemporaryGroup, self).__init__(*args, **kwargs)
 	# def draw(self, cr=None, transform=None, rect=None):
 	# 	super(TemporaryGroup, self).draw(cr, transform, rect)
 	# 	print self.x, self.activelayer.x

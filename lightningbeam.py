@@ -3,7 +3,10 @@
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
 
-import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess
+from __future__ import with_statement
+
+import os, shutil, tarfile, tempfile, StringIO, urllib, subprocess, sys
+
 
 # Workaround for broken menubar under Ubuntu
 os.putenv("UBUNTU_MENUPROXY", "0")
@@ -323,7 +326,17 @@ def run_file(self=None):
 	print "RUNNING"
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
 	open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
-	svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	if sys.version_info < (2, 6):
+		if x==5:	# which is the error value returned when linking libjpeg fails
+			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
+				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
+				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+				if x==5:
+					svlgui.alert("Sorry, something has gone terribly wrong.")
+			else:
+				return
 	#TODO: Make this cross-platform compatible
 	if svlgui.PLATFORM=="win32":
 		# Untested.
@@ -344,11 +357,15 @@ def run_file(self=None):
 				svlgui.alert("Aborting.")
 				return
 			else:
-				svlgui.alert("The file will download when you click Ok.\nThis may take some time.")
-				urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.app.zip", "fp.app.zip")
+				svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
+				if sys.version_info < (2, 6):
+					# Newer flash players won't run on Leopard
+					urllib.urlretrieve("http://download.macromedia.com/pub/flashplayer/updaters/10/flashplayer_10_sa_debug.app.zip", "fp.app.zip")
+				else:
+					urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.app.zip", "fp.app.zip")
 				# Unzip the file. Apparently ditto is better for OSX apps than unzip.
 				os.system('ditto -V -x -k --sequesterRsrc --rsrc fp.app.zip .')
-				shutil.move('Flash Player Debugger.app', '/Applications')
+				shutil.move('Flash Player Debugger.app', '/Applications/Flash Player Debugger.app')
 				# Generally it is not recognized until it is opened
 				os.system('open -a "/Applications/Flash Player Debugger.app"')
 				# Set Flash Player Debugger as the default app for .swf files
