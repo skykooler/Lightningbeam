@@ -314,6 +314,9 @@ elif sys.platform=="darwin":
 	TEMPDIR="/tmp"
 	sep = "/"
 	
+if SYSTEM=="osx":
+	from codeeditor import CodeEditor
+
 FILE = tarfile.open(name=TEMPDIR+"/Untitled",mode="w:gz")
 FILE.close()
 
@@ -1221,7 +1224,8 @@ class TextView(Widget):
 				def mouse_down(self, event):
 					self.become_target()
 					GUI.TextEditor.mouse_down(self, event)
-			self.box = OSXTextEditor(scrolling="hv")
+			# self.box = OSXTextEditor(scrolling="hv")
+			self.box = CodeEditor()
 			self.box.font = Font("Courier", 12, [])
 			if width and height:
 				self.box.size = (width, height)
