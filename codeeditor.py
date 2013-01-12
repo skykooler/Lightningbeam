@@ -194,8 +194,10 @@ class CodeEditor(ScrollableView):
 				key = keydict[ord(event.unichars)]
 			else:
 				key = event.unichars
+				print 'uni', key
 		else:
-			key = event.key.upper()
+			key = event.key#.upper()
+			print key
 		if key == "\b":
 			if self.cursorpos>0:
 				self.text = self.text[:self.cursorpos-1]+self.text[self.cursorpos:]
