@@ -14,6 +14,7 @@ mkdir -p debian/lightningbeam/DEBIAN
 cp lightningbeam debian/lightningbeam/usr/bin/
 cp lightningbeam.py debian/lightningbeam/usr/share/lightningbeam/
 cp svlgui.py debian/lightningbeam/usr/share/lightningbeam/
+cp codeeditor.py debian/lightningbeam/usr/share/lightningbeam/
 cp misc_funcs.py debian/lightningbeam/usr/share/lightningbeam/
 cp lightningbeam_windows.py debian/lightningbeam/usr/share/lightningbeam/
 cp colors.py debian/lightningbeam/usr/share/lightningbeam/
