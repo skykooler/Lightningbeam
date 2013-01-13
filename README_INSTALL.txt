@@ -10,14 +10,7 @@ Building on Windows:
 Building on Ubuntu/Debian:
 	1.	In a terminal, type:
 			./mkdebian
-			cd debian
-			dpkg --build lightningbeam ./
-	2.	Now there is a package, which can be installed however.
-	3.	To create a RPM package:
-			sudo apt-get install alien
-			alien -r lightningbeam.deb
-	4.	To create a Slackware TGZ package:
-			alien -t lightningbeam.deb
+	2.	This will create a .deb package, a RPM package, and a TGZ package.
 Building on Mac OSX:
 	1.	In a terminal, type:
 			/usr/bin/python setup.py py2app
