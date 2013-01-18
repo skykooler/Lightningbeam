@@ -337,6 +337,7 @@ if SYSTEM=="osx":
 			m.save_cmd.enabled = 1
 			m.save_as_cmd.enabled = 1
 			m.open_cmd.enabled = 1
+			m.new_cmd.enabled = 1
 			m.undo_cmd.enabled = 1
 			m.redo_cmd.enabled = 1
 			m.run_file.enabled = 1
@@ -521,9 +522,9 @@ class Menu(Widget):
 			if top:
 				global menus
 				self.mb = GUI.MenuList()
-				tool_menu = GUI.Menu("Tools", [("Execute", "test_cmd")])
+				# tool_menu = GUI.Menu("Tools", [("Execute", "test_cmd")])
 				menus = basic_menus(exclude = print_cmds)
-				menus.append(tool_menu)
+				# menus.append(tool_menu)
 		elif SYSTEM=="html":
 			pass
 			# I need to figure out how the menus work here.
@@ -568,7 +569,7 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
+				cmds={"New":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
 					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
@@ -1106,7 +1107,10 @@ class Canvas(Widget):
 						x, y = event.position
 						for i in self.objs:
 							try:
-								i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
+								if event.button:
+									i._onMouseDrag(x, y, button={"left":1,"right":2,"middle":3}[event.button])
+								else:
+									i._onMouseDrag(x, y, button=None)
 							except:
 								traceback.print_exc()
 						self.invalidate_rect([0,0,self.extent[0],self.extent[1]])

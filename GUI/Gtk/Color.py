@@ -17,13 +17,18 @@ class Color(GColor):
     
     _from_gdk_color = classmethod(_from_gdk_color)
 
-    def __init__(self, red, green, blue, alpha = 1.0):
+    # def __init__(self, red, green, blue, alpha = 1.0):
+    def __init__(self, red, green, blue, alpha = 1.0, image = False, im = ''):
         self._rgba = (red, green, blue, alpha)
-        gdk_color = gdk.Color()
-        gdk_color.red = int(red * 65535)
-        gdk_color.green = int(green * 65535)
-        gdk_color.blue = int(blue * 65535)
-        self._gdk_color = gdk_color
+        self.image = image
+        if image:
+            self.image = im._gdk_pixbuf
+        else:
+            gdk_color = gdk.Color()
+            gdk_color.red = int(red * 65535)
+            gdk_color.green = int(green * 65535)
+            gdk_color.blue = int(blue * 65535)
+            self._gdk_color = gdk_color
         self._alpha = alpha
     
     def get_red(self):

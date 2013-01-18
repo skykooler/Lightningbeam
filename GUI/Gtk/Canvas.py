@@ -5,13 +5,14 @@
 #--------------------------------------------------------------------
 
 from math import sin, cos, pi, floor
-from cairo import OPERATOR_OVER, OPERATOR_SOURCE, FILL_RULE_EVEN_ODD
+from cairo import OPERATOR_OVER, OPERATOR_SOURCE, FILL_RULE_EVEN_ODD, ImageSurface, SurfacePattern
 from GUI import export
 from GUI.Geometry import sect_rect
 from GUI.StdFonts import application_font
 from GUI.StdColors import black, white
 from GUI.GCanvases import Canvas as GCanvas
 from GUI.GCanvasPaths import CanvasPaths as GCanvasPaths
+import sys
 
 deg = pi / 180
 twopi = 2 * pi
@@ -111,20 +112,36 @@ class Canvas(GCanvas, GCanvasPaths):
     
     def newpath(self):
         self._gtk_ctx.new_path()
+        self.minx = sys.maxint
+        self.miny = sys.maxint
+        self.maxx = -sys.maxint/2
+        self.maxy = -sys.maxint/2
     
     def moveto(self, x, y):
         self._gtk_ctx.move_to(x, y)
+        self.minx = min(self.minx, x)
+        self.miny = min(self.miny, y)
+        self.maxx = max(self.maxx, x)
+        self.maxy = max(self.maxy, y)
     
     def rmoveto(self, x, y):
         self._gtk_ctx.rel_move_to(x, y)
     
     def lineto(self, x, y):
+        self.minx = min(self.minx, x)
+        self.miny = min(self.miny, y)
+        self.maxx = max(self.maxx, x)
+        self.maxy = max(self.maxy, y)
         self._gtk_ctx.line_to(x, y)
     
     def rlineto(self, x, y):
         self._gtk_ctx.rel_line_to(x, y)
     
     def curveto(self, p1, p2, p3):
+        self.minx = min(self.minx, p1[0], p2[0], p3[0])
+        self.miny = min(self.miny, p1[1], p2[1], p3[1])
+        self.maxx = max(self.maxx, p1[0], p2[0], p3[0])
+        self.maxy = max(self.maxy, p1[1], p2[1], p3[1])
         self._gtk_ctx.curve_to(p1[0], p1[1], p2[0], p2[1], p3[0], p3[1])
     
     def rcurveto(self, p1, p2, p3):
@@ -152,8 +169,17 @@ class Canvas(GCanvas, GCanvasPaths):
     def fill(self):
         ctx = self._gtk_ctx
         #ctx.set_source_rgba(*self._state.fillcolor._rgba)
-        ctx.set_source_color(self._state.fillcolor._gdk_color)
-        ctx.fill_preserve()
+        if self.fillcolor.image:
+            # surface = 
+            ctx.set_source_pixbuf(self.fillcolor.image, 0, 0)
+            ctx.save()
+            print (self.maxx-self.minx)*1.0/self.fillcolor.image.get_width()
+            self._gtk_ctx.scale((self.maxx-self.minx)*1.0/self.fillcolor.image.get_width(), 1)
+            ctx.fill_preserve()
+            ctx.restore()
+        else:
+            ctx.set_source_color(self._state.fillcolor._gdk_color)
+            ctx.fill_preserve()
     
     def erase(self):
         ctx = self._gtk_ctx

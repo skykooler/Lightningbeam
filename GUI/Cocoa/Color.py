@@ -49,4 +49,11 @@ class Color(GColor):
         except TypeError:
             return m(None, None, None, None)
 
+class ImageColor(object):
+    """docstring for ImageColor"""
+    def __init__(self, red, green, blue, alpha = 1.0, image = False, im = ''):
+        super(ImageColor, self).__init__()
+        self.arg = arg
+        
+
 export(Color)

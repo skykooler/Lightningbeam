@@ -635,8 +635,10 @@ def import_to_stage(widget=None):
 			# im = svlgui.Image(thefile)
 			if svlgui.PLATFORM=="osx":
 				# sips is OSX's built-in image manipulation tool
-				os.system("sips -s format png "+thefile+" --out "+svlgui.SECURETEMPDIR+"/"+thefile.split("/")[-1])
-			thefile = svlgui.SECURETEMPDIR+"/"+thefile.split("/")[-1]
+				os.system("sips -s format png "+thefile+" --out "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
+			elif "linux" in svlgui.PLATFORM:
+				os.system("convert "+thefile+" "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
+			thefile = svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png"
 			im = box(100,100,200,200,svlgui.Color(thefile))
 			print im.filled
 			im.onMouseDown = onMouseDownObj
