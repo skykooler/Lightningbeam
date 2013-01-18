@@ -629,7 +629,11 @@ def save_file_as(widget=None):
 	svlgui.FILE = thetarfile
 	pass
 def import_to_stage(widget=None):
-	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
+	try:
+		thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
+	except AttributeError:
+		# User cancelled
+		return
 	for i in ("jpg","png","bmp"):
 		if thefile.endswith(i):
 			# im = svlgui.Image(thefile)
