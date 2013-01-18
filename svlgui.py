@@ -2888,6 +2888,14 @@ def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 			for i in types:
 				ntypes.append(GUI.Files.FileType())
 				ntypes[-1].suffix = i
+				image = ["jpg", "jpeg", "png", "tiff", "tga"]
+				audio = ["wav", "mp3", "ogg"]
+				if i in image:
+					ntypes[-1].name = i.upper()+" Images"
+				elif i in audio:
+					ntypes[-1].name = i.upper()+" Audio"
+				else:
+					ntypes[-1].name = i.upper()+" Files"
 				if i in mactypes:
 					ntypes[-1].mac_type=mactypes[i]
 			types = ntypes
