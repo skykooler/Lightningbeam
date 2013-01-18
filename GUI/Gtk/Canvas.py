@@ -171,10 +171,9 @@ class Canvas(GCanvas, GCanvasPaths):
         #ctx.set_source_rgba(*self._state.fillcolor._rgba)
         if self.fillcolor.image:
             # surface = 
-            ctx.set_source_pixbuf(self.fillcolor.image, 0, 0)
             ctx.save()
-            print (self.maxx-self.minx)*1.0/self.fillcolor.image.get_width()
-            self._gtk_ctx.scale((self.maxx-self.minx)*1.0/self.fillcolor.image.get_width(), 1)
+            ctx.scale((self.maxx-self.minx)*1.0/self.fillcolor.image.get_width(), (self.maxy-self.miny)*1.0/self.fillcolor.image.get_height())
+            ctx.set_source_pixbuf(self.fillcolor.image, 0, 0)
             ctx.fill_preserve()
             ctx.restore()
         else:
