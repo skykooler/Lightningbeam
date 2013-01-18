@@ -539,7 +539,11 @@ def open_file(widget=None):
 	global root
 	MainWindow.stage.delete(root)
 	shutil.rmtree(svlgui.SECURETEMPDIR)
-	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
+	try:
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
+	except AttributeError:
+		# User cancelled
+		return
 	basefile = thetarfile.extractfile("basefile")
 	root, svlgui.Library = pickle.load(basefile)
 	svlgui.SECURETEMPDIR = tempfile.mkdtemp()
@@ -566,8 +570,11 @@ def save_file(widget=None):
 	tarinfo = tarfile.TarInfo('basefile')
 	tarinfo.size = len(data)
 	if svlgui.FILE.name.startswith(svlgui.TEMPDIR):
-		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
-		print thetarfile.name
+		try:
+			thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+		except AttributeError:
+			# User cancelled
+			return
 	else:
 		thetarfile = tarfile.open(svlgui.FILE.name,mode="w:gz")
 	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
@@ -607,7 +614,11 @@ def save_file_as(widget=None):
 	data = pickle.dumps((root,svlgui.Library))
 	tarinfo = tarfile.TarInfo('basefile')
 	tarinfo.size = len(data)
-	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+	try:
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+	except AttributeError:
+		# User cancelled
+		return
 	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
 	#Save the path so we can come back here
 	lastpath = os.path.abspath(".")
