@@ -640,7 +640,6 @@ def import_to_stage(widget=None):
 				os.system("convert "+thefile+" "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
 			thefile = svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png"
 			im = box(100,100,200,200,svlgui.Color(thefile))
-			print im.filled
 			im.onMouseDown = onMouseDownObj
 			im.onMouseMove = onMouseMoveObj
 			im.onMouseDrag = onMouseDragObj
