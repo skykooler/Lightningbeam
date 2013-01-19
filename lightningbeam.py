@@ -881,7 +881,7 @@ def export_swf(widget=None):
 		return
 	open(f.path+".sc",'w').write(create_sc(root))
 	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
-	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
+	x = os.system("swfc"+svlgui.sep+"swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
 	if sys.version_info < (2, 6):
 		if x==5:	# which is the error value returned when linking libjpeg fails
 			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
