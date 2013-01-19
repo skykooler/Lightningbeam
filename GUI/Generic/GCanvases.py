@@ -42,7 +42,8 @@ class Canvas(Properties):
         self.textcolor = c
     
     def rmoveto(self, dx, dy):
-        x0, y0 = self._current_point()
+        x0, y0 = self._current_point
+        # x0, y0 = self._current_point()
         self.moveto(x0 + dx, y0 + dy)
     
     def rlineto(self, dx, dy):
