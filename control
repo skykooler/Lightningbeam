@@ -4,6 +4,6 @@ Section: graphics
 Priority: optional
 Architecture: all
 Installed-size: 27000
-Depends: bash, python, python-imaging, imagemagick
+Depends: bash, python, python-imaging, imagemagick, libzzip-0-13
 Maintainer: skycooler@gmail.com
 Description: Lightningbeam is an open-source animated content creation tool.
