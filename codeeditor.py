@@ -83,7 +83,7 @@ class PyGUIFormatter(Formatter):
 class CodeEditor(ScrollableView):
 	def __init__(self):
 		ScrollableView.__init__(self)
-		self.text = "var a = {b:5, c:[3, 'df \\'']};\n_xscale\nif (this.hitTest(_root._xmouse, root._ymouse, false)) {\n\n\ttrace('hi');\n}"
+		self.text = "_root.onMouseDown = function () {\n\ttrace('Hi');\n};"
 		self.font = Font('Courier', 16)
 		self.selecting = False
 		self.lexer = ActionScriptLexer()

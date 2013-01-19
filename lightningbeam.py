@@ -326,15 +326,19 @@ fps="+str(svlgui.FRAMERATE)+"\n"+"".join([i.print_sc() for i in svlgui.Library])
 def run_file(self=None):
 	global root
 	print "RUNNING"
+	print svlgui.FILE.name
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
+	# open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
+	open(svlgui.FILE.name+".sc", "w").write(create_sc(root))
 	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
-	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	# x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	x = os.system("swfc"+svlgui.sep+"swfc_"+svlgui.PLATFORM+" "+svlgui.FILE.name+".sc -o "+svlgui.FILE.name+".swf")
 	if sys.version_info < (2, 6):
 		if x==5:	# which is the error value returned when linking libjpeg fails
 			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
 				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
-				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+				# x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+svlgui.FILE.name+".sc -o "+svlgui.FILE.name+".swf")
 				if x==5:
 					svlgui.alert("Sorry, something has gone terribly wrong.")
 			else:
@@ -342,7 +346,18 @@ def run_file(self=None):
 	#TODO: Make this cross-platform compatible
 	if svlgui.PLATFORM=="win32":
 		# Untested.
-		logloc = os.getenv('HOME')+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
+		logloc = os.path.expanduser("~")+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
+		if not os.path.exists(os.path.expanduser("~")+"\\flashplayerdebugger.exe"):
+			result = svlgui.alert("You do not have a Flash debugger installed. Install one?", confirm=True)
+			if not result:
+				svlgui.alert("Aborting.")
+				return
+			else:
+				svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
+				urllib.urlretrieve("http://download.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.exe", os.path.expanduser("~")+"\\flashplayerdebugger.exe")
+		if not os.path.exists(os.path.expanduser('~')+'\\mm.cfg'):
+			with open(os.path.expanduser('~')+"/mm.cfg", "w") as mm:
+				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
 	elif "linux" in svlgui.PLATFORM:
 		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
 		if not os.path.exists('/usr/bin/flashplayerdebugger'):
@@ -427,15 +442,18 @@ def run_file(self=None):
 		r.start()
 	if svlgui.PLATFORM=="osx":
 		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
-		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		# success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+svlgui.FILE.name+".swf")
 		if not success:
 			svlgui.alert("Oops! Didn't work. I probably couldn't find your Flash debugger!")
 	elif svlgui.PLATFORM=='win32':
-		win_flash_player_loc = ""
-		svlgui.execute('start '+win_flash_player_loc+" test.swf")
+		win_flash_player_loc = os.path.expanduser("~")+"\\flashplayerdebugger.exe"
+		# svlgui.execute('start '+win_flash_player_loc+" test.swf")
+		svlgui.execute('start '+win_flash_player_loc+" "+svlgui.FILE.name+".swf")
 	elif svlgui.PLATFORM.startswith('linux'):
 		linux_flash_player_loc = "/usr/bin/flashplayerdebugger"
-		if not svlgui.execute(linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf &"):
+		# if not svlgui.execute(linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf &"):
+		if not svlgui.execute(linux_flash_player_loc+" "+svlgui.FILE.name+".swf &"):
 			if '64' in svlgui.PLATFORM:
 				svlgui.alert("Flash debugger failed to launch! Try installing ia32-libs.")
 			elif '32' in svlgui.PLATFORM:

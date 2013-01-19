@@ -2913,6 +2913,7 @@ def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 
 def execute(command):
 	rv = os.system(command.replace("/",sep))
+	print command.replace("/",sep)
 	if SYSTEM == "osx":
 		if rv==0:
 			return True
