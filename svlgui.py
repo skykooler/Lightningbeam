@@ -1,4 +1,4 @@
-﻿#! /usr/bin/python
+#! /usr/bin/python
 # -*- coding:utf-8 -*-
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
@@ -2910,7 +2910,7 @@ def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 
 def execute(command):
 	rv = os.system(command.replace("/",sep))
-	if PLATFORM == "osx":
+	if SYSTEM == "osx":
 		if rv==0:
 			return True
 		else:

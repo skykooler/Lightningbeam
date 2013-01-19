@@ -49,6 +49,8 @@ global undo_stack
 global redo_stack
 undo_stack = []
 redo_stack = []
+global preferences
+preferences={}
 
 def clear(arr):
 	arr.__delslice__(0,len(arr))
@@ -342,12 +344,29 @@ def run_file(self=None):
 		# Untested.
 		logloc = os.getenv('HOME')+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
 	elif "linux" in svlgui.PLATFORM:
+		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
+		if not os.path.exists('/usr/bin/flashplayerdebugger'):
+			if os.system('which gnash')==0:
+				if not 'use_gnash' in preferences:
+					if svlgui.alert("You have GNASH installed. Do you wish to use it instead of Adobe's flash player?", confirm=True):
+						use_gnash = True
+						return
+			else:
+				result = svlgui.alert("You do not have a Flash debugger installed. Install one?", confirm=True)
+				if not result:
+					svlgui.alert("Aborting.")
+					return
+				else:
+					svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
+					if not "PPC" in svlgui.PLATFORM:
+						urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.i386.tar.gz", "fp.tar.gz")
+						os.system("tar -zxf fp.tar.gz")
+						os.system("gksudo mv flashplayerdebugger /usr/bin/")
 		if not os.path.exists(os.getenv('HOME')+"/mm.cfg"):
 			# By default, the Flash debugger on Linux does not log traces.
 			# So, we create a configuration file to tell it to do so if  the user hasn't already.
 			with open(os.getenv('HOME')+"/mm.cfg", "w") as mm:
 				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
-		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
 	elif svlgui.PLATFORM=="osx":
 		logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
 		if not os.path.exists('/Applications/Flash Player Debugger.app'):
@@ -412,8 +431,12 @@ def run_file(self=None):
 		win_flash_player_loc = ""
 		svlgui.execute('start '+win_flash_player_loc+" test.swf")
 	elif svlgui.PLATFORM.startswith('linux'):
-		linux_flash_player_loc = ""
-		svlgui.execute("xdg-open "+linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		linux_flash_player_loc = "/usr/bin/flashplayerdebugger"
+		if not svlgui.execute(linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf &"):
+			if '64' in svlgui.PLATFORM:
+				svlgui.alert("Flash debugger failed to launch! Try installing ia32-libs.")
+			elif '32' in svlgui.PLATFORM:
+				svlgui.alert("Flash debugger failed to launch! No idea why.")
 def create_html5(root):
 	retval = "<head>\n\
 <style type=\"text/css\">\n\
