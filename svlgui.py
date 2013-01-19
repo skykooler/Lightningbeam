@@ -352,6 +352,7 @@ if SYSTEM=="osx":
 			m.send_to_back.enabled = 1
 			m.import_to_stage.enabled = 1
 			m.import_to_library.enabled = 1
+			m.export_swf.enabled = 1
 			m.convert_to_symbol.enabled = 1
 			m.preferences_cmd.enabled = 1
 		

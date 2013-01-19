@@ -825,6 +825,29 @@ def convert_to_symbol(widget=None):
 		svlgui.ConvertToSymbolWindow(root, onMouseDownMC)
 		MainWindow.stage.draw()
 		
+def export_svg(widget=None):
+	pass
+
+def export_swf(widget=None):
+	global root
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
+	
+	f = svlgui.file_dialog("save", name="untitled.swf")
+	if not f:
+		return
+	open(f.path+".sc",'w').write(create_sc(root))
+	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
+	if sys.version_info < (2, 6):
+		if x==5:	# which is the error value returned when linking libjpeg fails
+			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
+				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
+				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
+				if x==5:
+					svlgui.alert("Sorry, something has gone terribly wrong.")
+			else:
+				return
+
 def about(widget=None):
 	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
 	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
@@ -858,10 +881,11 @@ svlgui.menufuncs([["File",
 						("Import to Stage",import_to_stage,"/I"),
 						("Import to Library",import_to_library)],
 					["Export",
-						"Export .swf",
+						("Export .swf",export_swf,""),
 						"Export HTML5",
 						"Export Native Application",
 						"Export .sc",
+						("Export SVG",export_svg,""),
 						"Export Image",
 						"Export Video",
 						"Export .pdf",
