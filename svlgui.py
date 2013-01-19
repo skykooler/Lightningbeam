@@ -1211,7 +1211,7 @@ class TextView(Widget):
 		if SYSTEM=="osx":
 			self.box.text = text
 	text = property(_gettext, _settext)
-	def __init__(self,editable=True,width=False,height=False):
+	def __init__(self,editable=True,width=False,height=False,code=False):
 		if SYSTEM=="gtk":
 			self.sw=ScrolledWindow()
 			self.box=gtk.TextView()
@@ -1229,8 +1229,10 @@ class TextView(Widget):
 				def mouse_down(self, event):
 					self.become_target()
 					GUI.TextEditor.mouse_down(self, event)
-			# self.box = OSXTextEditor(scrolling="hv")
-			self.box = CodeEditor()
+			if code:
+				self.box = CodeEditor()
+			else:
+				self.box = OSXTextEditor(scrolling="hv")
 			self.box.font = Font("Courier", 12, [])
 			if width and height:
 				self.box.size = (width, height)
@@ -1246,6 +1248,7 @@ class TextView(Widget):
 	def scroll_bottom(self):
 		if SYSTEM=="osx":
 			self.scroll_page_down();
+			self.box.invalidate()
 
 class TextEntry(Widget):
 	def __init__(self,text="",password=False):

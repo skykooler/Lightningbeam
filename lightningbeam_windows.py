@@ -231,7 +231,7 @@ class MainWindowOSX:
 		# self.toolbox.buttons[1][0]._int().enabled = False
 		self.toolbox.buttons[3][0]._int().enabled = False
 		self.toolbox.buttons[4][0]._int().enabled = False
-		self.scriptwindow = svlgui.TextView()
+		self.scriptwindow = svlgui.TextView(code=True)
 		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
 		def setmode(self):
 			svlgui.PMODE = self.value

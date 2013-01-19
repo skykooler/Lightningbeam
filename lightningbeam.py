@@ -418,10 +418,13 @@ def run_file(self=None):
 			outputtext.scroll_bottom()		# this doesn't work
 		except:
 			pass
-	r = misc_funcs.RepeatTimer(0.02, updatetrace, args=[outputtext])
-	print dir(outputwin.window)
-	r.daemon = True
-	r.start()
+		return True
+	if hasattr(svlgui, 'gobject'):
+		svlgui.gobject.timeout_add(20, updatetrace, outputtext)
+	else:
+		r = misc_funcs.RepeatTimer(0.02, updatetrace, args=[outputtext])
+		r.daemon = True
+		r.start()
 	if svlgui.PLATFORM=="osx":
 		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
 		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
