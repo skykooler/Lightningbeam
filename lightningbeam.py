@@ -685,7 +685,7 @@ def save_file_as(widget=None):
 	pass
 def import_to_stage(widget=None):
 	try:
-		thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
+		thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav","mp3","ogg"]).path
 	except AttributeError:
 		# User cancelled
 		return
@@ -716,54 +716,63 @@ def import_to_stage(widget=None):
 			root.descendItem().add(im)
 			break
 	else:
-		if thefile.endswith("wav"):
-			if svlgui.PLATFORM=="osx":
-				if not os.path.exists('sox/sox'):
-					try:
-						import numpy as NP
-						result = svlgui.alert("To import sound you must install SoX. This will take about 1 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
-						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
-						os.system('mv sox-14.4.0 sox')
-					except:
-						result = svlgui.alert("To import sound you must install NumPy and SoX. This will take about 10 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
-						import numpy as NP
-						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
-						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
-						os.system('mv sox-14.4.0 sox')
+		for i in ("wav", "mp3", "ogg"):
+			if thefile.endswith(i):
+				if i in ("mp3", "ogg"):
+					theorigfile = thefile
+					thefile = svlgui.SECURETEMPDIR+"/"+thefile.split('/')[-1]+'.wav'
+					os.system('mplayer -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"')
+				if svlgui.PLATFORM=="osx":
+					if not os.path.exists('sox/sox'):
+						try:
+							import numpy as NP
+							result = svlgui.alert("To import sound you must install SoX. This will take about 1 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+							os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+							os.system('mv sox-14.4.0 sox')
+						except:
+							result = svlgui.alert("To import sound you must install NumPy and SoX. This will take about 10 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+							import numpy as NP
+							urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+							os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+							os.system('mv sox-14.4.0 sox')
+					else:
+						try:
+							import numpy as NP
+						except:
+							result = svlgui.alert("To import sound you must install NumPy. This will take about 9 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+							import numpy as NP
+					SOX_EXEC = 'sox/sox'
+				elif "linux" in svlgui.PLATFORM:
+					import numpy as NP
+					SOX_EXEC = "sox"
+				svlgui.NP = NP
+				num_channels = 1
+				out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
+				cmd = [SOX_EXEC,
+					thefile,              # input filename
+					'-t','raw',            # output file type raw
+					'-e','signed-integer', # output encode as signed ints
+					'-L',                  # output little endin
+					'-b',str(out_byps*8),  # output bytes per sample
+					'-']                   # output to stdout]
+				data = NP.fromstring(subprocess.check_output(cmd),'<i%d'%(out_byps))
+				data = data.reshape(len(data)/num_channels, num_channels)
+				info = subprocess.check_output([SOX_EXEC,'--i',thefile])
+				if i=="mp3":
+					sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=theorigfile, info=info, type=i)
 				else:
-					try:
-						import numpy as NP
-					except:
-						result = svlgui.alert("To import sound you must install NumPy. This will take about 9 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
-						import numpy as NP
-				SOX_EXEC = 'sox/sox'
-			elif "linux" in svlgui.PLATFORM:
-				import numpy as NP
-				SOX_EXEC = "sox"
-			svlgui.NP = NP
-			num_channels = 1
-			out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
-			cmd = [SOX_EXEC,
-				thefile,              # input filename
-				'-t','raw',            # output file type raw
-				'-e','signed-integer', # output encode as signed ints
-				'-L',                  # output little endin
-				'-b',str(out_byps*8),  # output bytes per sample
-				'-']                   # output to stdout]
-			data = NP.fromstring(subprocess.check_output(cmd),'<i%d'%(out_byps))
-			data = data.reshape(len(data)/num_channels, num_channels)
-			info = subprocess.check_output([SOX_EXEC,'--i',thefile])
-			sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=thefile, info=info)
-			root.descendItem().add(sound)
+					sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=thefile, info=info, type=i)
+				root.descendItem().add(sound)
+				break
 
 	MainWindow.stage.draw()
 def import_to_library(widget=None):

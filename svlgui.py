@@ -1977,7 +1977,7 @@ class Text (object):
 
 class Sound:
 	"""Class for storing sounds in."""
-	def __init__(self, data, name, path, info):
+	def __init__(self, data, name, path, info, type):
 		global Library
 		Library.append(self)
 		self.data = data
@@ -1989,6 +1989,7 @@ class Sound:
 		self.yscale = 0
 		self.path = path
 		self.iname = None
+		self.type = type
 		reading_comments_flag = False
 		other = ''
 		for l in info.splitlines():
