@@ -14,6 +14,8 @@ import ez_setup
 ez_setup.use_setuptools()
 
 import sys
+import shutil
+import pygments
 from setuptools import setup
 
 
@@ -70,3 +72,11 @@ setup(
     name="Lightningbeam",
     **extra_options
 )
+
+if sys.platform == 'win32':
+    shutil.rmtree("dist\GUI")
+    shutil.rmtree("dist\pygments")
+    print "Copying PyGUI files..."
+    shutil.copytree("GUI", "dist\GUI")
+    print "Copying Pygments files..."
+    shutil.copytree("\\".join(pygments.__file__.split("\\")[:-1]), "dist\pygments")
