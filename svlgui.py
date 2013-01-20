@@ -340,6 +340,7 @@ if SYSTEM=="osx":
 			m.new_cmd.enabled = 1
 			m.undo_cmd.enabled = 1
 			m.redo_cmd.enabled = 1
+			m.copy_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
 			m.create_sc.enabled = 1
@@ -571,7 +572,7 @@ def menufuncs(j):
 				menus.append(menu)
 			else:
 				cmds={"New...":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
-					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd"}
+					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Copy":"copy_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):

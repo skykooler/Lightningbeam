@@ -821,6 +821,11 @@ def redo(widget=None):
 			undo_stack.append(e)
 		MainWindow.stage.draw()
 	
+def copy(widget=None):
+	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
+	print clip
+	raise blearrghh
+
 def add_keyframe(widget=None):
 	print "af> ", root.descendItem().activeframe
 	root.descendItem().add_frame(True)
@@ -921,7 +926,7 @@ svlgui.menufuncs([["File",
 						("Undo", undo, "/z"),
 						("Redo", redo, "/^z"),
 						"Cut",
-						"Copy",
+						("Copy", copy, "/c"),
 						"Paste",
 						"Delete",
 						("Preferences",preferences,"")],
