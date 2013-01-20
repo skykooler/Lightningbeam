@@ -119,7 +119,11 @@ class Canvas(GCanvas):
     def set_fillcolor(self, c):
         state = self._state
         state.fillcolor = c
-        state.win_fill_brush = gdip.SolidBrush(c._win_argb)
+        if self.fillcolor.image:
+            tb = gdip.TextureBrush(self.fillcolor.image)
+            state.win_fill_brush = tb
+        else:
+            state.win_fill_brush = gdip.SolidBrush(c._win_argb)
     
     def get_textcolor(self):
         return self._state.textcolor

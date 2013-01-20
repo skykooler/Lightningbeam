@@ -159,6 +159,21 @@ class SolidBrush(object):
 
 #--------------------------------------------------------------------
 
+class TextureBrush(object):
+
+    def __init__(self, image):
+        ptr = c_void_p()
+        wg.GdipCreateTexture(image.ptr, 4, byref(ptr))
+        self.ptr = ptr
+    
+    def __del__(self, wg = wg):
+        wg.GdipDeleteBrush(self.ptr)
+    
+    def __str__(self):
+        return "<TextureBrush>"
+
+#--------------------------------------------------------------------
+
 class Font(object):
 
     def __init__(self, family, size, style):

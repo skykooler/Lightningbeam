@@ -697,7 +697,16 @@ def import_to_stage(widget=None):
 				os.system("sips -s format png "+thefile+" --out "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
 			elif "linux" in svlgui.PLATFORM:
 				os.system("convert "+thefile+" "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
-			thefile = svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png"
+			elif svlgui.PLATFORM=="win32":
+				from PIL import Image
+				im = Image.open(thefile)
+				# Use alpha channel if available (e.g. GIF)
+				transparency = im.info["transparency"] if 'transparency' in im.info else None
+				if transparency:
+					im.save(svlgui.SECURETEMPDIR+"\\"+".".join(thefile.split("\\")[-1].split(".")[:-1])+".png", transparency=transparency)
+				else:
+					im.save(svlgui.SECURETEMPDIR+"\\"+".".join(thefile.split("\\")[-1].split(".")[:-1])+".png")
+			thefile = svlgui.SECURETEMPDIR+svlgui.sep+".".join(thefile.split(svlgui.sep)[-1].split(".")[:-1])+".png"
 			im = box(100,100,200,200,svlgui.Color(thefile))
 			im.onMouseDown = onMouseDownObj
 			im.onMouseMove = onMouseMoveObj
