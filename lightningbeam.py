@@ -821,10 +821,16 @@ def redo(widget=None):
 			undo_stack.append(e)
 		MainWindow.stage.draw()
 	
+def cut(widget=None):
+	if MainWindow.scriptwindow.is_focused():
+		clip = MainWindow.scriptwindow.text[MainWindow.scriptwindow.selection[0]:MainWindow.scriptwindow.selection[1]]
+		MainWindow.scriptwindow.insert("")
+		svlgui.app.set_clipboard(clip)
+
 def copy(widget=None):
-	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
-	print clip
-	raise blearrghh
+	if MainWindow.scriptwindow.is_focused():
+		clip = MainWindow.scriptwindow.text[MainWindow.scriptwindow.selection[0]:MainWindow.scriptwindow.selection[1]]
+		svlgui.app.set_clipboard(clip)
 def paste(widget=None):
 	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
 	if clip:
@@ -947,7 +953,7 @@ svlgui.menufuncs([["File",
 					["Edit",
 						("Undo", undo, "/z"),
 						("Redo", redo, "/^z"),
-						"Cut",
+						("Cut", cut, "/x"),
 						("Copy", copy, "/c"),
 						("Paste", paste, "/v"),
 						"Delete",

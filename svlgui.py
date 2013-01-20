@@ -341,6 +341,7 @@ if SYSTEM=="osx":
 			m.undo_cmd.enabled = 1
 			m.redo_cmd.enabled = 1
 			m.copy_cmd.enabled = 1
+			m.cut_cmd.enabled = 1
 			m.paste_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
@@ -573,7 +574,7 @@ def menufuncs(j):
 				menus.append(menu)
 			else:
 				cmds={"New...":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
-					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Copy":"copy_cmd", "Paste":"paste_cmd"}
+					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Cut":"cut_cmd", "Copy":"copy_cmd", "Paste":"paste_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -1215,7 +1216,14 @@ class TextView(Widget):
 	def _settext(self, text):
 		if SYSTEM=="osx":
 			self.box.text = text
+	def _getselection(self):
+		if SYSTEM=="osx":
+			return self.box.selection
+	def _setselection(self, tup):
+		if SYSTEM=="osx":
+			self.box.selection = tup
 	text = property(_gettext, _settext)
+	selection = property(_getselection, _setselection)
 	def __init__(self,editable=True,width=False,height=False,code=False):
 		if SYSTEM=="gtk":
 			self.sw=ScrolledWindow()
@@ -1256,7 +1264,9 @@ class TextView(Widget):
 	def insert(self, text):
 		if SYSTEM=="osx":
 			if isinstance(self.box, CodeEditor):
-				self.box.text = self.box.text[:self.box.scursorpos]+text+self.box.text[self.box.cursorpos:]
+				self.box.text = self.box.text[:self.box.selection[0]]+text+self.box.text[self.box.selection[1]:]
+				self.box.scursorpos = self.box.cursorpos = self.box.selection[0]+len(text)
+				self.box.selection = (self.box.selection[0]+len(text), self.box.selection[0]+len(text))
 				self.box.invalidate_rect([0,0,self.box.extent[0],self.box.extent[1]])
 	def scroll_bottom(self):
 		if SYSTEM=="osx":
