@@ -5,6 +5,7 @@
 #--------------------------------------------------------------------
 
 from math import sin, cos, pi
+import sys
 import win32con as wc, win32ui as ui, win32gui as gui
 from win32con import PS_SOLID, BS_SOLID, RGN_AND
 #from win32ui import CreatePen, CreateBrush
@@ -160,19 +161,41 @@ class Canvas(GCanvas):
 
     def newpath(self):
         self._win_path.Reset()
+        self.minx = sys.maxint
+        self.miny = sys.maxint
+        self.maxx = -sys.maxint/2
+        self.maxy = -sys.maxint/2
     
     def moveto(self, x, y):
         p = (x, y)
+        try:
+            self.minx = min(self.minx, x)
+            self.miny = min(self.miny, y)
+            self.maxx = max(self.maxx, x)
+            self.maxy = max(self.maxy, y)
+        except AttributeError:
+            self.minx = x
+            self.miny = y
+            self.maxx = x
+            self.maxy = y
         self._current_point = p
         self._win_path.StartFigure()
     
     def lineto(self, x, y):
         x0, y0 = self._current_point
+        self.minx = min(self.minx, x)
+        self.miny = min(self.miny, y)
+        self.maxx = max(self.maxx, x)
+        self.maxy = max(self.maxy, y)
         self._win_path.AddLine_4f(x0, y0, x, y)
         self._current_point = (x, y)
     
     def curveto(self, p1, p2, p3):
         p0 = self._current_point
+        self.minx = min(self.minx, p1[0], p2[0], p3[0])
+        self.miny = min(self.miny, p1[1], p2[1], p3[1])
+        self.maxx = max(self.maxx, p1[0], p2[0], p3[0])
+        self.maxy = max(self.maxy, p1[1], p2[1], p3[1])
         self._win_path.AddBezier_4p(p0, p1, p2, p3)
         self._current_point = p3
     
@@ -186,7 +209,13 @@ class Canvas(GCanvas):
         self._current_point = None
     
     def fill(self):
-        self._win_graphics.FillPath(self._state.win_fill_brush, self._win_path)
+        if self.fillcolor.image:
+            self.gsave()
+            self._win_graphics.Scale_2f((self.maxx-self.minx)*1.0/self.fillcolor.image.GetWidth(), (self.maxy-self.miny)*1.0/self.fillcolor.image.GetHeight())
+            self._win_graphics.FillPath(self._state.win_fill_brush, self._win_path)
+            self.grestore()
+        else:
+            self._win_graphics.FillPath(self._state.win_fill_brush, self._win_path)
     
     def stroke(self):
         self._win_graphics.DrawPath(self._state.win_pen, self._win_path)
