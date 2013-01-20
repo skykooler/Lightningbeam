@@ -746,6 +746,9 @@ def import_to_stage(widget=None):
 						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
 						import numpy as NP
 				SOX_EXEC = 'sox/sox'
+			elif "linux" in svlgui.PLATFORM:
+				import numpy as NP
+				SOX_EXEC = "sox"
 			svlgui.NP = NP
 			num_channels = 1
 			out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
