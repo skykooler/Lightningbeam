@@ -341,6 +341,7 @@ if SYSTEM=="osx":
 			m.undo_cmd.enabled = 1
 			m.redo_cmd.enabled = 1
 			m.copy_cmd.enabled = 1
+			m.paste_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
 			m.create_sc.enabled = 1
@@ -572,7 +573,7 @@ def menufuncs(j):
 				menus.append(menu)
 			else:
 				cmds={"New...":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
-					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Copy":"copy_cmd"}
+					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Copy":"copy_cmd", "Paste":"paste_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -1185,6 +1186,9 @@ class Canvas(Widget):
 			self.canvas.invalidate_rect((0,0,self.canvas.extent[0],self.canvas.extent[1]))
 		elif SYSTEM=="html":
 			jscommunicate("drawcanvas("+self.tid+")")
+	def is_focused(self):
+		if SYSTEM=="osx":
+			return self.canvas.is_target()
 	def add(self, obj, x, y):
 		obj.x = x
 		obj.y = y
@@ -1246,6 +1250,14 @@ class TextView(Widget):
 			return self.box
 		elif SYSTEM=="html":
 			return self.box
+	def is_focused(self):
+		if SYSTEM=="osx":
+			return self.box.is_target()
+	def insert(self, text):
+		if SYSTEM=="osx":
+			if isinstance(self.box, CodeEditor):
+				self.box.text = self.box.text[:self.box.scursorpos]+text+self.box.text[self.box.cursorpos:]
+				self.box.invalidate_rect([0,0,self.box.extent[0],self.box.extent[1]])
 	def scroll_bottom(self):
 		if SYSTEM=="osx":
 			self.scroll_page_down();

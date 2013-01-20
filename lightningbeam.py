@@ -825,6 +825,28 @@ def copy(widget=None):
 	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
 	print clip
 	raise blearrghh
+def paste(widget=None):
+	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
+	if clip:
+		print clip
+		if MainWindow.stage.is_focused():
+			ctext = svlgui.Text(clip,200,100)
+			ctext.editing = False
+			# svlgui.CURRENTTEXT = self.ctext
+			ctext.onMouseDown = onMouseDownText
+			ctext.onMouseDrag = onMouseDragText
+			ctext.onMouseUp = onMouseUpText
+			self = root.descendItem()
+			self.add(ctext)
+			# self.add(self.ctext)
+			# self.ctext = None
+			undo_stack.append(edit("add_object", self, {"frame":self.activelayer.currentframe, "layer":self.activelayer}, \
+													   {"frame":self.activelayer.currentframe, "layer":self.activelayer, \
+														"obj":self.activelayer.frames[self.activelayer.currentframe].objs[-1]}))
+			self.activelayer.currentselect = self.activelayer.frames[self.activelayer.currentframe].objs[-1]
+			MainWindow.stage.draw()
+		elif MainWindow.scriptwindow.is_focused():
+			MainWindow.scriptwindow.insert(clip)
 
 def add_keyframe(widget=None):
 	print "af> ", root.descendItem().activeframe
@@ -927,7 +949,7 @@ svlgui.menufuncs([["File",
 						("Redo", redo, "/^z"),
 						"Cut",
 						("Copy", copy, "/c"),
-						"Paste",
+						("Paste", paste, "/v"),
 						"Delete",
 						("Preferences",preferences,"")],
 					["Timeline",

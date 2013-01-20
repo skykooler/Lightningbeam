@@ -241,6 +241,7 @@ class CodeEditor(ScrollableView):
 		else:
 			self.text=self.text[:self.cursorpos]+str(key)+self.text[self.cursorpos:]
 			self.cursorpos += 1
+		self.scursorpos = self.cursorpos
 		self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 class test(Application):
 	def __init__(self):
