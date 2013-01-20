@@ -570,7 +570,7 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"New":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
+				cmds={"New...":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
 					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
