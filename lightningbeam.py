@@ -719,9 +719,28 @@ def import_to_stage(widget=None):
 		for i in ("wav", "mp3", "ogg"):
 			if thefile.endswith(i):
 				if i in ("mp3", "ogg"):
+					if svlgui.PLATFORM=="win32":
+						if os.system("C:\\Progra~2\\MPlayer\\mplayer.exe")!=0:
+							if os.system("C:\\Progra~1\\MPlayer\\mplayer.exe")!=0:
+								result = svlgui.alert("To import mp3 and ogg files you must install mplayer. This will take about 3 MB of space. Install?", confirm=True)
+								if not result:
+									return
+								urllib.urlretrieve("http://mplayer.kenkon.net/files/mplayer-win32-mingw-dev-svn20061001.exe", "mplayerdl.exe")
+								os.system("mplayerdl.exe")
+								mpath = "C:\\Progra~2\\MPlayer\\mplayer.exe"
+							else:
+								mpath = "C:\\Progra~1\\MPlayer\\mplayer.exe"
+						else:
+							mpath = "C:\\Progra~2\\MPlayer\\mplayer.exe"
+					else:
+						mpath = "mplayer"
 					theorigfile = thefile
-					thefile = svlgui.SECURETEMPDIR+"/"+thefile.split('/')[-1]+'.wav'
-					os.system('mplayer -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"')
+					thefile = svlgui.SECURETEMPDIR+svlgui.sep+thefile.split(svlgui.sep)[-1].replace(" ","_").replace("-","_").split(".")[0]+'.wav'
+					print mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"'
+					if svlgui.PLATFORM=="win32":
+						os.system(mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file=\\"'+thefile+'\\" "'+theorigfile+'"')
+					else:
+						os.system(mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"')
 				if svlgui.PLATFORM=="osx":
 					if not os.path.exists('sox/sox'):
 						try:
@@ -751,6 +770,15 @@ def import_to_stage(widget=None):
 							os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
 							import numpy as NP
 					SOX_EXEC = 'sox/sox'
+				elif svlgui.PLATFORM=="win32":
+					SOX_EXEC = "C:\\Progra~2\\sox-14~1\\sox.exe"
+					if not os.path.exists(SOX_EXEC):
+						if os.path.exists("C:\\Progra~1\\sox-14~1\\sox.exe"):
+							SOX_EXEC = "C:\\Progra~1\\sox-14~1\\sox.exe"
+						else:
+							urllib.urlretrieve("http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-win32.exe?r=&ts=1358725954&use_mirror=iweb", 'sox.exe')
+							os.system("sox.exe")
+					import numpy as NP
 				elif "linux" in svlgui.PLATFORM:
 					import numpy as NP
 					SOX_EXEC = "sox"
@@ -768,9 +796,9 @@ def import_to_stage(widget=None):
 				data = data.reshape(len(data)/num_channels, num_channels)
 				info = subprocess.check_output([SOX_EXEC,'--i',thefile])
 				if i=="mp3":
-					sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=theorigfile, info=info, type=i)
+					sound = svlgui.Sound(data, name=thefile.split(svlgui.sep)[-1], path=theorigfile, info=info, type=i)
 				else:
-					sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=thefile, info=info, type=i)
+					sound = svlgui.Sound(data, name=thefile.split(svlgui.sep)[-1], path=thefile, info=info, type=i)
 				root.descendItem().add(sound)
 				break
 

@@ -2045,7 +2045,7 @@ class Sound:
 	def hitTest(self, x, y):
 		return False
 	def print_sc(self):
-		retval = ".sound "+self.name+" \""+self.path+"\"\n"
+		retval = ".sound "+self.name+" \""+self.path.replace("\\","\\\\")+"\"\n"
 		return retval
 	def print_html(self):
 		retval = "var "+self.name.replace(".","_")+" = new Sound();\n"+self.name.replace(".","_")+"._sound = new Audio('"+self.path.split("/")[-1]+"');\n"
