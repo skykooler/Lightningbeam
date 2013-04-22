@@ -176,6 +176,8 @@ LINECOLOR = Color("#990099")
 FILLCOLOR = Color("#00FF00")
 TEXTCOLOR = Color("#000000")
 
+LINEWIDTH = 2
+
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
 	id = platform.machine()
@@ -2548,6 +2550,9 @@ class Group (object):
 		self.tempgroup = None
 		self.is_mc = False
 		self.name = "g"+str(int(random.random()*10000))+str(SITER)
+		self.lines = []
+		self.fills = []
+		self.activepoint = None
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
@@ -2568,6 +2573,8 @@ class Group (object):
 				cr.pencolor = Color([0,0,1]).pygui
 				cr.stroke_rect([sorted([self.startx,self.cx])[0], sorted([self.starty,self.cy])[0], \
 								sorted([self.startx,self.cx])[1], sorted([self.starty,self.cy])[1]])
+		for i in self.lines:
+			i.draw(cr, rect=rect)
 	def add(self, *args):
 		self.activelayer.add(*args)
 	def add_frame(self, populate):
@@ -2639,6 +2646,18 @@ class Group (object):
 								self.tempgroup = None
 							self.activelayer.currentselect = None
 							self.startx, self.starty = x, y
+							if MODE in " s":
+								for i in self.lines:
+									if abs(x-i.endpoint1.x)<10 and abs(y-i.endpoint1.y)<10:
+										i.endpoint1.x = x
+										i.endpoint1.y = y
+										self.activepoint = i.endpoint1
+										return
+									elif abs(x-i.endpoint2.x)<10 and abs(y-i.endpoint2.y)<10:
+										i.endpoint2.x = x
+										i.endpoint2.y = y
+										self.activepoint = i.endpoint2
+										return
 							self.selecting = True
 				else:
 					self.onMouseDown(self, x, y, button=button, clicks=clicks)
@@ -2656,6 +2675,25 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
+			elif self.activepoint:
+				for i in self.lines:
+					if abs(self.activepoint.x-i.endpoint1.x)<10 and abs(self.activepoint.y-i.endpoint1.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint1, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint1, 2)
+								break
+							except IndexError: pass
+					if abs(self.activepoint.x-i.endpoint2.x)<10 and abs(self.activepoint.y-i.endpoint2.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint2, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint2, 2)
+								break
+							except IndexError: pass
+						break
 			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
 				objs = []
 				for i in reversed(self.currentFrame()):
@@ -2690,6 +2728,9 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseDrag(x, y, button=button)
+			elif self.activepoint:
+				self.activepoint.x = x
+				self.activepoint.y = y
 		else:
 			self.onMouseDrag(self, x, y, button=button)
 	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
@@ -2828,6 +2869,80 @@ class TemporaryGroup(Group):
 		elif key=="down_arrow":
 			self1.y+=1
 		
+class Point(object):
+	"""represents an x,y point, might store other data in the future"""
+	def __init__(self, x, y):
+		super(Point, self).__init__()
+		self.x = x
+		self.y = y
+		
+
+class Line(object):
+	"""Use Lines to build Shapes while allowing paintbucketing."""
+	def __init__(self, endpoint1, endpoint2, connection1 = None, connection2 = None):
+		super(Line, self).__init__()
+		self.endpoint1 = endpoint1
+		self.endpoint2 = endpoint2
+		self.connection1 = connection1
+		self.connection2 = connection2
+		self.linecolor = LINECOLOR
+		self.linewidth = LINEWIDTH
+	def assign(self, point, which):
+		if which==1:
+			self.connection1 = point
+		elif which==2:
+			self.connection2 = point
+	def draw(self, cr=None, transform=None, rect=None):
+		if self.connection1:
+			self.endpoint1 = self.connection1
+		if self.connection2:
+			self.endpoint2 = self.connection2
+		if SYSTEM=="gtk":
+			cr.save()
+			cr.set_source(self.linecolor.cairo)
+			cr.set_line_width(max(self.linewidth,1))
+			cr.move_to(self.endpoint1.x,self.endpoint2.y)
+			cr.line_to(self.endpoint2.x,self.endpoint2.y)
+			cr.stroke()
+			cr.restore()
+		elif SYSTEM=="android":
+			global tb
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+		elif SYSTEM=="osx":
+			if USING_GL:
+				cr.save()
+				glColor3f(1.0,0.0,0.0)
+				glBegin(GL_LINES)
+				cr.x, cr.y = (self.endpoint1.x, self.endpoint1.y)
+				glVertex2f(cr.x, -cr.y)
+				point = (self.endpoint2.x, self.endpoint2.y)
+				glVertex2f(point[0], -point[1]) # because OpenGL swaps y coords
+				cr.x, cr.y = point
+				glEnd()
+				cr.restore()
+			else:
+				cr.gsave()
+				cr.newpath()
+				cr.pencolor = self.linecolor.pygui
+				cr.pensize = max(self.linewidth,1)
+				cr.moveto(self.endpoint1.x, self.endpoint1.y)
+				cr.lineto(self.endpoint2.x,self.endpoint2.y)
+				cr.stroke()
+				cr.grestore()
+		elif SYSTEM=="html":
+			tb = ""
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+			jscommunicate(tb)
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":
