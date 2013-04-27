@@ -123,9 +123,11 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 			for i in self.lines:
 				if abs(self.cshape.endpoint1.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint1.y)<10:
 					self.cshape.connection1 = i.endpoint1
+					self.cshape.connection1.lines.add(self.cshape)
 					break
 				elif abs(self.cshape.endpoint1.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint2.y)<10:
 					self.cshape.connection1 = i.endpoint2
+					self.cshape.connection1.lines.add(self.cshape)
 					break
 			self.lines.append(self.cshape)
 			return
@@ -201,9 +203,11 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 		for i in self.lines:
 			if abs(self.cshape.endpoint2.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint1.y)<10:
 				self.cshape.connection2 = i.endpoint1
+				self.cshape.connection2.lines.add(self.cshape)
 				break
 			elif abs(self.cshape.endpoint2.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint2.y)<10:
 				self.cshape.connection2 = i.endpoint2
+				self.cshape.connection2.lines.add(self.cshape)
 				break
 		self.cshape = None
 		MainWindow.stage.draw()

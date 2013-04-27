@@ -2658,6 +2658,45 @@ class Group (object):
 										i.endpoint2.y = y
 										self.activepoint = i.endpoint2
 										return
+							elif MODE=="b":
+								nlines = [i for i in self.lines]
+								endsleft = True
+								while endsleft:
+									endsleft = False
+									print nlines
+									for i in reversed(nlines):
+										if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+										elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+								if nlines:
+									mindist = sys.maxint
+									point = Point(x, y)
+									closestsegment = None
+									for i in nlines:
+										d = misc_funcs.distToSegment(point,i.endpoint1,i.endpoint2)
+										if d<mindist:
+											mindist = d
+											closestsegment = i
+									if closestsegment:
+										# Then go to endpoint of closestsegment counterclockwise from point
+										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
+										angle2 = misc_funcs.angle_to_point(point, closestsegment.endpoint2)
+										if (angle1<angle2 and angle2-angle1<180):
+											startpoint = closestsegment.endpoint2
+										else:
+											startpoint = closestsegment.endpoint1
+										print startpoint.lines
+										linelist = []
+										for i in startpoint.lines:
+											if i != closestsegment:
+												print closestsegment.angle(i)
+										# nextline = min([[i]])
+										# Then, follow clockwise-most segment leading off from said point
+										# Continue until closestsegment is reached. I _think_ this is inevitable.
+
 							self.selecting = True
 				else:
 					self.onMouseDown(self, x, y, button=button, clicks=clicks)
@@ -2875,6 +2914,9 @@ class Point(object):
 		super(Point, self).__init__()
 		self.x = x
 		self.y = y
+		self.lines = set()
+	def __repr__(self):
+		return "<Point x="+str(self.x)+" y="+str(self.y)+">"
 		
 
 class Line(object):
@@ -2883,15 +2925,51 @@ class Line(object):
 		super(Line, self).__init__()
 		self.endpoint1 = endpoint1
 		self.endpoint2 = endpoint2
+		self.endpoint1.lines.add(self)
+		self.endpoint2.lines.add(self)
 		self.connection1 = connection1
 		self.connection2 = connection2
+		if self.connection1: self.connection1.lines.add(self)
+		if self.connection2: self.connection2.lines.add(self)
 		self.linecolor = LINECOLOR
 		self.linewidth = LINEWIDTH
+	def __repr__(self):
+		return "<Line (endpoint1=("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+"),endpoint2=("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+"))>"
 	def assign(self, point, which):
 		if which==1:
 			self.connection1 = point
+			self.connection1.lines.add(self)
 		elif which==2:
 			self.connection2 = point
+			self.connection2.lines.add(self)
+	def angle(self, other):
+		if self.endpoint1==other.endpoint1:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint2==other.endpoint1:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint1==other.endpoint2:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		elif self.endpoint2==other.endpoint2:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		dot = x1*x2+y1*y2
+		mag1 = math.sqrt(x1**2+y1**2)
+		mag2 = math.sqrt(x2**2+y2**2)
+		angle = math.acos(dot/(mag1*mag2))/math.pi*180
+		cz = x1*y2-y1*x2
+		if cz>0: angle=360-angle
+		return angle
 	def draw(self, cr=None, transform=None, rect=None):
 		if self.connection1:
 			self.endpoint1 = self.connection1

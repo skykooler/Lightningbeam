@@ -96,8 +96,30 @@ def lastval(arr,index):
 			return i
 	
 
+def angle_to_point(point1, point2):
+	deltaX = point2.x-point1.x
+	deltaY = point2.y-point1.y
+	angleInDegrees = math.atan2(-deltaY, deltaX) * 180 / math.pi
+	if angleInDegrees<0: angleInDegrees = 360+angleInDegrees
+	return angleInDegrees
 
+def sqr(x) :
+	return x * x
+def dist2(v, w):
+	return sqr(v.x - w.x) + sqr(v.y - w.y)
+def distToSegmentSquared(p, v, w):
+	l2 = dist2(v, w)
+	if l2 == 0:
+		return dist2(p, v)
+	t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2
+	if t < 0:
+		return dist2(p, v)
+	if t > 1:
+		return dist2(p, w)
+	return dist2(p, svlgui.Point(x=(v.x+t*(w.x-v.x)), y=(v.y+t*(w.y-v.y))))
 
+def distToSegment(p, v, w):
+	return math.sqrt(distToSegmentSquared(p, v, w))
 
 def catmullRom2bezier( points ) :
 	#crp = points.split(/[,\s]/);
