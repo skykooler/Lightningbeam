@@ -2689,12 +2689,21 @@ class Group (object):
 										else:
 											startpoint = closestsegment.endpoint1
 										print startpoint.lines
-										linelist = []
-										for i in startpoint.lines:
-											if i != closestsegment:
-												print closestsegment.angle(i)
-										# nextline = min([[i]])
+										linelist = [closestsegment]
+										# nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i in linelist])
+										# print nextline
 										# Then, follow clockwise-most segment leading off from said point
+										while True:
+											try:
+												nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i==closestsegment])[1]
+											except:
+												break
+											closestsegment = nextline
+											if not nextline in linelist:
+												linelist.append(nextline)
+											else:
+												break
+										print "*****",linelist
 										# Continue until closestsegment is reached. I _think_ this is inevitable.
 
 							self.selecting = True
