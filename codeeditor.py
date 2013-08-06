@@ -83,12 +83,13 @@ class PyGUIFormatter(Formatter):
 class CodeEditor(ScrollableView):
 	def __init__(self):
 		ScrollableView.__init__(self)
-		self.text = "var a = {b:5, c:[3, 'df \\'']};\n_xscale\nif (this.hitTest(_root._xmouse, root._ymouse, false)) {\n\n\ttrace('hi');\n}"
+		self.text = "_root.onMouseDown = function () {\n\ttrace('Hi');\n};"
 		self.font = Font('Courier', 16)
 		self.selecting = False
 		self.lexer = ActionScriptLexer()
 		self.cursorpos = 0
 		self.scursorpos = 0
+		self.selection = (0,0)
 		self.formatter = PyGUIFormatter()
 		# self.filter = NameHighlightFilter(
 		self.filter = EverythingHighlightFilter(
@@ -169,6 +170,7 @@ class CodeEditor(ScrollableView):
 		except:
 			pass
 		self.scursorpos = self.cursorpos
+		self.selection = (self.cursorpos, self.cursorpos)
 		if int(y/self.font.height):
 			self.cursorpos+=1
 		self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
@@ -183,6 +185,7 @@ class CodeEditor(ScrollableView):
 			pass
 		if int(y/self.font.height):
 			self.cursorpos+=1
+		self.selection = (min(self.cursorpos, self.scursorpos), max(self.cursorpos, self.scursorpos))
 		self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 	def key_down(self, event):
 		keydict = {127:"backspace",63272:"delete",63232:"up_arrow",63233:"down_arrow",
@@ -241,6 +244,8 @@ class CodeEditor(ScrollableView):
 		else:
 			self.text=self.text[:self.cursorpos]+str(key)+self.text[self.cursorpos:]
 			self.cursorpos += 1
+		self.scursorpos = self.cursorpos
+		self.selection = (self.cursorpos, self.cursorpos)
 		self.invalidate_rect([0,0,self.extent[0],self.extent[1]])
 class test(Application):
 	def __init__(self):

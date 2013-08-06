@@ -1,4 +1,4 @@
-﻿#! /usr/bin/python
+#! /usr/bin/python
 # -*- coding:utf-8 -*-
 # © 2012 Skyler Lehmkuhl
 # Released under the GPLv3. For more information, see gpl.txt.
@@ -176,6 +176,8 @@ LINECOLOR = Color("#990099")
 FILLCOLOR = Color("#00FF00")
 TEXTCOLOR = Color("#000000")
 
+LINEWIDTH = 2
+
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
 	id = platform.machine()
@@ -340,6 +342,9 @@ if SYSTEM=="osx":
 			m.new_cmd.enabled = 1
 			m.undo_cmd.enabled = 1
 			m.redo_cmd.enabled = 1
+			m.copy_cmd.enabled = 1
+			m.cut_cmd.enabled = 1
+			m.paste_cmd.enabled = 1
 			m.run_file.enabled = 1
 			m.run_html.enabled = 1
 			m.create_sc.enabled = 1
@@ -352,6 +357,7 @@ if SYSTEM=="osx":
 			m.send_to_back.enabled = 1
 			m.import_to_stage.enabled = 1
 			m.import_to_library.enabled = 1
+			m.export_swf.enabled = 1
 			m.convert_to_symbol.enabled = 1
 			m.preferences_cmd.enabled = 1
 		
@@ -569,8 +575,8 @@ def menufuncs(j):
 				#menu = GUI.Menu("Test", [("Run", 'run_file')])
 				menus.append(menu)
 			else:
-				cmds={"New":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
-					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd"}
+				cmds={"New...":"new_cmd", "Save":"save_cmd", "Save As":"save_as_cmd", "Open":"open_cmd","About Lightningbeam...":"about_cmd",\
+					"Preferences":"preferences_cmd", "Undo":"undo_cmd", "Redo":"redo_cmd", "Cut":"cut_cmd", "Copy":"copy_cmd", "Paste":"paste_cmd"}
 				[setattr(app,cmds[k[0]],k[1]) for k in i if (k[0] in cmds)]
 			
 class VBox(Widget):
@@ -1183,6 +1189,9 @@ class Canvas(Widget):
 			self.canvas.invalidate_rect((0,0,self.canvas.extent[0],self.canvas.extent[1]))
 		elif SYSTEM=="html":
 			jscommunicate("drawcanvas("+self.tid+")")
+	def is_focused(self):
+		if SYSTEM=="osx":
+			return self.canvas.is_target()
 	def add(self, obj, x, y):
 		obj.x = x
 		obj.y = y
@@ -1209,8 +1218,15 @@ class TextView(Widget):
 	def _settext(self, text):
 		if SYSTEM=="osx":
 			self.box.text = text
+	def _getselection(self):
+		if SYSTEM=="osx":
+			return self.box.selection
+	def _setselection(self, tup):
+		if SYSTEM=="osx":
+			self.box.selection = tup
 	text = property(_gettext, _settext)
-	def __init__(self,editable=True,width=False,height=False):
+	selection = property(_getselection, _setselection)
+	def __init__(self,editable=True,width=False,height=False,code=False):
 		if SYSTEM=="gtk":
 			self.sw=ScrolledWindow()
 			self.box=gtk.TextView()
@@ -1228,8 +1244,10 @@ class TextView(Widget):
 				def mouse_down(self, event):
 					self.become_target()
 					GUI.TextEditor.mouse_down(self, event)
-			# self.box = OSXTextEditor(scrolling="hv")
-			self.box = CodeEditor()
+			if code:
+				self.box = CodeEditor()
+			else:
+				self.box = OSXTextEditor(scrolling="hv")
 			self.box.font = Font("Courier", 12, [])
 			if width and height:
 				self.box.size = (width, height)
@@ -1242,9 +1260,20 @@ class TextView(Widget):
 			return self.box
 		elif SYSTEM=="html":
 			return self.box
+	def is_focused(self):
+		if SYSTEM=="osx":
+			return self.box.is_target()
+	def insert(self, text):
+		if SYSTEM=="osx":
+			if isinstance(self.box, CodeEditor):
+				self.box.text = self.box.text[:self.box.selection[0]]+text+self.box.text[self.box.selection[1]:]
+				self.box.scursorpos = self.box.cursorpos = self.box.selection[0]+len(text)
+				self.box.selection = (self.box.selection[0]+len(text), self.box.selection[0]+len(text))
+				self.box.invalidate_rect([0,0,self.box.extent[0],self.box.extent[1]])
 	def scroll_bottom(self):
 		if SYSTEM=="osx":
 			self.scroll_page_down();
+			self.box.invalidate()
 
 class TextEntry(Widget):
 	def __init__(self,text="",password=False):
@@ -1950,7 +1979,7 @@ class Text (object):
 
 class Sound:
 	"""Class for storing sounds in."""
-	def __init__(self, data, name, path, info):
+	def __init__(self, data, name, path, info, type):
 		global Library
 		Library.append(self)
 		self.data = data
@@ -1962,6 +1991,7 @@ class Sound:
 		self.yscale = 0
 		self.path = path
 		self.iname = None
+		self.type = type
 		reading_comments_flag = False
 		other = ''
 		for l in info.splitlines():
@@ -2017,7 +2047,7 @@ class Sound:
 	def hitTest(self, x, y):
 		return False
 	def print_sc(self):
-		retval = ".sound "+self.name+" \""+self.path+"\"\n"
+		retval = ".sound "+self.name+" \""+self.path.replace("\\","\\\\")+"\"\n"
 		return retval
 	def print_html(self):
 		retval = "var "+self.name.replace(".","_")+" = new Sound();\n"+self.name.replace(".","_")+"._sound = new Audio('"+self.path.split("/")[-1]+"');\n"
@@ -2520,6 +2550,9 @@ class Group (object):
 		self.tempgroup = None
 		self.is_mc = False
 		self.name = "g"+str(int(random.random()*10000))+str(SITER)
+		self.lines = []
+		self.fills = []
+		self.activepoint = None
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
@@ -2540,6 +2573,8 @@ class Group (object):
 				cr.pencolor = Color([0,0,1]).pygui
 				cr.stroke_rect([sorted([self.startx,self.cx])[0], sorted([self.starty,self.cy])[0], \
 								sorted([self.startx,self.cx])[1], sorted([self.starty,self.cy])[1]])
+		for i in self.lines:
+			i.draw(cr, rect=rect)
 	def add(self, *args):
 		self.activelayer.add(*args)
 	def add_frame(self, populate):
@@ -2611,6 +2646,66 @@ class Group (object):
 								self.tempgroup = None
 							self.activelayer.currentselect = None
 							self.startx, self.starty = x, y
+							if MODE in " s":
+								for i in self.lines:
+									if abs(x-i.endpoint1.x)<10 and abs(y-i.endpoint1.y)<10:
+										i.endpoint1.x = x
+										i.endpoint1.y = y
+										self.activepoint = i.endpoint1
+										return
+									elif abs(x-i.endpoint2.x)<10 and abs(y-i.endpoint2.y)<10:
+										i.endpoint2.x = x
+										i.endpoint2.y = y
+										self.activepoint = i.endpoint2
+										return
+							elif MODE=="b":
+								nlines = [i for i in self.lines]
+								endsleft = True
+								while endsleft:
+									endsleft = False
+									print nlines
+									for i in reversed(nlines):
+										if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+										elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+								if nlines:
+									mindist = sys.maxint
+									point = Point(x, y)
+									closestsegment = None
+									for i in nlines:
+										d = misc_funcs.distToSegment(point,i.endpoint1,i.endpoint2)
+										if d<mindist:
+											mindist = d
+											closestsegment = i
+									if closestsegment:
+										# Then go to endpoint of closestsegment counterclockwise from point
+										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
+										angle2 = misc_funcs.angle_to_point(point, closestsegment.endpoint2)
+										if (angle1<angle2 and angle2-angle1<180):
+											startpoint = closestsegment.endpoint2
+										else:
+											startpoint = closestsegment.endpoint1
+										print startpoint.lines
+										linelist = [closestsegment]
+										# nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i in linelist])
+										# print nextline
+										# Then, follow clockwise-most segment leading off from said point
+										while True:
+											try:
+												nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i==closestsegment])[1]
+											except:
+												break
+											closestsegment = nextline
+											if not nextline in linelist:
+												linelist.append(nextline)
+											else:
+												break
+										print "*****",linelist
+										# Continue until closestsegment is reached. I _think_ this is inevitable.
+
 							self.selecting = True
 				else:
 					self.onMouseDown(self, x, y, button=button, clicks=clicks)
@@ -2628,6 +2723,25 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
+			elif self.activepoint:
+				for i in self.lines:
+					if abs(self.activepoint.x-i.endpoint1.x)<10 and abs(self.activepoint.y-i.endpoint1.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint1, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint1, 2)
+								break
+							except IndexError: pass
+					if abs(self.activepoint.x-i.endpoint2.x)<10 and abs(self.activepoint.y-i.endpoint2.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint2, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint2, 2)
+								break
+							except IndexError: pass
+						break
 			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
 				objs = []
 				for i in reversed(self.currentFrame()):
@@ -2662,6 +2776,9 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseDrag(x, y, button=button)
+			elif self.activepoint:
+				self.activepoint.x = x
+				self.activepoint.y = y
 		else:
 			self.onMouseDrag(self, x, y, button=button)
 	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
@@ -2800,6 +2917,119 @@ class TemporaryGroup(Group):
 		elif key=="down_arrow":
 			self1.y+=1
 		
+class Point(object):
+	"""represents an x,y point, might store other data in the future"""
+	def __init__(self, x, y):
+		super(Point, self).__init__()
+		self.x = x
+		self.y = y
+		self.lines = set()
+	def __repr__(self):
+		return "<Point x="+str(self.x)+" y="+str(self.y)+">"
+		
+
+class Line(object):
+	"""Use Lines to build Shapes while allowing paintbucketing."""
+	def __init__(self, endpoint1, endpoint2, connection1 = None, connection2 = None):
+		super(Line, self).__init__()
+		self.endpoint1 = endpoint1
+		self.endpoint2 = endpoint2
+		self.endpoint1.lines.add(self)
+		self.endpoint2.lines.add(self)
+		self.connection1 = connection1
+		self.connection2 = connection2
+		if self.connection1: self.connection1.lines.add(self)
+		if self.connection2: self.connection2.lines.add(self)
+		self.linecolor = LINECOLOR
+		self.linewidth = LINEWIDTH
+	def __repr__(self):
+		return "<Line (endpoint1=("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+"),endpoint2=("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+"))>"
+	def assign(self, point, which):
+		if which==1:
+			self.connection1 = point
+			self.connection1.lines.add(self)
+		elif which==2:
+			self.connection2 = point
+			self.connection2.lines.add(self)
+	def angle(self, other):
+		if self.endpoint1==other.endpoint1:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint2==other.endpoint1:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint1==other.endpoint2:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		elif self.endpoint2==other.endpoint2:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		dot = x1*x2+y1*y2
+		mag1 = math.sqrt(x1**2+y1**2)
+		mag2 = math.sqrt(x2**2+y2**2)
+		angle = math.acos(dot/(mag1*mag2))/math.pi*180
+		cz = x1*y2-y1*x2
+		if cz>0: angle=360-angle
+		return angle
+	def draw(self, cr=None, transform=None, rect=None):
+		if self.connection1:
+			self.endpoint1 = self.connection1
+		if self.connection2:
+			self.endpoint2 = self.connection2
+		if SYSTEM=="gtk":
+			cr.save()
+			cr.set_source(self.linecolor.cairo)
+			cr.set_line_width(max(self.linewidth,1))
+			cr.move_to(self.endpoint1.x,self.endpoint2.y)
+			cr.line_to(self.endpoint2.x,self.endpoint2.y)
+			cr.stroke()
+			cr.restore()
+		elif SYSTEM=="android":
+			global tb
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+		elif SYSTEM=="osx":
+			if USING_GL:
+				cr.save()
+				glColor3f(1.0,0.0,0.0)
+				glBegin(GL_LINES)
+				cr.x, cr.y = (self.endpoint1.x, self.endpoint1.y)
+				glVertex2f(cr.x, -cr.y)
+				point = (self.endpoint2.x, self.endpoint2.y)
+				glVertex2f(point[0], -point[1]) # because OpenGL swaps y coords
+				cr.x, cr.y = point
+				glEnd()
+				cr.restore()
+			else:
+				cr.gsave()
+				cr.newpath()
+				cr.pencolor = self.linecolor.pygui
+				cr.pensize = max(self.linewidth,1)
+				cr.moveto(self.endpoint1.x, self.endpoint1.y)
+				cr.lineto(self.endpoint2.x,self.endpoint2.y)
+				cr.stroke()
+				cr.grestore()
+		elif SYSTEM=="html":
+			tb = ""
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+			jscommunicate(tb)
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":
@@ -2888,6 +3118,14 @@ def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 			for i in types:
 				ntypes.append(GUI.Files.FileType())
 				ntypes[-1].suffix = i
+				image = ["jpg", "jpeg", "png", "tiff", "tga"]
+				audio = ["wav", "mp3", "ogg"]
+				if i in image:
+					ntypes[-1].name = i.upper()+" Images"
+				elif i in audio:
+					ntypes[-1].name = i.upper()+" Audio"
+				else:
+					ntypes[-1].name = i.upper()+" Files"
 				if i in mactypes:
 					ntypes[-1].mac_type=mactypes[i]
 			types = ntypes
@@ -2901,7 +3139,8 @@ def file_dialog(mode="open",default=None,types=None,multiple=False,name=None):
 
 def execute(command):
 	rv = os.system(command.replace("/",sep))
-	if PLATFORM == "osx":
+	print command.replace("/",sep)
+	if SYSTEM == "osx":
 		if rv==0:
 			return True
 		else:

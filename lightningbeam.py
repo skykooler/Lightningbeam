@@ -15,7 +15,7 @@ os.putenv("UBUNTU_MENUPROXY", "0")
 #import objc, AppKit, cPickle
 
 #Uncomment to build on Windows
-#import ctypes, ctypes.wintypes, win32print
+# import ctypes, ctypes.wintypes, win32print
 
 #SVLGUI - my custom GUI wrapper to abstract the GUI
 import svlgui
@@ -49,6 +49,8 @@ global undo_stack
 global redo_stack
 undo_stack = []
 redo_stack = []
+global preferences
+preferences={}
 
 def clear(arr):
 	arr.__delslice__(0,len(arr))
@@ -108,6 +110,7 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
 			self.clicked = True
+		
 	elif svlgui.MODE in ["r", "e", "p"]:
 		if svlgui.MODE=="r":
 			# 'c' stands for 'current'
@@ -115,7 +118,19 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 		elif svlgui.MODE=="e":
 			self.cshape = ellipse(x, y, 0, 0)
 		elif svlgui.MODE=="p":
-			self.cshape = shape(x, y)
+			# self.cshape = shape(x, y)
+			self.cshape = svlgui.Line(svlgui.Point(x, y),svlgui.Point(x,y))
+			for i in self.lines:
+				if abs(self.cshape.endpoint1.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint1.y)<10:
+					self.cshape.connection1 = i.endpoint1
+					self.cshape.connection1.lines.add(self.cshape)
+					break
+				elif abs(self.cshape.endpoint1.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint2.y)<10:
+					self.cshape.connection1 = i.endpoint2
+					self.cshape.connection1.lines.add(self.cshape)
+					break
+			self.lines.append(self.cshape)
+			return
 		#self.cshape.rotation = 5
 		self.cshape.initx,self.cshape.inity = x, y
 		self.add(self.cshape)
@@ -182,9 +197,18 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 					undo_stack[-1] = undo_stack[-1].complete({"obj":cobj, "frame":self.activelayer.currentframe, "layer":self.activelayer})
 					clear(redo_stack)
 	elif svlgui.MODE=="p":
-		print len(self.cshape.shapedata)
+		'''print len(self.cshape.shapedata)
 		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, svlgui.PMODE.split()[-1],1)
-		print len(self.cshape.shapedata)
+		print len(self.cshape.shapedata)'''
+		for i in self.lines:
+			if abs(self.cshape.endpoint2.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint1.y)<10:
+				self.cshape.connection2 = i.endpoint1
+				self.cshape.connection2.lines.add(self.cshape)
+				break
+			elif abs(self.cshape.endpoint2.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint2.y)<10:
+				self.cshape.connection2 = i.endpoint2
+				self.cshape.connection2.lines.add(self.cshape)
+				break
 		self.cshape = None
 		MainWindow.stage.draw()
 def onMouseUpObj(self, x, y,button=1,clicks=1):
@@ -243,7 +267,9 @@ def onMouseDragGroup(self, x, y,button=1,clicks=1):
 		y=y-self.cshape.inity
 		self.cshape.shapedata = [["M",x/2,0],["C",4*x/5,0,x,y/5,x,y/2],["C",x,4*y/5,4*x/5,y,x/2,y],["C",x/5,y,0,4*y/5,0,y/2],["C",0,y/5,x/5,0,x/2,0]]
 	elif svlgui.MODE == "p":
-		self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
+		# self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
+		self.cshape.endpoint2.x = x
+		self.cshape.endpoint2.y = y
 def onMouseDragObj(self, x, y,button=1,clicks=1):
 	if svlgui.MODE==" ":
 		self.x = x-self.initx
@@ -324,15 +350,19 @@ fps="+str(svlgui.FRAMERATE)+"\n"+"".join([i.print_sc() for i in svlgui.Library])
 def run_file(self=None):
 	global root
 	print "RUNNING"
+	print svlgui.FILE.name
 	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
-	open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
+	# open(os.getenv('HOME')+"/test.sc", "w").write(create_sc(root))
+	open(svlgui.FILE.name+".sc", "w").write(create_sc(root))
 	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
-	x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	# x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	x = os.system("swfc"+svlgui.sep+"swfc_"+svlgui.PLATFORM+" "+svlgui.FILE.name+".sc -o "+svlgui.FILE.name+".swf")
 	if sys.version_info < (2, 6):
 		if x==5:	# which is the error value returned when linking libjpeg fails
 			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
 				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
-				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+				# x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+svlgui.FILE.name+".sc -o "+svlgui.FILE.name+".swf")
 				if x==5:
 					svlgui.alert("Sorry, something has gone terribly wrong.")
 			else:
@@ -340,14 +370,42 @@ def run_file(self=None):
 	#TODO: Make this cross-platform compatible
 	if svlgui.PLATFORM=="win32":
 		# Untested.
-		logloc = os.getenv('HOME')+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
+		logloc = os.path.expanduser("~")+"\\AppData\\Roaming\\Macromedia\\Flash Player\\Logs\\flashlog.txt"
+		if not os.path.exists(os.path.expanduser("~")+"\\flashplayerdebugger.exe"):
+			result = svlgui.alert("You do not have a Flash debugger installed. Install one?", confirm=True)
+			if not result:
+				svlgui.alert("Aborting.")
+				return
+			else:
+				svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
+				urllib.urlretrieve("http://download.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.exe", os.path.expanduser("~")+"\\flashplayerdebugger.exe")
+		if not os.path.exists(os.path.expanduser('~')+'\\mm.cfg'):
+			with open(os.path.expanduser('~')+"/mm.cfg", "w") as mm:
+				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
 	elif "linux" in svlgui.PLATFORM:
+		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
+		if not os.path.exists('/usr/bin/flashplayerdebugger'):
+			if os.system('which gnash')==0:
+				if not 'use_gnash' in preferences:
+					if svlgui.alert("You have GNASH installed. Do you wish to use it instead of Adobe's flash player?", confirm=True):
+						use_gnash = True
+						return
+			else:
+				result = svlgui.alert("You do not have a Flash debugger installed. Install one?", confirm=True)
+				if not result:
+					svlgui.alert("Aborting.")
+					return
+				else:
+					svlgui.alert("The Flash Debugger will download when you click Ok.\nThis may take some time.")
+					if not "PPC" in svlgui.PLATFORM:
+						urllib.urlretrieve("http://fpdownload.macromedia.com/pub/flashplayer/updaters/11/flashplayer_11_sa_debug.i386.tar.gz", "fp.tar.gz")
+						os.system("tar -zxf fp.tar.gz")
+						os.system("gksudo mv flashplayerdebugger /usr/bin/")
 		if not os.path.exists(os.getenv('HOME')+"/mm.cfg"):
 			# By default, the Flash debugger on Linux does not log traces.
 			# So, we create a configuration file to tell it to do so if  the user hasn't already.
 			with open(os.getenv('HOME')+"/mm.cfg", "w") as mm:
 				mm.write("ErrorReportingEnable=1\nTraceOutputFileEnable=1")
-		logloc = os.getenv('HOME')+"/.macromedia/Flash_Player/Logs/flashlog.txt"
 	elif svlgui.PLATFORM=="osx":
 		logloc = os.getenv('HOME')+"/Library/Preferences/Macromedia/Flash Player/Logs/flashlog.txt"
 		if not os.path.exists('/Applications/Flash Player Debugger.app'):
@@ -399,21 +457,31 @@ def run_file(self=None):
 			outputtext.scroll_bottom()		# this doesn't work
 		except:
 			pass
-	r = misc_funcs.RepeatTimer(0.02, updatetrace, args=[outputtext])
-	print dir(outputwin.window)
-	r.daemon = True
-	r.start()
+		return True
+	if hasattr(svlgui, 'gobject'):
+		svlgui.gobject.timeout_add(20, updatetrace, outputtext)
+	else:
+		r = misc_funcs.RepeatTimer(0.02, updatetrace, args=[outputtext])
+		r.daemon = True
+		r.start()
 	if svlgui.PLATFORM=="osx":
 		osx_flash_player_loc = "/Applications/Flash\ Player\ Debugger.app"
-		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		# success = svlgui.execute("open -a "+osx_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		success = svlgui.execute("open -a "+osx_flash_player_loc+" "+svlgui.FILE.name+".swf")
 		if not success:
 			svlgui.alert("Oops! Didn't work. I probably couldn't find your Flash debugger!")
 	elif svlgui.PLATFORM=='win32':
-		win_flash_player_loc = ""
-		svlgui.execute('start '+win_flash_player_loc+" test.swf")
+		win_flash_player_loc = os.path.expanduser("~")+"\\flashplayerdebugger.exe"
+		# svlgui.execute('start '+win_flash_player_loc+" test.swf")
+		svlgui.execute('start '+win_flash_player_loc+" "+svlgui.FILE.name+".swf")
 	elif svlgui.PLATFORM.startswith('linux'):
-		linux_flash_player_loc = ""
-		svlgui.execute("xdg-open "+linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf")
+		linux_flash_player_loc = "/usr/bin/flashplayerdebugger"
+		# if not svlgui.execute(linux_flash_player_loc+" "+os.getenv('HOME')+"/test.swf &"):
+		if not svlgui.execute(linux_flash_player_loc+" "+svlgui.FILE.name+".swf &"):
+			if '64' in svlgui.PLATFORM:
+				svlgui.alert("Flash debugger failed to launch! Try installing ia32-libs.")
+			elif '32' in svlgui.PLATFORM:
+				svlgui.alert("Flash debugger failed to launch! No idea why.")
 def create_html5(root):
 	retval = "<head>\n\
 <style type=\"text/css\">\n\
@@ -539,7 +607,11 @@ def open_file(widget=None):
 	global root
 	MainWindow.stage.delete(root)
 	shutil.rmtree(svlgui.SECURETEMPDIR)
-	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
+	try:
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("open").open("rb"),mode="r:gz")
+	except AttributeError:
+		# User cancelled
+		return
 	basefile = thetarfile.extractfile("basefile")
 	root, svlgui.Library = pickle.load(basefile)
 	svlgui.SECURETEMPDIR = tempfile.mkdtemp()
@@ -566,8 +638,11 @@ def save_file(widget=None):
 	tarinfo = tarfile.TarInfo('basefile')
 	tarinfo.size = len(data)
 	if svlgui.FILE.name.startswith(svlgui.TEMPDIR):
-		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
-		print thetarfile.name
+		try:
+			thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+		except AttributeError:
+			# User cancelled
+			return
 	else:
 		thetarfile = tarfile.open(svlgui.FILE.name,mode="w:gz")
 	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
@@ -607,7 +682,11 @@ def save_file_as(widget=None):
 	data = pickle.dumps((root,svlgui.Library))
 	tarinfo = tarfile.TarInfo('basefile')
 	tarinfo.size = len(data)
-	thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+	try:
+		thetarfile = tarfile.open(fileobj=svlgui.file_dialog("save", name="untitled.beam").open('wb'),mode="w:gz")
+	except AttributeError:
+		# User cancelled
+		return
 	thetarfile.addfile(tarinfo, StringIO.StringIO(data))
 	#Save the path so we can come back here
 	lastpath = os.path.abspath(".")
@@ -629,7 +708,11 @@ def save_file_as(widget=None):
 	svlgui.FILE = thetarfile
 	pass
 def import_to_stage(widget=None):
-	thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav"]).path
+	try:
+		thefile = svlgui.file_dialog("open",None,["jpg","png","bmp","wav","mp3","ogg"]).path
+	except AttributeError:
+		# User cancelled
+		return
 	for i in ("jpg","png","bmp"):
 		if thefile.endswith(i):
 			# im = svlgui.Image(thefile)
@@ -638,9 +721,17 @@ def import_to_stage(widget=None):
 				os.system("sips -s format png "+thefile+" --out "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
 			elif "linux" in svlgui.PLATFORM:
 				os.system("convert "+thefile+" "+svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png")
-			thefile = svlgui.SECURETEMPDIR+"/"+".".join(thefile.split("/")[-1].split(".")[:-1])+".png"
+			elif svlgui.PLATFORM=="win32":
+				from PIL import Image
+				im = Image.open(thefile)
+				# Use alpha channel if available (e.g. GIF)
+				transparency = im.info["transparency"] if 'transparency' in im.info else None
+				if transparency:
+					im.save(svlgui.SECURETEMPDIR+"\\"+".".join(thefile.split("\\")[-1].split(".")[:-1])+".png", transparency=transparency)
+				else:
+					im.save(svlgui.SECURETEMPDIR+"\\"+".".join(thefile.split("\\")[-1].split(".")[:-1])+".png")
+			thefile = svlgui.SECURETEMPDIR+svlgui.sep+".".join(thefile.split(svlgui.sep)[-1].split(".")[:-1])+".png"
 			im = box(100,100,200,200,svlgui.Color(thefile))
-			print im.filled
 			im.onMouseDown = onMouseDownObj
 			im.onMouseMove = onMouseMoveObj
 			im.onMouseDrag = onMouseDragObj
@@ -649,51 +740,91 @@ def import_to_stage(widget=None):
 			root.descendItem().add(im)
 			break
 	else:
-		if thefile.endswith("wav"):
-			if svlgui.PLATFORM=="osx":
-				if not os.path.exists('sox/sox'):
-					try:
-						import numpy as NP
-						result = svlgui.alert("To import sound you must install SoX. This will take about 1 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
-						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
-						os.system('mv sox-14.4.0 sox')
-					except:
-						result = svlgui.alert("To import sound you must install NumPy and SoX. This will take about 10 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
-						import numpy as NP
-						urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
-						os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
-						os.system('mv sox-14.4.0 sox')
+		for i in ("wav", "mp3", "ogg"):
+			if thefile.endswith(i):
+				if i in ("mp3", "ogg"):
+					if svlgui.PLATFORM=="win32":
+						if os.system("C:\\Progra~2\\MPlayer\\mplayer.exe")!=0:
+							if os.system("C:\\Progra~1\\MPlayer\\mplayer.exe")!=0:
+								result = svlgui.alert("To import mp3 and ogg files you must install mplayer. This will take about 3 MB of space. Install?", confirm=True)
+								if not result:
+									return
+								urllib.urlretrieve("http://mplayer.kenkon.net/files/mplayer-win32-mingw-dev-svn20061001.exe", "mplayerdl.exe")
+								os.system("mplayerdl.exe")
+								mpath = "C:\\Progra~2\\MPlayer\\mplayer.exe"
+							else:
+								mpath = "C:\\Progra~1\\MPlayer\\mplayer.exe"
+						else:
+							mpath = "C:\\Progra~2\\MPlayer\\mplayer.exe"
+					else:
+						mpath = "mplayer"
+					theorigfile = thefile
+					thefile = svlgui.SECURETEMPDIR+svlgui.sep+thefile.split(svlgui.sep)[-1].replace(" ","_").replace("-","_").split(".")[0]+'.wav'
+					print mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"'
+					if svlgui.PLATFORM=="win32":
+						os.system(mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file=\\"'+thefile+'\\" "'+theorigfile+'"')
+					else:
+						os.system(mpath+' -srate 48000 -vo null -vc null -ao pcm:fast:file="'+thefile+'" "'+theorigfile+'"')
+				if svlgui.PLATFORM=="osx":
+					if not os.path.exists('sox/sox'):
+						try:
+							import numpy as NP
+							result = svlgui.alert("To import sound you must install SoX. This will take about 1 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+							os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+							os.system('mv sox-14.4.0 sox')
+						except:
+							result = svlgui.alert("To import sound you must install NumPy and SoX. This will take about 10 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+							import numpy as NP
+							urllib.urlretrieve('http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-macosx.zip?r=&ts=1357270265&use_mirror=iweb', 'sox.zip')
+							os.system('ditto -V -x -k --sequesterRsrc --rsrc sox.zip .')
+							os.system('mv sox-14.4.0 sox')
+					else:
+						try:
+							import numpy as NP
+						except:
+							result = svlgui.alert("To import sound you must install NumPy. This will take about 9 MB of space. Install?", confirm=True)
+							if not result:
+								return
+							os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
+							import numpy as NP
+					SOX_EXEC = 'sox/sox'
+				elif svlgui.PLATFORM=="win32":
+					SOX_EXEC = "C:\\Progra~2\\sox-14~1\\sox.exe"
+					if not os.path.exists(SOX_EXEC):
+						if os.path.exists("C:\\Progra~1\\sox-14~1\\sox.exe"):
+							SOX_EXEC = "C:\\Progra~1\\sox-14~1\\sox.exe"
+						else:
+							urllib.urlretrieve("http://downloads.sourceforge.net/project/sox/sox/14.4.0/sox-14.4.0-win32.exe?r=&ts=1358725954&use_mirror=iweb", 'sox.exe')
+							os.system("sox.exe")
+					import numpy as NP
+				elif "linux" in svlgui.PLATFORM:
+					import numpy as NP
+					SOX_EXEC = "sox"
+				svlgui.NP = NP
+				num_channels = 1
+				out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
+				cmd = [SOX_EXEC,
+					thefile,              # input filename
+					'-t','raw',            # output file type raw
+					'-e','signed-integer', # output encode as signed ints
+					'-L',                  # output little endin
+					'-b',str(out_byps*8),  # output bytes per sample
+					'-']                   # output to stdout]
+				data = NP.fromstring(subprocess.check_output(cmd),'<i%d'%(out_byps))
+				data = data.reshape(len(data)/num_channels, num_channels)
+				info = subprocess.check_output([SOX_EXEC,'--i',thefile])
+				if i=="mp3":
+					sound = svlgui.Sound(data, name=thefile.split(svlgui.sep)[-1], path=theorigfile, info=info, type=i)
 				else:
-					try:
-						import numpy as NP
-					except:
-						result = svlgui.alert("To import sound you must install NumPy. This will take about 9 MB of space. Install?", confirm=True)
-						if not result:
-							return
-						os.system("""osascript -e 'do shell script "easy_install numpy" with administrator privileges'""")
-						import numpy as NP
-				SOX_EXEC = 'sox/sox'
-			svlgui.NP = NP
-			num_channels = 1
-			out_byps = 2 # Bytes per sample you want, must be 1, 2, 4, or 8
-			cmd = [SOX_EXEC,
-				thefile,              # input filename
-				'-t','raw',            # output file type raw
-				'-e','signed-integer', # output encode as signed ints
-				'-L',                  # output little endin
-				'-b',str(out_byps*8),  # output bytes per sample
-				'-']                   # output to stdout]
-			data = NP.fromstring(subprocess.check_output(cmd),'<i%d'%(out_byps))
-			data = data.reshape(len(data)/num_channels, num_channels)
-			info = subprocess.check_output([SOX_EXEC,'--i',thefile])
-			sound = svlgui.Sound(data, name=thefile.split('/')[-1], path=thefile, info=info)
-			root.descendItem().add(sound)
+					sound = svlgui.Sound(data, name=thefile.split(svlgui.sep)[-1], path=thefile, info=info, type=i)
+				root.descendItem().add(sound)
+				break
 
 	MainWindow.stage.draw()
 def import_to_library(widget=None):
@@ -754,6 +885,39 @@ def redo(widget=None):
 			undo_stack.append(e)
 		MainWindow.stage.draw()
 	
+def cut(widget=None):
+	if MainWindow.scriptwindow.is_focused():
+		clip = MainWindow.scriptwindow.text[MainWindow.scriptwindow.selection[0]:MainWindow.scriptwindow.selection[1]]
+		MainWindow.scriptwindow.insert("")
+		svlgui.app.set_clipboard(clip)
+
+def copy(widget=None):
+	if MainWindow.scriptwindow.is_focused():
+		clip = MainWindow.scriptwindow.text[MainWindow.scriptwindow.selection[0]:MainWindow.scriptwindow.selection[1]]
+		svlgui.app.set_clipboard(clip)
+def paste(widget=None):
+	clip = svlgui.app.get_clipboard() if svlgui.app.query_clipboard() else None
+	if clip:
+		print clip
+		if MainWindow.stage.is_focused():
+			ctext = svlgui.Text(clip,200,100)
+			ctext.editing = False
+			# svlgui.CURRENTTEXT = self.ctext
+			ctext.onMouseDown = onMouseDownText
+			ctext.onMouseDrag = onMouseDragText
+			ctext.onMouseUp = onMouseUpText
+			self = root.descendItem()
+			self.add(ctext)
+			# self.add(self.ctext)
+			# self.ctext = None
+			undo_stack.append(edit("add_object", self, {"frame":self.activelayer.currentframe, "layer":self.activelayer}, \
+													   {"frame":self.activelayer.currentframe, "layer":self.activelayer, \
+														"obj":self.activelayer.frames[self.activelayer.currentframe].objs[-1]}))
+			self.activelayer.currentselect = self.activelayer.frames[self.activelayer.currentframe].objs[-1]
+			MainWindow.stage.draw()
+		elif MainWindow.scriptwindow.is_focused():
+			MainWindow.scriptwindow.insert(clip)
+
 def add_keyframe(widget=None):
 	print "af> ", root.descendItem().activeframe
 	root.descendItem().add_frame(True)
@@ -811,6 +975,29 @@ def convert_to_symbol(widget=None):
 		svlgui.ConvertToSymbolWindow(root, onMouseDownMC)
 		MainWindow.stage.draw()
 		
+def export_svg(widget=None):
+	pass
+
+def export_swf(widget=None):
+	global root
+	root.descendItem().activelayer.frames[root.descendItem().activelayer.currentframe].actions = MainWindow.scriptwindow.text
+	
+	f = svlgui.file_dialog("save", name="untitled.swf")
+	if not f:
+		return
+	open(f.path+".sc",'w').write(create_sc(root))
+	# svlgui.execute("swfc/swfc_"+svlgui.PLATFORM+" "+os.getenv('HOME')+"/test.sc -o "+os.getenv('HOME')+"/test.swf")
+	x = os.system("swfc"+svlgui.sep+"swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
+	if sys.version_info < (2, 6):
+		if x==5:	# which is the error value returned when linking libjpeg fails
+			if svlgui.alert("You appear to be missing libjpeg. Install it?", confirm=True):
+				os.system("""osascript -e 'do shell script "mkdir -p /usr/local/lib; cp swfc/libjpeg.8.dylib /usr/local/lib" with administrator privileges'""")
+				x = os.system("swfc/swfc_"+svlgui.PLATFORM+" "+f.path+".sc -o "+f.path)
+				if x==5:
+					svlgui.alert("Sorry, something has gone terribly wrong.")
+			else:
+				return
+
 def about(widget=None):
 	svlgui.alert("Lightningbeam v1.0-alpha1\nLast Updated: "+update_date()+
 	"\nCreated by: Skyler Lehmkuhl\nBased on SWIFT")
@@ -830,9 +1017,9 @@ svlgui.menufuncs([["File",
 					["Edit",
 						("Undo", undo, "/z"),
 						("Redo", redo, "/^z"),
-						"Cut",
-						"Copy",
-						"Paste",
+						("Cut", cut, "/x"),
+						("Copy", copy, "/c"),
+						("Paste", paste, "/v"),
 						"Delete",
 						("Preferences",preferences,"")],
 					["Timeline",
@@ -844,10 +1031,11 @@ svlgui.menufuncs([["File",
 						("Import to Stage",import_to_stage,"/I"),
 						("Import to Library",import_to_library)],
 					["Export",
-						"Export .swf",
+						("Export .swf",export_swf,""),
 						"Export HTML5",
 						"Export Native Application",
 						"Export .sc",
+						("Export SVG",export_svg,""),
 						"Export Image",
 						"Export Video",
 						"Export .pdf",
