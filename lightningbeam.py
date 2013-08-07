@@ -569,6 +569,8 @@ if svlgui.SYSTEM == "gtk":
 	MainWindow = lightningbeam_windows.MainWindow()
 elif svlgui.SYSTEM=="osx":
 	MainWindow = lightningbeam_windows.MainWindowOSX()
+elif svlgui.SYSTEM=="kivy":
+	MainWindow = lightningbeam_windows.MainWindowKivy()
 elif svlgui.SYSTEM=="html":
 	MainWindow = lightningbeam_windows.MainWindowHTML()
 elif svlgui.SYSTEM=="pyglet":

@@ -136,6 +136,8 @@ class Color (object):
 		retval = "var "+self.val.split('/')[-1].replace(' ','_').replace('.','_')+" = new Image();\n"
 		retval = retval+self.val.split('/')[-1].replace(' ','_').replace('.','_')+".src = \""+self.val.split("/")[-1]+"\";\n"
 		return retval
+	def print_json(self):
+		return {'type':'Color','arguments':{'val':self.val}}
 def rgb2hex(r, g, b, a=1):
 	r=hex(int(r*255)).split("x")[1].zfill(2)
 	g=hex(int(g*255)).split("x")[1].zfill(2)
@@ -203,6 +205,7 @@ if sys.platform=="linux2":
 	import pickle
 	import tarfile
 	import tempfile
+	'''
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
@@ -220,7 +223,16 @@ if sys.platform=="linux2":
 			from PIL import Image as PILImage
 		except ImportError:
 			import Image as PILImage
-	from GUI.Geometry import offset_rect, rect_sized
+	SYSTEM="osx"
+	from GUI.Geometry import offset_rect, rect_sized'''
+
+	from kivy.app import App # Using Kivy. Very experimental.
+	from kivy.uix.widget import Widget
+	from kivy.uix.codeinput import CodeInput
+	from kivy.uix.tabbedpanel import TabbedPanel
+	from kivy.uix.button import Button
+	from kivy.graphics import Color, Ellipse, Line
+	SYSTEM="kivy"
 	
 	#If we can import this, we are in the install directory. Mangle media paths accordingly.
 	try:
@@ -228,7 +240,6 @@ if sys.platform=="linux2":
 	except:
 		media_path = ""
 	#app = GUI.application()
-	SYSTEM="osx"
 	TEMPDIR = "/tmp"
 	FONT = u'Times New Roman'
 	'''
@@ -379,6 +390,31 @@ if SYSTEM=="osx":
 			
 			
 	app = Lightningbeam()
+elif SYSTEM=="kivy":
+	class Lightningbeam(App):
+		def build(self):
+			return LightningbeamPanel()
+	class LightningbeamPanel(TabbedPanel):
+		pass
+	class KivyCanvas(Widget):
+		def draw(self):
+			with self.canvas:
+				for i in self.objs:
+					try:
+						i.draw(None)
+					except:
+						traceback.print_exc()
+		def on_touch_down(self, touch):
+			x, y = touch.x, touch.y
+			try:
+				try:
+					for i in self.objs:
+						i._onMouseDown(x,y,button=touch.button, clicks=(3 if touch.is_triple_click else (2 if touch.is_double_click else 1)))
+				except ObjectDeletedError:
+					return
+			except:
+				traceback.print_exc()
+			self.draw()
 elif SYSTEM=="html":
 	app = ""
 
@@ -1153,6 +1189,9 @@ class Canvas(Widget):
 						pass
 				self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
+		elif SYSTEM=="kivy":
+			
+				self.canvas = KivyCanvas()
 		elif SYSTEM=="html":
 			global ids
 			while True:
@@ -1185,6 +1224,8 @@ class Canvas(Widget):
 	def draw(self):
 		if SYSTEM=="gtk":
 			self.expose_event(self.canvas, "draw_event", self.objs)
+		elif SYSTEM=="kivy":
+			self.canvas.draw()
 		elif SYSTEM in ["osx", "android"]:
 			self.canvas.invalidate_rect((0,0,self.canvas.extent[0],self.canvas.extent[1]))
 		elif SYSTEM=="html":
@@ -1192,6 +1233,8 @@ class Canvas(Widget):
 	def is_focused(self):
 		if SYSTEM=="osx":
 			return self.canvas.is_target()
+		else:
+			return false
 	def add(self, obj, x, y):
 		obj.x = x
 		obj.y = y
@@ -1493,6 +1536,8 @@ class Image(object):
 		pass
 	def print_sc(self):
 		return ".png "+self.name+" \""+self.path+"\"\n"
+	def print_json(self):
+		return {'type':'Image','arguments':{'image':self.image,'x':self.x,'y':self.y,'animated':self.animated,'canvas':None,'htiles':self.htiles,'vtiles':self.vtiles,'skipl':false}}
 	
 class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
@@ -1638,6 +1683,10 @@ class Shape (object):
 				else:
 					cr.stroke()
 				cr.grestore()
+		elif SYSTEM=="kivy":
+			Color(1, 1, 0)
+			d = 30.
+			Ellipse(pos=(self.x - d / 2, self.y - d / 2), size=(d, d))
 		elif SYSTEM=="html":
 			tb = ""
 			tb+="cr.save()\n"
@@ -1768,6 +1817,13 @@ class Shape (object):
 			retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
 		retval += self.name+".filled = "+str(self.filled).lower()+";\n"
 		return retval
+	def print_json(self):
+		return {'type':'Shape','arguments':{'x':self.x,
+											'y':self.y,
+											'rotation':self.rotation,
+											'linecolor':self.linecolor.print_json(),
+											'fillcolor':self.fillcolor.print_json()},
+								'properties':{'shapedata':self.shapedata}}
 
 class Text (object):
 	def __init__(self,text="",x=0,y=0):

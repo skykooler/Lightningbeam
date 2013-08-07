@@ -438,7 +438,10 @@ class MainWindowHTML:
 								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
 	
-
+class MainWindowKivy:
+	def __init__(self):
+		from kivy.lang import Builder
+		Builder.load_file("lightningbeam.kv")
 
 if __name__=="__main__":
 	a = MainWindow()
