@@ -205,7 +205,7 @@ if sys.platform=="linux2":
 	import pickle
 	import tarfile
 	import tempfile
-	'''
+	
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
@@ -224,7 +224,8 @@ if sys.platform=="linux2":
 		except ImportError:
 			import Image as PILImage
 	SYSTEM="osx"
-	from GUI.Geometry import offset_rect, rect_sized'''
+	from GUI.Geometry import offset_rect, rect_sized
+	'''
 
 	from kivy.app import App # Using Kivy. Very experimental.
 	from kivy.uix.widget import Widget
@@ -232,7 +233,7 @@ if sys.platform=="linux2":
 	from kivy.uix.tabbedpanel import TabbedPanel
 	from kivy.uix.button import Button
 	from kivy.graphics import Color, Ellipse, Line
-	SYSTEM="kivy"
+	SYSTEM="kivy"'''
 	
 	#If we can import this, we are in the install directory. Mangle media paths accordingly.
 	try:
@@ -2776,9 +2777,12 @@ class Group (object):
 		self.dragging = False
 		self.selecting = False
 		x, y = self.localtransform(x, y)
+		# If we are in selection mode and the current level (i.e. what we're inside of) is this layer
 		if self.activelayer.level and MODE in [" ", "s"]:
+			# If we have a selection
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
+			# COMMENT PLZ
 			elif self.activepoint:
 				for i in self.lines:
 					if abs(self.activepoint.x-i.endpoint1.x)<10 and abs(self.activepoint.y-i.endpoint1.y)<10:
@@ -2798,7 +2802,9 @@ class Group (object):
 								break
 							except IndexError: pass
 						break
+			# if neither of those, but we've dragged the mouse at least 4 pixels in either axis
 			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
+				# this should make a temporary group containing all the objects within the area we dragged
 				objs = []
 				for i in reversed(self.currentFrame()):
 					if self.startx<i.x+i.minx<x or self.startx<i.x+i.maxx<x:
