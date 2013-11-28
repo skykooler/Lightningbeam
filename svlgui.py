@@ -2922,7 +2922,7 @@ class Group (object):
 class TemporaryGroup(Group):
 	"""Created when selecting multiple items, for ease of use."""
 	def __init__(self, *args, **kwargs):
-		(TemporaryGroup, self).__init__(*args, **kwargs)
+		super(TemporaryGroup, self).__init__(*args, **kwargs)
 	# def draw(self, cr=None, transform=None, rect=None):
 	# 	super(TemporaryGroup, self).draw(cr, transform, rect)
 	# 	print self.x, self.activelayer.x
