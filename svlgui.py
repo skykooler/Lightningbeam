@@ -2631,6 +2631,8 @@ class Group (object):
 				cr.pencolor = Color([0,0,1]).pygui
 				cr.stroke_rect([sorted([self.startx,self.cx])[0], sorted([self.starty,self.cy])[0], \
 								sorted([self.startx,self.cx])[1], sorted([self.starty,self.cy])[1]])
+		for i in self.fills:
+			i.draw(cr, rect=rect)
 		for i in self.lines:
 			i.draw(cr, rect=rect)
 	def add(self, *args):
@@ -2720,17 +2722,15 @@ class Group (object):
 										return
 							elif MODE=="b":
 								nlines = [i for i in self.lines]
-								endsleft = True
-								while endsleft:
-									endsleft = False
-									print nlines
-									for i in reversed(nlines):
-										if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
-											nlines.remove(i)
-											endsleft = True
-										elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
-											nlines.remove(i)
-											endsleft = True
+								# First, remove all line segments that have at least one free endpoit, not coincident with any other segment.
+								# Do that repeatedly until no such segment remains.
+								for i in reversed(nlines):
+									if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+										nlines.remove(i)
+									elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+										nlines.remove(i)
+
+								# Find the closest segment to the point.
 								if nlines:
 									mindist = sys.maxint
 									point = Point(x, y)
@@ -2740,6 +2740,71 @@ class Group (object):
 										if d<mindist:
 											mindist = d
 											closestsegment = i
+
+									print closestsegment
+
+									# Go to the endpoint and turn right. Repeat until you hit the closest segment again.
+									if closestsegment:
+										# Grab angles to closest segments endpoints, go to the counterclockwise-most one
+										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
+										angle2 = misc_funcs.angle_to_point(point, closestsegment.endpoint2)
+										if (angle1<angle2 and angle2-angle1<180):
+											startpoint = closestsegment.endpoint2
+											sp = 2
+										else:
+											startpoint = closestsegment.endpoint1
+											sp = 1
+										linelist = [closestsegment]
+										while True:
+											# try:
+											nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i==closestsegment])[1]
+											# except:
+												# break
+											closestsegment = nextline
+											startpoint = [None,closestsegment.endpoint1,closestsegment.endpoint2][sp]
+											if not nextline in linelist:
+												linelist.append(nextline)
+											else:
+												break
+
+										# Check if the polygon encloses the given point. If it is not, then we've found an "island"
+										if misc_funcs.hittest(linelist,x,y):
+											f = Fill()
+											f.lines = linelist
+											print linelist
+											self.fills.append(f)
+										else:
+											print "No hit"
+
+
+								'''nlines = [i for i in self.lines]
+								endsleft = True
+								while endsleft:
+									endsleft = False
+									for i in reversed(nlines):
+										if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+										elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+								print "2728",nlines
+								
+								if nlines:
+									mindist = sys.maxint
+									point = Point(x, y)
+									closestsegment = None
+
+									for i in nlines:
+										d = misc_funcs.distToSegment(point,i.endpoint1,i.endpoint2)
+										if d<mindist:
+											mindist = d
+											closestsegment = i
+
+									f = Fill()
+									f.lines = nlines
+									self.fills.append(f)
+
 									if closestsegment:
 										# Then go to endpoint of closestsegment counterclockwise from point
 										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
@@ -2764,7 +2829,7 @@ class Group (object):
 											else:
 												break
 										print "*****",linelist
-										# Continue until closestsegment is reached. I _think_ this is inevitable.
+										# Continue until closestsegment is reached. I _think_ this is inevitable.'''
 
 							self.selecting = True
 				else:
@@ -3096,6 +3161,26 @@ class Line(object):
 			tb+="cr.stroke()\n"
 			tb+="cr.restore()\n"
 			jscommunicate(tb)
+
+class Fill(object):
+	"""Fills are Shapes without edges, built from Lines"""
+	def __init__(self):
+		super(Fill,self).__init__()
+		self.lines = []
+		self.fillcolor = FILLCOLOR
+	def draw(self, cr=None, transform=None, rect=None):
+		if SYSTEM=="osx":
+			if USING_GL:
+				pass
+			else:
+				cr.gsave()
+				cr.newpath()
+				cr.fillcolor = self.fillcolor.pygui
+				cr.moveto(self.lines[0].endpoint2.x,self.lines[0].endpoint2.y)
+				for i in self.lines:
+					cr.lineto(i.endpoint1.x,i.endpoint1.y)
+				cr.fill()
+				cr.grestore()
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":

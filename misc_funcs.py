@@ -10,6 +10,7 @@ import math
 import subprocess 
 import re
 import os
+import sys
 
 def select_any(self):
 	svlgui.MODE = " "
@@ -266,3 +267,27 @@ def pairwise(iterable):
     a, b = tee(iterable)
     next(b, None)
     return izip(a, b)
+
+def hittest(linelist,x,y):
+	hits = False
+	def IsOnLeft(a, b, c):
+		return Area2(a, b, c) > 0
+	def IsOnRight(a, b, c):
+		return Area2(a, b, c) < 0
+	def IsCollinear(a, b, c):
+		return Area2(a, b, c) == 0
+	# calculates the triangle's size (formed by the "anchor" segment and additional point)
+	def Area2(a, b, c):
+		return (b[0]-a[0])*(c[1]-a[1])-(c[0]-a[0])*(b[1]-a[1])
+	def intersects(a,b,c,d):
+		return not (IsOnLeft(a,b,c) != IsOnRight(a,b,d))
+	def ccw(a,b,c):
+		return (c[1]-a[1])*(b[0]-a[0]) > (b[1]-a[1])*(c[0]-a[0])
+	def intersect(a,b,c,d):
+		return ccw(a,c,d) != ccw(b,c,d) and ccw(a,b,c) != ccw(a,b,d)
+	for i in xrange(len(linelist)):
+		hits = hits != intersect([linelist[i-1].endpoint1.x,linelist[i-1].endpoint1.y],
+								 [linelist[i].endpoint1.x,linelist[i].endpoint1.y],[x,y],[x,sys.maxint])
+	print hits, x, y
+	return hits
+
