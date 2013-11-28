@@ -2413,6 +2413,7 @@ class Layer:
 			print "#>>",i
 			for j in self.frames[self.currentframe].objs:
 				if j == i:
+					print "Deleting",j
 					del self.currentFrame()[self.currentFrame().index(j)]
 	def add_frame(self,populate):
 		if self.activeframe>len(self.frames):
@@ -2634,6 +2635,8 @@ class Group (object):
 			i.draw(cr, rect=rect)
 	def add(self, *args):
 		self.activelayer.add(*args)
+	def delete(self, *args):
+		self.activelayer.delete(*args)
 	def add_frame(self, populate):
 		self.activelayer.add_frame(populate)
 	def add_layer(self, index):
@@ -2782,7 +2785,7 @@ class Group (object):
 			# If we have a selection
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
-			# COMMENT PLZ
+			# If we have a point that we're dragging around (vector editing)
 			elif self.activepoint:
 				for i in self.lines:
 					if abs(self.activepoint.x-i.endpoint1.x)<10 and abs(self.activepoint.y-i.endpoint1.y)<10:
@@ -2802,6 +2805,7 @@ class Group (object):
 								break
 							except IndexError: pass
 						break
+				self.activepoint = None
 			# if neither of those, but we've dragged the mouse at least 4 pixels in either axis
 			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
 				# this should make a temporary group containing all the objects within the area we dragged
