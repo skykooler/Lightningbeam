@@ -2770,8 +2770,26 @@ class Group (object):
 										# Check if the polygon encloses the given point. If it is not, then we've found an "island"
 										if misc_funcs.hittest(linelist,x,y):
 											f = Fill()
-											f.lines = linelist
-											print linelist
+											dic = {}
+											for i in linelist:
+												dic[i.endpoint1]=i
+											
+											def walk(list_of_lines, starting_point):
+												lookup_map = {}
+												for i in list_of_lines:
+													lookup_map[i.endpoint1]=i
+												cur_point = starting_point
+												visited_points = []
+												print lookup_map
+												while cur_point.endpoint2 in lookup_map and not cur_point in visited_points:
+													visited_points.append(cur_point)
+													cur_point = lookup_map[cur_point.endpoint2]
+													yield cur_point
+
+
+											# f.lines = linelist
+											f.lines = [x for x in walk(linelist,linelist[0])]
+											print f.lines
 											self.fills.append(f)
 										else:
 											print "No hit"
@@ -3176,9 +3194,9 @@ class Fill(object):
 				cr.gsave()
 				cr.newpath()
 				cr.fillcolor = self.fillcolor.pygui
-				cr.moveto(self.lines[0].endpoint2.x,self.lines[0].endpoint2.y)
+				cr.moveto(self.lines[0].endpoint1.x,self.lines[0].endpoint1.y)
 				for i in self.lines:
-					cr.lineto(i.endpoint1.x,i.endpoint1.y)
+					cr.lineto(i.endpoint2.x,i.endpoint2.y)
 				cr.fill()
 				cr.grestore()
 
