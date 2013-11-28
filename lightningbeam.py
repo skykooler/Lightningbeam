@@ -208,6 +208,17 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, svlgui.PMODE.split()[-1],1)
 		postlen = len(self.cshape.shapedata)
 		print str((prelen-postlen)*100/prelen)+"% reduction: started at "+str(prelen)+" vertices, ended at "+str(postlen)+" vertices"
+		if svlgui.PMODE.split()[-1]=="straight":
+			lastline = None
+			x, y = self.cshape.x, self.cshape.y
+			for a, b in misc_funcs.pairwise(self.cshape.shapedata):
+				l = svlgui.Line(svlgui.Point(a[1]+x,a[2]+y),svlgui.Point(b[1]+x,b[2]+y))
+				if lastline:
+					l.connection1 = lastline.endpoint2
+					l.connection1.lines.add(l)
+				lastline = l
+				self.lines.append(l)
+			self.delete(self.activelayer.frames[self.currentframe].objs[-1])
 		'''for i in self.lines:
 			if abs(self.cshape.endpoint2.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint1.y)<10:
 				self.cshape.connection2 = i.endpoint1
