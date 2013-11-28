@@ -219,6 +219,26 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 				lastline = l
 				self.lines.append(l)
 			self.delete(self.activelayer.frames[self.currentframe].objs[-1])
+			for line in self.lines:
+				for otherline in self.lines:
+					if not otherline is line:
+						if line.connection1 and otherline in line.connection1.lines: continue
+						if line.connection2 and otherline in line.connection2.lines: continue
+						inter = line.intersects(otherline)
+						if inter:
+							print "INTERSECTION"
+							inter = svlgui.Point(*inter)
+							l1 = svlgui.Line(line.endpoint1,inter,line.connection1,inter)
+							l2 = svlgui.Line(line.endpoint2,inter,line.connection2,inter)
+							l3 = svlgui.Line(otherline.endpoint1,inter,otherline.connection1,inter)
+							l4 = svlgui.Line(otherline.endpoint2,inter,otherline.connection2,inter)
+							inter.lines.add(l1)
+							inter.lines.add(l2)
+							inter.lines.add(l3)
+							inter.lines.add(l4)
+							self.lines[self.lines.index(line):self.lines.index(line)+1]=[l1,l2]
+							self.lines[self.lines.index(otherline):self.lines.index(otherline)+1]=[l3,l4]
+							break
 		'''for i in self.lines:
 			if abs(self.cshape.endpoint2.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint1.y)<10:
 				self.cshape.connection2 = i.endpoint1

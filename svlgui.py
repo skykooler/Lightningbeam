@@ -3128,6 +3128,52 @@ class Line(object):
 		cz = x1*y2-y1*x2
 		if cz>0: angle=360-angle
 		return angle
+	def intersects(self,other):
+		'''def IsOnLeft(a,b,c):
+			return Area2(a,b,c) > 0
+		def IsOnRight(a,b,c):
+			return Area2(a,b,c) < 0
+		def IsCollinear(a,b,c):
+			return Area2(a,b,c) == 0
+		def Area2 (a,b,c):
+			return (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)
+		if (IsOnLeft(self.endpoint1,self.endpoint2,other.endpoint1) and IsOnRight(self.endpoint1,self.endpoint2,other.endpoint2))
+			or (IsOnLeft(self.endpoint1,self.endpoint2,other.endpoint2) and IsOnRight(self.endpoint1,self.endpoint2,other.endpoint1):
+			if (IsOnLeft(other.endpoint1,other.endpoint2,self.endpoint1) and IsOnRight(other.endpoint1,other.endpoint2,self.endpoint2))
+				or (IsOnLeft(other.endpoint1,other.endpoint2,self.endpoint2) and IsOnRight(other.endpoint1,other.endpoint2,self.endpoint1):
+					return True'''
+		# Formula for line is y = mx + b
+		try:
+			sm = (self.endpoint1.y-self.endpoint2.y)/(self.endpoint1.x-self.endpoint1.y)
+			om = (other.endpoint1.y-other.endpoint2.y)/(other.endpoint1.x-other.endpoint1.y)
+			sb = self.endpoint1.y-sm*self.endpoint1.x
+			ob = other.endpoint1.y-sm*other.endpoint1.x
+			if sm == om: return False
+			x = (ob-sb)/(sm-om)
+			y = sm*x + sb
+			if min(self.endpoint1.x,self.endpoint2.x)<x<max(self.endpoint1.x,self.endpoint2.x):
+				return [x,y]
+			else:
+				return False
+		except ZeroDivisionError:
+			# One of the lines is vertical.
+			# Formula for line in terms of y is x = my + b
+			try:
+				sm = (self.endpoint1.x-self.endpoint2.x)/(self.endpoint1.y-self.endpoint1.x)
+				om = (other.endpoint1.x-other.endpoint2.x)/(other.endpoint1.y-other.endpoint1.x)
+				sb = self.endpoint1.x-sm*self.endpoint1.y
+				ob = other.endpoint1.x-sm*other.endpoint1.y
+				if sm == om: return False
+				y = (ob-sb)/(sm-om)
+				x = sm*y + sb
+				if min(self.endpoint1.y,self.endpoint2.y)<y<max(self.endpoint1.y,self.endpoint2.y):
+					return [x,y]
+			except ZeroDivisionError:
+				# One of the lines is horizontal, too. Or one has zero length.
+				# Logic this.
+				return False
+
+		return False
 	def draw(self, cr=None, transform=None, rect=None):
 		if self.connection1:
 			self.endpoint1 = self.connection1
