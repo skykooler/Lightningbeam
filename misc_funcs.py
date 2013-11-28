@@ -206,7 +206,6 @@ def simplify_shape(shape,mode,iterations):
 						del shape[j]	
 		if mode=="smooth":
 			shape = catmullRom2bezier([shape[0]]*2+shape+[shape[-1]])
-			print shape
 							
 	return shape#+nshape
 	
