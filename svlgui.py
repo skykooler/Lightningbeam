@@ -2965,6 +2965,17 @@ class Group (object):
 		#	retval+=i.print_sc(True, False)
 		if not self.name=="_root":
 			retval+=".sprite "+self.name+"\n"
+		if self.fills:
+			for i in self.fills:
+				retval+=i.print_sc()
+				retval+=".put fill_"+str(i.__hash__())+"\n"
+		if self.lines:
+			for i in self.lines:
+				retval+=".outline "+self.name+"_line_"+str(i.__hash__())+"_outline:\n"
+				retval+=" "+i.print_sc()
+				retval+="\n.end\n"
+				retval+=".filled "+self.name+"_line_"+str(i.__hash__())+" outline="+self.name+"_line_"+str(i.__hash__())+"_outline color="+i.linecolor.rgb+"\n"
+				retval+=".put "+self.name+"_line_"+str(i.__hash__())+"\n"
 		for i in xrange(self.maxframe()):
 			for j in self.layers:
 				if j.frames[i]:
@@ -3225,6 +3236,8 @@ class Line(object):
 			tb+="cr.stroke()\n"
 			tb+="cr.restore()\n"
 			jscommunicate(tb)
+	def print_sc(self):
+		return "M "+str(self.endpoint1.x)+" "+str(self.endpoint1.y)+" L "+str(self.endpoint2.x)+" "+str(self.endpoint2.y)
 
 class Fill(object):
 	"""Fills are Shapes without edges, built from Lines"""
@@ -3245,6 +3258,14 @@ class Fill(object):
 					cr.lineto(i.endpoint2.x,i.endpoint2.y)
 				cr.fill()
 				cr.grestore()
+	def print_sc(self):
+		retval = ".outline fill_"+str(self.__hash__())+"_outline:\n"
+		retval += "M "+str(self.lines[0].endpoint1.x)+" "+str(self.lines[0].endpoint1.y)
+		for i in self.lines:
+			retval += " L "+str(i.endpoint2.x)+" "+str(i.endpoint2.y)
+		retval += "\n.end\n"
+		retval += ".filled fill_"+str(self.__hash__())+" outline=fill_"+str(self.__hash__())+"_outline fill="+self.fillcolor.rgb+"\n"
+		return retval
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":
