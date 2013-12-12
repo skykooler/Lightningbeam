@@ -4,6 +4,10 @@
 from GUI import Application, ScrollableView, Window, Font, Colors
 from pygments import highlight
 from pygments.lexers import ActionScriptLexer
+# from pygments.lexers import *
+if False:
+	from pygments.lexers import text, templates, math, dotnet, parsers, hdl, asm, foxpro, special
+	from pygments.styles import default
 from pygments.formatter import Formatter
 from pygments.filters import NameHighlightFilter
 from pygments.token import Token

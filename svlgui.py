@@ -1768,6 +1768,11 @@ class Shape (object):
 		return retval
 
 class Text (object):
+	def __getstate__(self):
+		dict = self.__dict__.copy()
+		dict['font'] = None
+		print dict
+		return dict
 	def __init__(self,text="",x=0,y=0):
 		global SITER
 		global Library
@@ -2811,8 +2816,9 @@ class TemporaryGroup(Group):
 		if key in ("delete", "backspace"):
 			del self1.parent[self1.parent.index(self1)] # Need to clean up deletion
 		elif key in [" ", "s", "r", "e", "b", "p"]:
-			svlgui.MODE=key
-			svlgui.set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
+			global MODE
+			MODE=key
+			set_cursor({" ":"arrow","s":"arrow","r":"crosshair","e":"crosshair",
 					"b":"arrow","p":"arrow"}[key], MainWindow.stage)
 			misc_funcs.update_tooloptions()
 		elif key=="F6":
@@ -3046,7 +3052,7 @@ class ColorSelectionWindow:
 						undo_stack.append(edit("fill", root.descendItem().activelayer.currentselect, \
 							{"filled":root.descendItem().activelayer.currentselect.filled, \
 									"fillcolor":root.descendItem().activelayer.currentselect.fillcolor}, 
-							{"filled":True, "fillcolor":svlgui.FILLCOLOR}))
+							{"filled":True, "fillcolor":FILLCOLOR}))
 						clear(redo_stack)
 					root.descendItem().activelayer.currentselect.fillcolor = FILLCOLOR
 					root.descendItem().activelayer.currentselect.filled = True

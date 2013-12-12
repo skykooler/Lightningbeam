@@ -74,6 +74,7 @@ class maybe:
 		return self.edit
 
 svlgui.undo_stack = undo_stack
+svlgui.redo_stack = redo_stack
 svlgui.edit = edit
 svlgui.maybe = maybe
 svlgui.clear = clear

@@ -16,8 +16,11 @@ ez_setup.use_setuptools()
 import sys
 import shutil
 import pygments
+from pygments.lexers import *
 from setuptools import setup
 
+# if sys.platform == 'darwin':
+    # shutil.copytree("/".join(pygments.__file__.split("/")[:-1]), "pygments")
 
 mainscript = 'lightningbeam.py'
 
@@ -56,10 +59,10 @@ elif sys.platform == 'win32':
     extra_options = dict(
         setup_requires=['py2exe'],
         windows=[{"script":mainscript,"icon_resources":[(1,"media/icon.ico")]}],
-		other_resources=[("media",["media"]),("gpl.txt",["gpl.txt"]),("swfc",["swfc"]),("GUI",["GUI"])],
+        other_resources=[("media",["media"]),("gpl.txt",["gpl.txt"]),("swfc",["swfc"]),("GUI",["GUI"])],
         data_files=Mydata_files,
         options=dict(py2exe=dict(packages=["win32ui","win32clipboard","win32api","win32gui","win32process"],
-		             skip_archive=True,)),
+                     skip_archive=True,)),
     )
 else:
      extra_options = dict(
