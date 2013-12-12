@@ -5,10 +5,12 @@
 
 import svlgui
 from threading import Event, Thread
+from itertools import tee, izip
 import math
 import subprocess 
 import re
 import os
+import sys
 
 def select_any(self):
 	svlgui.MODE = " "
@@ -96,8 +98,30 @@ def lastval(arr,index):
 			return i
 	
 
+def angle_to_point(point1, point2):
+	deltaX = point2.x-point1.x
+	deltaY = point2.y-point1.y
+	angleInDegrees = math.atan2(-deltaY, deltaX) * 180 / math.pi
+	if angleInDegrees<0: angleInDegrees = 360+angleInDegrees
+	return angleInDegrees
 
+def sqr(x) :
+	return x * x
+def dist2(v, w):
+	return sqr(v.x - w.x) + sqr(v.y - w.y)
+def distToSegmentSquared(p, v, w):
+	l2 = dist2(v, w)
+	if l2 == 0:
+		return dist2(p, v)
+	t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2
+	if t < 0:
+		return dist2(p, v)
+	if t > 1:
+		return dist2(p, w)
+	return dist2(p, svlgui.Point(x=(v.x+t*(w.x-v.x)), y=(v.y+t*(w.y-v.y))))
 
+def distToSegment(p, v, w):
+	return math.sqrt(distToSegmentSquared(p, v, w))
 
 def catmullRom2bezier( points ) :
 	#crp = points.split(/[,\s]/);
@@ -184,7 +208,6 @@ def simplify_shape(shape,mode,iterations):
 						del shape[j]	
 		if mode=="smooth":
 			shape = catmullRom2bezier([shape[0]]*2+shape+[shape[-1]])
-			print shape
 							
 	return shape#+nshape
 	
@@ -237,3 +260,34 @@ class RepeatTimer(Thread):
  
     def cancel(self):
         self.finished.set()
+
+
+def pairwise(iterable):
+    "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+    a, b = tee(iterable)
+    next(b, None)
+    return izip(a, b)
+
+def hittest(linelist,x,y):
+	hits = False
+	def IsOnLeft(a, b, c):
+		return Area2(a, b, c) > 0
+	def IsOnRight(a, b, c):
+		return Area2(a, b, c) < 0
+	def IsCollinear(a, b, c):
+		return Area2(a, b, c) == 0
+	# calculates the triangle's size (formed by the "anchor" segment and additional point)
+	def Area2(a, b, c):
+		return (b[0]-a[0])*(c[1]-a[1])-(c[0]-a[0])*(b[1]-a[1])
+	def intersects(a,b,c,d):
+		return not (IsOnLeft(a,b,c) != IsOnRight(a,b,d))
+	def ccw(a,b,c):
+		return (c[1]-a[1])*(b[0]-a[0]) > (b[1]-a[1])*(c[0]-a[0])
+	def intersect(a,b,c,d):
+		return ccw(a,c,d) != ccw(b,c,d) and ccw(a,b,c) != ccw(a,b,d)
+	for i in xrange(len(linelist)):
+		hits = hits != intersect([linelist[i-1].endpoint1.x,linelist[i-1].endpoint1.y],
+								 [linelist[i].endpoint1.x,linelist[i].endpoint1.y],[x,y],[x,sys.maxint])
+	print hits, x, y
+	return hits
+

@@ -9,16 +9,18 @@ from kivy.graphics import Color, Ellipse, Line
 
 Builder.load_file("lightningbeam.kv")
 
-class Lightningbeam(TabbedPanel):
+class LightningbeamPanel(TabbedPanel):
 
     pass
 
+class KivyCanvas(Widget):
+	def on_touch_down(self, touch):
+		print touch.button
 
-class MyPaintApp(App):
+class LightningbeamApp(App):
 
     def build(self):
-        return Lightningbeam()
-
+        return LightningbeamPanel()
 
 if __name__ == '__main__':
-    MyPaintApp().run()
+    LightningbeamApp().run()

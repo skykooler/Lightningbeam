@@ -9,6 +9,7 @@ import misc_funcs
 from misc_funcs import *
 
 class MainWindow:
+	''' GTK UI. Not currently used. '''
 	def __init__(self):
 		self.window = svlgui.Window("Lightningbeam")
 		self.window.maximize()
@@ -134,6 +135,7 @@ class MainWindow:
 	
 
 class MainWindowAndroid:
+	''' Android UI. Not currently used. Will be replaced with Kivy. '''
 	def __init__(self):
 		class stagewrapper:
 			def add(self, obj, x, y):
@@ -231,7 +233,8 @@ class MainWindowOSX:
 		# self.toolbox.buttons[1][0]._int().enabled = False
 		self.toolbox.buttons[3][0]._int().enabled = False
 		self.toolbox.buttons[4][0]._int().enabled = False
-		self.scriptwindow = svlgui.TextView(code=True)
+		# self.scriptwindow = svlgui.TextView(code=True)
+		self.scriptwindow = svlgui.TextView(code=False)
 		self.paintgroup = svlgui.RadioGroup("Draw straight", "Draw smooth", "Draw as inked")
 		def setmode(self):
 			svlgui.PMODE = self.value
@@ -435,7 +438,10 @@ class MainWindowHTML:
 								[self.stage,self.toolbox._int(),self.scriptwindow._int(),self.timelinebox._int()+2,0,"nsew", "hv"] )
 		self.window.add(self.frame)
 	
-
+class MainWindowKivy:
+	def __init__(self):
+		from kivy.lang import Builder
+		Builder.load_file("lightningbeam.kv")
 
 if __name__=="__main__":
 	a = MainWindow()

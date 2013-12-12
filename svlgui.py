@@ -136,6 +136,8 @@ class Color (object):
 		retval = "var "+self.val.split('/')[-1].replace(' ','_').replace('.','_')+" = new Image();\n"
 		retval = retval+self.val.split('/')[-1].replace(' ','_').replace('.','_')+".src = \""+self.val.split("/")[-1]+"\";\n"
 		return retval
+	def print_json(self):
+		return {'type':'Color','arguments':{'val':self.val}}
 def rgb2hex(r, g, b, a=1):
 	r=hex(int(r*255)).split("x")[1].zfill(2)
 	g=hex(int(g*255)).split("x")[1].zfill(2)
@@ -176,6 +178,8 @@ LINECOLOR = Color("#990099")
 FILLCOLOR = Color("#00FF00")
 TEXTCOLOR = Color("#000000")
 
+LINEWIDTH = 2
+
 #Magic. Detect platform and select appropriate toolkit. To be used throughout code.
 if sys.platform=="linux2":
 	id = platform.machine()
@@ -201,6 +205,7 @@ if sys.platform=="linux2":
 	import pickle
 	import tarfile
 	import tempfile
+	
 	import GUI		# Using PyGUI. Experimental.
 	from GUI import Window as OSXWindow, Button as OSXButton, Image as OSXImage
 	from GUI import Frame as OSXFrame, Color as OSXColor, Grid as OSXGrid, CheckBox as OSXCheckBox
@@ -218,7 +223,17 @@ if sys.platform=="linux2":
 			from PIL import Image as PILImage
 		except ImportError:
 			import Image as PILImage
+	SYSTEM="osx"
 	from GUI.Geometry import offset_rect, rect_sized
+	'''
+
+	from kivy.app import App # Using Kivy. Very experimental.
+	from kivy.uix.widget import Widget
+	from kivy.uix.codeinput import CodeInput
+	from kivy.uix.tabbedpanel import TabbedPanel
+	from kivy.uix.button import Button
+	from kivy.graphics import Color, Ellipse, Line
+	SYSTEM="kivy"'''
 	
 	#If we can import this, we are in the install directory. Mangle media paths accordingly.
 	try:
@@ -226,7 +241,6 @@ if sys.platform=="linux2":
 	except:
 		media_path = ""
 	#app = GUI.application()
-	SYSTEM="osx"
 	TEMPDIR = "/tmp"
 	FONT = u'Times New Roman'
 	'''
@@ -377,6 +391,31 @@ if SYSTEM=="osx":
 			
 			
 	app = Lightningbeam()
+elif SYSTEM=="kivy":
+	class Lightningbeam(App):
+		def build(self):
+			return LightningbeamPanel()
+	class LightningbeamPanel(TabbedPanel):
+		pass
+	class KivyCanvas(Widget):
+		def draw(self):
+			with self.canvas:
+				for i in self.objs:
+					try:
+						i.draw(None)
+					except:
+						traceback.print_exc()
+		def on_touch_down(self, touch):
+			x, y = touch.x, touch.y
+			try:
+				try:
+					for i in self.objs:
+						i._onMouseDown(x,y,button=touch.button, clicks=(3 if touch.is_triple_click else (2 if touch.is_double_click else 1)))
+				except ObjectDeletedError:
+					return
+			except:
+				traceback.print_exc()
+			self.draw()
 elif SYSTEM=="html":
 	app = ""
 
@@ -1151,6 +1190,9 @@ class Canvas(Widget):
 						pass
 				self.canvas = OSXCanvas(extent = (width, height), scrolling = 'hv')
 			self.canvas.objs = self.objs
+		elif SYSTEM=="kivy":
+			
+				self.canvas = KivyCanvas()
 		elif SYSTEM=="html":
 			global ids
 			while True:
@@ -1183,6 +1225,8 @@ class Canvas(Widget):
 	def draw(self):
 		if SYSTEM=="gtk":
 			self.expose_event(self.canvas, "draw_event", self.objs)
+		elif SYSTEM=="kivy":
+			self.canvas.draw()
 		elif SYSTEM in ["osx", "android"]:
 			self.canvas.invalidate_rect((0,0,self.canvas.extent[0],self.canvas.extent[1]))
 		elif SYSTEM=="html":
@@ -1190,6 +1234,8 @@ class Canvas(Widget):
 	def is_focused(self):
 		if SYSTEM=="osx":
 			return self.canvas.is_target()
+		else:
+			return false
 	def add(self, obj, x, y):
 		obj.x = x
 		obj.y = y
@@ -1491,6 +1537,8 @@ class Image(object):
 		pass
 	def print_sc(self):
 		return ".png "+self.name+" \""+self.path+"\"\n"
+	def print_json(self):
+		return {'type':'Image','arguments':{'image':self.image,'x':self.x,'y':self.y,'animated':self.animated,'canvas':None,'htiles':self.htiles,'vtiles':self.vtiles,'skipl':false}}
 	
 class Shape (object):
 	def __init__(self,x=0,y=0,rotation=0,fillcolor=None,linecolor=None):
@@ -1636,6 +1684,10 @@ class Shape (object):
 				else:
 					cr.stroke()
 				cr.grestore()
+		elif SYSTEM=="kivy":
+			Color(1, 1, 0)
+			d = 30.
+			Ellipse(pos=(self.x - d / 2, self.y - d / 2), size=(d, d))
 		elif SYSTEM=="html":
 			tb = ""
 			tb+="cr.save()\n"
@@ -1766,6 +1818,13 @@ class Shape (object):
 			retval += self.name+".fill = \""+self.fillcolor.rgb+"\";\n"+self.name+".line = \""+self.linecolor.rgb+"\";\n"
 		retval += self.name+".filled = "+str(self.filled).lower()+";\n"
 		return retval
+	def print_json(self):
+		return {'type':'Shape','arguments':{'x':self.x,
+											'y':self.y,
+											'rotation':self.rotation,
+											'linecolor':self.linecolor.print_json(),
+											'fillcolor':self.fillcolor.print_json()},
+								'properties':{'shapedata':self.shapedata}}
 
 class Text (object):
 	def __getstate__(self):
@@ -2359,6 +2418,7 @@ class Layer:
 			print "#>>",i
 			for j in self.frames[self.currentframe].objs:
 				if j == i:
+					print "Deleting",j
 					del self.currentFrame()[self.currentFrame().index(j)]
 	def add_frame(self,populate):
 		if self.activeframe>len(self.frames):
@@ -2553,6 +2613,9 @@ class Group (object):
 		self.tempgroup = None
 		self.is_mc = False
 		self.name = "g"+str(int(random.random()*10000))+str(SITER)
+		self.lines = []
+		self.fills = []
+		self.activepoint = None
 		if "onload" in kwargs:
 			kwargs["onload"](self)
 	def draw(self,cr=None,transform=None,rect=None):
@@ -2573,8 +2636,14 @@ class Group (object):
 				cr.pencolor = Color([0,0,1]).pygui
 				cr.stroke_rect([sorted([self.startx,self.cx])[0], sorted([self.starty,self.cy])[0], \
 								sorted([self.startx,self.cx])[1], sorted([self.starty,self.cy])[1]])
+		for i in self.fills:
+			i.draw(cr, rect=rect)
+		for i in self.lines:
+			i.draw(cr, rect=rect)
 	def add(self, *args):
 		self.activelayer.add(*args)
+	def delete(self, *args):
+		self.activelayer.delete(*args)
 	def add_frame(self, populate):
 		self.activelayer.add_frame(populate)
 	def add_layer(self, index):
@@ -2644,6 +2713,147 @@ class Group (object):
 								self.tempgroup = None
 							self.activelayer.currentselect = None
 							self.startx, self.starty = x, y
+							if MODE in " s":
+								for i in self.lines:
+									if abs(x-i.endpoint1.x)<10 and abs(y-i.endpoint1.y)<10:
+										i.endpoint1.x = x
+										i.endpoint1.y = y
+										self.activepoint = i.endpoint1
+										return
+									elif abs(x-i.endpoint2.x)<10 and abs(y-i.endpoint2.y)<10:
+										i.endpoint2.x = x
+										i.endpoint2.y = y
+										self.activepoint = i.endpoint2
+										return
+							elif MODE=="b":
+								nlines = [i for i in self.lines]
+								# First, remove all line segments that have at least one free endpoit, not coincident with any other segment.
+								# Do that repeatedly until no such segment remains.
+								for i in reversed(nlines):
+									if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+										nlines.remove(i)
+									elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+										nlines.remove(i)
+
+								# Find the closest segment to the point.
+								if nlines:
+									mindist = sys.maxint
+									point = Point(x, y)
+									closestsegment = None
+									for i in nlines:
+										d = misc_funcs.distToSegment(point,i.endpoint1,i.endpoint2)
+										if d<mindist:
+											mindist = d
+											closestsegment = i
+
+									print closestsegment
+
+									# Go to the endpoint and turn right. Repeat until you hit the closest segment again.
+									if closestsegment:
+										# Grab angles to closest segments endpoints, go to the counterclockwise-most one
+										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
+										angle2 = misc_funcs.angle_to_point(point, closestsegment.endpoint2)
+										if (angle1<angle2 and angle2-angle1<180):
+											startpoint = closestsegment.endpoint2
+											sp = 2
+										else:
+											startpoint = closestsegment.endpoint1
+											sp = 1
+										linelist = [closestsegment]
+										while True:
+											# try:
+											nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i==closestsegment])[1]
+											# except:
+												# break
+											closestsegment = nextline
+											startpoint = [None,closestsegment.endpoint1,closestsegment.endpoint2][sp]
+											if not nextline in linelist:
+												linelist.append(nextline)
+											else:
+												break
+
+										# Check if the polygon encloses the given point. If it is not, then we've found an "island"
+										if misc_funcs.hittest(linelist,x,y):
+											f = Fill()
+											dic = {}
+											for i in linelist:
+												dic[i.endpoint1]=i
+											
+											def walk(list_of_lines, starting_point):
+												lookup_map = {}
+												for i in list_of_lines:
+													lookup_map[i.endpoint1]=i
+												cur_point = starting_point
+												visited_points = []
+												print lookup_map
+												while cur_point.endpoint2 in lookup_map and not cur_point in visited_points:
+													visited_points.append(cur_point)
+													cur_point = lookup_map[cur_point.endpoint2]
+													yield cur_point
+
+
+											# f.lines = linelist
+											f.lines = [x for x in walk(linelist,linelist[0])]
+											print f.lines
+											self.fills.append(f)
+										else:
+											print "No hit"
+
+
+								'''nlines = [i for i in self.lines]
+								endsleft = True
+								while endsleft:
+									endsleft = False
+									for i in reversed(nlines):
+										if not (i.endpoint1 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+										elif not (i.endpoint2 in [j.endpoint1 for j in nlines if not j==i]+[j.endpoint2 for j in nlines if not j==i]):
+											nlines.remove(i)
+											endsleft = True
+								print "2728",nlines
+								
+								if nlines:
+									mindist = sys.maxint
+									point = Point(x, y)
+									closestsegment = None
+
+									for i in nlines:
+										d = misc_funcs.distToSegment(point,i.endpoint1,i.endpoint2)
+										if d<mindist:
+											mindist = d
+											closestsegment = i
+
+									f = Fill()
+									f.lines = nlines
+									self.fills.append(f)
+
+									if closestsegment:
+										# Then go to endpoint of closestsegment counterclockwise from point
+										angle1 = misc_funcs.angle_to_point(point, closestsegment.endpoint1)
+										angle2 = misc_funcs.angle_to_point(point, closestsegment.endpoint2)
+										if (angle1<angle2 and angle2-angle1<180):
+											startpoint = closestsegment.endpoint2
+										else:
+											startpoint = closestsegment.endpoint1
+										print startpoint.lines
+										linelist = [closestsegment]
+										# nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i in linelist])
+										# print nextline
+										# Then, follow clockwise-most segment leading off from said point
+										while True:
+											try:
+												nextline = max([[closestsegment.angle(i),i] for i in startpoint.lines if not i==closestsegment])[1]
+											except:
+												break
+											closestsegment = nextline
+											if not nextline in linelist:
+												linelist.append(nextline)
+											else:
+												break
+										print "*****",linelist
+										# Continue until closestsegment is reached. I _think_ this is inevitable.'''
+
 							self.selecting = True
 				else:
 					self.onMouseDown(self, x, y, button=button, clicks=clicks)
@@ -2658,10 +2868,35 @@ class Group (object):
 		self.dragging = False
 		self.selecting = False
 		x, y = self.localtransform(x, y)
+		# If we are in selection mode and the current level (i.e. what we're inside of) is this layer
 		if self.activelayer.level and MODE in [" ", "s"]:
+			# If we have a selection
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseUp(x, y, button=button, clicks=clicks)
+			# If we have a point that we're dragging around (vector editing)
+			elif self.activepoint:
+				for i in self.lines:
+					if abs(self.activepoint.x-i.endpoint1.x)<10 and abs(self.activepoint.y-i.endpoint1.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint1, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint1, 2)
+								break
+							except IndexError: pass
+					if abs(self.activepoint.x-i.endpoint2.x)<10 and abs(self.activepoint.y-i.endpoint2.y)<10:
+						try:
+							[j for j in self.lines if self.activepoint==j.endpoint1][0].assign(i.endpoint2, 1)
+						except IndexError:
+							try:
+								[j for j in self.lines if self.activepoint==j.endpoint2][0].assign(i.endpoint2, 2)
+								break
+							except IndexError: pass
+						break
+				self.activepoint = None
+			# if neither of those, but we've dragged the mouse at least 4 pixels in either axis
 			elif abs(self.startx-x)>4 or abs(self.starty-y)>4:
+				# this should make a temporary group containing all the objects within the area we dragged
 				objs = []
 				for i in reversed(self.currentFrame()):
 					if self.startx<i.x+i.minx<x or self.startx<i.x+i.maxx<x:
@@ -2695,6 +2930,9 @@ class Group (object):
 		if self.activelayer.level and MODE in [" ", "s"]:
 			if self.activelayer.currentselect:
 				self.activelayer.currentselect._onMouseDrag(x, y, button=button)
+			elif self.activepoint:
+				self.activepoint.x = x
+				self.activepoint.y = y
 		else:
 			self.onMouseDrag(self, x, y, button=button)
 	def onMouseDrag(self, self1, x, y, button=1, clicks=1):
@@ -2732,6 +2970,17 @@ class Group (object):
 		#	retval+=i.print_sc(True, False)
 		if not self.name=="_root":
 			retval+=".sprite "+self.name+"\n"
+		if self.fills:
+			for i in self.fills:
+				retval+=i.print_sc()
+				retval+=".put fill_"+str(i.__hash__())+"\n"
+		if self.lines:
+			for i in self.lines:
+				retval+=".outline "+self.name+"_line_"+str(i.__hash__())+"_outline:\n"
+				retval+=" "+i.print_sc()
+				retval+="\n.end\n"
+				retval+=".filled "+self.name+"_line_"+str(i.__hash__())+" outline="+self.name+"_line_"+str(i.__hash__())+"_outline color="+i.linecolor.rgb+"\n"
+				retval+=".put "+self.name+"_line_"+str(i.__hash__())+"\n"
 		for i in xrange(self.maxframe()):
 			for j in self.layers:
 				if j.frames[i]:
@@ -2776,7 +3025,7 @@ class Group (object):
 class TemporaryGroup(Group):
 	"""Created when selecting multiple items, for ease of use."""
 	def __init__(self, *args, **kwargs):
-		(TemporaryGroup, self).__init__(*args, **kwargs)
+		super(TemporaryGroup, self).__init__(*args, **kwargs)
 	# def draw(self, cr=None, transform=None, rect=None):
 	# 	super(TemporaryGroup, self).draw(cr, transform, rect)
 	# 	print self.x, self.activelayer.x
@@ -2834,6 +3083,195 @@ class TemporaryGroup(Group):
 		elif key=="down_arrow":
 			self1.y+=1
 		
+class Point(object):
+	"""represents an x,y point, might store other data in the future"""
+	def __init__(self, x, y):
+		super(Point, self).__init__()
+		self.x = x
+		self.y = y
+		self.lines = set()
+	def __repr__(self):
+		return "<Point x="+str(self.x)+" y="+str(self.y)+">"
+		
+
+class Line(object):
+	"""Use Lines to build Shapes while allowing paintbucketing."""
+	def __init__(self, endpoint1, endpoint2, connection1 = None, connection2 = None):
+		super(Line, self).__init__()
+		self.endpoint1 = endpoint1
+		self.endpoint2 = endpoint2
+		self.endpoint1.lines.add(self)
+		self.endpoint2.lines.add(self)
+		self.connection1 = connection1
+		self.connection2 = connection2
+		if self.connection1: self.connection1.lines.add(self)
+		if self.connection2: self.connection2.lines.add(self)
+		self.linecolor = LINECOLOR
+		self.linewidth = LINEWIDTH
+	def __repr__(self):
+		return "<Line (endpoint1=("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+"),endpoint2=("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+"))>"
+	def assign(self, point, which):
+		if which==1:
+			self.connection1 = point
+			self.connection1.lines.add(self)
+		elif which==2:
+			self.connection2 = point
+			self.connection2.lines.add(self)
+	def angle(self, other):
+		if self.endpoint1==other.endpoint1:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint2==other.endpoint1:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint2.x-other.endpoint1.x
+			y2 = other.endpoint2.y-other.endpoint1.y
+		elif self.endpoint1==other.endpoint2:
+			x1 = self.endpoint2.x-self.endpoint1.x
+			y1 = self.endpoint2.y-self.endpoint1.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		elif self.endpoint2==other.endpoint2:
+			x1 = self.endpoint1.x-self.endpoint2.x
+			y1 = self.endpoint1.y-self.endpoint2.y
+			x2 = other.endpoint1.x-other.endpoint2.x
+			y2 = other.endpoint1.y-other.endpoint2.y
+		dot = x1*x2+y1*y2
+		mag1 = math.sqrt(x1**2+y1**2)
+		mag2 = math.sqrt(x2**2+y2**2)
+		angle = math.acos(dot/(mag1*mag2))/math.pi*180
+		cz = x1*y2-y1*x2
+		if cz>0: angle=360-angle
+		return angle
+	def intersects(self,other):
+		'''def IsOnLeft(a,b,c):
+			return Area2(a,b,c) > 0
+		def IsOnRight(a,b,c):
+			return Area2(a,b,c) < 0
+		def IsCollinear(a,b,c):
+			return Area2(a,b,c) == 0
+		def Area2 (a,b,c):
+			return (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)
+		if (IsOnLeft(self.endpoint1,self.endpoint2,other.endpoint1) and IsOnRight(self.endpoint1,self.endpoint2,other.endpoint2))
+			or (IsOnLeft(self.endpoint1,self.endpoint2,other.endpoint2) and IsOnRight(self.endpoint1,self.endpoint2,other.endpoint1):
+			if (IsOnLeft(other.endpoint1,other.endpoint2,self.endpoint1) and IsOnRight(other.endpoint1,other.endpoint2,self.endpoint2))
+				or (IsOnLeft(other.endpoint1,other.endpoint2,self.endpoint2) and IsOnRight(other.endpoint1,other.endpoint2,self.endpoint1):
+					return True'''
+		# Formula for line is y = mx + b
+		try:
+			sm = (self.endpoint1.y-self.endpoint2.y)/(self.endpoint1.x-self.endpoint1.y)
+			om = (other.endpoint1.y-other.endpoint2.y)/(other.endpoint1.x-other.endpoint1.y)
+			sb = self.endpoint1.y-sm*self.endpoint1.x
+			ob = other.endpoint1.y-sm*other.endpoint1.x
+			if sm == om: return False
+			x = (ob-sb)/(sm-om)
+			y = sm*x + sb
+			if min(self.endpoint1.x,self.endpoint2.x)<x<max(self.endpoint1.x,self.endpoint2.x):
+				return [x,y]
+			else:
+				return False
+		except ZeroDivisionError:
+			# One of the lines is vertical.
+			# Formula for line in terms of y is x = my + b
+			try:
+				sm = (self.endpoint1.x-self.endpoint2.x)/(self.endpoint1.y-self.endpoint1.x)
+				om = (other.endpoint1.x-other.endpoint2.x)/(other.endpoint1.y-other.endpoint1.x)
+				sb = self.endpoint1.x-sm*self.endpoint1.y
+				ob = other.endpoint1.x-sm*other.endpoint1.y
+				if sm == om: return False
+				y = (ob-sb)/(sm-om)
+				x = sm*y + sb
+				if min(self.endpoint1.y,self.endpoint2.y)<y<max(self.endpoint1.y,self.endpoint2.y):
+					return [x,y]
+			except ZeroDivisionError:
+				# One of the lines is horizontal, too. Or one has zero length.
+				# Logic this.
+				return False
+
+		return False
+	def draw(self, cr=None, transform=None, rect=None):
+		if self.connection1:
+			self.endpoint1 = self.connection1
+		if self.connection2:
+			self.endpoint2 = self.connection2
+		if SYSTEM=="gtk":
+			cr.save()
+			cr.set_source(self.linecolor.cairo)
+			cr.set_line_width(max(self.linewidth,1))
+			cr.move_to(self.endpoint1.x,self.endpoint2.y)
+			cr.line_to(self.endpoint2.x,self.endpoint2.y)
+			cr.stroke()
+			cr.restore()
+		elif SYSTEM=="android":
+			global tb
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+		elif SYSTEM=="osx":
+			if USING_GL:
+				cr.save()
+				glColor3f(1.0,0.0,0.0)
+				glBegin(GL_LINES)
+				cr.x, cr.y = (self.endpoint1.x, self.endpoint1.y)
+				glVertex2f(cr.x, -cr.y)
+				point = (self.endpoint2.x, self.endpoint2.y)
+				glVertex2f(point[0], -point[1]) # because OpenGL swaps y coords
+				cr.x, cr.y = point
+				glEnd()
+				cr.restore()
+			else:
+				cr.gsave()
+				cr.newpath()
+				cr.pencolor = self.linecolor.pygui
+				cr.pensize = max(self.linewidth,1)
+				cr.moveto(self.endpoint1.x, self.endpoint1.y)
+				cr.lineto(self.endpoint2.x,self.endpoint2.y)
+				cr.stroke()
+				cr.grestore()
+		elif SYSTEM=="html":
+			tb = ""
+			tb+="cr.save()\n"
+			tb+="cr.lineWidth = "+str(max(self.linewidth,1))+"\n"
+			tb+="cr.moveTo("+str(self.endpoint1.x)+","+str(self.endpoint1.y)+")\n"
+			tb+="cr.lineTo("+str(self.endpoint2.x)+","+str(self.endpoint2.y)+")\n"
+			tb+="cr.stroke()\n"
+			tb+="cr.restore()\n"
+			jscommunicate(tb)
+	def print_sc(self):
+		return "M "+str(self.endpoint1.x)+" "+str(self.endpoint1.y)+" L "+str(self.endpoint2.x)+" "+str(self.endpoint2.y)
+
+class Fill(object):
+	"""Fills are Shapes without edges, built from Lines"""
+	def __init__(self):
+		super(Fill,self).__init__()
+		self.lines = []
+		self.fillcolor = FILLCOLOR
+	def draw(self, cr=None, transform=None, rect=None):
+		if SYSTEM=="osx":
+			if USING_GL:
+				pass
+			else:
+				cr.gsave()
+				cr.newpath()
+				cr.fillcolor = self.fillcolor.pygui
+				cr.moveto(self.lines[0].endpoint1.x,self.lines[0].endpoint1.y)
+				for i in self.lines:
+					cr.lineto(i.endpoint2.x,i.endpoint2.y)
+				cr.fill()
+				cr.grestore()
+	def print_sc(self):
+		retval = ".outline fill_"+str(self.__hash__())+"_outline:\n"
+		retval += "M "+str(self.lines[0].endpoint1.x)+" "+str(self.lines[0].endpoint1.y)
+		for i in self.lines:
+			retval += " L "+str(i.endpoint2.x)+" "+str(i.endpoint2.y)
+		retval += "\n.end\n"
+		retval += ".filled fill_"+str(self.__hash__())+" outline=fill_"+str(self.__hash__())+"_outline fill="+self.fillcolor.rgb+"\n"
+		return retval
 
 def set_cursor(curs, widget=None):
 	if SYSTEM == "osx":

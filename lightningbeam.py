@@ -111,6 +111,7 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 	if svlgui.MODE in [" ", "s"]:
 		if self.hitTest(x, y):
 			self.clicked = True
+		
 	elif svlgui.MODE in ["r", "e", "p"]:
 		if svlgui.MODE=="r":
 			# 'c' stands for 'current'
@@ -118,7 +119,26 @@ def onMouseDownGroup(self, x, y,button=1,clicks=1):
 		elif svlgui.MODE=="e":
 			self.cshape = ellipse(x, y, 0, 0)
 		elif svlgui.MODE=="p":
+			for i in self.lines:
+				if abs(x-i.endpoint1.x)<10 and abs(y-i.endpoint1.y)<10:
+					x, y = i.endpoint1.x, i.endpoint1.y
+					break
+				elif abs(x-i.endpoint2.x)<10 and abs(i.endpoint2.y)<10:
+					x, y = i.endpoint2.x, i.endpoint2.y
+					break
 			self.cshape = shape(x, y)
+			'''self.cshape = svlgui.Line(svlgui.Point(x, y),svlgui.Point(x,y))
+			for i in self.lines:
+				if abs(self.cshape.endpoint1.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint1.y)<10:
+					self.cshape.connection1 = i.endpoint1
+					self.cshape.connection1.lines.add(self.cshape)
+					break
+				elif abs(self.cshape.endpoint1.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint1.y-i.endpoint2.y)<10:
+					self.cshape.connection1 = i.endpoint2
+					self.cshape.connection1.lines.add(self.cshape)
+					break
+			self.lines.append(self.cshape)
+			return'''
 		#self.cshape.rotation = 5
 		self.cshape.initx,self.cshape.inity = x, y
 		self.add(self.cshape)
@@ -185,9 +205,50 @@ def onMouseUpGroup(self, x, y,button=1,clicks=1):
 					undo_stack[-1] = undo_stack[-1].complete({"obj":cobj, "frame":self.activelayer.currentframe, "layer":self.activelayer})
 					clear(redo_stack)
 	elif svlgui.MODE=="p":
-		print len(self.cshape.shapedata)
+		prelen = len(self.cshape.shapedata)
 		self.cshape.shapedata = misc_funcs.simplify_shape(self.cshape.shapedata, svlgui.PMODE.split()[-1],1)
-		print len(self.cshape.shapedata)
+		postlen = len(self.cshape.shapedata)
+		print str((prelen-postlen)*100/prelen)+"% reduction: started at "+str(prelen)+" vertices, ended at "+str(postlen)+" vertices"
+		if svlgui.PMODE.split()[-1]=="straight":
+			lastline = None
+			x, y = self.cshape.x, self.cshape.y
+			for a, b in misc_funcs.pairwise(self.cshape.shapedata):
+				l = svlgui.Line(svlgui.Point(a[1]+x,a[2]+y),svlgui.Point(b[1]+x,b[2]+y))
+				if lastline:
+					l.connection1 = lastline.endpoint2
+					l.connection1.lines.add(l)
+				lastline = l
+				self.lines.append(l)
+			self.delete(self.activelayer.frames[self.currentframe].objs[-1])
+			for line in self.lines:
+				for otherline in self.lines:
+					if not otherline is line:
+						if line.connection1 and otherline in line.connection1.lines: continue
+						if line.connection2 and otherline in line.connection2.lines: continue
+						inter = line.intersects(otherline)
+						if inter:
+							print "INTERSECTION"
+							inter = svlgui.Point(*inter)
+							l1 = svlgui.Line(line.endpoint1,inter,line.connection1,inter)
+							l2 = svlgui.Line(line.endpoint2,inter,line.connection2,inter)
+							l3 = svlgui.Line(otherline.endpoint1,inter,otherline.connection1,inter)
+							l4 = svlgui.Line(otherline.endpoint2,inter,otherline.connection2,inter)
+							inter.lines.add(l1)
+							inter.lines.add(l2)
+							inter.lines.add(l3)
+							inter.lines.add(l4)
+							self.lines[self.lines.index(line):self.lines.index(line)+1]=[l1,l2]
+							self.lines[self.lines.index(otherline):self.lines.index(otherline)+1]=[l3,l4]
+							break
+		'''for i in self.lines:
+			if abs(self.cshape.endpoint2.x-i.endpoint1.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint1.y)<10:
+				self.cshape.connection2 = i.endpoint1
+				self.cshape.connection2.lines.add(self.cshape)
+				break
+			elif abs(self.cshape.endpoint2.x-i.endpoint2.x)<10 and abs(self.cshape.endpoint2.y-i.endpoint2.y)<10:
+				self.cshape.connection2 = i.endpoint2
+				self.cshape.connection2.lines.add(self.cshape)
+				break'''
 		self.cshape = None
 		MainWindow.stage.draw()
 def onMouseUpObj(self, x, y,button=1,clicks=1):
@@ -247,6 +308,8 @@ def onMouseDragGroup(self, x, y,button=1,clicks=1):
 		self.cshape.shapedata = [["M",x/2,0],["C",4*x/5,0,x,y/5,x,y/2],["C",x,4*y/5,4*x/5,y,x/2,y],["C",x/5,y,0,4*y/5,0,y/2],["C",0,y/5,x/5,0,x/2,0]]
 	elif svlgui.MODE == "p":
 		self.cshape.shapedata.append(["L",x-self.cshape.initx,y-self.cshape.inity])
+		# self.cshape.endpoint2.x = x
+		# self.cshape.endpoint2.y = y
 def onMouseDragObj(self, x, y,button=1,clicks=1):
 	if svlgui.MODE==" ":
 		self.x = x-self.initx
@@ -546,6 +609,8 @@ if svlgui.SYSTEM == "gtk":
 	MainWindow = lightningbeam_windows.MainWindow()
 elif svlgui.SYSTEM=="osx":
 	MainWindow = lightningbeam_windows.MainWindowOSX()
+elif svlgui.SYSTEM=="kivy":
+	MainWindow = lightningbeam_windows.MainWindowKivy()
 elif svlgui.SYSTEM=="html":
 	MainWindow = lightningbeam_windows.MainWindowHTML()
 elif svlgui.SYSTEM=="pyglet":

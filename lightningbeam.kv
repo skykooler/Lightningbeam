@@ -1,12 +1,16 @@
 #:kivy 1.0
 #:import ActionScriptLexer pygments.lexers.ActionScriptLexer
 
-<Lightningbeam>:
+<KivyCanvas>:
+
+
+<LightningbeamPanel>:
 	do_default_tab: False
 	TabbedPanelItem:
 		text: 'Drawing'
 		BoxLayout:
 			orientation: "vertical"
+			KivyCanvas:
 			
 	TabbedPanelItem:
 		text: 'Tools'
@@ -25,7 +29,7 @@
 			Button:
 				text: "Ellipse"
 			Button:
-				text: "Painbrush"
+				text: "Paintbrush"
 	TabbedPanelItem:
 		text: 'ActionScript'
 		CodeInput:
