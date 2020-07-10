@@ -1,19 +1,25 @@
 <!DOCTYPE html>
 <head>
+<meta charset="UTF-8">
 <style>
 :root {
-	--main-bg-color: #aaa;
-	--bg-accent-color: #888;
+	--main-bg-color: #383838;
+	--bg-accent-color: #2B2B2B;
+	--button-bg-color: #595959;
+	--main-fg-color: #fff;
+	--fg-accent-color: #5b85c7;
 	--timeline-height: 100px;
+	--timeline-layer-width: 150px;
 }
 body {
-	background-color: #bbb;
+	background-color: var(--main-bg-color);
 	margin: 0;
 }
 #timeline {
-	width: 100%;
+	width: calc(100vw - 30% - var(--timeline-layer-width));
 	height: var(--timeline-height);
 	border-top: 2px solid var(--bg-accent-color);
+	margin-left: 150px;
 	background: repeating-linear-gradient(
 		90deg,
 		var(--main-bg-color),
@@ -61,11 +67,13 @@ body {
 #tools {
 	width: 120px;
 	/*height: 600px;*/
-	background-color: #ddd;
+	background-color: var(--main-bg-color);
+	box-shadow: 0px 2px 10px #0004;
 	position: fixed;
 	top: 10px;
 	left: 20px;
 	list-style: none;
+	border-radius: 5px;
 	/*margin: 2em;*/
 	padding-top: 20px;
 	padding-bottom: 20px;
@@ -75,9 +83,10 @@ body {
 }
 .tool {
 	margin-left: -20px;
-	background-color: #fff;
+	background-color: var(--button-bg-color);
 	width: 50px;
 	height: 50px;
+	border-radius: 5px;
 }
 #scriptEditor, .CodeMirror {
 	/*grid-area: CodeEditor;*/
