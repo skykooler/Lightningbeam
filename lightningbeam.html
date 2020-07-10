@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<head>
+<style>
+body {
+	background-color: #bbb;
+	margin: 0;
+}
+#stagecontainer {
+	overflow: auto;
+	border: 2px solid #444;
+	width: 8192px;
+	height: 8192px;
+	margin: 0;
+}
+#stage {
+	width: 1024px;
+	height: 768px;
+	background-color: #fff;
+	/*TODO*/
+	position: absolute;
+	top: 300px;
+	left: 700px;
+}
+#tools {
+	width: 120px;
+	/*height: 600px;*/
+	background-color: #ddd;
+	position: fixed;
+	top: 10px;
+	left: 20px;
+	list-style: none;
+	/*margin: 2em;*/
+	padding-top: 20px;
+	padding-bottom: 20px;
+	display: grid;
+	grid-gap: 20px;
+	grid-template-columns: repeat(auto-fill,minmax(50px, 1fr));
+}
+.tool {
+	margin-left: -20px;
+	background-color: #fff;
+	width: 50px;
+	height: 50px;
+}
+</style>
+<script>
+function activateTool(tool) {
+	switch(tool) {
+		case 'rect': alert('hi')
+	}
+}
+</script>
+</head>
+<body>
+	<div id="stagecontainer">
+		<div id="stage"></div>
+	</div>
+	<ul id="tools">
+		<li class="tool"></li>
+		<li class="tool"></li>
+		<li class="tool" id="rect_tool" onclick="activateTool('rect')">
+			<icon style="width:30px; height:20px; display: block; background-color: blue"></icon>
+		</li>
+		<li class="tool"></li>
+		<li class="tool"></li>
+		<li class="tool"></li>
+		<li class="tool"></li>
+		<li class="tool"></li>
+		<li class="tool"></li>
+	</ul>
+</body>
