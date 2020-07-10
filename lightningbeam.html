@@ -1,23 +1,60 @@
 <!DOCTYPE html>
 <head>
 <style>
+:root {
+	--main-bg-color: #aaa;
+	--bg-accent-color: #888;
+	--timeline-height: 100px;
+}
 body {
 	background-color: #bbb;
 	margin: 0;
 }
-#stagecontainer {
+#timeline {
+	width: 100%;
+	height: var(--timeline-height);
+	border-top: 2px solid var(--bg-accent-color);
+	background: repeating-linear-gradient(
+		90deg,
+		var(--main-bg-color),
+		var(--main-bg-color) 10px,
+		var(--bg-accent-color) 10px,
+		var(--bg-accent-color) 11px,
+		var(--main-bg-color) 11px,
+		var(--main-bg-color) 20px,
+		var(--bg-accent-color) 20px,
+		var(--bg-accent-color) 21px,
+		var(--main-bg-color) 21px,
+		var(--main-bg-color) 30px,
+		var(--bg-accent-color) 30px,
+		var(--bg-accent-color) 31px,
+		var(--main-bg-color) 31px,
+		var(--main-bg-color) 40px,
+		var(--bg-accent-color) 40px,
+		var(--bg-accent-color) 50px
+	);
+}
+
+#menuBar {  }
+
+#stagecontainercontainer {
 	overflow: auto;
+	/*position: absolute;*/
+	width: calc(100vw - 30%);
+	height: calc(100vh - var(--timeline-height));
+	/*height: calc(~"100vh - 100px");*/
+}
+#stagecontainer {
 	border: 2px solid #444;
 	width: 8192px;
 	height: 8192px;
-	margin: 0;
 }
 #stage {
 	width: 1024px;
 	height: 768px;
 	background-color: #fff;
 	/*TODO*/
-	position: absolute;
+	position: relative;
 	top: 300px;
 	left: 700px;
 }
@@ -43,6 +80,7 @@ body {
 	height: 50px;
 }
 #scriptEditor, .CodeMirror {
+	/*grid-area: CodeEditor;*/
 	height: 100% !important;
 	width: 30%;
 	position: fixed !important;
@@ -64,23 +102,29 @@ function activateTool(tool) {
 <script src="mode/javascript/javascript.js"></script>
 </head>
 <body>
-	<div id="stagecontainer">
-		<div id="stage"></div>
+	<div class="grid-container">
+		<div id="menuBar"></div>
+		<div id="stagecontainercontainer">
+			<div id="stagecontainer">
+				<div id="stage"></div>
+			</div>
+		</div>
+		<ul id="tools">
+			<li class="tool"></li>
+			<li class="tool"></li>
+			<li class="tool" id="rect_tool" onclick="activateTool('rect')">
+				<icon style="width:30px; height:20px; display: block; background-color: blue"></icon>
+			</li>
+			<li class="tool"></li>
+			<li class="tool"></li>
+			<li class="tool"></li>
+			<li class="tool"></li>
+			<li class="tool"></li>
+			<li class="tool"></li>
+		</ul>
+		<textarea id="scriptEditor"></textarea>
+		<div id="timeline"></div>
 	</div>
-	<ul id="tools">
-		<li class="tool"></li>
-		<li class="tool"></li>
-		<li class="tool" id="rect_tool" onclick="activateTool('rect')">
-			<icon style="width:30px; height:20px; display: block; background-color: blue"></icon>
-		</li>
-		<li class="tool"></li>
-		<li class="tool"></li>
-		<li class="tool"></li>
-		<li class="tool"></li>
-		<li class="tool"></li>
-		<li class="tool"></li>
-	</ul>
-	<textarea id="scriptEditor"></textarea>
 </body>
 <script>
 // Page load complete setup
