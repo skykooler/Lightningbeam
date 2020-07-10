@@ -40,6 +40,62 @@ body {
 		var(--bg-accent-color) 50px
 	);
 }
+#timeline-numbering {
+	background-color: var(--bg-accent-color);
+	height: 20px;
+	width: 100%;
+	position: relative;
+	top: 0px;
+	left: 0px;
+}
+#timeline-marker {
+	width: 2px;
+	height: var(--timeline-height);
+	position: relative;
+	background-color: var(--fg-accent-color);
+}
+#timeline-layers {
+	position: absolute;
+	height: var(--timeline-height);
+	width: var(--timeline-layer-width);
+	bottom: 0px;
+	left: 0px;
+	/*background-color: var(--bg-accent-color);*/
+}
+#timeline-control {
+	height: 20px;
+	width: 100%;
+	position: relative;
+	top: 0px;
+	left: 0px;
+	padding-left: 5px;
+	background-color: var(--bg-accent-color);
+}
+button {
+	background-color: var(--button-bg-color);
+	border-radius: 3px;
+	color: var(--main-fg-color);
+	border:none;
+}
+button:active {
+	background-color: var(--fg-accent-color);
+}
+button.selected {
+	background-color: var(--fg-accent-color);
+}
+.layers {
+	list-style-type: none;
+	padding: 0;
+	margin-top: 0;
+	font-family: Helvetica, sans-serif;
+}
+.layers li {
+	background-color: var(--bg-accent-color);
+	padding: 5px;
+	color: var(--main-fg-color);
+	border-top: 1px solid #fff2;
+	border-bottom: 1px solid #0002;
+}
 
 #menuBar {  }
 
@@ -98,9 +154,52 @@ body {
 }
 </style>
 <script>
+playing = false;
+frame = 0;
+framerate = 12
+start = 0;
+repeating = false;
 function activateTool(tool) {
 	switch(tool) {
 		case 'rect': alert('hi')
+	}
+}
+function eventLoop(timestamp) {
+	if (start==0) {
+		start=timestamp-0.01 // let's avoid any possible division by zero here
+	}
+	timestep = (timestamp - start) / 1000
+	start = timestamp
+	if (playing) {
+		frame += timestep * framerate
+	}
+	document.getElementById("timeline-marker").style.left = frame * 10 + "px"
+
+	window.requestAnimationFrame(eventLoop)
+}
+function gotobeginning() {
+	frame = 0;
+}
+function playpause() {
+	if (playing) {
+		console.log("pausing")
+		playing = false;
+		frame = Math.round(frame)
+		document.getElementById("playbtn").className = "fa fa-play"
+	} else {
+		console.log("playing")
+		playing = true;
+		document.getElementById("playbtn").className = "fa fa-pause"
+	}
+}
+
+function toggleRepeat() {
+	if (repeating) {
+		repeating = false
+		document.getElementById("repeatbtn").className = ""
+	} else {
+		repeating = true
+		document.getElementById("repeatbtn").className = "selected"
 	}
 }
 </script>
@@ -108,6 +207,8 @@ function activateTool(tool) {
 <link rel="stylesheet" type="text/css" href="lib/codemirror.css">
 <link rel="stylesheet" type="text/css" href="theme/neat2.css">
 <link rel="stylesheet" type="text/css" href="theme/monokai.css">
+<!-- TODO: bundle this -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
 <script src="mode/javascript/javascript.js"></script>
 </head>
 <body>
@@ -132,7 +233,23 @@ function activateTool(tool) {
 			<li class="tool"></li>
 		</ul>
 		<textarea id="scriptEditor"></textarea>
-		<div id="timeline"></div>
+		<div id="timeline">
+			<div id="timeline-numbering"></div>
+			<div id="timeline-marker"></div>
+			<div id="timeline-layers">
+				<div id="timeline-control">
+					<button class="btn" onclick="gotobeginning()"><i class="fa fa-fast-backward" aria-hidden="true"></i></button>
+					<button class="btn" onclick="playpause()">
+						<i id="playbtn" class="fa fa-play" aria-hidden="true"></i></button>
+					<button class="btn"><i class="fa fa-fast-forward" aria-hidden="true"></i></button>
+					<button class="btn" id="repeatbtn" onclick="toggleRepeat()"><i class="fa fa-repeat" aria-hidden="true"></i></button>
+				</div>
+				<ul class="layers">
+					<li>Layer 1</li>
+					<li>Layer 2</li>
+				</ul>
+			</div>
+		</div>
 	</div>
 </body>
 <script>
@@ -147,4 +264,5 @@ var scriptCodeMirror = CodeMirror.fromTextArea(scriptEditor,
 		cursorScrollMargin: 1,
 		theme: "monokai"
 	})
+window.requestAnimationFrame(eventLoop);
 </script>
