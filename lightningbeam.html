@@ -42,6 +42,13 @@ body {
 	width: 50px;
 	height: 50px;
 }
+#scriptEditor, .CodeMirror {
+	height: 100% !important;
+	width: 30%;
+	position: fixed !important;
+	top: 0px;
+	right: 0px;
+}
 </style>
 <script>
 function activateTool(tool) {
@@ -50,6 +57,11 @@ function activateTool(tool) {
 	}
 }
 </script>
+<script src="lib/codemirror.js"></script>
+<link rel="stylesheet" type="text/css" href="lib/codemirror.css">
+<link rel="stylesheet" type="text/css" href="theme/neat2.css">
+<link rel="stylesheet" type="text/css" href="theme/monokai.css">
+<script src="mode/javascript/javascript.js"></script>
 </head>
 <body>
 	<div id="stagecontainer">
@@ -68,4 +80,18 @@ function activateTool(tool) {
 		<li class="tool"></li>
 		<li class="tool"></li>
 	</ul>
+	<textarea id="scriptEditor"></textarea>
 </body>
+<script>
+// Page load complete setup
+var scriptEditor = document.getElementById("scriptEditor")
+var scriptCodeMirror = CodeMirror.fromTextArea(scriptEditor,
+	{
+		mode: "javascript",
+		lineNumbers: true,
+		showCursorWhenSelecting: true,
+		selectionsMayTouch: true,
+		cursorScrollMargin: 1,
+		theme: "monokai"
+	})
+</script>

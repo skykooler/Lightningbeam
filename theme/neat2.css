@@ -1,0 +1,14 @@
+.cm-s-neat2 span.cm-comment { color: #a86; }
+.cm-s-neat2 span.cm-keyword { line-height: 1em; font-weight: bold; color: blue; }
+.cm-s-neat2 span.cm-string { color: #45b11c; }
+.cm-s-neat2 span.cm-builtin { line-height: 1em; font-weight: bold; color: #077; }
+.cm-s-neat2 span.cm-special { line-height: 1em; font-weight: bold; color: #0aa; }
+.cm-s-neat2 span.cm-variable { color: black; }
+.cm-s-neat2 span.cm-number, .cm-s-neat2 span.cm-atom { color: #3a3; }
+.cm-s-neat2 span.cm-meta { color: #555; }
+.cm-s-neat2 span.cm-link { color: #3a3; }
+
+.cm-s-neat2 .CodeMirror-activeline-background { background: #e8f2ff; }
+.cm-s-neat2 .CodeMirror-matchingbracket { outline:1px solid grey; color:black !important; }
+
+.cm-s-neat2 span.cm-property, .cm-s-neat2 span.cm-attribute { color: blue; }
