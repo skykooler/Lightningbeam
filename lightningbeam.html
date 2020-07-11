@@ -165,6 +165,7 @@ frame = 0;
 framerate = 12
 start = 0;
 repeating = false;
+zoom = 1
 function activateTool(tool) {
 	switch(tool) {
 		case 'rect': alert('hi')
@@ -206,6 +207,31 @@ function toggleRepeat() {
 	} else {
 		repeating = true
 		document.getElementById("repeatbtn").className = "selected"
+	}
+}
+
+function zoomInOut(fac) {
+	scc = document.getElementById("stagecontainercontainer")
+	// TODO: zoom to center instead of top-left corner
+	leftscroll = scc.scrollLeft / zoom
+	topscroll = scc.scrollTop / zoom
+	zoom *= fac
+	document.getElementById("stagecontainer").style.transform = "scale("+zoom+")"
+	document.getElementById("stagecontainer").style.width = 8192*zoom+"px"
+	document.getElementById("stagecontainer").style.height = 8192*zoom+"px"
+	scc.scrollLeft = leftscroll * zoom
+	scc.scrollTop = topscroll * zoom
+
+}
+
+function zoomIn() {
+	if (zoom < 100) {
+		zoomInOut(1.5)
+	}
+}
+function zoomOut() {
+	if (zoom > 0.1) {
+		zoomInOut(1/1.5)
 	}
 }
 </script>
