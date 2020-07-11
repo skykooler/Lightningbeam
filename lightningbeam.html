@@ -182,6 +182,8 @@ function eventLoop(timestamp) {
 	}
 	document.getElementById("timeline-marker").style.left = frame * 10 + "px"
 
+	root.draw()
+
 	window.requestAnimationFrame(eventLoop)
 }
 function gotobeginning() {
@@ -234,6 +236,66 @@ function zoomOut() {
 		zoomInOut(1/1.5)
 	}
 }
+class Sprite {
+	constructor(children) {
+		this.layers = [
+			{
+				name:"Layer 1",
+				visible: true,
+				objects: children
+			}
+		]
+		// todo: calculate bounding box automatically
+		var ls = []
+		var rs = []
+		var ts = []
+		var bs = []
+		for (let child of children) {
+			ls.push(child.bounds.l)
+			rs.push(child.bounds.r)
+			ts.push(child.bounds.t)
+			bs.push(child.bounds.b)
+		}
+		var l = Math.min(ls)
+		var r = Math.max(rs)
+		var t = Math.min(ts)
+		var b = Math.max(bs)
+		this.x = (l+r)/2
+		this.y = (t+b)/2
+	}
+
+	get bounds() {
+		return 0
+	}
+
+	draw () {
+
+	}
+}
+
+class Graphic {
+	constructor() {
+		var NS = "http://www.w3.org/2000/svg";
+		this.svg = document.createElementNS(NS, "svg")
+
+		//this.svg.width = 300
+		//this.svg.height = 150
+		document.getElementById("stage").appendChild(this.svg)
+		var svgrect = document.createElementNS(NS, "rect")
+		svgrect.width.baseVal.value = 150
+		svgrect.height.baseVal.value = 100
+		svgrect.style.fill = "blue"
+		this.svg.appendChild(svgrect)
+	}
+
+	get bounds() {
+		return {l: 0, r: 0, t:0, b:0}
+	}
+}
+
+root = new Sprite([])
+
+
 </script>
 <script src="lib/codemirror.js"></script>
 <link rel="stylesheet" type="text/css" href="lib/codemirror.css">
