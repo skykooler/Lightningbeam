@@ -10,6 +10,8 @@
 	--fg-accent-color: #5b85c7;
 	--timeline-height: 100px;
 	--timeline-layer-width: 150px;
+	--toolbar-button-size: 30px;
+	--toolbar-margin: 20px;
 }
 body {
 	background-color: var(--main-bg-color);
@@ -96,6 +98,9 @@ button.selected {
 	border-top: 1px solid #fff2;
 	border-bottom: 1px solid #0002;
 }
+.layercontrol {
+	float: right;
+}
 
 #menuBar {  }
 
@@ -110,6 +115,7 @@ button.selected {
 	border: 2px solid #444;
 	width: 8192px;
 	height: 8192px;
+	transform-origin: 0 0;
 }
 #stage {
 	width: 1024px;
@@ -121,7 +127,7 @@ button.selected {
 	left: 700px;
 }
 #tools {
-	width: 120px;
+	width: calc(var(--toolbar-button-size) * 2 + var(--toolbar-margin));
 	/*height: 600px;*/
 	background-color: var(--main-bg-color);
 	box-shadow: 0px 2px 10px #0004;
@@ -131,17 +137,17 @@ button.selected {
 	list-style: none;
 	border-radius: 5px;
 	/*margin: 2em;*/
-	padding-top: 20px;
-	padding-bottom: 20px;
+	padding-top: var(--toolbar-margin);
+	padding-bottom: var(--toolbar-margin);
 	display: grid;
-	grid-gap: 20px;
-	grid-template-columns: repeat(auto-fill,minmax(50px, 1fr));
+	grid-gap: var(--toolbar-margin);
+	grid-template-columns: repeat(auto-fill,minmax(var(--toolbar-margin), 1fr));
 }
 .tool {
-	margin-left: -20px;
+	margin-left: calc(0px - var(--toolbar-margin));
 	background-color: var(--button-bg-color);
-	width: 50px;
-	height: 50px;
+	width: var(--toolbar-button-size);
+	height: var(--toolbar-button-size);
 	border-radius: 5px;
 }
 #scriptEditor, .CodeMirror {
@@ -220,17 +226,20 @@ function toggleRepeat() {
 			</div>
 		</div>
 		<ul id="tools">
-			<li class="tool"></li>
-			<li class="tool"></li>
-			<li class="tool" id="rect_tool" onclick="activateTool('rect')">
-				<icon style="width:30px; height:20px; display: block; background-color: blue"></icon>
-			</li>
-			<li class="tool"></li>
-			<li class="tool"></li>
-			<li class="tool"></li>
-			<li class="tool"></li>
-			<li class="tool"></li>
-			<li class="tool"></li>
+			<button class="tool"><i class="fa fa-lg fa-mouse-pointer"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-arrows"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-hourglass-o"></i></button><!-- TODO: better "lasso" icon -->
+			<button class="tool"><i class="fa fa-lg fa-font"></i></button>
+			<button class="tool" id="rect_tool" onclick="activateTool('rect')">
+				<i class="fa fa-lg fa-square-o"></i>
+			</button>
+			<button class="tool"><i class="fa fa-lg fa-circle-o"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-minus"></i></button> <!-- TODO: better "line" icon -->
+			<button class="tool"><i class="fa fa-lg fa-paint-brush"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-pencil"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-eyedropper"></i></button>
+			<button class="tool" onclick="zoomIn()"><i class="fa fa-lg fa-eraser"></i></button>
+			<button class="tool" onclick="zoomOut()"><i class="fa fa-lg fa-tint"></i></button>
 		</ul>
 		<textarea id="scriptEditor"></textarea>
 		<div id="timeline">
@@ -245,8 +254,8 @@ function toggleRepeat() {
 					<button class="btn" id="repeatbtn" onclick="toggleRepeat()"><i class="fa fa-repeat" aria-hidden="true"></i></button>
 				</div>
 				<ul class="layers">
-					<li>Layer 1</li>
-					<li>Layer 2</li>
+					<li>Layer 1<i class="layercontrol fa fa-eye"></i></li>
+					<li>Layer 2<i class="layercontrol fa fa-eye-slash"></i></li>
 				</ul>
 			</div>
 		</div>
@@ -265,4 +274,9 @@ var scriptCodeMirror = CodeMirror.fromTextArea(scriptEditor,
 		theme: "monokai"
 	})
 window.requestAnimationFrame(eventLoop);
+
+
+
+rsvg = new Graphic()
+r1 = new Sprite([rsvg])
 </script>
