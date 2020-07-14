@@ -55,7 +55,7 @@ body {
 }
 #timeline-marker {
 	width: 2px;
-	height: var(--timeline-height);
+	height: calc(var(--timeline-height) - 20px);
 	position: relative;
 	background-color: var(--fg-accent-color);
 }
@@ -165,6 +165,18 @@ button.selected {
 	margin: auto;
 	background-color: var(--fillcolor);
 }
+#zoomcontrols {
+	position: fixed;
+	left: calc(20px + var(--toolbar-margin));
+	bottom: calc(var(--timeline-height) + 10px);
+	height: var(--toolbar-button-size);
+}
+#zoombar {
+	width: calc(var(--toolbar-button-size) * 2 + var(--toolbar-margin));
+	display: inline-block;
+	vertical-align: middle;
+	margin-right: var(--toolbar-margin)
+}
 #scriptEditor, .CodeMirror {
 	/*grid-area: CodeEditor;*/
 	height: 100% !important;
@@ -243,12 +255,17 @@ function toggleRepeat() {
 	}
 }
 
-function zoomInOut(fac) {
+function zoomInOut(fac, absolute=false) {
 	scc = document.getElementById("stagecontainercontainer")
 	// TODO: zoom to center instead of top-left corner
 	leftscroll = scc.scrollLeft / zoom
 	topscroll = scc.scrollTop / zoom
-	zoom *= fac
+	if (absolute) {
+		zoom = fac
+	} else {
+		zoom *= fac
+		document.getElementById("zoombar").value = Math.log10(zoom)*100+100
+	}
 	document.getElementById("stagecontainer").style.transform = "scale("+zoom+")"
 	document.getElementById("stagecontainer").style.width = 8192*zoom+"px"
 	document.getElementById("stagecontainer").style.height = 8192*zoom+"px"
@@ -266,6 +283,11 @@ function zoomOut() {
 	if (zoom > 0.1) {
 		zoomInOut(1/1.5)
 	}
+}
+function zoomSlider() {
+	rawval = parseInt(document.getElementById("zoombar").value)
+	val = Math.pow(10, rawval/100)/10
+	zoomInOut(val, true)
 }
 
 function getLineColor() {
@@ -382,6 +404,11 @@ root = new Sprite([])
 			<div id="stagecontainer">
 				<div id="stage"></div>
 			</div>
+		</div>
+		<div id="zoomcontrols">
+			<button class="tool" onclick="zoomOut()"><i class="fa fa-lg fa-search-minus"></i></button>
+			<input type="range" min="0" max="300" value="100" id="zoombar" oninput="zoomSlider()">
+			<button class="tool" onclick="zoomIn()"><i class="fa fa-lg fa-search-plus"></i></button>
 		</div>
 		<ul id="tools">
 			<button class="tool"><i class="fa fa-lg fa-mouse-pointer"></i></button>
