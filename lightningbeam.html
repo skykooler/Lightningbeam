@@ -209,9 +209,22 @@ repeating = false;
 zoom = 1
 var linepicker;
 var fillpicker;
+var active_tool;
+var active_shape;
+var startx;
+var starty;
+var SVG_NS = "http://www.w3.org/2000/svg";
 function activateTool(tool) {
+	active_tool = tool;
 	switch(tool) {
-		case 'rect': alert('hi')
+		case 'pointer': {
+			document.getElementById("stagecontainer").style.cursor = 'default'
+			break;
+		}
+		case 'rect': {
+			document.getElementById("stagecontainer").style.cursor = 'crosshair'
+			break
+		}
 	}
 }
 function eventLoop(timestamp) {
@@ -328,6 +341,7 @@ function pickFillColor() {
 }
 class Sprite {
 	constructor(children) {
+		console.log(children)
 		this.layers = [
 			{
 				name:"Layer 1",
@@ -335,6 +349,7 @@ class Sprite {
 				objects: children
 			}
 		]
+		this.activeLayer = this.layers[0]
 		// todo: calculate bounding box automatically
 		var ls = []
 		var rs = []
@@ -361,17 +376,20 @@ class Sprite {
 	draw () {
 
 	}
+
+	addChild (child) {
+		this.activeLayer.objects.push(child)
+	}
 }
 
 class Graphic {
 	constructor() {
-		var NS = "http://www.w3.org/2000/svg";
-		this.svg = document.createElementNS(NS, "svg")
+		this.svg = document.createElementNS(SVG_NS, "svg")
 
 		//this.svg.width = 300
 		//this.svg.height = 150
 		document.getElementById("stage").appendChild(this.svg)
-		var svgrect = document.createElementNS(NS, "rect")
+		var svgrect = document.createElementNS(SVG_NS, "rect")
 		svgrect.width.baseVal.value = 150
 		svgrect.height.baseVal.value = 100
 		svgrect.style.fill = "blue"
@@ -381,6 +399,10 @@ class Graphic {
 	get bounds() {
 		return {l: 0, r: 0, t:0, b:0}
 	}
+}
+
+function getCurrentGraphic() {
+	return root.activeLayer.objects[0]
 }
 
 root = new Sprite([])
@@ -411,7 +433,7 @@ root = new Sprite([])
 			<button class="tool" onclick="zoomIn()"><i class="fa fa-lg fa-search-plus"></i></button>
 		</div>
 		<ul id="tools">
-			<button class="tool"><i class="fa fa-lg fa-mouse-pointer"></i></button>
+			<button class="tool" onclick="activateTool('pointer')"><i class="fa fa-lg fa-mouse-pointer"></i></button>
 			<button class="tool"><i class="fa fa-lg fa-arrows"></i></button>
 			<button class="tool"><i class="fa fa-lg fa-hourglass-o"></i></button><!-- TODO: better "lasso" icon -->
 			<button class="tool"><i class="fa fa-lg fa-font"></i></button>
@@ -462,8 +484,71 @@ var scriptCodeMirror = CodeMirror.fromTextArea(scriptEditor,
 	})
 window.requestAnimationFrame(eventLoop);
 
+function getStageCoords(event) {
+	var rect = event.target.getBoundingClientRect();
+	var stage = document.getElementById("stage")
+	var stagecontainer = document.getElementById("stagecontainer")
+	var stagerect = stage.getBoundingClientRect()
+	x = event.offsetX + rect.left - stagerect.left
+	y = event.offsetY + rect.top - stagerect.top
+	return [x, y]
+}
+
+document.getElementById("stagecontainer").addEventListener('mousedown', e => {
+	let [x, y] = getStageCoords(e);
+	switch (active_tool) {
+		case 'rect': {
+			graphic = getCurrentGraphic()
+			svg = graphic.svg
+			var svgrect = document.createElementNS(SVG_NS, "rect")
+			active_shape = svgrect
+			svgrect.width.baseVal.value = 180
+			svgrect.height.baseVal.value = 100
+			svgrect.style.fill = getFillColor()
+			console.log(`x: ${x}, y:${y}`)
+			svgrect.x.baseVal.value = x
+			svgrect.y.baseVal.value = y
+			svg.appendChild(svgrect)
+			startx = x;
+			starty = y;
+			break;
+		}
+	}
+})
+
+document.getElementById("stagecontainer").addEventListener('mousemove', e => {
+	let [x, y] = getStageCoords(e);
+	switch (active_tool) {
+		case 'rect': {
+			if (active_shape) {
+				if (x >= startx) {
+					active_shape.x.baseVal.value = startx;
+					active_shape.width.baseVal.value = x - startx;
+				} else {
+					active_shape.x.baseVal.value = x;
+					active_shape.width.baseVal.value = startx - x;
+				}
+				if (y >= starty) {
+					active_shape.y.baseVal.value = starty;
+					active_shape.height.baseVal.value = y - starty;
+				} else {
+					active_shape.y.baseVal.value = y;
+					active_shape.height.baseVal.value = starty - y;
+				}
+			}
+			break;
+		}
+	}
+})
+
+document.getElementById("stagecontainer").addEventListener('mouseup', e => {
+	let [x, y] = getStageCoords(e)
+	active_shape = null
+})
+
 
 
 rsvg = new Graphic()
-r1 = new Sprite([rsvg])
+// r1 = new Sprite([rsvg])
+root.addChild(rsvg)
 </script>
