@@ -12,6 +12,9 @@
 	--timeline-layer-width: 150px;
 	--toolbar-button-size: 30px;
 	--toolbar-margin: 20px;
+
+	--linecolor: #000000;
+	--fillcolor: #0000ff;
 }
 body {
 	background-color: var(--main-bg-color);
@@ -150,6 +153,18 @@ button.selected {
 	height: var(--toolbar-button-size);
 	border-radius: 5px;
 }
+#linecolor {
+	width: calc(var(--toolbar-button-size) * 0.4);
+	height: calc(var(--toolbar-button-size) * 0.4);
+	margin: auto;
+	border: 2px solid var(--linecolor);
+}
+#fillcolor {
+	width: calc(var(--toolbar-button-size) * 0.4 + 4px);
+	height: calc(var(--toolbar-button-size) * 0.4 + 4px);
+	margin: auto;
+	background-color: var(--fillcolor);
+}
 #scriptEditor, .CodeMirror {
 	/*grid-area: CodeEditor;*/
 	height: 100% !important;
@@ -157,6 +172,20 @@ button.selected {
 	position: fixed !important;
 	top: 0px;
 	right: 0px;
+}
+.picker_wrapper {
+	z-index: 1000;
+	background-color: var(--bg-accent-color) !important;
+	box-shadow: 0px 2px 10px #0004 !important;
+	border-radius: 5px;
+}
+.picker_wrapper button {
+	background-color: var(--button-bg-color) !important;
+	background-image: none !important;
+	box-shadow: none !important;
+}
+.picker_sl, .picker_sample, .picker_hue, .picker_alpha, .picker_wrapper input {
+	box-shadow: none !important;
 }
 </style>
 <script>
@@ -166,6 +195,8 @@ framerate = 12
 start = 0;
 repeating = false;
 zoom = 1
+var linepicker;
+var fillpicker;
 function activateTool(tool) {
 	switch(tool) {
 		case 'rect': alert('hi')
@@ -236,6 +267,43 @@ function zoomOut() {
 		zoomInOut(1/1.5)
 	}
 }
+
+function getLineColor() {
+	return getComputedStyle(document.documentElement).getPropertyValue('--linecolor')
+}
+function getFillColor() {
+	return getComputedStyle(document.documentElement).getPropertyValue('--fillcolor')
+}
+function pickLineColor() {
+	if (!linepicker) {
+		linepicker = new Picker({
+			parent: document.querySelector('#linecolor'),
+			popup: false,
+			cancelButton: false,
+			color: getComputedStyle(document.documentElement).getPropertyValue('--linecolor'),
+			onDone: function(color) {
+				document.documentElement.style.setProperty('--linecolor', `rgba(${color._rgba[0]}, ${color._rgba[1]}, ${color._rgba[2]}, ${color._rgba[3]})`)
+				this.closeHandler()
+				setTimeout(function(){linepicker = null}, 200)
+			}
+		})
+	}
+}
+function pickFillColor() {
+	if (!fillpicker) {
+		fillpicker = new Picker({
+			parent: document.querySelector('#fillcolor'),
+			popup: false,
+			cancelButton: false,
+			color: getComputedStyle(document.documentElement).getPropertyValue('--fillcolor'),
+			onDone: function(color) {
+				document.documentElement.style.setProperty('--fillcolor', `rgba(${color._rgba[0]}, ${color._rgba[1]}, ${color._rgba[2]}, ${color._rgba[3]})`)
+				this.closeHandler()
+				setTimeout(function(){fillpicker = null}, 200)
+			}
+		})
+	}
+}
 class Sprite {
 	constructor(children) {
 		this.layers = [
@@ -304,6 +372,8 @@ root = new Sprite([])
 <!-- TODO: bundle this -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
 <script src="mode/javascript/javascript.js"></script>
+<!-- Color picker with alpha channel -->
+<script src="vanilla-picker.min.js"></script>
 </head>
 <body>
 	<div class="grid-container">
@@ -326,8 +396,10 @@ root = new Sprite([])
 			<button class="tool"><i class="fa fa-lg fa-paint-brush"></i></button>
 			<button class="tool"><i class="fa fa-lg fa-pencil"></i></button>
 			<button class="tool"><i class="fa fa-lg fa-eyedropper"></i></button>
-			<button class="tool" onclick="zoomIn()"><i class="fa fa-lg fa-eraser"></i></button>
-			<button class="tool" onclick="zoomOut()"><i class="fa fa-lg fa-tint"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-eraser"></i></button>
+			<button class="tool"><i class="fa fa-lg fa-tint"></i></button>
+			<button class="tool" onclick="pickLineColor()"><div id="linecolor"></div></button>
+			<button class="tool" onclick="pickFillColor()"><div id="fillcolor"></div></button>
 		</ul>
 		<textarea id="scriptEditor"></textarea>
 		<div id="timeline">
