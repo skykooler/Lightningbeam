@@ -10,7 +10,7 @@ let canvases = [];
 let mode = "draw"
 
 let minSegmentSize = 5;
-let maxSmoothAngle = 0.2;
+let maxSmoothAngle = 0.6;
 
 let tools = {
   select: {
@@ -99,43 +99,36 @@ class Shape {
   }
   simplify(mode="smooth") {
     // Mode can be corners, smooth or auto
-    // let maxIndex;
-    // for (let j=0; j<5; j++) {
-    //   if (this.curves.length < 3) return;
-    //   maxIndex = this.curves.length-1;
-    //   for (let i=1; i<maxIndex; i++) {
-    //     let P1 = this.curves[i]
-    //     let P2 = this.curves[i-1]
-    //     let P3 = this.curves[i+1]
-    //     let angle = Math.atan2(P3.y - P1.y, P3.x - P1.x) -
-    //             Math.atan2(P2.y - P1.y, P2.x - P1.x);
-    //     angle = Math.PI - Math.abs(angle)
-    //     if (Math.abs(angle) < maxSmoothAngle) {
-    //       if (mode=="corners") {
-    //         this.curves.splice(i,1)
-    //       } else if (mode=="smooth") {
-    //         P3.cp1x = P1.x;
-    //         P3.cp1y = P1.y;
-    //         P3.cp2x = P1.x;
-    //         P3.cp2y = P1.y;
-    //         this.curves.splice(i,1)
-    //       }
-    //       i;
-    //       maxIndex--;
-    //       console.log(angle)
-    //     }
-    //   }
-
-    // }
-    let error = 30;
-    let points = [[this.startx, this.starty]]
-    for (let curve of this.curves) {
-      points.push([curve.x, curve.y])
-    }
-    this.curves = []
-    let curves = fitCurve.fitCurve(points, error)
-    for (let curve of curves) {
-      this.curves.push(new Curve(curve[1][0],curve[1][1],curve[2][0], curve[2][1], curve[3][0], curve[3][1]))
+    if (mode=="corners") {
+      let angles;
+      while (this.curves.length > 3) {
+        angles = [2*Math.PI]
+        for (let i=1; i<this.curves.length-1; i++) {
+          let P1 = this.curves[i]
+          let P2 = this.curves[i-1]
+          let P3 = this.curves[i+1]
+          let angle = Math.atan2(P3.y - P1.y, P3.x - P1.x) -
+                  Math.atan2(P2.y - P1.y, P2.x - P1.x);
+          angles[i] = Math.abs(Math.PI - Math.abs(angle))
+        }
+        let smallestAngle = Math.min(...angles)
+        if (smallestAngle < maxSmoothAngle) {
+          this.curves.splice(angles.indexOf(smallestAngle), 1)
+        } else {
+          break;
+        }
+      }
+    } else if (mode=="smooth") {
+      let error = 30;
+      let points = [[this.startx, this.starty]]
+      for (let curve of this.curves) {
+        points.push([curve.x, curve.y])
+      }
+      this.curves = []
+      let curves = fitCurve.fitCurve(points, error)
+      for (let curve of curves) {
+        this.curves.push(new Curve(curve[1][0],curve[1][1],curve[2][0], curve[2][1], curve[3][0], curve[3][1]))
+      }
     }
   }
 }
