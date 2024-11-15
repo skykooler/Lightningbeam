@@ -8,30 +8,52 @@ let canvases = [];
 
 let mode = "draw"
 
+let minSegmentSize = 5;
+
 let tools = {
   select: {
-    icon: "/assets/select.png",
+    icon: "/assets/select.svg",
+
+  },
+  transform: {
+    icon: "/assets/transform.svg",
 
   },
   draw: {
-    icon: "/assets/pen.png"
+    icon: "/assets/draw.svg"
   },
   rectangle: {
-    icon: "/assets/rectangle.png"
+    icon: "/assets/rectangle.svg"
   },
   polygon: {
-    icon: "assets/polygon.png"
+    icon: "assets/polygon.svg"
   }
 }
 
 let mouseEvent;
 
-let context = {}
+let context = {
+  mouseDown: false,
+  swatches: [
+    "#000000",
+    "#FFFFFF",
+    "#FF0000",
+    "#FFFF00",
+    "#00FF00",
+    "#00FFFF",
+    "#0000FF",
+    "#FF00FF",
+  ]
+}
 
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
     (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
   );
+}
+
+function vectorDist(a, b) {
+  return Math.sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y))
 }
 
 function getMousePos(canvas, evt) {
@@ -68,6 +90,9 @@ class Shape {
     this.strokeStyle = strokeStyle;
     this.filled = filled;
     this.stroked = stroked;
+  }
+  addCurve(curve) {
+    this.curves.push(curve)
   }
 }
 
@@ -121,8 +146,9 @@ class GraphicsObject {
 
 let root = new GraphicsObject();
 let shp = new Shape(100,100,'blue', 'black')
-shp.curves.push(new Curve(150,150,150,150,200,100))
+shp.addCurve(new Curve(150,150,150,150,200,100))
 root.addShape(shp)
+context.activeObject = root
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -155,6 +181,60 @@ function stage() {
   scroller.className = "scroll"
   canvases.push(stage)
   scroller.appendChild(stage)
+  stage.addEventListener("mousedown", (e) => {
+    let mouse = getMousePos(stage, e)
+    switch (mode) {
+      case "draw":
+        context.mouseDown = true
+        context.activeShape = new Shape(mouse.x, mouse.y, context.fillStyle, context.strokeStyle, true, true)
+        context.activeObject.addShape(context.activeShape)
+        context.lastMouse = mouse
+        console.log(stage)
+        break;
+    
+      default:
+        break;
+    }
+    context.lastMouse = mouse
+    updateUI()
+  })
+  stage.addEventListener("mouseup", (e) => {
+    context.mouseDown = false
+    let mouse = getMousePos(stage, e)
+    switch (mode) {
+      case "draw":
+        if (context.activeShape) {
+          if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
+            let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
+            context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+          }
+          context.activeShape = undefined
+        }
+        break;
+    
+      default:
+        break;
+    }
+    context.lastMouse = mouse
+    updateUI()
+  })
+  stage.addEventListener("mousemove", (e) => {
+    let mouse = getMousePos(stage, e)
+    switch (mode) {
+      case "draw":
+        if (context.activeShape) {
+          if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
+            let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
+            context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+          }
+        }
+        break;
+      default:
+        break;
+    }
+    context.lastMouse = mouse
+    updateUI()
+  })
   return scroller
 }
 
@@ -170,6 +250,52 @@ function toolbar() {
     toolbtn.appendChild(icon)
     tools_scroller.appendChild(toolbtn)
   }
+  let tools_break = document.createElement("div")
+  tools_break.className = "horiz_break"
+  tools_scroller.appendChild(tools_break)
+  let fillColor = document.createElement("input")
+  let strokeColor = document.createElement("input")
+  fillColor.className = "color-field"
+  strokeColor.className = "color-field"
+  fillColor.value = "#ffffff"
+  strokeColor.value = "#000000"
+  fillColor.addEventListener('click', e => {
+    Coloris({
+      el: ".color-field",
+      selectInput: true,
+      focusInput: true,
+      theme: 'default',
+      swatches: context.swatches,
+      defaultColor: '#ffffff',
+      onChange: (color) => {
+        context.fillStyle = color;
+      }
+    })
+  })
+  strokeColor.addEventListener('click', e => {
+    Coloris({
+      el: ".color-field",
+      selectInput: true,
+      focusInput: true,
+      theme: 'default',
+      swatches: context.swatches,
+      defaultColor: '#000000',
+      onChange: (color) => {
+        context.strokeStyle = color;
+      }
+    })
+  })
+  // Fill and stroke colors use the same set of swatches
+  fillColor.addEventListener("change", e => {
+    context.swatches.unshift(fillColor.value)
+    if (context.swatches.length>12) context.swatches.pop();
+  })
+  strokeColor.addEventListener("change", e => {
+    context.swatches.unshift(strokeColor.value)
+    if (context.swatches.length>12) context.swatches.pop();
+  })
+  tools_scroller.appendChild(fillColor)
+  tools_scroller.appendChild(strokeColor)
   return tools_scroller
 }
 
@@ -249,13 +375,13 @@ function updateUI() {
     context.ctx = ctx;
     root.draw(context)
 
-    let mouse;
-    if (mouseEvent) {
-      mouse = getMousePos(canvas, mouseEvent);
-    } else {
-      mouse = {x: 0, y: 0}
-    }
-    ctx.fillRect(mouse.x, mouse.y, 50,50)
+    // let mouse;
+    // if (mouseEvent) {
+    //   mouse = getMousePos(canvas, mouseEvent);
+    // } else {
+    //   mouse = {x: 0, y: 0}
+    // }
+    // ctx.fillRect(mouse.x, mouse.y, 50,50)
   }
-  requestAnimationFrame(updateUI)
+  // requestAnimationFrame(updateUI)
 }
