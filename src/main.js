@@ -1,4 +1,5 @@
-// const { invoke } = window.__TAURI__.core;
+const { invoke } = window.__TAURI__.core;
+import * as fitCurve from '/fit-curve.js';
 
 let greetInputEl;
 let greetMsgEl;
@@ -9,6 +10,7 @@ let canvases = [];
 let mode = "draw"
 
 let minSegmentSize = 5;
+let maxSmoothAngle = 0.2;
 
 let tools = {
   select: {
@@ -31,6 +33,7 @@ let tools = {
 }
 
 let mouseEvent;
+console.log(fitCurve)
 
 let context = {
   mouseDown: false,
@@ -94,6 +97,47 @@ class Shape {
   addCurve(curve) {
     this.curves.push(curve)
   }
+  simplify(mode="smooth") {
+    // Mode can be corners, smooth or auto
+    // let maxIndex;
+    // for (let j=0; j<5; j++) {
+    //   if (this.curves.length < 3) return;
+    //   maxIndex = this.curves.length-1;
+    //   for (let i=1; i<maxIndex; i++) {
+    //     let P1 = this.curves[i]
+    //     let P2 = this.curves[i-1]
+    //     let P3 = this.curves[i+1]
+    //     let angle = Math.atan2(P3.y - P1.y, P3.x - P1.x) -
+    //             Math.atan2(P2.y - P1.y, P2.x - P1.x);
+    //     angle = Math.PI - Math.abs(angle)
+    //     if (Math.abs(angle) < maxSmoothAngle) {
+    //       if (mode=="corners") {
+    //         this.curves.splice(i,1)
+    //       } else if (mode=="smooth") {
+    //         P3.cp1x = P1.x;
+    //         P3.cp1y = P1.y;
+    //         P3.cp2x = P1.x;
+    //         P3.cp2y = P1.y;
+    //         this.curves.splice(i,1)
+    //       }
+    //       i;
+    //       maxIndex--;
+    //       console.log(angle)
+    //     }
+    //   }
+
+    // }
+    let error = 30;
+    let points = [[this.startx, this.starty]]
+    for (let curve of this.curves) {
+      points.push([curve.x, curve.y])
+    }
+    this.curves = []
+    let curves = fitCurve.fitCurve(points, error)
+    for (let curve of curves) {
+      this.curves.push(new Curve(curve[1][0],curve[1][1],curve[2][0], curve[2][1], curve[3][0], curve[3][1]))
+    }
+  }
 }
 
 class GraphicsObject {
@@ -128,6 +172,11 @@ class GraphicsObject {
       ctx.moveTo(shape.startx, shape.starty)
       for (let curve of shape.curves) {
         ctx.bezierCurveTo(curve.cp1x, curve.cp1y, curve.cp2x, curve.cp2y, curve.x, curve.y)
+
+        // Debug, show curve endpoints
+        // ctx.beginPath()
+        // ctx.arc(curve.x,curve.y, 3, 0, 2*Math.PI)
+        // ctx.fill()
       }
       if (shape.filled) {
         ctx.fillStyle = shape.fillStyle
@@ -145,9 +194,9 @@ class GraphicsObject {
 }
 
 let root = new GraphicsObject();
-let shp = new Shape(100,100,'blue', 'black')
-shp.addCurve(new Curve(150,150,150,150,200,100))
-root.addShape(shp)
+// let shp = new Shape(100,100,'blue', 'black')
+// shp.addCurve(new Curve(150,150,150,150,200,100))
+// root.addShape(shp)
 context.activeObject = root
 
 async function greet() {
@@ -204,10 +253,9 @@ function stage() {
     switch (mode) {
       case "draw":
         if (context.activeShape) {
-          if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
-            let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
-            context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
-          }
+          let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
+          context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+          context.activeShape.simplify()
           context.activeShape = undefined
         }
         break;
@@ -226,13 +274,13 @@ function stage() {
           if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
             let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
             context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+            context.lastMouse = mouse
           }
         }
         break;
       default:
         break;
     }
-    context.lastMouse = mouse
     updateUI()
   })
   return scroller
@@ -259,6 +307,8 @@ function toolbar() {
   strokeColor.className = "color-field"
   fillColor.value = "#ffffff"
   strokeColor.value = "#000000"
+  context.fillStyle = fillColor.value
+  context.strokeStyle = strokeColor.value
   fillColor.addEventListener('click', e => {
     Coloris({
       el: ".color-field",
