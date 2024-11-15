@@ -199,3 +199,8 @@ button {
 
   background-color: #2f2f2f;
 }
+.clr-field button {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 5px;
+}

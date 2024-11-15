@@ -359,6 +359,7 @@ function splitPane(div, percent, horiz) {
   }
   div1.style.flex = `0 0 ${percent}%`
   div2.style.flex = `1 1 auto`
+  Coloris({el: ".color-field"})
   updateUI()
 }
 
