@@ -33,7 +33,6 @@ let tools = {
 }
 
 let mouseEvent;
-console.log(fitCurve)
 
 let context = {
   mouseDown: false,
@@ -203,7 +202,7 @@ window.addEventListener("DOMContentLoaded", () => {
   // greetInputEl = document.querySelector("#greet-input");
   // greetMsgEl = document.querySelector("#greet-msg");
   rootPane = document.querySelector("#root")
-  rootPane.appendChild(toolbar())
+  rootPane.appendChild(createPane(toolbar()))
   rootPane.addEventListener("mousemove", (e) => {
     mouseEvent = e;
   })
@@ -211,8 +210,13 @@ window.addEventListener("DOMContentLoaded", () => {
   //   e.preventDefault();
   //   greet();
   // });
-  splitPane(rootPane, 10, true)
+  let [_toolbar, panel] = splitPane(rootPane, 10, true)
+  let [_stage, _infopanel] = splitPane(panel, 70, false, createPane(infopanel()))
 });
+
+window.addEventListener("resize", () => {
+  updateLayout(rootPane)
+})
 
 function stage() {
   let stage = document.createElement("canvas")
@@ -342,10 +346,18 @@ function toolbar() {
   return tools_scroller
 }
 
-function createPane() {
+function infopanel() {
+  let panel = document.createElement("div")
+
+  return panel
+}
+
+function createPane(content=undefined) {
   let div = document.createElement("div")
   let header = document.createElement("div")
-  let content = stage() // TODO: change based on type
+  if (!content) {
+    content = stage() // TODO: change based on type
+  }
   header.className = "header"
 
   let button = document.createElement("button")
@@ -362,15 +374,15 @@ function createPane() {
   // header.style.gridArea = "1 / 1 / 2 / 2"
   // content.style.gridArea = "1 / 2 / 2 / 3"
 
-  div.classList = ["vertical-grid", "pane"]
-  header.style.flex = "0 0 var(--lineheight)"
-  content.style.flex = "1 1 100%"
+  div.className = "vertical-grid"
+  header.style.height = "calc( 2 * var(--lineheight))"
+  content.style.height = "calc( 100% - 2 * var(--lineheight) )"
   div.appendChild(header)
   div.appendChild(content)
   return div
 }
 
-function splitPane(div, percent, horiz) {
+function splitPane(div, percent, horiz, newPane=undefined) {
   let content = div.firstElementChild
   let div1 = document.createElement("div")
   let div2 = document.createElement("div")
@@ -378,8 +390,13 @@ function splitPane(div, percent, horiz) {
   div1.className = "panecontainer"
   div2.className = "panecontainer"
 
+  console.log(div)
   div1.appendChild(content)
-  div2.appendChild(createPane())
+  if (newPane) {
+    div2.appendChild(newPane)
+  } else {
+    div2.appendChild(createPane())
+  }
   div.appendChild(div1)
   div.appendChild(div2)
 
@@ -398,15 +415,43 @@ function splitPane(div, percent, horiz) {
   if (horiz) {
     div.className = "horizontal-grid"
   } else {
-    div.className = "verical-grid"
+    div.className = "vertical-grid"
   }
-  div1.style.flex = `0 0 ${percent}%`
-  div2.style.flex = `1 1 auto`
+  div.setAttribute("lb-percent", percent) // TODO: better attribute name
+  // div1.style.flex = `0 0 ${percent}%`
+  // div2.style.flex = `1 1 auto`
   Coloris({el: ".color-field"})
   updateUI()
+  updateLayout(rootPane)
+  return [div1, div2]
 }
 
-
+function updateLayout(element) {
+  let rect = element.getBoundingClientRect()
+  let percent = element.getAttribute("lb-percent")
+  percent ||= 50
+  let children = element.children
+  if (children.length != 2) return;
+  if (element.className == "horizontal-grid") {
+    console.log(rect)
+    children[0].style.width = `${rect.width * percent / 100}px`
+    children[1].style.width = `${rect.width * (100 - percent) / 100}px`
+    children[0].style.height = `${rect.height}px`
+    children[1].style.height = `${rect.height}px`
+  } else if (element.className == "vertical-grid") {
+    console.log("vert")
+    children[0].style.height = `${rect.height * percent / 100}px`
+    children[1].style.height = `${rect.height * (100 - percent) / 100}px`
+    children[0].style.width = `${rect.width}px`
+    children[1].style.width = `${rect.width}px`
+  }
+  if (children[0].getAttribute("lb-percent")) {
+    updateLayout(children[0])
+  }
+  if (children[1].getAttribute("lb-percent")) {
+    updateLayout(children[1])
+  }
+}
 
 function updateUI() {
   for (let canvas of canvases) {
