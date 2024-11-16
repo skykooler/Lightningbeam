@@ -1,6 +1,8 @@
 const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
 
+let simplifyPolyline = simplify
+
 let greetInputEl;
 let greetMsgEl;
 let rootPane;
@@ -96,27 +98,23 @@ class Shape {
   addCurve(curve) {
     this.curves.push(curve)
   }
-  simplify(mode="smooth") {
+  simplify(mode="corners") {
     // Mode can be corners, smooth or auto
     if (mode=="corners") {
-      let angles;
-      while (this.curves.length > 3) {
-        angles = [2*Math.PI]
-        for (let i=1; i<this.curves.length-1; i++) {
-          let P1 = this.curves[i]
-          let P2 = this.curves[i-1]
-          let P3 = this.curves[i+1]
-          let angle = Math.atan2(P3.y - P1.y, P3.x - P1.x) -
-                  Math.atan2(P2.y - P1.y, P2.x - P1.x);
-          angles[i] = Math.abs(Math.PI - Math.abs(angle))
-        }
-        let smallestAngle = Math.min(...angles)
-        if (smallestAngle < maxSmoothAngle) {
-          this.curves.splice(angles.indexOf(smallestAngle), 1)
-        } else {
-          break;
-        }
+      let points = [{x: this.startx, y: this.starty}]
+      points = points.concat(this.curves)
+      let newpoints = simplifyPolyline(points, 10, false)
+      console.log(points.length)
+      console.log(newpoints.length)
+      this.curves = []
+      let lastpoint = newpoints.shift()
+      let midpoint
+      for (let point of newpoints) {
+        midpoint = {x: (lastpoint.x+point.x)/2, y: (lastpoint.y+point.y)/2}
+        this.curves.push(new Curve(midpoint.x, midpoint.y,midpoint.x,midpoint.y,point.x,point.y))
+        lastpoint = point
       }
+      console.log(this.curves)
     } else if (mode=="smooth") {
       let error = 30;
       let points = [[this.startx, this.starty]]
