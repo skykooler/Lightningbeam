@@ -82,6 +82,7 @@ class Curve {
 class Frame {
   constructor() {
     this.keys = {}
+    this.shapes = []
   }
 }
 
@@ -157,7 +158,7 @@ class GraphicsObject {
       child.scale = this.frames[this.currentFrame][idx].scale;
       child.draw(context)
     }
-    for (let shape of this.shapes) {
+    for (let shape of this.frames[this.currentFrame].shapes) {
       ctx.beginPath()
       ctx.moveTo(shape.startx, shape.starty)
       for (let curve of shape.curves) {
@@ -179,7 +180,8 @@ class GraphicsObject {
     }
   }
   addShape(shape) {
-    this.shapes.push(shape)
+    // this.shapes.push(shape)
+    this.frames[this.currentFrame].shapes.push(shape)
   }
 }
 
