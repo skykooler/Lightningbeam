@@ -17,20 +17,31 @@ let maxSmoothAngle = 0.6;
 let tools = {
   select: {
     icon: "/assets/select.svg",
+    properties: {}
 
   },
   transform: {
     icon: "/assets/transform.svg",
+    properties: {}
 
   },
   draw: {
-    icon: "/assets/draw.svg"
+    icon: "/assets/draw.svg",
+    properties: {
+      "lineWidth": {
+        type: "number",
+        // default: 5,
+        label: "Line Width"
+      }
+    }
   },
   rectangle: {
-    icon: "/assets/rectangle.svg"
+    icon: "/assets/rectangle.svg",
+    properties: {}
   },
   polygon: {
-    icon: "assets/polygon.svg"
+    icon: "assets/polygon.svg",
+    properties: {}
   }
 }
 
@@ -47,7 +58,14 @@ let context = {
     "#00FFFF",
     "#0000FF",
     "#FF00FF",
-  ]
+  ],
+  lineWidth: 5,
+}
+
+let config = {
+  shortcuts: {
+    playAnimation: " ",
+  }
 }
 
 function uuidv4() {
@@ -66,6 +84,25 @@ function getMousePos(canvas, evt) {
     x: evt.clientX - rect.left,
     y: evt.clientY - rect.top
   };
+}
+
+function getProperty(context, path) {
+  let pointer = context;
+  let pathComponents = path.split('.')
+  for (let component of pathComponents) {
+    pointer = pointer[component]
+  }
+  return pointer
+}
+
+function setProperty(context, path, value) {
+  let pointer = context;
+  let pathComponents = path.split('.')
+  let finalComponent = pathComponents.pop()
+  for (let component of pathComponents) {
+    pointer = pointer[component]
+  }
+  pointer[finalComponent] = value
 }
 
 class Curve {
@@ -87,12 +124,13 @@ class Frame {
 }
 
 class Shape {
-  constructor(startx, starty, fillStyle, strokeStyle, filled=true, stroked=true) {
+  constructor(startx, starty, context, filled=true, stroked=true) {
     this.startx = startx;
     this.starty = starty;
     this.curves = [];
-    this.fillStyle = fillStyle;
-    this.strokeStyle = strokeStyle;
+    this.fillStyle = context.fillStyle;
+    this.strokeStyle = context.strokeStyle;
+    this.lineWidth = context.lineWidth
     this.filled = filled;
     this.stroked = stroked;
   }
@@ -105,8 +143,6 @@ class Shape {
       let points = [{x: this.startx, y: this.starty}]
       points = points.concat(this.curves)
       let newpoints = simplifyPolyline(points, 10, false)
-      console.log(points.length)
-      console.log(newpoints.length)
       this.curves = []
       let lastpoint = newpoints.shift()
       let midpoint
@@ -115,7 +151,6 @@ class Shape {
         this.curves.push(new Curve(midpoint.x, midpoint.y,midpoint.x,midpoint.y,point.x,point.y))
         lastpoint = point
       }
-      console.log(this.curves)
     } else if (mode=="smooth") {
       let error = 30;
       let points = [[this.startx, this.starty]]
@@ -160,6 +195,7 @@ class GraphicsObject {
     }
     for (let shape of this.frames[this.currentFrame].shapes) {
       ctx.beginPath()
+      ctx.lineWidth = shape.lineWidth
       ctx.moveTo(shape.startx, shape.starty)
       for (let curve of shape.curves) {
         ctx.bezierCurveTo(curve.cp1x, curve.cp1y, curve.cp2x, curve.cp2y, curve.x, curve.y)
@@ -180,42 +216,37 @@ class GraphicsObject {
     }
   }
   addShape(shape) {
-    // this.shapes.push(shape)
     this.frames[this.currentFrame].shapes.push(shape)
   }
 }
 
 let root = new GraphicsObject();
-// let shp = new Shape(100,100,'blue', 'black')
-// shp.addCurve(new Curve(150,150,150,150,200,100))
-// root.addShape(shp)
 context.activeObject = root
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
   greetMsgEl.textContent = await invoke("greet", { name: greetInputEl.value });
 
-  // splitPane(rootPane, 50, true)
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  // greetInputEl = document.querySelector("#greet-input");
-  // greetMsgEl = document.querySelector("#greet-msg");
   rootPane = document.querySelector("#root")
   rootPane.appendChild(createPane(toolbar()))
   rootPane.addEventListener("mousemove", (e) => {
     mouseEvent = e;
   })
-  // document.querySelector("#greet-form").addEventListener("submit", (e) => {
-  //   e.preventDefault();
-  //   greet();
-  // });
   let [_toolbar, panel] = splitPane(rootPane, 10, true)
   let [_stage, _infopanel] = splitPane(panel, 70, false, createPane(infopanel()))
 });
 
 window.addEventListener("resize", () => {
   updateLayout(rootPane)
+})
+
+window.addEventListener("keypress", (e) => {
+  if (e.key == config.shortcuts.playAnimation) {
+    console.log("Spacebar pressed")
+  }
 })
 
 function stage() {
@@ -232,10 +263,9 @@ function stage() {
     switch (mode) {
       case "draw":
         context.mouseDown = true
-        context.activeShape = new Shape(mouse.x, mouse.y, context.fillStyle, context.strokeStyle, true, true)
+        context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
         context.activeObject.addShape(context.activeShape)
         context.lastMouse = mouse
-        console.log(stage)
         break;
     
       default:
@@ -348,7 +378,31 @@ function toolbar() {
 
 function infopanel() {
   let panel = document.createElement("div")
-
+  panel.className = "infopanel"
+  let input;
+  let label;
+  let span;
+  // for (let i=0; i<10; i++) {
+  for (let property in tools[mode].properties) {
+    let prop = tools[mode].properties[property]
+    label = document.createElement("label")
+    label.className = "infopanel-field"
+    span = document.createElement("span")
+    span.className = "infopanel-label"
+    span.innerText = prop.label
+    input = document.createElement("input")
+    input.className = "infopanel-input"
+    input.value = getProperty(context, property)
+    input.addEventListener("input", () => {
+      console.log(input.value)
+      if (!isNaN(input.value) && input.value > 0) {
+        setProperty(context, property, input.value)
+      }
+    })
+    label.appendChild(span)
+    label.appendChild(input)
+    panel.appendChild(label)
+  }
   return panel
 }
 
@@ -390,7 +444,6 @@ function splitPane(div, percent, horiz, newPane=undefined) {
   div1.className = "panecontainer"
   div2.className = "panecontainer"
 
-  console.log(div)
   div1.appendChild(content)
   if (newPane) {
     div2.appendChild(newPane)
@@ -433,13 +486,11 @@ function updateLayout(element) {
   let children = element.children
   if (children.length != 2) return;
   if (element.className == "horizontal-grid") {
-    console.log(rect)
     children[0].style.width = `${rect.width * percent / 100}px`
     children[1].style.width = `${rect.width * (100 - percent) / 100}px`
     children[0].style.height = `${rect.height}px`
     children[1].style.height = `${rect.height}px`
   } else if (element.className == "vertical-grid") {
-    console.log("vert")
     children[0].style.height = `${rect.height * percent / 100}px`
     children[1].style.height = `${rect.height * (100 - percent) / 100}px`
     children[0].style.width = `${rect.width}px`

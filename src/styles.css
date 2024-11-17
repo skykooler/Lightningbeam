@@ -139,7 +139,7 @@ button {
 
 .horizontal-grid, .vertical-grid {
   display: flex;
-  gap: 10px;
+  gap: 5px;
   background-color: #0f0f0f;
   width: 100%;
   height: 100%;
@@ -173,7 +173,10 @@ button {
   display: flex;
   flex-direction: row;
   gap: 10px;
+  padding: 5px;
   flex-wrap: wrap;
+  align-content: flex-start;
+  justify-content: space-around;
 }
 .toolbtn {
   width: calc( 3 * var(--lineheight) );
@@ -203,4 +206,24 @@ button {
   width: 100%;
   height: 100%;
   background-color: #3f3f3f;
+  display: flex;
+  box-sizing: border-box;
+  gap: calc( var(--lineheight) / 2 );
+  padding: calc( var(--lineheight) / 2 );
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+.infopanel-field {
+  width: 300px;
+  height: var(--lineheight);
+  display: flex;
+  flex-direction: row;
+}
+.infopanel-label {
+  flex: 1 1 50%;
+}
+.infopanel-input {
+  flex: 1 1 50%;
+  width: 50%;
 }
