@@ -77,6 +77,7 @@ let context = {
   simplifyMode: "smooth",
   fillShape: true,
   dragging: false,
+  selectionRect: undefined,
   selection: [],
 }
 
@@ -152,6 +153,36 @@ function growBoundingBox(bboxa, bboxb) {
   bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min)
   bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max)
   bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max)
+}
+
+function regionToBbox(region) {
+  return {
+    x: {min: Math.min(region.x1, region.x2), max: Math.max(region.x1, region.x2)},
+    y: {min: Math.min(region.y1, region.y2), max: Math.max(region.y1, region.y2)}
+  }
+}
+
+function hitTest(candidate, object) {
+  let bbox = object.bbox()
+  if (candidate.x.min) {
+    // We're checking a bounding box
+    if (candidate.x.min < bbox.x.max + object.x && candidate.x.max > bbox.x.min + object.x &&
+      candidate.y.min < bbox.y.max + object.y && candidate.y.max > bbox.y.min + object.y) {
+        return true;
+    } else {
+      return false;
+    }
+  } else {
+    // We're checking a point
+    if (candidate.x > bbox.x.min + object.x &&
+      candidate.x < bbox.x.max + object.x &&
+      candidate.y > bbox.y.min + object.y &&
+      candidate.y < bbox.y.max + object.y) {
+        return true;
+    } else {
+      return false
+    }
+  }
 }
 
 class Curve {
@@ -338,17 +369,17 @@ class GraphicsObject {
         ctx.stroke()
       }
     }
-    if (context.activeObject==this && context.activeCurve) {
-      ctx.strokeStyle = "magenta"
-      ctx.beginPath()
-      ctx.moveTo(context.activeCurve.points[0].x, context.activeCurve.points[0].y)
-      ctx.bezierCurveTo(context.activeCurve.points[1].x, context.activeCurve.points[1].y,
-                        context.activeCurve.points[2].x, context.activeCurve.points[2].y,
-                        context.activeCurve.points[3].x, context.activeCurve.points[3].y
-      )
-      ctx.stroke()
-    }
     if (this == context.activeObject) {
+      if (context.activeCurve) {
+        ctx.strokeStyle = "magenta"
+        ctx.beginPath()
+        ctx.moveTo(context.activeCurve.points[0].x, context.activeCurve.points[0].y)
+        ctx.bezierCurveTo(context.activeCurve.points[1].x, context.activeCurve.points[1].y,
+                          context.activeCurve.points[2].x, context.activeCurve.points[2].y,
+                          context.activeCurve.points[3].x, context.activeCurve.points[3].y
+        )
+        ctx.stroke()
+      }
       for (let item of context.selection) {
         ctx.save()
         ctx.strokeStyle = "#00ffff"
@@ -356,6 +387,18 @@ class GraphicsObject {
         ctx.beginPath()
         let bbox = item.bbox()
         ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max, bbox.y.max)
+        ctx.stroke()
+        ctx.restore()
+      }
+      if (context.selectionRect) {
+        ctx.save()
+        ctx.strokeStyle = "#00ffff"
+        ctx.beginPath()
+        ctx.rect(
+          context.selectionRect.x1, context.selectionRect.y1,
+          context.selectionRect.x2 - context.selectionRect.x1,
+          context.selectionRect.y2 - context.selectionRect.y1
+        )
         ctx.stroke()
         ctx.restore()
       }
@@ -482,11 +525,11 @@ function stage() {
           // Have to iterate in reverse order to grab the frontmost object when two overlap
           for (let i=context.activeObject.children.length-1; i>=0; i--) {
             child = context.activeObject.children[i]
-            let bbox = child.bbox()
-            if (mouse.x > bbox.x.min + child.x &&
-              mouse.x < bbox.x.max + child.x &&
-              mouse.y > bbox.y.min + child.y &&
-              mouse.y < bbox.y.max + child.y) {
+            // let bbox = child.bbox()
+            if (hitTest(mouse, child)) {
+                if (context.selection.indexOf(child) != -1) {
+                  // dragging = true
+                }
                 context.selection = [child]
                 selected = true
                 break
@@ -494,6 +537,7 @@ function stage() {
           }
           if (!selected) {
             context.selection = []
+            context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
           }
         }
         console.log(context.selection)
@@ -507,6 +551,7 @@ function stage() {
   stage.addEventListener("mouseup", (e) => {
     context.mouseDown = false
     context.dragging = false
+    context.selectionRect = undefined
     let mouse = getMousePos(stage, e)
     switch (mode) {
       case "draw":
@@ -556,7 +601,15 @@ function stage() {
           }
           cpoint.x += (mouse.x - context.lastMouse.x)
           cpoint.y += (mouse.y - context.lastMouse.y)
-
+        } else if (context.selectionRect) {
+          context.selectionRect.x2 = mouse.x
+          context.selectionRect.y2 = mouse.y
+          context.selection = []
+          for (let child of context.activeObject.children) {
+            if (hitTest(regionToBbox(context.selectionRect), child)) {
+              context.selection.push(child)
+            }
+          }
         } else {
           context.activeCurve = selectCurve(context, mouse)
         }
