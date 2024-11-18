@@ -440,6 +440,7 @@ function stage() {
       case "select":
         let curve = selectCurve(context, mouse)
         if (curve) {
+          context.dragging = true
           console.log("gonna move this")
         }
         break;
@@ -451,6 +452,7 @@ function stage() {
   })
   stage.addEventListener("mouseup", (e) => {
     context.mouseDown = false
+    context.dragging = false
     let mouse = getMousePos(stage, e)
     switch (mode) {
       case "draw":
@@ -470,9 +472,9 @@ function stage() {
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
-    context.activeCurve = undefined
     switch (mode) {
       case "draw":
+        context.activeCurve = undefined
         if (context.activeShape) {
           if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
             context.activeShape.addLine(mouse.x, mouse.y)
@@ -481,6 +483,7 @@ function stage() {
         }
         break;
       case "rectangle":
+        context.activeCurve = undefined
         if (context.activeShape) {
           context.activeShape.clear()
           context.activeShape.addLine(mouse.x, context.activeShape.starty)
@@ -491,7 +494,19 @@ function stage() {
         }
         break;
       case "select":
-        context.activeCurve = selectCurve(context, mouse)
+        if (context.dragging) {
+          let dist = vectorDist(mouse, context.activeCurve.points[1])
+          let cpoint = context.activeCurve.points[1]
+          if (vectorDist(mouse, context.activeCurve.points[2]) < dist) {
+            cpoint = context.activeCurve.points[2]
+          }
+          cpoint.x += (mouse.x - context.lastMouse.x)
+          cpoint.y += (mouse.y - context.lastMouse.y)
+
+        } else {
+          context.activeCurve = selectCurve(context, mouse)
+        }
+        context.lastMouse = mouse
         break;
       default:
         break;
@@ -616,9 +631,7 @@ function infopanel() {
           }
           break;
         case "enum":
-          console.log(e)
           if (prop.options.indexOf(e.target.value) >= 0) {
-            console.log(setProperty)
             setProperty(context, property, e.target.value)
           }
           break;
