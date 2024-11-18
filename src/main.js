@@ -32,6 +32,11 @@ let tools = {
         type: "number",
         // default: 5,
         label: "Line Width"
+      },
+      "simplifyMode": {
+        type: "enum",
+        options: ["corners", "smooth"], // "auto"],
+        label: "Line Mode"
       }
     }
   },
@@ -60,6 +65,7 @@ let context = {
     "#FF00FF",
   ],
   lineWidth: 5,
+  simplifyMode: "smooth",
 }
 
 let config = {
@@ -267,7 +273,7 @@ function stage() {
         context.activeObject.addShape(context.activeShape)
         context.lastMouse = mouse
         break;
-    
+
       default:
         break;
     }
@@ -282,7 +288,7 @@ function stage() {
         if (context.activeShape) {
           let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
           context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
-          context.activeShape.simplify()
+          context.activeShape.simplify(context.simplifyMode)
           context.activeShape = undefined
         }
         break;
@@ -390,14 +396,41 @@ function infopanel() {
     span = document.createElement("span")
     span.className = "infopanel-label"
     span.innerText = prop.label
-    input = document.createElement("input")
-    input.className = "infopanel-input"
-    input.value = getProperty(context, property)
+    switch (prop.type) {
+      case "number":
+        input = document.createElement("input")
+        input.className = "infopanel-input"
+        input.type = "number"
+        input.value = getProperty(context, property)   
+        break;
+      case "enum":
+        input = document.createElement("select")
+        input.className = "infopanel-input"
+        let optionEl;
+        for (let option of prop.options) {
+          optionEl = document.createElement("option")
+          optionEl.value = option
+          optionEl.innerText = option
+          input.appendChild(optionEl)
+        }
+        input.value = getProperty(context, property)
+        break;
+    }
     input.addEventListener("input", () => {
       console.log(input.value)
-      if (!isNaN(input.value) && input.value > 0) {
-        setProperty(context, property, input.value)
+      switch (prop.type) {
+        case "number":
+          if (!isNaN(input.value) && input.value > 0) {
+            setProperty(context, property, input.value)
+          }
+          break;
+        case "enum":
+          if (prop.options.indexOf(input.value) >= 0) {
+            // console.log(input.value)
+            setProperty(context, property, input.value)
+          }
       }
+
     })
     label.appendChild(span)
     label.appendChild(input)
