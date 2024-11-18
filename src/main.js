@@ -77,6 +77,7 @@ let context = {
   simplifyMode: "smooth",
   fillShape: true,
   dragging: false,
+  selection: [],
 }
 
 let config = {
@@ -146,6 +147,13 @@ function selectCurve(context, mouse) {
   }
 }
 
+function growBoundingBox(bboxa, bboxb) {
+  bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min)
+  bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min)
+  bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max)
+  bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max)
+}
+
 class Curve {
   constructor(startx, starty, cp1x, cp1y, cp2x, cp2y, x, y) {
     this.startx = startx
@@ -203,15 +211,9 @@ class Shape {
   clear() {
     this.curves = []
   }
-  growBoundingBox(bbox) {
-    this.boundingBox.x.min = Math.min(this.boundingBox.x.min, bbox.x.min)
-    this.boundingBox.y.min = Math.min(this.boundingBox.y.min, bbox.y.min)
-    this.boundingBox.x.max = Math.max(this.boundingBox.x.max, bbox.x.max)
-    this.boundingBox.y.max = Math.max(this.boundingBox.y.max, bbox.y.max)
-  }
   recalculateBoundingBox() {
     for (let curve of this.curves) {
-      this.growBoundingBox(curve.bbox())
+      growBoundingBox(this.boundingBox, curve.bbox())
     }
   }
   simplify(mode="corners") {
@@ -270,6 +272,24 @@ class GraphicsObject {
 
     this.shapes = []
   }
+  bbox() {
+    let bbox;
+    if (this.frames[this.currentFrame].shapes.length > 0) {
+      bbox = this.frames[this.currentFrame].shapes[0].boundingBox
+      for (let shape of this.frames[this.currentFrame].shapes) {
+        growBoundingBox(bbox, shape.boundingBox)
+      }
+    }
+    if (this.children.length > 0) {
+      if (!bbox) {
+        bbox = this.children[0].bbox()
+      }
+      for (let child of this.children) {
+        growBoundingBox(bbox, child.bbox())
+      }
+    }
+    return bbox
+  }
   draw(context) {
     let ctx = context.ctx;
     ctx.translate(this.x, this.y)
@@ -327,6 +347,18 @@ class GraphicsObject {
                         context.activeCurve.points[3].x, context.activeCurve.points[3].y
       )
       ctx.stroke()
+    }
+    if (this == context.activeObject) {
+      for (let item of context.selection) {
+        ctx.save()
+        ctx.strokeStyle = "#00ffff"
+        ctx.translate(item.x, item.y)
+        ctx.beginPath()
+        let bbox = item.bbox()
+        ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max, bbox.y.max)
+        ctx.stroke()
+        ctx.restore()
+      }
     }
   }
   addShape(shape) {
@@ -408,7 +440,9 @@ function stage() {
               imageShape.addLine(width, height)
               imageShape.addLine(0, height)
               imageShape.addLine(0, 0)
+              imageShape.recalculateBoundingBox()
               imageObject.addShape(imageShape)
+              console.log(imageObject.bbox())
               context.activeObject.addObject(
                 imageObject,
                 mouse.x-width/2 + (20*img.ix),
@@ -442,7 +476,27 @@ function stage() {
         if (curve) {
           context.dragging = true
           console.log("gonna move this")
+        } else {
+          let selected = false
+          let child;
+          // Have to iterate in reverse order to grab the frontmost object when two overlap
+          for (let i=context.activeObject.children.length-1; i>=0; i--) {
+            child = context.activeObject.children[i]
+            let bbox = child.bbox()
+            if (mouse.x > bbox.x.min + child.x &&
+              mouse.x < bbox.x.max + child.x &&
+              mouse.y > bbox.y.min + child.y &&
+              mouse.y < bbox.y.max + child.y) {
+                context.selection = [child]
+                selected = true
+                break
+            }
+          }
+          if (!selected) {
+            context.selection = []
+          }
         }
+        console.log(context.selection)
         break;
       default:
         break;
