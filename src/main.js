@@ -1,5 +1,7 @@
 const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
+import { Bezier } from "/bezier.js";
+
 
 let simplifyPolyline = simplify
 
@@ -74,6 +76,7 @@ let context = {
   lineWidth: 5,
   simplifyMode: "smooth",
   fillShape: true,
+  dragging: false,
 }
 
 let config = {
@@ -87,7 +90,6 @@ function uuidv4() {
     (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
   );
 }
-
 function vectorDist(a, b) {
   return Math.sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y))
 }
@@ -119,8 +121,35 @@ function setProperty(context, path, value) {
   pointer[finalComponent] = value
 }
 
+function selectCurve(context, mouse) {
+  let mouseTolerance = 15;
+  for (let shape of context.activeObject.frames[context.activeObject.currentFrame].shapes) {
+    if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
+        mouse.x < shape.boundingBox.x.max + mouseTolerance &&
+        mouse.y > shape.boundingBox.y.min - mouseTolerance &&
+        mouse.y < shape.boundingBox.y.max + mouseTolerance) {
+      let closestDist = mouseTolerance;
+      let closest = undefined
+      for (let curve of shape.curves) {
+        let dist = vectorDist(mouse, curve.project(mouse))
+        if (dist <= closestDist ) {
+          closestDist = dist
+          closest = curve
+        }
+      }
+      if (closest) {
+        return closest
+      } else {
+        return undefined
+      }
+    }
+  }
+}
+
 class Curve {
-  constructor(cp1x, cp1y, cp2x, cp2y, x, y) {
+  constructor(startx, starty, cp1x, cp1y, cp2x, cp2y, x, y) {
+    this.startx = startx
+    this.starty = starty
     this.cp1x = cp1x;
     this.cp1y = cp1y;
     this.cp2x = cp2x;
@@ -148,47 +177,82 @@ class Shape {
     this.lineWidth = context.lineWidth
     this.filled = context.fillShape;
     this.stroked = stroked;
+    this.boundingBox = {
+      x: {min: startx, max: starty},
+      y: {min: starty, max: starty}
+    }
   }
   addCurve(curve) {
     this.curves.push(curve)
+    this.growBoundingBox(curve.bbox())
   }
   addLine(x, y) {
     let lastpoint;
     if (this.curves.length) {
-      lastpoint = this.curves[this.curves.length - 1]
+      lastpoint = this.curves[this.curves.length - 1].points[3]
     } else {
       lastpoint = {x: this.startx, y: this.starty}
     }
     let midpoint = {x: (x + lastpoint.x) / 2, y: (y + lastpoint.y) / 2}
-    let curve = new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, x, y)
+    let curve = new Bezier(lastpoint.x, lastpoint.y,
+                           midpoint.x, midpoint.y,
+                           midpoint.x, midpoint.y,
+                           x, y)
     this.curves.push(curve)
+  }
+  clear() {
+    this.curves = []
+  }
+  growBoundingBox(bbox) {
+    this.boundingBox.x.min = Math.min(this.boundingBox.x.min, bbox.x.min)
+    this.boundingBox.y.min = Math.min(this.boundingBox.y.min, bbox.y.min)
+    this.boundingBox.x.max = Math.max(this.boundingBox.x.max, bbox.x.max)
+    this.boundingBox.y.max = Math.max(this.boundingBox.y.max, bbox.y.max)
+  }
+  recalculateBoundingBox() {
+    for (let curve of this.curves) {
+      this.growBoundingBox(curve.bbox())
+    }
   }
   simplify(mode="corners") {
     // Mode can be corners, smooth or auto
     if (mode=="corners") {
       let points = [{x: this.startx, y: this.starty}]
-      points = points.concat(this.curves)
+      for (let curve of this.curves) {
+        points.push(curve.points[3])
+      }
+      // points = points.concat(this.curves)
       let newpoints = simplifyPolyline(points, 10, false)
       this.curves = []
       let lastpoint = newpoints.shift()
       let midpoint
       for (let point of newpoints) {
         midpoint = {x: (lastpoint.x+point.x)/2, y: (lastpoint.y+point.y)/2}
-        this.curves.push(new Curve(midpoint.x, midpoint.y,midpoint.x,midpoint.y,point.x,point.y))
+        let bezier = new Bezier(lastpoint.x, lastpoint.y,
+                                midpoint.x, midpoint.y,
+                                midpoint.x,midpoint.y,
+                                point.x,point.y)
+        this.curves.push(bezier)
         lastpoint = point
       }
     } else if (mode=="smooth") {
       let error = 30;
       let points = [[this.startx, this.starty]]
       for (let curve of this.curves) {
-        points.push([curve.x, curve.y])
+        points.push([curve.points[3].x, curve.points[3].y])
       }
       this.curves = []
       let curves = fitCurve.fitCurve(points, error)
       for (let curve of curves) {
-        this.curves.push(new Curve(curve[1][0],curve[1][1],curve[2][0], curve[2][1], curve[3][0], curve[3][1]))
+        let bezier = new Bezier(curve[0][0], curve[0][1],
+                                curve[1][0],curve[1][1],
+                                curve[2][0], curve[2][1],
+                                curve[3][0], curve[3][1])
+        this.curves.push(bezier)
+
       }
     }
+    this.recalculateBoundingBox()
   }
 }
 
@@ -230,11 +294,14 @@ class GraphicsObject {
       ctx.lineWidth = shape.lineWidth
       ctx.moveTo(shape.startx, shape.starty)
       for (let curve of shape.curves) {
-        ctx.bezierCurveTo(curve.cp1x, curve.cp1y, curve.cp2x, curve.cp2y, curve.x, curve.y)
+        // ctx.moveTo(curve.points[0].x, curve.points[0].y)
+        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                          curve.points[2].x, curve.points[2].y,
+                          curve.points[3].x, curve.points[3].y)
 
         // Debug, show curve endpoints
         // ctx.beginPath()
-        // ctx.arc(curve.x,curve.y, 3, 0, 2*Math.PI)
+        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
         // ctx.fill()
       }
       if (shape.filled) {
@@ -250,6 +317,16 @@ class GraphicsObject {
         ctx.strokeStyle = shape.strokeStyle
         ctx.stroke()
       }
+    }
+    if (context.activeObject==this && context.activeCurve) {
+      ctx.strokeStyle = "magenta"
+      ctx.beginPath()
+      ctx.moveTo(context.activeCurve.points[0].x, context.activeCurve.points[0].y)
+      ctx.bezierCurveTo(context.activeCurve.points[1].x, context.activeCurve.points[1].y,
+                        context.activeCurve.points[2].x, context.activeCurve.points[2].y,
+                        context.activeCurve.points[3].x, context.activeCurve.points[3].y
+      )
+      ctx.stroke()
     }
   }
   addShape(shape) {
@@ -353,13 +430,19 @@ function stage() {
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e)
     switch (mode) {
+      case "rectangle":
       case "draw":
         context.mouseDown = true
         context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
         context.activeObject.addShape(context.activeShape)
         context.lastMouse = mouse
         break;
-
+      case "select":
+        let curve = selectCurve(context, mouse)
+        if (curve) {
+          console.log("gonna move this")
+        }
+        break;
       default:
         break;
     }
@@ -372,13 +455,13 @@ function stage() {
     switch (mode) {
       case "draw":
         if (context.activeShape) {
-          let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
-          context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+          context.activeShape.addLine(mouse.x, mouse.y)
           context.activeShape.simplify(context.simplifyMode)
           context.activeShape = undefined
         }
         break;
-    
+      case "rectangle":
+        context.activeShape = undefined
       default:
         break;
     }
@@ -387,15 +470,28 @@ function stage() {
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
+    context.activeCurve = undefined
     switch (mode) {
       case "draw":
         if (context.activeShape) {
           if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
-            let midpoint = {x: (mouse.x+context.lastMouse.x)/2, y: (mouse.y+context.lastMouse.y)/2}
-            context.activeShape.addCurve(new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, mouse.x, mouse.y))
+            context.activeShape.addLine(mouse.x, mouse.y)
             context.lastMouse = mouse
           }
         }
+        break;
+      case "rectangle":
+        if (context.activeShape) {
+          context.activeShape.clear()
+          context.activeShape.addLine(mouse.x, context.activeShape.starty)
+          context.activeShape.addLine(mouse.x, mouse.y)
+          context.activeShape.addLine(context.activeShape.startx, mouse.y)
+          context.activeShape.addLine(context.activeShape.startx, context.activeShape.starty)
+          context.activeShape.recalculateBoundingBox()
+        }
+        break;
+      case "select":
+        context.activeCurve = selectCurve(context, mouse)
         break;
       default:
         break;
@@ -417,6 +513,7 @@ function toolbar() {
     toolbtn.appendChild(icon)
     tools_scroller.appendChild(toolbtn)
     toolbtn.addEventListener("click", () => {
+      mode = tool
       console.log(tool)
     })
   }
@@ -511,21 +608,22 @@ function infopanel() {
         input.checked = getProperty(context, property)
         break;
     }
-    input.addEventListener("input", () => {
-      console.log(input.value)
+    input.addEventListener("input", (e) => {
       switch (prop.type) {
         case "number":
-          if (!isNaN(input.value) && input.value > 0) {
-            setProperty(context, property, input.value)
+          if (!isNaN(e.target.value) && e.target.value > 0) {
+            setProperty(context, property, e.target.value)
           }
           break;
         case "enum":
-          if (prop.options.indexOf(input.value) >= 0) {
-            setProperty(context, property, input.value)
+          console.log(e)
+          if (prop.options.indexOf(e.target.value) >= 0) {
+            console.log(setProperty)
+            setProperty(context, property, e.target.value)
           }
           break;
         case "boolean":
-          setProperty(context, property, input.checked)
+          setProperty(context, property, e.target.checked)
       }
 
     })
