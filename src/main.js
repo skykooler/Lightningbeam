@@ -30,13 +30,16 @@ let tools = {
     properties: {
       "lineWidth": {
         type: "number",
-        // default: 5,
         label: "Line Width"
       },
       "simplifyMode": {
         type: "enum",
         options: ["corners", "smooth"], // "auto"],
         label: "Line Mode"
+      },
+      "fillShape": {
+        type: "boolean",
+        label: "Fill Shape"
       }
     }
   },
@@ -44,8 +47,12 @@ let tools = {
     icon: "/assets/rectangle.svg",
     properties: {}
   },
-  polygon: {
-    icon: "assets/polygon.svg",
+  ellipse: {
+    icon: "assets/ellipse.svg",
+    properties: {}
+  },
+  paint_bucket: {
+    icon: "/assets/paint_bucket.svg",
     properties: {}
   }
 }
@@ -66,6 +73,7 @@ let context = {
   ],
   lineWidth: 5,
   simplifyMode: "smooth",
+  fillShape: true,
 }
 
 let config = {
@@ -130,17 +138,29 @@ class Frame {
 }
 
 class Shape {
-  constructor(startx, starty, context, filled=true, stroked=true) {
+  constructor(startx, starty, context, stroked=true) {
     this.startx = startx;
     this.starty = starty;
     this.curves = [];
     this.fillStyle = context.fillStyle;
+    this.fillImage = context.fillImage;
     this.strokeStyle = context.strokeStyle;
     this.lineWidth = context.lineWidth
-    this.filled = filled;
+    this.filled = context.fillShape;
     this.stroked = stroked;
   }
   addCurve(curve) {
+    this.curves.push(curve)
+  }
+  addLine(x, y) {
+    let lastpoint;
+    if (this.curves.length) {
+      lastpoint = this.curves[this.curves.length - 1]
+    } else {
+      lastpoint = {x: this.startx, y: this.starty}
+    }
+    let midpoint = {x: (x + lastpoint.x) / 2, y: (y + lastpoint.y) / 2}
+    let curve = new Curve(midpoint.x, midpoint.y, midpoint.x, midpoint.y, x, y)
     this.curves.push(curve)
   }
   simplify(mode="corners") {
@@ -176,7 +196,7 @@ class GraphicsObject {
   constructor() {
     this.x = 0;
     this.y = 0;
-    this.rotation = 0;
+    this.rotation = 0; // in radians
     this.scale = 1;
     this.idx = uuidv4()
 
@@ -188,16 +208,22 @@ class GraphicsObject {
   }
   draw(context) {
     let ctx = context.ctx;
+    ctx.translate(this.x, this.y)
+    ctx.rotate(this.rotation)
     if (this.currentFrame>=this.frames.length) {
       this.currentFrame = 0;
     }
     for (let child of this.children) {
       let idx = child.idx
-      child.x = this.frames[this.currentFrame][idx].x;
-      child.y = this.frames[this.currentFrame][idx].y;
-      child.rotation = this.frames[this.currentFrame][idx].rotation;
-      child.scale = this.frames[this.currentFrame][idx].scale;
-      child.draw(context)
+      if (idx in this.frames[this.currentFrame].keys) {
+        child.x = this.frames[this.currentFrame].keys[idx].x;
+        child.y = this.frames[this.currentFrame].keys[idx].y;
+        child.rotation = this.frames[this.currentFrame].keys[idx].rotation;
+        child.scale = this.frames[this.currentFrame].keys[idx].scale;
+        ctx.save()
+        child.draw(context)
+        ctx.restore()
+      }
     }
     for (let shape of this.frames[this.currentFrame].shapes) {
       ctx.beginPath()
@@ -212,7 +238,12 @@ class GraphicsObject {
         // ctx.fill()
       }
       if (shape.filled) {
-        ctx.fillStyle = shape.fillStyle
+        if (shape.fillImage) {
+          let pat = ctx.createPattern(shape.fillImage, "no-repeat")
+          ctx.fillStyle = pat
+        } else {
+          ctx.fillStyle = shape.fillStyle
+        }
         ctx.fill()
       }
       if (shape.stroked) {
@@ -223,6 +254,16 @@ class GraphicsObject {
   }
   addShape(shape) {
     this.frames[this.currentFrame].shapes.push(shape)
+  }
+  addObject(object, x=0, y=0) {
+    this.children.push(object)
+    let idx = object.idx
+    this.frames[this.currentFrame].keys[idx] = {
+      x: x,
+      y: y,
+      rotation: 0,
+      scale: 1,
+    }
   }
 }
 
@@ -262,6 +303,51 @@ function stage() {
   stage.width = 1500
   stage.height = 1000
   scroller.className = "scroll"
+  stage.addEventListener("drop", (e) => {
+    e.preventDefault()
+    let mouse = getMousePos(stage, e)
+    const imageTypes = ['image/png', 'image/gif', 'image/avif', 'image/jpeg',
+       'image/svg+xml', 'image/webp'
+    ];
+    if (e.dataTransfer.items) {
+      let i = 0
+      for (let item of e.dataTransfer.items) {
+        if (item.kind == "file") {
+          let file = item.getAsFile()
+          if (imageTypes.includes(file.type)) {
+            let img = new Image()
+            img.src = window.URL.createObjectURL(file)
+            img.ix = i
+            img.onload = function() {
+              let width = img.width
+              let height = img.height
+              let imageObject = new GraphicsObject()
+              let ct = {
+                ...context,
+                fillImage: img,
+              }
+              let imageShape = new Shape(0, 0, ct, false)
+              imageShape.addLine(width, 0)
+              imageShape.addLine(width, height)
+              imageShape.addLine(0, height)
+              imageShape.addLine(0, 0)
+              imageObject.addShape(imageShape)
+              context.activeObject.addObject(
+                imageObject,
+                mouse.x-width/2 + (20*img.ix),
+                mouse.y-height/2 + (20*img.ix))
+              updateUI()
+            }
+          }
+          i++;
+        }
+      }
+    } else {
+    }
+  })
+  stage.addEventListener("dragover", (e) => {
+    e.preventDefault()
+  })
   canvases.push(stage)
   scroller.appendChild(stage)
   stage.addEventListener("mousedown", (e) => {
@@ -330,6 +416,9 @@ function toolbar() {
     icon.src = tools[tool].icon
     toolbtn.appendChild(icon)
     tools_scroller.appendChild(toolbtn)
+    toolbtn.addEventListener("click", () => {
+      console.log(tool)
+    })
   }
   let tools_break = document.createElement("div")
   tools_break.className = "horiz_break"
@@ -415,6 +504,12 @@ function infopanel() {
         }
         input.value = getProperty(context, property)
         break;
+      case "boolean":
+        input = document.createElement("input")
+        input.className = "infopanel-input"
+        input.type = "checkbox"
+        input.checked = getProperty(context, property)
+        break;
     }
     input.addEventListener("input", () => {
       console.log(input.value)
@@ -426,9 +521,11 @@ function infopanel() {
           break;
         case "enum":
           if (prop.options.indexOf(input.value) >= 0) {
-            // console.log(input.value)
             setProperty(context, property, input.value)
           }
+          break;
+        case "boolean":
+          setProperty(context, property, input.checked)
       }
 
     })
@@ -540,6 +637,7 @@ function updateLayout(element) {
 function updateUI() {
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d")
+    ctx.reset();
     ctx.fillStyle = "white"
     ctx.fillRect(0,0,canvas.width,canvas.height)
     ctx.fillStyle = "green"
