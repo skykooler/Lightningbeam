@@ -16,6 +16,9 @@ let mode = "draw"
 let minSegmentSize = 5;
 let maxSmoothAngle = 0.6;
 
+let undoStack = [];
+let redoStack = [];
+
 let tools = {
   select: {
     icon: "/assets/select.svg",
@@ -84,6 +87,55 @@ let context = {
 let config = {
   shortcuts: {
     playAnimation: " ",
+    // undo: "<ctrl>+z"
+    undo: "z",
+    redo: "Z",
+  }
+}
+
+// Pointers to all objects
+let pointerList = {}
+
+let actions = {
+  addShape: {
+    create: (parent, shape) => {
+      redoStack.length = 0; // Clear redo stack
+      let serializableCurves = []
+      for (let curve of shape.curves) {
+        serializableCurves.push({ points: curve.points })
+      }
+      let action = {
+        parent: parent.idx,
+        curves: serializableCurves,
+        startx: shape.startx,
+        starty: shape.starty,
+        uuid: uuidv4()
+      }
+      undoStack.push({name: "addShape", action: action})
+      actions.addShape.execute(action)
+    },
+    execute: (action) => {
+      let object = pointerList[action.parent]
+      console.log(object)
+      let curvesList = action.curves
+      let shape = new Shape(action.startx, action.starty, context, action.uuid)
+      for (let curve of curvesList) {
+        shape.addCurve(
+          new Bezier(
+            curve.points[0].x, curve.points[0].y,
+            curve.points[1].x, curve.points[1].y,
+            curve.points[2].x, curve.points[2].y,
+            curve.points[3].x, curve.points[3].y
+          ))
+      }
+      object.addShape(shape)
+    },
+    rollback: (action) => {
+      let object = pointerList[action.parent]
+      let shape = pointerList[action.uuid]
+      object.removeShape(shape)
+      delete pointerList[action.uuid]
+    }
   }
 }
 
@@ -125,7 +177,7 @@ function setProperty(context, path, value) {
 
 function selectCurve(context, mouse) {
   let mouseTolerance = 15;
-  for (let shape of context.activeObject.frames[context.activeObject.currentFrame].shapes) {
+  for (let shape of context.activeObject.currentFrame.shapes) {
     if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
         mouse.x < shape.boundingBox.x.max + mouseTolerance &&
         mouse.y > shape.boundingBox.y.min - mouseTolerance &&
@@ -185,6 +237,36 @@ function hitTest(candidate, object) {
   }
 }
 
+function pushState() {
+  // console.log(context)
+  // let ctx = context.ctx
+  // context.ctx = undefined
+  // undoStack.push(window.structuredClone([root,context]))
+  // context.ctx = ctx
+}
+function undo() {
+  let action = undoStack.pop()
+  if (action) {
+    actions[action.name].rollback(action.action)
+    redoStack.push(action)
+    updateUI()
+  } else {
+    console.log("No actions to undo")
+  }
+}
+
+function redo() {
+  let action = redoStack.pop()
+  if (action) {
+    actions[action.name].execute(action.action)
+    undoStack.push(action)
+    updateUI()
+  } else {
+    console.log("No actions to redo")
+  }
+}
+
+
 class Curve {
   constructor(startx, starty, cp1x, cp1y, cp2x, cp2y, x, y) {
     this.startx = startx
@@ -199,14 +281,33 @@ class Curve {
 }
 
 class Frame {
-  constructor() {
+  constructor(uuid) {
     this.keys = {}
     this.shapes = []
+    if (!uuid) {
+      this.idx = uuidv4()
+    } else {
+      this.idx = uuid
+    }
+    pointerList[this.idx] = this
+  }
+}
+
+class Layer {
+  constructor(uuid) {
+    this.frames = [new Frame()]
+    this.children = []
+    if (!uuid) {
+      this.idx = uuidv4()
+    } else {
+      this.idx = uuid
+    }
+    pointerList[this.idx] = this
   }
 }
 
 class Shape {
-  constructor(startx, starty, context, stroked=true) {
+  constructor(startx, starty, context, uuid=undefined) {
     this.startx = startx;
     this.starty = starty;
     this.curves = [];
@@ -215,15 +316,21 @@ class Shape {
     this.strokeStyle = context.strokeStyle;
     this.lineWidth = context.lineWidth
     this.filled = context.fillShape;
-    this.stroked = stroked;
+    this.stroked = context.strokeShape || true;
     this.boundingBox = {
       x: {min: startx, max: starty},
       y: {min: starty, max: starty}
     }
+    if (!uuid) {
+      this.idx = uuidv4()
+    } else {
+      this.idx = uuid
+    }
+    pointerList[this.idx] = this
   }
   addCurve(curve) {
     this.curves.push(curve)
-    this.growBoundingBox(curve.bbox())
+    growBoundingBox(this.boundingBox, curve.bbox())
   }
   addLine(x, y) {
     let lastpoint;
@@ -287,27 +394,79 @@ class Shape {
     }
     this.recalculateBoundingBox()
   }
+  draw(context) {
+    let ctx = context.ctx;
+    ctx.beginPath()
+    ctx.lineWidth = this.lineWidth
+    ctx.moveTo(this.startx, this.starty)
+    for (let curve of this.curves) {
+      ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                        curve.points[2].x, curve.points[2].y,
+                        curve.points[3].x, curve.points[3].y)
+
+      // Debug, show curve endpoints
+      // ctx.beginPath()
+      // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
+      // ctx.fill()
+    }
+    if (this.filled) {
+      if (this.fillImage) {
+        let pat = ctx.createPattern(this.fillImage, "no-repeat")
+        ctx.fillStyle = pat
+      } else {
+        ctx.fillStyle = this.fillStyle
+      }
+      ctx.fill()
+    }
+    if (this.stroked) {
+      ctx.strokeStyle = this.strokeStyle
+      ctx.stroke()
+    }
+
+  }
 }
 
 class GraphicsObject {
-  constructor() {
+  constructor(uuid) {
     this.x = 0;
     this.y = 0;
     this.rotation = 0; // in radians
     this.scale = 1;
-    this.idx = uuidv4()
+    if (!uuid) {
+      this.idx = uuidv4()
+    } else {
+      this.idx = uuid
+    }
+    pointerList[this.idx] = this
 
-    this.frames = [new Frame()]
-    this.currentFrame = 0;
-    this.children = []
+    this.currentFrameNum = 0;
+    this.currentLayer = 0;
+    this.layers = [new Layer()]
+    // this.children = []
 
     this.shapes = []
   }
+  get activeLayer() {
+    return this.layers[this.currentLayer]
+  }
+  get children() {
+    return this.layers[this.currentLayer].children
+  }
+  get currentFrame() {
+    return this.layers[this.currentLayer].frames[this.currentFrameNum]
+  }
+  get maxFrame() {
+    let maxFrames = []
+    for (let layer of this.layers) {
+      maxFrames.push(layer.frames.length)
+    }
+    return Math.max(maxFrames)
+  }
   bbox() {
     let bbox;
-    if (this.frames[this.currentFrame].shapes.length > 0) {
-      bbox = this.frames[this.currentFrame].shapes[0].boundingBox
-      for (let shape of this.frames[this.currentFrame].shapes) {
+    if (this.currentFrame.shapes.length > 0) {
+      bbox = this.currentFrame.shapes[0].boundingBox
+      for (let shape of this.currentFrame.shapes) {
         growBoundingBox(bbox, shape.boundingBox)
       }
     }
@@ -325,48 +484,22 @@ class GraphicsObject {
     let ctx = context.ctx;
     ctx.translate(this.x, this.y)
     ctx.rotate(this.rotation)
-    if (this.currentFrame>=this.frames.length) {
-      this.currentFrame = 0;
+    if (this.currentFrameNum>=this.maxFrame) {
+      this.currentFrameNum = 0;
+    }
+    for (let shape of this.currentFrame.shapes) {
+      shape.draw(context)
     }
     for (let child of this.children) {
       let idx = child.idx
-      if (idx in this.frames[this.currentFrame].keys) {
-        child.x = this.frames[this.currentFrame].keys[idx].x;
-        child.y = this.frames[this.currentFrame].keys[idx].y;
-        child.rotation = this.frames[this.currentFrame].keys[idx].rotation;
-        child.scale = this.frames[this.currentFrame].keys[idx].scale;
+      if (idx in this.currentFrame.keys) {
+        child.x = this.currentFrame.keys[idx].x;
+        child.y = this.currentFrame.keys[idx].y;
+        child.rotation = this.currentFrame.keys[idx].rotation;
+        child.scale = this.currentFrame.keys[idx].scale;
         ctx.save()
         child.draw(context)
         ctx.restore()
-      }
-    }
-    for (let shape of this.frames[this.currentFrame].shapes) {
-      ctx.beginPath()
-      ctx.lineWidth = shape.lineWidth
-      ctx.moveTo(shape.startx, shape.starty)
-      for (let curve of shape.curves) {
-        // ctx.moveTo(curve.points[0].x, curve.points[0].y)
-        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                          curve.points[2].x, curve.points[2].y,
-                          curve.points[3].x, curve.points[3].y)
-
-        // Debug, show curve endpoints
-        // ctx.beginPath()
-        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
-        // ctx.fill()
-      }
-      if (shape.filled) {
-        if (shape.fillImage) {
-          let pat = ctx.createPattern(shape.fillImage, "no-repeat")
-          ctx.fillStyle = pat
-        } else {
-          ctx.fillStyle = shape.fillStyle
-        }
-        ctx.fill()
-      }
-      if (shape.stroked) {
-        ctx.strokeStyle = shape.strokeStyle
-        ctx.stroke()
       }
     }
     if (this == context.activeObject) {
@@ -405,16 +538,26 @@ class GraphicsObject {
     }
   }
   addShape(shape) {
-    this.frames[this.currentFrame].shapes.push(shape)
+    this.currentFrame.shapes.push(shape)
   }
   addObject(object, x=0, y=0) {
     this.children.push(object)
     let idx = object.idx
-    this.frames[this.currentFrame].keys[idx] = {
+    this.currentFrame.keys[idx] = {
       x: x,
       y: y,
       rotation: 0,
       scale: 1,
+    }
+  }
+  removeShape(shape) {
+    for (let layer of this.layers) {
+      for (let frame of layer.frames) {
+        let shapeIndex = frame.shapes.indexOf(shape)
+        if (shapeIndex >= 0) {
+          frame.shapes.splice(shapeIndex, 1)
+        }
+      }
     }
   }
 }
@@ -443,8 +586,18 @@ window.addEventListener("resize", () => {
 })
 
 window.addEventListener("keypress", (e) => {
+  // let shortcuts = {}
+  // for (let shortcut of config.shortcuts) {
+    // shortcut = shortcut.split("+")
+    // TODO
+  // }
+  console.log(e)
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
+  } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
+    undo()
+  } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
+    redo()
   }
 })
 
@@ -509,9 +662,10 @@ function stage() {
     switch (mode) {
       case "rectangle":
       case "draw":
+        pushState()
         context.mouseDown = true
         context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
-        context.activeObject.addShape(context.activeShape)
+        console.log(context.activeObject)
         context.lastMouse = mouse
         break;
       case "select":
@@ -558,7 +712,11 @@ function stage() {
         if (context.activeShape) {
           context.activeShape.addLine(mouse.x, mouse.y)
           context.activeShape.simplify(context.simplifyMode)
+          actions.addShape.create(context.activeObject, context.activeShape)
+          // context.activeObject.addShape(context.activeShape)
           context.activeShape = undefined
+          console.log(pointerList)
+          console.log(undoStack)
         }
         break;
       case "rectangle":
@@ -863,6 +1021,9 @@ function updateUI() {
 
     context.ctx = ctx;
     root.draw(context)
+    if (context.activeShape) {
+      context.activeShape.draw(context)
+    }
 
     // let mouse;
     // if (mouseEvent) {
