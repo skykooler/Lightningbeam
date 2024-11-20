@@ -79,6 +79,7 @@ let context = {
   lineWidth: 5,
   simplifyMode: "smooth",
   fillShape: true,
+  strokeShape: true,
   dragging: false,
   selectionRect: undefined,
   selection: [],
@@ -95,6 +96,8 @@ let config = {
 
 // Pointers to all objects
 let pointerList = {}
+// Keeping track of initial values of variables when we edit them continuously
+let startProps = {}
 
 let actions = {
   addShape: {
@@ -138,6 +141,7 @@ let actions = {
   },
   editShape: {
     create: (shape, newCurves) => {
+      redoStack.length = 0; // Clear redo stack
       let serializableNewCurves = []
       for (let curve of newCurves) {
         serializableNewCurves.push({ points: curve.points })
@@ -183,19 +187,79 @@ let actions = {
           ))
       }}
   },
-  addObject: {
-    create: () => {},
-    execute: (action) => {
-
+  addImageObject: {
+    create: (x, y, img, parent) => {
+      redoStack.length = 0; // Clear redo stack
+      let action = {
+        shapeUuid: uuidv4(),
+        objectUuid: uuidv4(),
+        x: x,
+        y: y,
+        width: img.width,
+        height: img.height,
+        ix: img.ix,
+        img: img.idx,
+        parent: parent.idx
+      }
+      undoStack.push({name: "addImageObject", action: action})
+      actions.addImageObject.execute(action)
     },
-    rollback: (action) => {}
+    execute: (action) => {
+      let imageObject = new GraphicsObject(action.objectUuid)
+      let img = pointerList[action.img] 
+      let ct = {
+        ...context,
+        fillImage: img,
+        strokeShape: false,
+      }
+      let imageShape = new Shape(0, 0, ct, action.shapeUuid)
+      imageShape.addLine(action.width, 0)
+      imageShape.addLine(action.width, action.height)
+      imageShape.addLine(0, action.height)
+      imageShape.addLine(0, 0)
+      imageShape.recalculateBoundingBox()
+      imageObject.addShape(imageShape)
+      let parent = pointerList[action.parent]
+      parent.addObject(
+        imageObject,
+        action.x-action.width/2 + (20*action.ix),
+        action.y-action.height/2 + (20*action.ix)
+      )
+    },
+    rollback: (action) => {
+      let shape = pointerList[action.shapeUuid]
+      let object = pointerList[action.objectUuid]
+      let parent = pointerList[action.parent]
+      object.removeShape(shape)
+      delete pointerList[action.shapeUuid]
+      parent.removeChild(object)
+      delete pointerList[action.objectUuid]
+      let selectIndex = context.selection.indexOf(object)
+      if (selectIndex >= 0) {
+        context.selection.splice(selectIndex, 1)
+      }
+    }
   },
-  editObject: {
-    create: () => {},
-    execute: (action) => {
-
+  editFrame: {
+    create: (frame) => {
+      redoStack.length = 0; // Clear redo stack
+      let action = {
+        newState: structuredClone(frame.keys),
+        oldState: startProps[frame.idx],
+        frame: frame.idx
+      }
+      undoStack.push({name: "editFrame", action: action})
+      actions.editFrame.execute(action)
     },
-    rollback: (action) => {}
+    execute: (action) => {
+      let frame = pointerList[action.frame]
+      frame.keys = structuredClone(action.newState)
+    },
+    rollback: (action) => {
+      let frame = pointerList[action.frame]
+      frame.keys = structuredClone(action.oldState)
+      console.log(frame)
+    }
   },
 }
 
@@ -482,6 +546,9 @@ class Frame {
     }
     pointerList[this.idx] = this
   }
+  saveState() {
+    startProps[this.idx] = structuredClone(this.keys)
+  }
 }
 
 class Layer {
@@ -507,7 +574,7 @@ class Shape {
     this.strokeStyle = context.strokeStyle;
     this.lineWidth = context.lineWidth
     this.filled = context.fillShape;
-    this.stroked = context.strokeShape || true;
+    this.stroked = context.strokeShape;
     this.boundingBox = {
       x: {min: startx, max: starty},
       y: {min: starty, max: starty}
@@ -707,6 +774,7 @@ class GraphicsObject {
       for (let item of context.selection) {
         ctx.save()
         ctx.strokeStyle = "#00ffff"
+        ctx.lineWidth = 1;
         ctx.translate(item.x, item.y)
         ctx.beginPath()
         let bbox = item.bbox()
@@ -717,6 +785,7 @@ class GraphicsObject {
       if (context.selectionRect) {
         ctx.save()
         ctx.strokeStyle = "#00ffff"
+        ctx.lineWidth = 1;
         ctx.beginPath()
         ctx.rect(
           context.selectionRect.x1, context.selectionRect.y1,
@@ -749,6 +818,23 @@ class GraphicsObject {
           frame.shapes.splice(shapeIndex, 1)
         }
       }
+    }
+  }
+  removeChild(childObject) {
+    let idx = childObject.idx
+    for (let layer of this.layers) {
+      for (let frame of layer.frames) {
+        delete frame[idx]
+      }
+    }
+    this.children.splice(this.children.indexOf(childObject), 1)
+  }
+  saveState() {
+    startProps[this.idx] = {
+      x: this.x,
+      y: this.y,
+      rotation: this.rotation,
+      scale: this.scale
     }
   }
 }
@@ -814,25 +900,29 @@ function stage() {
             let img = new Image()
             img.src = window.URL.createObjectURL(file)
             img.ix = i
+            img.idx = uuidv4()
+            pointerList[img.idx] = img
             img.onload = function() {
-              let width = img.width
-              let height = img.height
-              let imageObject = new GraphicsObject()
-              let ct = {
-                ...context,
-                fillImage: img,
-              }
-              let imageShape = new Shape(0, 0, ct, false)
-              imageShape.addLine(width, 0)
-              imageShape.addLine(width, height)
-              imageShape.addLine(0, height)
-              imageShape.addLine(0, 0)
-              imageShape.recalculateBoundingBox()
-              imageObject.addShape(imageShape)
-              context.activeObject.addObject(
-                imageObject,
-                mouse.x-width/2 + (20*img.ix),
-                mouse.y-height/2 + (20*img.ix))
+              actions.addImageObject.create(
+                mouse.x, mouse.y, img, context.activeObject)
+              // let width = img.width
+              // let height = img.height
+              // let imageObject = new GraphicsObject()
+              // let ct = {
+              //   ...context,
+              //   fillImage: img,
+              // }
+              // let imageShape = new Shape(0, 0, ct, false)
+              // imageShape.addLine(width, 0)
+              // imageShape.addLine(width, height)
+              // imageShape.addLine(0, height)
+              // imageShape.addLine(0, 0)
+              // imageShape.recalculateBoundingBox()
+              // imageObject.addShape(imageShape)
+              // context.activeObject.addObject(
+              //   imageObject,
+              //   mouse.x-width/2 + (20*img.ix),
+              //   mouse.y-height/2 + (20*img.ix))
               updateUI()
             }
           }
@@ -871,22 +961,37 @@ function stage() {
         } else {
           let selected = false
           let child;
-          // Have to iterate in reverse order to grab the frontmost object when two overlap
-          for (let i=context.activeObject.children.length-1; i>=0; i--) {
-            child = context.activeObject.children[i]
-            // let bbox = child.bbox()
-            if (hitTest(mouse, child)) {
-                if (context.selection.indexOf(child) != -1) {
-                  // dragging = true
-                }
-                context.selection = [child]
-                selected = true
+          if (context.selection.length) {
+            for (child of context.selection) {
+              if (hitTest(mouse, child)) {
+                context.dragging = true
+                context.lastMouse = mouse
+                context.activeObject.currentFrame.saveState()
                 break
+              }
             }
           }
-          if (!selected) {
-            context.selection = []
-            context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
+          if (!context.dragging) {
+            // Have to iterate in reverse order to grab the frontmost object when two overlap
+            for (let i=context.activeObject.children.length-1; i>=0; i--) {
+              child = context.activeObject.children[i]
+              // let bbox = child.bbox()
+              if (hitTest(mouse, child)) {
+                  if (context.selection.indexOf(child) != -1) {
+                    // dragging = true
+                  }
+                  child.saveState()
+                  context.selection = [child]
+                  context.dragging = true
+                  selected = true
+                  context.activeObject.currentFrame.saveState()
+                  break
+              }
+            }
+            if (!selected) {
+              context.selection = []
+              context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
+            }
           }
         }
         break;
@@ -925,6 +1030,9 @@ function stage() {
             }
           }
           actions.editShape.create(context.activeCurve.shape, newCurves)
+        } else if (context.selection.length) {
+          console.log("sopjngf")
+          actions.editFrame.create(context.activeObject.currentFrame)
         }
         break;
       default:
@@ -959,16 +1067,16 @@ function stage() {
         break;
       case "select":
         if (context.dragging) {
-          // let dist = vectorDist(mouse, context.activeCurve.points[1])
-          // let cpoint = context.activeCurve.points[1]
-          // if (vectorDist(mouse, context.activeCurve.points[2]) < dist) {
-          //   cpoint = context.activeCurve.points[2]
-          // }
-          // cpoint.x += (mouse.x - context.lastMouse.x)
-          // cpoint.y += (mouse.y - context.lastMouse.y)
-          context.activeCurve.current.points = moldCurve(
-            context.activeCurve.initial, mouse, context.activeCurve.startmouse
-          ).points 
+          if (context.activeCurve) {
+            context.activeCurve.current.points = moldCurve(
+              context.activeCurve.initial, mouse, context.activeCurve.startmouse
+            ).points 
+          } else {
+            for (let child of context.selection) {
+              context.activeObject.currentFrame.keys[child.idx].x += (mouse.x - context.lastMouse.x)
+              context.activeObject.currentFrame.keys[child.idx] .y += (mouse.y - context.lastMouse.y)
+            }
+          }
         } else if (context.selectionRect) {
           context.selectionRect.x2 = mouse.x
           context.selectionRect.y2 = mouse.y
