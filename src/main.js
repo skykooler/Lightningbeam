@@ -644,50 +644,51 @@ class Shape {
 
       }
     }
-    let epsilon = 0.0001
-    // let newCurves = []
-    // for (let i=0; i<this.curves.length-1; i++) {
-    //   for (let j=i+1; j<this.curves.length; j++) {
-    //     let intersects = this.curves[i].intersects(this.curves[j])
-    //     if (intersects.length==0) {
-    //       newCurves.push(this.curves[i])
-    //     } else {
-    //       intersects.sort().reverse() // with respect to curve 1
-    //       let secondaryIntersects = []
-    //       let remainingFraction = 1
-    //       let remainingCurve = this.curves[i]
-    //       let curveBasket = []
-    //       for (let intersect of intersects) {
-    //         let [t1, t2] = intersect.split("/")
-    //         if (t1 > epsilon && t1 < 1-epsilon) {
-    //           let split = remainingCurve.split(t1 / remainingFraction)
-    //           remainingFraction = t1
-    //           curveBasket.push(split.right)
-    //           remainingCurve = split.left
-    //         }
-    //         if (t2 > epsilon && t2 < 1-epsilon) {
-    //           secondaryIntersects.push(t2)
-    //         }
-    //       }
-    //       curveBasket.reverse()
-    //       for (let curve of curveBasket) {
-    //         newCurves.push(curve)
-    //       }
-    //       curveBasket = []
-    //       secondaryIntersects.sort() // now sorting with respect to curve 2
-    //       remainingFraction = 1
-    //       remainingCurve = this.curves[j]
-    //       for (let t2 of secondaryIntersects) {
-    //         let split = remainingCurve.split(t2 / remainingFraction)
-    //         remainingFraction = t2
-    //         curveBasket.push(split.right)
-    //         remainingCurve = split.left
-    //       }
-    //       this.curves.splice(j, 1, ...curveBasket)
-    //     }
-    //   }
-    // }
-    // this.curves = newCurves 
+    let epsilon = 0.01
+          let newCurves = []
+          let intersectMap = {}
+          for (let i=0; i<this.curves.length-1; i++) {
+            for (let j=i+1; j<this.curves.length; j++) {
+              let intersects = this.curves[i].intersects(this.curves[j])
+              console.log(intersects)
+              if (intersects.length) {
+                intersectMap[i] ||= []
+                intersectMap[j] ||= []
+                for(let intersect of intersects) {
+                  let [t1, t2] = intersect.split("/")
+                  intersectMap[i].push(parseFloat(t1))
+                  intersectMap[j].push(parseFloat(t2))
+                }
+              }
+            }
+          }
+          for (let lst in intersectMap) {
+            for (let i=1; i<intersectMap[lst].length; i++) {
+              if (Math.abs(intersectMap[lst][i] - intersectMap[lst][i-1]) < epsilon) {
+                intersectMap[lst].splice(i,1)
+                i--
+              }
+            }
+          }
+          for (let i=this.curves.length-1; i>=0; i--) {
+            if (i in intersectMap) {
+              intersectMap[i].sort().reverse()
+              let remainingFraction = 1
+              let remainingCurve = this.curves[i]
+              for (let t of intersectMap[i]) {
+                let split = remainingCurve.split(t / remainingFraction)
+                remainingFraction = t
+                newCurves.push(split.right)
+                remainingCurve = split.left
+              }
+              newCurves.push(remainingCurve)
+
+            } else {
+              newCurves.push(this.curves[i])
+            }
+          }
+          newCurves.reverse()
+          this.curves = newCurves 
     this.recalculateBoundingBox()
   }
   draw(context) {
