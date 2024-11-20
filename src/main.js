@@ -116,7 +116,6 @@ let actions = {
     },
     execute: (action) => {
       let object = pointerList[action.parent]
-      console.log(object)
       let curvesList = action.curves
       let shape = new Shape(action.startx, action.starty, context, action.uuid)
       for (let curve of curvesList) {
@@ -136,7 +135,68 @@ let actions = {
       object.removeShape(shape)
       delete pointerList[action.uuid]
     }
-  }
+  },
+  editShape: {
+    create: (shape, newCurves) => {
+      let serializableNewCurves = []
+      for (let curve of newCurves) {
+        serializableNewCurves.push({ points: curve.points })
+      }
+      let serializableOldCurves = []
+      for (let curve of shape.curves) {
+        serializableOldCurves.push({ points: curve.points })
+      }
+      let action = {
+        shape: shape.idx,
+        oldCurves: serializableOldCurves,
+        newCurves: serializableNewCurves
+      }
+      undoStack.push({name: "editShape", action: action})
+      actions.editShape.execute(action)
+
+    },
+    execute: (action) => {
+      let shape = pointerList[action.shape]
+      let curvesList = action.newCurves
+      shape.curves = []
+      for (let curve of curvesList) {
+        shape.addCurve(
+          new Bezier(
+            curve.points[0].x, curve.points[0].y,
+            curve.points[1].x, curve.points[1].y,
+            curve.points[2].x, curve.points[2].y,
+            curve.points[3].x, curve.points[3].y
+          ))
+      }
+    },
+    rollback: (action) => {
+      let shape = pointerList[action.shape]
+      let curvesList = action.oldCurves
+      shape.curves = []
+      for (let curve of curvesList) {
+        shape.addCurve(
+          new Bezier(
+            curve.points[0].x, curve.points[0].y,
+            curve.points[1].x, curve.points[1].y,
+            curve.points[2].x, curve.points[2].y,
+            curve.points[3].x, curve.points[3].y
+          ))
+      }}
+  },
+  addObject: {
+    create: () => {},
+    execute: (action) => {
+
+    },
+    rollback: (action) => {}
+  },
+  editObject: {
+    create: () => {},
+    execute: (action) => {
+
+    },
+    rollback: (action) => {}
+  },
 }
 
 function uuidv4() {
@@ -192,12 +252,143 @@ function selectCurve(context, mouse) {
         }
       }
       if (closest) {
-        return closest
+        return {curve:closest, shape:shape}
       } else {
         return undefined
       }
     }
   }
+}
+
+function moldCurve(curve, mouse, oldmouse) {
+  let diff = {x: mouse.x - oldmouse.x, y: mouse.y - oldmouse.y}
+  let p = curve.project(mouse)
+  let min_influence = 0.1
+  console.log(p.t)
+  const CP1 = {
+    x: curve.points[1].x + diff.x*(1-p.t)*2,
+    y: curve.points[1].y + diff.y*(1-p.t)*2
+  }
+  const CP2 = {
+    x: curve.points[2].x + diff.x*(p.t)*2,
+    y: curve.points[2].y + diff.y*(p.t)*2
+  }
+  return new Bezier(curve.points[0], CP1, CP2, curve.points[3])
+  // return curve
+}
+
+function moldCurveMath(curve, mouse) {
+  let interpolated = true
+
+  let p = curve.project({x: mouse.x, y: mouse.y})
+
+  let t1 = p.t;
+  let struts = curve.getStrutPoints(t1);
+  let m = {
+      t: p.t,
+      B: p,
+      e1: struts[7],
+      e2: struts[8]
+  };
+  m.d1 = { x: m.e1.x - m.B.x, y: m.e1.y - m.B.y};
+  m.d2 = { x: m.e2.x - m.B.x, y: m.e2.y - m.B.y};
+
+  const S = curve.points[0],
+        E = curve.points[curve.order],
+        {B, t, e1, e2} = m,
+        org = curve.getABC(t, B),
+        nB = mouse,
+        d1 = { x: e1.x - B.x, y: e1.y - B.y },
+        d2 = { x: e2.x - B.x, y: e2.y - B.y },
+        ne1 = { x: nB.x + d1.x, y: nB.y + d1.y },
+        ne2 = { x: nB.x + d2.x, y: nB.y + d2.y },
+        {A, C} = curve.getABC(t, nB),
+        // The cubic case requires us to derive two control points,
+        // which we'll do in a separate function to keep the code
+        // at least somewhat manageable.
+        {v1, v2, C1, C2} = deriveControlPoints(S, A, E, ne1, ne2, t);
+
+  // if (interpolated) {
+    // For the last example, we need to show what the "ideal" curve
+    // looks like, in addition to the one we actually get when we
+    // rely on the B we picked with the `t` value and e1/e2 points
+    // that point B had...
+    const ideal = getIdealisedCurve(S, nB, E);
+    let idealCurve = new Bezier(ideal.S, ideal.C1, ideal.C2, ideal.E);
+  // }
+  let molded = new Bezier(S,C1,C2,E);
+
+  let falloff = 100
+
+  let d = Bezier.getUtils().dist(ideal.B, p);
+  let t2 = Math.min(falloff, d) / falloff;
+  console.log(d)
+  let iC1 = {
+      x: (1-t2) * molded.points[1].x + t2 * idealCurve.points[1].x,
+      y: (1-t2) * molded.points[1].y + t2 * idealCurve.points[1].y
+  };
+  let iC2 = {
+      x: (1-t2) * molded.points[2].x + t2 * idealCurve.points[2].x,
+      y: (1-t2) * molded.points[2].y + t2 * idealCurve.points[2].y
+  };
+  let interpolatedCurve = new Bezier(molded.points[0], iC1, iC2, molded.points[3]);
+
+  return interpolatedCurve
+  // return idealCurve
+}
+
+function deriveControlPoints(S, A, E, e1, e2, t) {
+  // Deriving the control points is effectively "doing what
+  // we talk about in the section", in code:
+
+  const v1 = {
+      x: A.x - (A.x - e1.x)/(1-t),
+      y: A.y - (A.y - e1.y)/(1-t)
+  };
+  const v2 = {
+      x: A.x - (A.x - e2.x)/t,
+      y: A.y - (A.y - e2.y)/t
+  };
+
+  const C1 = {
+      x: S.x + (v1.x - S.x) / t,
+      y: S.y + (v1.y - S.y) / t
+  };
+  const C2 = {
+      x: E.x + (v2.x - E.x) / (1-t),
+      y: E.y + (v2.y - E.y) / (1-t)
+  };
+
+  return {v1, v2, C1, C2};
+}
+
+function getIdealisedCurve(p1, p2, p3) {
+  // This "reruns" the curve composition, but with a `t` value
+  // that is unrelated to the actual point B we picked, instead
+  // using whatever the appropriate `t` value would be if we were
+  // trying to fit a circular arc, as per earlier in the section.
+  const utils = Bezier.getUtils()
+  const c = utils.getccenter(p1, p2, p3),
+        d1 = utils.dist(p1, p2),
+        d2 = utils.dist(p3, p2),
+        t = d1 / (d1 + d2),
+        { A, B, C, S, E } = Bezier.getABC(3, p1, p2, p3, t),
+        angle = (Math.atan2(E.y-S.y, E.x-S.x) - Math.atan2(B.y-S.y, B.x-S.x) + utils.TAU) % utils.TAU,
+        bc = (angle < 0 || angle > utils.PI ? -1 : 1) * utils.dist(S, E)/3,
+        de1 = t * bc,
+        de2 = (1-t) * bc,
+        tangent = [
+          { x: B.x - 10 * (B.y-c.y), y: B.y + 10 * (B.x-c.x) },
+          { x: B.x + 10 * (B.y-c.y), y: B.y - 10 * (B.x-c.x) }
+        ],
+        tlength = utils.dist(tangent[0], tangent[1]),
+        dx = (tangent[1].x - tangent[0].x)/tlength,
+        dy = (tangent[1].y - tangent[0].y)/tlength,
+        e1 = { x: B.x + de1 * dx, y: B.y + de1 * dy},
+        e2 = { x: B.x - de2 * dx, y: B.y - de2 * dy },
+        {v1, v2, C1, C2} = deriveControlPoints(S, A, E, e1, e2, t);
+
+  return {A,B,C,S,E,e1,e2,v1,v2,C1,C2};
 }
 
 function growBoundingBox(bboxa, bboxb) {
@@ -506,10 +697,10 @@ class GraphicsObject {
       if (context.activeCurve) {
         ctx.strokeStyle = "magenta"
         ctx.beginPath()
-        ctx.moveTo(context.activeCurve.points[0].x, context.activeCurve.points[0].y)
-        ctx.bezierCurveTo(context.activeCurve.points[1].x, context.activeCurve.points[1].y,
-                          context.activeCurve.points[2].x, context.activeCurve.points[2].y,
-                          context.activeCurve.points[3].x, context.activeCurve.points[3].y
+        ctx.moveTo(context.activeCurve.current.points[0].x, context.activeCurve.current.points[0].y)
+        ctx.bezierCurveTo(context.activeCurve.current.points[1].x, context.activeCurve.current.points[1].y,
+                          context.activeCurve.current.points[2].x, context.activeCurve.current.points[2].y,
+                          context.activeCurve.current.points[3].x, context.activeCurve.current.points[3].y
         )
         ctx.stroke()
       }
@@ -638,7 +829,6 @@ function stage() {
               imageShape.addLine(0, 0)
               imageShape.recalculateBoundingBox()
               imageObject.addShape(imageShape)
-              console.log(imageObject.bbox())
               context.activeObject.addObject(
                 imageObject,
                 mouse.x-width/2 + (20*img.ix),
@@ -665,13 +855,18 @@ function stage() {
         pushState()
         context.mouseDown = true
         context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
-        console.log(context.activeObject)
         context.lastMouse = mouse
         break;
       case "select":
-        let curve = selectCurve(context, mouse)
-        if (curve) {
+        let selection = selectCurve(context, mouse)
+        if (selection) {
           context.dragging = true
+          context.activeCurve = {
+            initial: selection.curve,
+            current: new Bezier(selection.curve.points),
+            shape: selection.shape,
+            startmouse: mouse
+          }
           console.log("gonna move this")
         } else {
           let selected = false
@@ -694,7 +889,6 @@ function stage() {
             context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
           }
         }
-        console.log(context.selection)
         break;
       default:
         break;
@@ -715,16 +909,29 @@ function stage() {
           actions.addShape.create(context.activeObject, context.activeShape)
           // context.activeObject.addShape(context.activeShape)
           context.activeShape = undefined
-          console.log(pointerList)
-          console.log(undoStack)
         }
         break;
       case "rectangle":
         context.activeShape = undefined
+        break;
+      case "select":
+        if (context.activeCurve) {
+          let newCurves = []
+          for (let curve of context.activeCurve.shape.curves) {
+            if (curve == context.activeCurve.initial) {
+              newCurves.push(context.activeCurve.current)
+            } else {
+              newCurves.push(curve)
+            }
+          }
+          actions.editShape.create(context.activeCurve.shape, newCurves)
+        }
+        break;
       default:
         break;
     }
     context.lastMouse = mouse
+    context.activeCurve = undefined
     updateUI()
   })
   stage.addEventListener("mousemove", (e) => {
@@ -752,13 +959,16 @@ function stage() {
         break;
       case "select":
         if (context.dragging) {
-          let dist = vectorDist(mouse, context.activeCurve.points[1])
-          let cpoint = context.activeCurve.points[1]
-          if (vectorDist(mouse, context.activeCurve.points[2]) < dist) {
-            cpoint = context.activeCurve.points[2]
-          }
-          cpoint.x += (mouse.x - context.lastMouse.x)
-          cpoint.y += (mouse.y - context.lastMouse.y)
+          // let dist = vectorDist(mouse, context.activeCurve.points[1])
+          // let cpoint = context.activeCurve.points[1]
+          // if (vectorDist(mouse, context.activeCurve.points[2]) < dist) {
+          //   cpoint = context.activeCurve.points[2]
+          // }
+          // cpoint.x += (mouse.x - context.lastMouse.x)
+          // cpoint.y += (mouse.y - context.lastMouse.y)
+          context.activeCurve.current.points = moldCurve(
+            context.activeCurve.initial, mouse, context.activeCurve.startmouse
+          ).points 
         } else if (context.selectionRect) {
           context.selectionRect.x2 = mouse.x
           context.selectionRect.y2 = mouse.y
@@ -769,7 +979,17 @@ function stage() {
             }
           }
         } else {
-          context.activeCurve = selectCurve(context, mouse)
+          let selection = selectCurve(context, mouse)
+          if (selection) {
+            context.activeCurve = {
+              current: selection.curve, 
+              initial: new Bezier(selection.curve.points),
+              shape: selection.shape,
+              startmouse: mouse
+            }
+          } else {
+            context.activeCurve = undefined
+          }
         }
         context.lastMouse = mouse
         break;
@@ -927,13 +1147,6 @@ function createPane(content=undefined) {
   icon.src = "/assets/stage.svg"
   button.appendChild(icon)
 
-
-  // div.style.display = "grid";
-  // div.style.gridTemplateColumns = `var(--lineheight) 1fr`
-  // div.style.gridTemplateRows = "1fr"
-  // header.style.gridArea = "1 / 1 / 2 / 2"
-  // content.style.gridArea = "1 / 2 / 2 / 3"
-
   div.className = "vertical-grid"
   header.style.height = "calc( 2 * var(--lineheight))"
   content.style.height = "calc( 100% - 2 * var(--lineheight) )"
@@ -959,26 +1172,12 @@ function splitPane(div, percent, horiz, newPane=undefined) {
   div.appendChild(div1)
   div.appendChild(div2)
 
-  // div.style.display = "grid";
-  // if (horiz) {
-  //   div.classList.add("horizontal-grid")
-  //   div.style.gridTemplateColumns = `${percent}% 1fr`
-  //   div1.style.gridArea = "1 / 1 / 2 / 2"
-  //   div2.style.gridArea = "1 / 2 / 2 / 3"
-  // } else {
-  //   div.classList.add("vertical-grid")
-  //   div.style.gridTemplateRows = `${percent}% 1fr`
-  //   div1.style.gridArea = "1 / 1 / 2 / 2"
-  //   div2.style.gridArea = "2 / 1 / 3 / 2"
-  // }
   if (horiz) {
     div.className = "horizontal-grid"
   } else {
     div.className = "vertical-grid"
   }
   div.setAttribute("lb-percent", percent) // TODO: better attribute name
-  // div1.style.flex = `0 0 ${percent}%`
-  // div2.style.flex = `1 1 auto`
   Coloris({el: ".color-field"})
   updateUI()
   updateLayout(rootPane)
@@ -1016,8 +1215,6 @@ function updateUI() {
     ctx.reset();
     ctx.fillStyle = "white"
     ctx.fillRect(0,0,canvas.width,canvas.height)
-    ctx.fillStyle = "green"
-    // ctx.fillRect(0,0,200,200)
 
     context.ctx = ctx;
     root.draw(context)
@@ -1025,13 +1222,5 @@ function updateUI() {
       context.activeShape.draw(context)
     }
 
-    // let mouse;
-    // if (mouseEvent) {
-    //   mouse = getMousePos(canvas, mouseEvent);
-    // } else {
-    //   mouse = {x: 0, y: 0}
-    // }
-    // ctx.fillRect(mouse.x, mouse.y, 50,50)
   }
-  // requestAnimationFrame(updateUI)
 }

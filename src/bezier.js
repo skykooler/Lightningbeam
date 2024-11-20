@@ -1,3 +1,5 @@
+import { Vector } from "./vector.js";
+
 // math-inlining.
 const { abs, cos, sin, acos, atan2, sqrt, pow } = Math;
 
@@ -1968,6 +1970,25 @@ class Bezier {
     } while (t_e < 1);
     return circles;
   }
+
+  getStrutPoints(t) {
+    const p = this.points.map((p) => new Vector(p));
+    const mt = 1 - t;
+
+    let s = 0;
+    let n = p.length + 1;
+    while (--n > 1) {
+      let list = p.slice(s, s + n);
+      for (let i = 0, e = list.length - 1; i < e; i++) {
+        let pt = list[i + 1].subtract(list[i + 1].subtract(list[i]).scale(mt));
+        p.push(pt);
+      }
+      s += n;
+    }
+
+    return p;
+  }
+
 }
 
 export { Bezier };
