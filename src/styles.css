@@ -78,6 +78,11 @@ button {
   box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
 }
 
+div {
+  /* this should be on everything by default, really */
+  box-sizing: border-box;
+}
+
 button {
   cursor: pointer;
 }
@@ -227,4 +232,56 @@ button {
 .infopanel-input {
   flex: 1 1 50%;
   width: 50%;
+}
+.layers-container {
+  overflow-y: scroll;
+}
+.layers {
+  background-color: #222222;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  min-height: 100%;
+}
+.frames-container {
+  background-color: #222222;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  /* overflow-x: scroll; */
+  /* overflow-y:inherit; */
+  min-height: 100%;
+}
+.layer-header {
+  width: 100%;
+  height: calc( 2 * var(--lineheight));
+  background-color: #3f3f3f;
+  border-top: 1px solid #4f4f4f;
+  border-bottom: 1px solid #222222;
+  flex-shrink: 0;
+}
+.layer-track {
+  min-width: 100%;
+  height: calc( 2 * var(--lineheight));
+  background: repeating-linear-gradient(to right, transparent, transparent 24px, #3f3f3f 24px, #3f3f3f 25px),
+              repeating-linear-gradient(to right, #222222, #222222 100px, #151515 100px, #151515 125px);
+
+  display: flex;
+  flex-direction: row;
+  border-top: 1px solid #222222;
+  border-bottom: 1px solid #3f3f3f;
+  flex-shrink: 0;
+}
+.frame {
+  width: 25px;
+  height: 100%;
+
+  background-color: #4f4f4f;
+  flex-grow: 0;
+  flex-shrink: 0;
+  border-right: 1px solid #3f3f3f;
+  border-left: 1px solid #555555;
+}
+.frame:hover {
+  background-color: #555555;
 }

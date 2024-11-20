@@ -19,6 +19,8 @@ let maxSmoothAngle = 0.6;
 let undoStack = [];
 let redoStack = [];
 
+let layoutElements = []
+
 let tools = {
   select: {
     icon: "/assets/select.svg",
@@ -398,7 +400,6 @@ function moldCurveMath(curve, mouse) {
   let interpolatedCurve = new Bezier(molded.points[0], iC1, iC2, molded.points[3]);
 
   return interpolatedCurve
-  // return idealCurve
 }
 
 function deriveControlPoints(S, A, E, e1, e2, t) {
@@ -492,13 +493,6 @@ function hitTest(candidate, object) {
   }
 }
 
-function pushState() {
-  // console.log(context)
-  // let ctx = context.ctx
-  // context.ctx = undefined
-  // undoStack.push(window.structuredClone([root,context]))
-  // context.ctx = ctx
-}
 function undo() {
   let action = undoStack.pop()
   if (action) {
@@ -650,6 +644,50 @@ class Shape {
 
       }
     }
+    let epsilon = 0.0001
+    // let newCurves = []
+    // for (let i=0; i<this.curves.length-1; i++) {
+    //   for (let j=i+1; j<this.curves.length; j++) {
+    //     let intersects = this.curves[i].intersects(this.curves[j])
+    //     if (intersects.length==0) {
+    //       newCurves.push(this.curves[i])
+    //     } else {
+    //       intersects.sort().reverse() // with respect to curve 1
+    //       let secondaryIntersects = []
+    //       let remainingFraction = 1
+    //       let remainingCurve = this.curves[i]
+    //       let curveBasket = []
+    //       for (let intersect of intersects) {
+    //         let [t1, t2] = intersect.split("/")
+    //         if (t1 > epsilon && t1 < 1-epsilon) {
+    //           let split = remainingCurve.split(t1 / remainingFraction)
+    //           remainingFraction = t1
+    //           curveBasket.push(split.right)
+    //           remainingCurve = split.left
+    //         }
+    //         if (t2 > epsilon && t2 < 1-epsilon) {
+    //           secondaryIntersects.push(t2)
+    //         }
+    //       }
+    //       curveBasket.reverse()
+    //       for (let curve of curveBasket) {
+    //         newCurves.push(curve)
+    //       }
+    //       curveBasket = []
+    //       secondaryIntersects.sort() // now sorting with respect to curve 2
+    //       remainingFraction = 1
+    //       remainingCurve = this.curves[j]
+    //       for (let t2 of secondaryIntersects) {
+    //         let split = remainingCurve.split(t2 / remainingFraction)
+    //         remainingFraction = t2
+    //         curveBasket.push(split.right)
+    //         remainingCurve = split.left
+    //       }
+    //       this.curves.splice(j, 1, ...curveBasket)
+    //     }
+    //   }
+    // }
+    // this.curves = newCurves 
     this.recalculateBoundingBox()
   }
   draw(context) {
@@ -854,12 +892,13 @@ window.addEventListener("DOMContentLoaded", () => {
   rootPane.addEventListener("mousemove", (e) => {
     mouseEvent = e;
   })
-  let [_toolbar, panel] = splitPane(rootPane, 10, true)
-  let [_stage, _infopanel] = splitPane(panel, 70, false, createPane(infopanel()))
+  let [_toolbar, panel] = splitPane(rootPane, 10, true, createPane(timeline()))
+  let [stageAndTimeline, _infopanel] = splitPane(panel, 70, false, createPane(infopanel()))
+  let [_timeline, _stage] = splitPane(stageAndTimeline, 30, false, createPane(stage()))
 });
 
 window.addEventListener("resize", () => {
-  updateLayout(rootPane)
+  updateAll()
 })
 
 window.addEventListener("keypress", (e) => {
@@ -905,24 +944,6 @@ function stage() {
             img.onload = function() {
               actions.addImageObject.create(
                 mouse.x, mouse.y, img, context.activeObject)
-              // let width = img.width
-              // let height = img.height
-              // let imageObject = new GraphicsObject()
-              // let ct = {
-              //   ...context,
-              //   fillImage: img,
-              // }
-              // let imageShape = new Shape(0, 0, ct, false)
-              // imageShape.addLine(width, 0)
-              // imageShape.addLine(width, height)
-              // imageShape.addLine(0, height)
-              // imageShape.addLine(0, 0)
-              // imageShape.recalculateBoundingBox()
-              // imageObject.addShape(imageShape)
-              // context.activeObject.addObject(
-              //   imageObject,
-              //   mouse.x-width/2 + (20*img.ix),
-              //   mouse.y-height/2 + (20*img.ix))
               updateUI()
             }
           }
@@ -942,7 +963,6 @@ function stage() {
     switch (mode) {
       case "rectangle":
       case "draw":
-        pushState()
         context.mouseDown = true
         context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
         context.lastMouse = mouse
@@ -1012,7 +1032,6 @@ function stage() {
           context.activeShape.addLine(mouse.x, mouse.y)
           context.activeShape.simplify(context.simplifyMode)
           actions.addShape.create(context.activeObject, context.activeShape)
-          // context.activeObject.addShape(context.activeShape)
           context.activeShape = undefined
         }
         break;
@@ -1176,6 +1195,22 @@ function toolbar() {
   return tools_scroller
 }
 
+function timeline() {
+  let container = document.createElement("div")
+  let layerspanel = document.createElement("div")
+  let framescontainer = document.createElement("div")
+  container.classList.add("horizontal-grid")
+  container.classList.add("layers-container")
+  layerspanel.className = "layers"
+  framescontainer.className = "frames-container"
+  container.appendChild(layerspanel)
+  container.appendChild(framescontainer)
+  layoutElements.push(container)
+  container.setAttribute("lb-percent", 20)
+
+  return container
+}
+
 function infopanel() {
   let panel = document.createElement("div")
   panel.className = "infopanel"
@@ -1287,9 +1322,17 @@ function splitPane(div, percent, horiz, newPane=undefined) {
   }
   div.setAttribute("lb-percent", percent) // TODO: better attribute name
   Coloris({el: ".color-field"})
+  updateAll()
   updateUI()
-  updateLayout(rootPane)
+  updateLayers()
   return [div1, div2]
+}
+
+function updateAll() {
+  updateLayout(rootPane)
+  for (let element of layoutElements) {
+    updateLayout(element)
+  }
 }
 
 function updateLayout(element) {
@@ -1298,12 +1341,12 @@ function updateLayout(element) {
   percent ||= 50
   let children = element.children
   if (children.length != 2) return;
-  if (element.className == "horizontal-grid") {
+  if (element.classList.contains("horizontal-grid")) {
     children[0].style.width = `${rect.width * percent / 100}px`
     children[1].style.width = `${rect.width * (100 - percent) / 100}px`
     children[0].style.height = `${rect.height}px`
     children[1].style.height = `${rect.height}px`
-  } else if (element.className == "vertical-grid") {
+  } else if (element.classList.contains("vertical-grid")) {
     children[0].style.height = `${rect.height * percent / 100}px`
     children[1].style.height = `${rect.height * (100 - percent) / 100}px`
     children[0].style.width = `${rect.width}px`
@@ -1330,5 +1373,31 @@ function updateUI() {
       context.activeShape.draw(context)
     }
 
+  }
+}
+
+function updateLayers() {
+  console.log(document.querySelectorAll(".layers-container"))
+  for (let container of document.querySelectorAll(".layers-container")) {
+    console.log("?")
+    let layerspanel = container.querySelectorAll(".layers")[0]
+    let framescontainer = container.querySelectorAll(".frames-container")[0]
+    layerspanel.textContent = ""
+    framescontainer.textContent = ""
+    for (let layer of context.activeObject.layers) {
+    // for (let i=0; i<5; i++) {
+      let layerHeader = document.createElement("div")
+      layerHeader.className = "layer-header"
+      layerspanel.appendChild(layerHeader)
+      let layerTrack = document.createElement("div")
+      layerTrack.className = "layer-track"
+      framescontainer.appendChild(layerTrack)
+      for (let frame of layer.frames) {
+      // for (let j=0; j<5-i; j++) {
+        let frameEl = document.createElement("div")
+        frameEl.className = "frame"
+        layerTrack.appendChild(frameEl)
+      }
+    }
   }
 }
