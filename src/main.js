@@ -303,26 +303,28 @@ function setProperty(context, path, value) {
 
 function selectCurve(context, mouse) {
   let mouseTolerance = 15;
+  let closestDist = mouseTolerance;
+  let closestCurve = undefined
+  let closestShape = undefined
   for (let shape of context.activeObject.currentFrame.shapes) {
     if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
         mouse.x < shape.boundingBox.x.max + mouseTolerance &&
         mouse.y > shape.boundingBox.y.min - mouseTolerance &&
         mouse.y < shape.boundingBox.y.max + mouseTolerance) {
-      let closestDist = mouseTolerance;
-      let closest = undefined
       for (let curve of shape.curves) {
         let dist = vectorDist(mouse, curve.project(mouse))
         if (dist <= closestDist ) {
           closestDist = dist
-          closest = curve
+          closestCurve = curve
+          closestShape = shape
         }
       }
-      if (closest) {
-        return {curve:closest, shape:shape}
-      } else {
-        return undefined
       }
     }
+      if (closestCurve) {
+        return {curve:closestCurve, shape:closestShape}
+      } else {
+        return undefined
   }
 }
 
@@ -645,50 +647,50 @@ class Shape {
       }
     }
     let epsilon = 0.01
-          let newCurves = []
-          let intersectMap = {}
-          for (let i=0; i<this.curves.length-1; i++) {
-            for (let j=i+1; j<this.curves.length; j++) {
-              let intersects = this.curves[i].intersects(this.curves[j])
-              console.log(intersects)
-              if (intersects.length) {
-                intersectMap[i] ||= []
-                intersectMap[j] ||= []
-                for(let intersect of intersects) {
-                  let [t1, t2] = intersect.split("/")
-                  intersectMap[i].push(parseFloat(t1))
-                  intersectMap[j].push(parseFloat(t2))
-                }
-              }
-            }
+    let newCurves = []
+    let intersectMap = {}
+    for (let i=0; i<this.curves.length-1; i++) {
+      for (let j=i+1; j<this.curves.length; j++) {
+        let intersects = this.curves[i].intersects(this.curves[j])
+        console.log(intersects)
+        if (intersects.length) {
+          intersectMap[i] ||= []
+          intersectMap[j] ||= []
+          for(let intersect of intersects) {
+            let [t1, t2] = intersect.split("/")
+            intersectMap[i].push(parseFloat(t1))
+            intersectMap[j].push(parseFloat(t2))
           }
-          for (let lst in intersectMap) {
-            for (let i=1; i<intersectMap[lst].length; i++) {
-              if (Math.abs(intersectMap[lst][i] - intersectMap[lst][i-1]) < epsilon) {
-                intersectMap[lst].splice(i,1)
-                i--
-              }
-            }
-          }
-          for (let i=this.curves.length-1; i>=0; i--) {
-            if (i in intersectMap) {
-              intersectMap[i].sort().reverse()
-              let remainingFraction = 1
-              let remainingCurve = this.curves[i]
-              for (let t of intersectMap[i]) {
-                let split = remainingCurve.split(t / remainingFraction)
-                remainingFraction = t
-                newCurves.push(split.right)
-                remainingCurve = split.left
-              }
-              newCurves.push(remainingCurve)
+        }
+      }
+    }
+    for (let lst in intersectMap) {
+      for (let i=1; i<intersectMap[lst].length; i++) {
+        if (Math.abs(intersectMap[lst][i] - intersectMap[lst][i-1]) < epsilon) {
+          intersectMap[lst].splice(i,1)
+          i--
+        }
+      }
+    }
+    for (let i=this.curves.length-1; i>=0; i--) {
+      if (i in intersectMap) {
+        intersectMap[i].sort().reverse()
+        let remainingFraction = 1
+        let remainingCurve = this.curves[i]
+        for (let t of intersectMap[i]) {
+          let split = remainingCurve.split(t / remainingFraction)
+          remainingFraction = t
+          newCurves.push(split.right)
+          remainingCurve = split.left
+        }
+        newCurves.push(remainingCurve)
 
-            } else {
-              newCurves.push(this.curves[i])
-            }
-          }
-          newCurves.reverse()
-          this.curves = newCurves 
+      } else {
+        newCurves.push(this.curves[i])
+      }
+    }
+    newCurves.reverse()
+    this.curves = newCurves 
     this.recalculateBoundingBox()
   }
   draw(context) {
@@ -1108,6 +1110,7 @@ function stage() {
           }
         } else {
           let selection = selectCurve(context, mouse)
+          console.log(selection)
           if (selection) {
             context.activeCurve = {
               current: selection.curve, 
