@@ -1154,6 +1154,7 @@ function stage() {
         }
         break;
       case "rectangle":
+        actions.addShape.create(context.activeObject, context.activeShape)
         context.activeShape = undefined
         break;
       case "select":
