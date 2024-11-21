@@ -1149,6 +1149,11 @@ class Bezier {
     this._lut = []; //  invalidate any precomputed LUT
   }
 
+  setColor(color) {
+    this.color = color
+    return this
+  }
+
   verify() {
     const print = this.coordDigest();
     if (print !== this._print) {

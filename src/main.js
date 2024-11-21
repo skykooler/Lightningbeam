@@ -124,13 +124,12 @@ let actions = {
       let curvesList = action.curves
       let shape = new Shape(action.startx, action.starty, context, action.uuid)
       for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x, curve.points[0].y,
-            curve.points[1].x, curve.points[1].y,
-            curve.points[2].x, curve.points[2].y,
-            curve.points[3].x, curve.points[3].y
-          ))
+        shape.addCurve(new Bezier(
+          curve.points[0].x, curve.points[0].y,
+          curve.points[1].x, curve.points[1].y,
+          curve.points[2].x, curve.points[2].y,
+          curve.points[3].x, curve.points[3].y
+        ).setColor(curve.color))
       }
       shape.update()
       object.addShape(shape)
@@ -167,13 +166,12 @@ let actions = {
       let curvesList = action.newCurves
       shape.curves = []
       for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x, curve.points[0].y,
-            curve.points[1].x, curve.points[1].y,
-            curve.points[2].x, curve.points[2].y,
-            curve.points[3].x, curve.points[3].y
-          ))
+        shape.addCurve(new Bezier(
+          curve.points[0].x, curve.points[0].y,
+          curve.points[1].x, curve.points[1].y,
+          curve.points[2].x, curve.points[2].y,
+          curve.points[3].x, curve.points[3].y
+        ).setColor(curve.color))
       }
       shape.update()
     },
@@ -182,13 +180,12 @@ let actions = {
       let curvesList = action.oldCurves
       shape.curves = []
       for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x, curve.points[0].y,
-            curve.points[1].x, curve.points[1].y,
-            curve.points[2].x, curve.points[2].y,
-            curve.points[3].x, curve.points[3].y
-          ))
+        shape.addCurve(new Bezier(
+          curve.points[0].x, curve.points[0].y,
+          curve.points[1].x, curve.points[1].y,
+          curve.points[2].x, curve.points[2].y,
+          curve.points[3].x, curve.points[3].y
+        ).setColor(curve.color))
       }
       shape.update()
     }
@@ -626,6 +623,7 @@ class Shape {
                            midpoint.x, midpoint.y,
                            midpoint.x, midpoint.y,
                            x, y)
+    curve.color = context.strokeStyle
     this.curves.push(curve)
   }
   clear() {
@@ -716,8 +714,11 @@ class Shape {
         newCurves.push(this.curves[i])
       }
     }
+    for (let curve of newCurves) {
+      curve.color = context.strokeStyle
+    }
     newCurves.reverse()
-    this.curves = newCurves 
+    this.curves = newCurves
     this.update()
   }
   update() {
@@ -765,20 +766,16 @@ class Shape {
   }
   draw(context) {
     let ctx = context.ctx;
-    ctx.beginPath()
     ctx.lineWidth = this.lineWidth
-    ctx.moveTo(this.startx, this.starty)
-    for (let curve of this.curves) {
-      ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                        curve.points[2].x, curve.points[2].y,
-                        curve.points[3].x, curve.points[3].y)
-
-      // Debug, show curve endpoints
-      // ctx.beginPath()
-      // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
-      // ctx.fill()
-    }
+    ctx.lineCap = "round"
     if (this.filled) {
+      ctx.beginPath()
+      ctx.moveTo(this.startx, this.starty)
+      for (let curve of this.curves) {
+        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                          curve.points[2].x, curve.points[2].y,
+                          curve.points[3].x, curve.points[3].y)
+      }
       if (this.fillImage) {
         let pat = ctx.createPattern(this.fillImage, "no-repeat")
         ctx.fillStyle = pat
@@ -787,9 +784,19 @@ class Shape {
       }
       ctx.fill()
     }
-    if (this.stroked) {
-      ctx.strokeStyle = this.strokeStyle
+    for (let curve of this.curves) {
+      ctx.strokeStyle = curve.color
+      ctx.beginPath()
+      ctx.moveTo(curve.points[0].x, curve.points[0].y)
+      ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                        curve.points[2].x, curve.points[2].y,
+                        curve.points[3].x, curve.points[3].y)
       ctx.stroke()
+
+      // Debug, show curve endpoints
+      // ctx.beginPath()
+      // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
+      // ctx.fill()
     }
 
   }
@@ -1090,7 +1097,7 @@ function stage() {
             context.activeVertex = undefined
             context.activeCurve = {
               initial: selection.curve,
-              current: new Bezier(selection.curve.points),
+              current: new Bezier(selection.curve.points).setColor(selection.curve.color),
               shape: selection.shape,
               startmouse: {x: mouse.x, y: mouse.y}
             }
@@ -1278,7 +1285,7 @@ function stage() {
             if (selection) {
               context.activeCurve = {
                 current: selection.curve, 
-                initial: new Bezier(selection.curve.points),
+                initial: new Bezier(selection.curve.points).setColor(selection.curve.color),
                 shape: selection.shape,
                 startmouse: mouse
               }
