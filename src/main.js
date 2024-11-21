@@ -107,7 +107,7 @@ let actions = {
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = []
       for (let curve of shape.curves) {
-        serializableCurves.push({ points: curve.points })
+        serializableCurves.push({ points: curve.points, color: curve.color })
       }
       let action = {
         parent: parent.idx,
@@ -146,7 +146,7 @@ let actions = {
       redoStack.length = 0; // Clear redo stack
       let serializableNewCurves = []
       for (let curve of newCurves) {
-        serializableNewCurves.push({ points: curve.points })
+        serializableNewCurves.push({ points: curve.points, color: curve.color })
       }
       let serializableOldCurves = []
       for (let curve of shape.curves) {
