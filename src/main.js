@@ -132,6 +132,7 @@ let actions = {
             curve.points[3].x, curve.points[3].y
           ))
       }
+      shape.update()
       object.addShape(shape)
     },
     rollback: (action) => {
@@ -174,6 +175,7 @@ let actions = {
             curve.points[3].x, curve.points[3].y
           ))
       }
+      shape.update()
     },
     rollback: (action) => {
       let shape = pointerList[action.shape]
@@ -187,7 +189,9 @@ let actions = {
             curve.points[2].x, curve.points[2].y,
             curve.points[3].x, curve.points[3].y
           ))
-      }}
+      }
+      shape.update()
+    }
   },
   addImageObject: {
     create: (x, y, img, parent) => {
@@ -219,7 +223,7 @@ let actions = {
       imageShape.addLine(action.width, action.height)
       imageShape.addLine(0, action.height)
       imageShape.addLine(0, 0)
-      imageShape.recalculateBoundingBox()
+      imageShape.update()
       imageObject.addShape(imageShape)
       let parent = pointerList[action.parent]
       parent.addObject(
@@ -260,7 +264,6 @@ let actions = {
     rollback: (action) => {
       let frame = pointerList[action.frame]
       frame.keys = structuredClone(action.oldState)
-      console.log(frame)
     }
   },
 }
@@ -327,12 +330,37 @@ function selectCurve(context, mouse) {
         return undefined
   }
 }
+function selectVertex(context, mouse) {
+  let mouseTolerance = 15;
+  let closestDist = mouseTolerance;
+  let closestVertex = undefined
+  let closestShape = undefined
+  for (let shape of context.activeObject.currentFrame.shapes) {
+    if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
+        mouse.x < shape.boundingBox.x.max + mouseTolerance &&
+        mouse.y > shape.boundingBox.y.min - mouseTolerance &&
+        mouse.y < shape.boundingBox.y.max + mouseTolerance) {
+      for (let vertex of shape.vertices) {
+        let dist = vectorDist(mouse, vertex.point)
+        if (dist <= closestDist ) {
+          closestDist = dist
+          closestVertex = vertex
+          closestShape = shape
+        }
+      }
+      }
+    }
+      if (closestVertex) {
+        return {vertex:closestVertex, shape:closestShape}
+      } else {
+        return undefined
+  }
+}
 
 function moldCurve(curve, mouse, oldmouse) {
   let diff = {x: mouse.x - oldmouse.x, y: mouse.y - oldmouse.y}
   let p = curve.project(mouse)
   let min_influence = 0.1
-  console.log(p.t)
   const CP1 = {
     x: curve.points[1].x + diff.x*(1-p.t)*2,
     y: curve.points[1].y + diff.y*(1-p.t)*2
@@ -390,7 +418,6 @@ function moldCurveMath(curve, mouse) {
 
   let d = Bezier.getUtils().dist(ideal.B, p);
   let t2 = Math.min(falloff, d) / falloff;
-  console.log(d)
   let iC1 = {
       x: (1-t2) * molded.points[1].x + t2 * idealCurve.points[1].x,
       y: (1-t2) * molded.points[1].y + t2 * idealCurve.points[1].y
@@ -565,6 +592,7 @@ class Shape {
     this.startx = startx;
     this.starty = starty;
     this.curves = [];
+    this.vertices = [];
     this.fillStyle = context.fillStyle;
     this.fillImage = context.fillImage;
     this.strokeStyle = context.strokeStyle;
@@ -652,7 +680,6 @@ class Shape {
     for (let i=0; i<this.curves.length-1; i++) {
       for (let j=i+1; j<this.curves.length; j++) {
         let intersects = this.curves[i].intersects(this.curves[j])
-        console.log(intersects)
         if (intersects.length) {
           intersectMap[i] ||= []
           intersectMap[j] ||= []
@@ -691,7 +718,50 @@ class Shape {
     }
     newCurves.reverse()
     this.curves = newCurves 
+    this.update()
+  }
+  update() {
     this.recalculateBoundingBox()
+    this.updateVertices()
+    if (this.curves.length) {
+      this.startx = this.curves[0].points[0].x
+      this.starty = this.curves[0].points[0].y
+    }
+  }
+  updateVertices() {
+    this.vertices = []
+    let utils = Bezier.getUtils()
+    let epsilon = 1.5 // big epsilon whoa
+    let tooClose;
+    let i = 0;
+    for (let curve of this.curves) {
+      for (let index of [0, 3]) {
+        tooClose = false
+        for (let vertex of this.vertices) {
+          if (utils.dist(curve.points[index], vertex.point) < epsilon){
+            tooClose = true;
+            vertex[["startCurves",,,"endCurves"][index]][i] = curve
+            break
+          }
+        }
+        if (!tooClose) {
+          if (index==0) {
+            this.vertices.push({
+              point:curve.points[index],
+              startCurves: {[i]:curve},
+              endCurves: []
+            })
+          } else {
+            this.vertices.push({
+              point:curve.points[index],
+              startCurves: [],
+              endCurves: {[i]:curve}
+            })
+          }
+        }
+      }
+      i++;
+    }
   }
   draw(context) {
     let ctx = context.ctx;
@@ -811,6 +881,33 @@ class GraphicsObject {
                           context.activeCurve.current.points[3].x, context.activeCurve.current.points[3].y
         )
         ctx.stroke()
+      }
+      if (context.activeVertex) {
+        ctx.save()
+        ctx.strokeStyle = "#00ffff"
+        let curves = {...context.activeVertex.current.startCurves,
+          ...context.activeVertex.current.endCurves
+        }
+        // I don't understand why I can't use a for...of loop here
+        for (let idx in curves) {
+          let curve = curves[idx]
+          ctx.beginPath()
+          ctx.moveTo(curve.points[0].x, curve.points[0].y)
+          ctx.bezierCurveTo(
+            curve.points[1].x,curve.points[1].y,
+            curve.points[2].x,curve.points[2].y,
+            curve.points[3].x,curve.points[3].y
+          )
+          ctx.stroke()
+        }
+        ctx.fillStyle = "black"
+        ctx.beginPath()
+        let vertexSize = 15
+        ctx.rect(context.activeVertex.current.point.x - vertexSize/2,
+          context.activeVertex.current.point.y - vertexSize/2, vertexSize, vertexSize
+        )
+        ctx.fill()
+        ctx.restore()
       }
       for (let item of context.selection) {
         ctx.save()
@@ -971,49 +1068,67 @@ function stage() {
         context.lastMouse = mouse
         break;
       case "select":
-        let selection = selectCurve(context, mouse)
+        let selection = selectVertex(context, mouse)
         if (selection) {
           context.dragging = true
-          context.activeCurve = {
-            initial: selection.curve,
-            current: new Bezier(selection.curve.points),
+          context.activeCurve = undefined
+          context.activeVertex = {
+            current: {
+              point: {x: selection.vertex.point.x, y: selection.vertex.point.y},
+              startCurves: structuredClone(selection.vertex.startCurves),
+              endCurves: structuredClone(selection.vertex.endCurves),
+            },
+            initial: selection.vertex,
             shape: selection.shape,
-            startmouse: mouse
+            startmouse: {x: mouse.x, y: mouse.y}
           }
           console.log("gonna move this")
         } else {
-          let selected = false
-          let child;
-          if (context.selection.length) {
-            for (child of context.selection) {
-              if (hitTest(mouse, child)) {
-                context.dragging = true
-                context.lastMouse = mouse
-                context.activeObject.currentFrame.saveState()
-                break
-              }
+          selection = selectCurve(context, mouse)
+          if (selection) {
+            context.dragging = true
+            context.activeVertex = undefined
+            context.activeCurve = {
+              initial: selection.curve,
+              current: new Bezier(selection.curve.points),
+              shape: selection.shape,
+              startmouse: {x: mouse.x, y: mouse.y}
             }
-          }
-          if (!context.dragging) {
-            // Have to iterate in reverse order to grab the frontmost object when two overlap
-            for (let i=context.activeObject.children.length-1; i>=0; i--) {
-              child = context.activeObject.children[i]
-              // let bbox = child.bbox()
-              if (hitTest(mouse, child)) {
-                  if (context.selection.indexOf(child) != -1) {
-                    // dragging = true
-                  }
-                  child.saveState()
-                  context.selection = [child]
+            console.log("gonna move this")
+          } else {
+            let selected = false
+            let child;
+            if (context.selection.length) {
+              for (child of context.selection) {
+                if (hitTest(mouse, child)) {
                   context.dragging = true
-                  selected = true
+                  context.lastMouse = mouse
                   context.activeObject.currentFrame.saveState()
                   break
+                }
               }
             }
-            if (!selected) {
-              context.selection = []
-              context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
+            if (!context.dragging) {
+              // Have to iterate in reverse order to grab the frontmost object when two overlap
+              for (let i=context.activeObject.children.length-1; i>=0; i--) {
+                child = context.activeObject.children[i]
+                // let bbox = child.bbox()
+                if (hitTest(mouse, child)) {
+                    if (context.selection.indexOf(child) != -1) {
+                      // dragging = true
+                    }
+                    child.saveState()
+                    context.selection = [child]
+                    context.dragging = true
+                    selected = true
+                    context.activeObject.currentFrame.saveState()
+                    break
+                }
+              }
+              if (!selected) {
+                context.selection = []
+                context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
+              }
             }
           }
         }
@@ -1042,7 +1157,19 @@ function stage() {
         context.activeShape = undefined
         break;
       case "select":
-        if (context.activeCurve) {
+        if (context.activeVertex) {
+          let newCurves = []
+          for (let i in context.activeVertex.shape.curves) {
+            if (i in context.activeVertex.current.startCurves) {
+              newCurves.push(context.activeVertex.current.startCurves[i])
+            } else if (i in context.activeVertex.current.endCurves) {
+              newCurves.push(context.activeVertex.current.endCurves[i])
+            } else {
+              newCurves.push(context.activeVertex.shape.curves[i])
+            }
+          }
+          actions.editShape.create(context.activeVertex.shape, newCurves)
+        } else if (context.activeCurve) {
           let newCurves = []
           for (let curve of context.activeCurve.shape.curves) {
             if (curve == context.activeCurve.initial) {
@@ -1053,7 +1180,6 @@ function stage() {
           }
           actions.editShape.create(context.activeCurve.shape, newCurves)
         } else if (context.selection.length) {
-          console.log("sopjngf")
           actions.editFrame.create(context.activeObject.currentFrame)
         }
         break;
@@ -1084,12 +1210,35 @@ function stage() {
           context.activeShape.addLine(mouse.x, mouse.y)
           context.activeShape.addLine(context.activeShape.startx, mouse.y)
           context.activeShape.addLine(context.activeShape.startx, context.activeShape.starty)
-          context.activeShape.recalculateBoundingBox()
+          context.activeShape.update()
         }
         break;
       case "select":
         if (context.dragging) {
-          if (context.activeCurve) {
+          if (context.activeVertex) {
+            let vert = context.activeVertex
+            let mouseDelta = {x: mouse.x - vert.startmouse.x, y: mouse.y - vert.startmouse.y}
+            vert.current.point.x = vert.initial.point.x + mouseDelta.x
+            vert.current.point.y = vert.initial.point.y + mouseDelta.y
+            for (let i in vert.current.startCurves) {
+              let curve = vert.current.startCurves[i]
+              let oldCurve = vert.initial.startCurves[i]
+              curve.points[0] = vert.current.point
+              curve.points[1] = {
+                x: oldCurve.points[1].x + mouseDelta.x,
+                y: oldCurve.points[1].y + mouseDelta.y
+              }
+            }
+            for (let i in vert.current.endCurves) {
+              let curve = vert.current.endCurves[i]
+              let oldCurve = vert.initial.endCurves[i]
+              curve.points[3] = {x:vert.current.point.x, y:vert.current.point.y}
+              curve.points[2] = {
+                x: oldCurve.points[2].x + mouseDelta.x,
+                y: oldCurve.points[2].y + mouseDelta.y
+              }
+            }
+          } else if (context.activeCurve) {
             context.activeCurve.current.points = moldCurve(
               context.activeCurve.initial, mouse, context.activeCurve.startmouse
             ).points 
@@ -1109,17 +1258,32 @@ function stage() {
             }
           }
         } else {
-          let selection = selectCurve(context, mouse)
-          console.log(selection)
+          let selection = selectVertex(context, mouse)
           if (selection) {
-            context.activeCurve = {
-              current: selection.curve, 
-              initial: new Bezier(selection.curve.points),
+            context.activeCurve = undefined
+            context.activeVertex = {
+              current: selection.vertex,
+              initial: {
+                point: {x: selection.vertex.point.x, y: selection.vertex.point.y}, 
+                startCurves: structuredClone(selection.vertex.startCurves),
+                endCurves: structuredClone(selection.vertex.endCurves),
+              },
               shape: selection.shape,
-              startmouse: mouse
+              startmouse: {x: mouse.x, y: mouse.y}
             }
           } else {
-            context.activeCurve = undefined
+            context.activeVertex = undefined
+            selection = selectCurve(context, mouse)
+            if (selection) {
+              context.activeCurve = {
+                current: selection.curve, 
+                initial: new Bezier(selection.curve.points),
+                shape: selection.shape,
+                startmouse: mouse
+              }
+            } else {
+              context.activeCurve = undefined
+            }
           }
         }
         context.lastMouse = mouse
@@ -1383,7 +1547,6 @@ function updateUI() {
 function updateLayers() {
   console.log(document.querySelectorAll(".layers-container"))
   for (let container of document.querySelectorAll(".layers-container")) {
-    console.log("?")
     let layerspanel = container.querySelectorAll(".layers")[0]
     let framescontainer = container.querySelectorAll(".frames-container")[0]
     layerspanel.textContent = ""
