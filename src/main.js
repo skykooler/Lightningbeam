@@ -717,13 +717,11 @@ class Shape {
         newCurves.push(this.curves[i])
       }
     }
-    console.log(structuredClone(newCurves))
     for (let curve of newCurves) {
       curve.color = context.strokeStyle
     }
     newCurves.reverse()
     this.curves = newCurves
-    this.update()
   }
   update() {
     this.recalculateBoundingBox()
@@ -754,6 +752,21 @@ class Shape {
     let epsilon = 1.5 // big epsilon whoa
     let tooClose;
     let i = 0;
+
+
+    this.regions = [{curves: [], fillStyle: undefined, filled: false}]
+    for (let curve of this.curves) {
+      this.regions[0].curves.push(curve)
+    }
+    if (this.regions[0].curves.length) {
+      if (utils.dist(
+        this.regions[0].curves[0].points[0],
+        this.regions[0].curves[this.regions[0].curves.length - 1].points[3]
+      ) < epsilon) {
+        this.regions[0].filled = true
+      }
+    }
+
     // Generate vertices
     for (let curve of this.curves) {
       for (let index of [0, 3]) {
@@ -783,6 +796,50 @@ class Shape {
       }
       i++;
     }
+
+    this.vertices.forEach((vertex, i) => {
+      console.log(i)
+      for (let i=0; i<Math.min(10,this.regions.length); i++) {
+        let region = this.regions[i]
+        let regionVertexCurves = []
+        let vertexCurves = {...vertex.startCurves, ...vertex.endCurves}
+        if (Object.keys(vertexCurves).length==1) {
+          // endpoint
+          continue;
+        } else if (Object.keys(vertexCurves).length==2) {
+          // path vertex, don't need to do anything
+          continue;
+        } else if (Object.keys(vertexCurves).length==3) {
+          // T junction. Region doesn't change but might need to update curves?
+          // Skip for now.
+          continue;
+        } else if (Object.keys(vertexCurves).length==4) {
+          // Intersection, split region in 2
+          for (let i in vertexCurves) {
+            let curve = vertexCurves[i]
+            if (region.curves.includes(curve)) {
+              regionVertexCurves.push(curve)
+            }
+          }
+          console.log('&&&&')
+          console.log(region)
+          console.log(vertexCurves)
+          console.log(regionVertexCurves)
+          let start = region.curves.indexOf(regionVertexCurves[1])
+          let end = region.curves.indexOf(regionVertexCurves[3])
+          if (end > start) {
+            this.regions.push({
+              curves: region.curves.splice(start, end - start),
+              fillStyle: region.fillStyle,
+              filled: true
+            })  
+          }
+        } else {
+          // not sure how to handle vertices with more than 4 curves
+          console.log(`Unexpected vertex with ${Object.keys(vertexCurves).length} curves!`)
+        }
+      }
+    })
     // Generate enclosed regions
     let graph = {}
     let edges = []
@@ -854,7 +911,7 @@ class Shape {
       return polygons;
     }
     
-    
+    /*
     const polygons = findEnclosedPolygons(edges);
     this.regions = []
 
@@ -896,29 +953,31 @@ class Shape {
         // Filter out single curves
         this.regions.push(region)
       }
-    }
-    console.log("regions")
-    console.log(this.regions)
+    }*/
   }
   draw(context) {
     let ctx = context.ctx;
     ctx.lineWidth = this.lineWidth
     ctx.lineCap = "round"
-    if (this.filled) {
-      ctx.beginPath()
-      ctx.moveTo(this.startx, this.starty)
-      for (let curve of this.curves) {
-        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                          curve.points[2].x, curve.points[2].y,
-                          curve.points[3].x, curve.points[3].y)
+    for (let region of this.regions) {
+      // if (region.filled) continue;
+      if (region.fillStyle && region.filled) {
+        // ctx.fillStyle = region.fill
+        if (region.fillImage) {
+          let pat = ctx.createPattern(region.fillImage, "no-repeat")
+          ctx.fillStyle = pat
+        } else {
+          ctx.fillStyle = region.fillStyle
+        }
+        ctx.beginPath()
+        for (let curve of region.curves) {
+          ctx.lineTo(curve.points[0].x, curve.points[0].y)
+          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                            curve.points[2].x, curve.points[2].y,
+                            curve.points[3].x, curve.points[3].y)
+        }
+        ctx.fill()
       }
-      if (this.fillImage) {
-        let pat = ctx.createPattern(this.fillImage, "no-repeat")
-        ctx.fillStyle = pat
-      } else {
-        ctx.fillStyle = this.fillStyle
-      }
-      ctx.fill()
     }
     for (let curve of this.curves) {
       ctx.strokeStyle = curve.color
@@ -933,17 +992,6 @@ class Shape {
       // ctx.beginPath()
       // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
       // ctx.fill()
-    }
-    for (let region of this.regions) {
-      ctx.fillStyle = `#${Math.random().toString(16).slice(-6)}`
-      ctx.beginPath()
-      for (let curve of region) {
-        ctx.lineTo(curve.points[0].x, curve.points[0].y)
-        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                          curve.points[2].x, curve.points[2].y,
-                          curve.points[3].x, curve.points[3].y)
-      }
-      ctx.fill()
     }
 
   }
@@ -1283,6 +1331,23 @@ function stage() {
                 context.selection = []
                 context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
               }
+            }
+          }
+        }
+        break;
+      case "paint_bucket":
+        let line = {p1: mouse, p2: {x: mouse.x + 3000, y: mouse.y}}
+        for (let shape of context.activeObject.currentFrame.shapes) {
+          for (let region of shape.regions) {
+            
+            let intersect_count = 0;
+            for (let curve of region.curves) {
+              intersect_count += curve.intersects(line).length
+            }
+            console.log(region)
+            console.log(intersect_count)
+            if (intersect_count%2==1) {
+              region.fillStyle = context.fillStyle
             }
           }
         }

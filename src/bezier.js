@@ -1994,6 +1994,10 @@ class Bezier {
     return p;
   }
 
+  toString() {
+    return `<[${this.points[0].x},${this.points[0].y}], [${this.points[1].x},${this.points[1].y}], [${this.points[2].x},${this.points[2].y}], [${this.points[3].x},${this.points[3].y}]`
+  }
+
 }
 
 export { Bezier };
