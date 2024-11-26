@@ -6,13 +6,14 @@
   "build": {
     "frontendDist": "../src"
   },
+  
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
         "title": "lightningbeam",
-        "width": 800,
-        "height": 600
+        "width": 1500,
+        "height": 1024
       }
     ],
     "security": {

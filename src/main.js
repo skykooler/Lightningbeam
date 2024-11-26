@@ -1,8 +1,10 @@
 const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
-import earcut from './earcut.js';
-
+import { Quadtree } from './quadtree.js';
+const { writeTextFile, BaseDirectory }=  window.__TAURI__.fs;
+const { save } = window.__TAURI__.dialog;
+const { documentDir, join } = window.__TAURI__.path;
 
 let simplifyPolyline = simplify
 
@@ -21,6 +23,7 @@ let undoStack = [];
 let redoStack = [];
 
 let layoutElements = []
+
 
 let tools = {
   select: {
@@ -94,6 +97,7 @@ let config = {
     // undo: "<ctrl>+z"
     undo: "z",
     redo: "Z",
+    save: "s",
   }
 }
 
@@ -189,6 +193,26 @@ let actions = {
         ).setColor(curve.color))
       }
       shape.update()
+    }
+  },
+  colorRegion: {
+    create: (region, color) => {
+      redoStack.length = 0; // Clear redo stack
+      let action = {
+        region: region.idx,
+        oldColor: region.fillStyle,
+        newColor: color
+      }
+      undoStack.push({name: "colorRegion", action: action})
+      actions.colorRegion.execute(action)
+    },
+    execute: (action) => {
+      let region = pointerList[action.region]
+      region.fillStyle = action.newColor
+    },
+    rollback: (action) => {
+      let region = pointerList[action.region]
+      region.fillStyle = action.oldColor
     }
   },
   addImageObject: {
@@ -543,19 +567,6 @@ function redo() {
 }
 
 
-class Curve {
-  constructor(startx, starty, cp1x, cp1y, cp2x, cp2y, x, y) {
-    this.startx = startx
-    this.starty = starty
-    this.cp1x = cp1x;
-    this.cp1y = cp1y;
-    this.cp2x = cp2x;
-    this.cp2y = cp2y;
-    this.x = x;
-    this.y = y;
-  }
-}
-
 class Frame {
   constructor(uuid) {
     this.keys = {}
@@ -603,6 +614,7 @@ class Shape {
       x: {min: startx, max: starty},
       y: {min: starty, max: starty}
     }
+    this.quadtree = new Quadtree({x: {min: 0, max: 500}, y: {min: 0, max: 500}}, 4)
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -612,6 +624,7 @@ class Shape {
   }
   addCurve(curve) {
     this.curves.push(curve)
+    this.quadtree.insert(curve, this.curves.length - 1)
     growBoundingBox(this.boundingBox, curve.bbox())
   }
   addLine(x, y) {
@@ -638,6 +651,7 @@ class Shape {
     }
   }
   simplify(mode="corners") {
+    this.quadtree.clear()
     // Mode can be corners, smooth or auto
     if (mode=="corners") {
       let points = [{x: this.startx, y: this.starty}]
@@ -656,6 +670,7 @@ class Shape {
                                 midpoint.x,midpoint.y,
                                 point.x,point.y)
         this.curves.push(bezier)
+        this.quadtree.insert(bezier, this.curves.length - 1)
         lastpoint = point
       }
     } else if (mode=="smooth") {
@@ -672,6 +687,7 @@ class Shape {
                                 curve[2][0], curve[2][1],
                                 curve[3][0], curve[3][1])
         this.curves.push(bezier)
+        this.quadtree.insert(bezier, this.curves.length - 1)
 
       }
     }
@@ -679,7 +695,10 @@ class Shape {
     let newCurves = []
     let intersectMap = {}
     for (let i=0; i<this.curves.length-1; i++) {
-      for (let j=i+1; j<this.curves.length; j++) {
+      console.log(this.quadtree.query(this.curves[i].bbox()))
+      // for (let j=i+1; j<this.curves.length; j++) {
+      for (let j of this.quadtree.query(this.curves[i].bbox())) {
+        if (i == j) continue;
         let intersects = this.curves[i].intersects(this.curves[j])
         if (intersects.length) {
           intersectMap[i] ||= []
@@ -754,7 +773,9 @@ class Shape {
     let i = 0;
 
 
-    this.regions = [{curves: [], fillStyle: undefined, filled: false}]
+    let region = {idx: uuidv4(), curves: [], fillStyle: undefined, filled: false}
+    pointerList[region.idx] = region
+    this.regions = [region]
     for (let curve of this.curves) {
       this.regions[0].curves.push(curve)
     }
@@ -821,18 +842,17 @@ class Shape {
               regionVertexCurves.push(curve)
             }
           }
-          console.log('&&&&')
-          console.log(region)
-          console.log(vertexCurves)
-          console.log(regionVertexCurves)
           let start = region.curves.indexOf(regionVertexCurves[1])
           let end = region.curves.indexOf(regionVertexCurves[3])
           if (end > start) {
-            this.regions.push({
+            let newRegion = {
+              idx: uuidv4(), // TODO: generate this deterministically so that undo/redo works
               curves: region.curves.splice(start, end - start),
               fillStyle: region.fillStyle,
               filled: true
-            })  
+            }
+            pointerList[newRegion.idx] = newRegion
+            this.regions.push(newRegion)  
           }
         } else {
           // not sure how to handle vertices with more than 4 curves
@@ -840,120 +860,6 @@ class Shape {
         }
       }
     })
-    // Generate enclosed regions
-    let graph = {}
-    let edges = []
-    this.vertices.forEach((vertex, i) => {
-      this.vertices.forEach((otherVertex, j) => {
-        for (let curve in vertex.startCurves) {
-          if (curve in otherVertex.endCurves) {
-            edges.push([i, j])
-            if (graph[i]) {
-              graph[i].push(j)
-            } else {
-              graph[i] = [j]
-            }
-          }
-        }
-        for (let curve in vertex.endCurves) {
-          if (curve in otherVertex.startCurves) {
-            edges.push([i, j])
-            if (graph[i]) {
-              graph[i].push(j)
-            } else {
-              graph[i] = [j]
-            }
-          }
-        }
-      })
-    })
-    // for (let vertex in graph) {
-    //   let node = vertex
-    //   let seenNodes = []
-    //   for (let i=0; i<graph.length; i++) {
-    //     let clockwiseCurves = this.getClockwiseCurves(node, graph[node])
-    //     node = clockwiseCurves
-    //   }
-    // }
-    function findEnclosedPolygons(edges) {
-      const polygons = [];
-      const visited = new Set();
-    
-      function dfs(node, path) {
-        if (visited.has(node)) {
-          const polygon = path.slice(path.indexOf(node)).sort();
-          // Allow degenerate polygons, because the edges can be curved
-          if (polygon.length > 1) {
-            for (let otherPolygon of polygons) {
-              if (polygon.every((val, idx) => val === otherPolygon[idx])) {
-                return;
-              }
-            }
-            polygons.push(polygon);
-          }
-          return;
-        }
-    
-        visited.add(node);
-        for (const edge of edges) {
-          if (edge[0] === node) {
-            dfs(edge[1], [...path, node]);
-          } else if (edge[1] === node) {
-            dfs(edge[0], [...path, node]);
-          }
-        }
-      }
-    
-      for (const edge of edges) {
-        dfs(edge[0], []);
-      }
-    
-      return polygons;
-    }
-    
-    /*
-    const polygons = findEnclosedPolygons(edges);
-    this.regions = []
-
-    for (let polygon of polygons) {
-      let region = []
-      let firstVertex = undefined
-      let lastVertex = undefined
-      for (let vertex of polygon) {
-        firstVertex ||= vertex
-        if (lastVertex) {
-          for (let i in this.vertices[vertex].startCurves) {
-            let curve = this.vertices[vertex].startCurves[i]
-            if (i in this.vertices[lastVertex].endCurves) {
-              region.push(curve)
-            }
-          }
-          for (let i in this.vertices[vertex].endCurves) {
-            let curve = this.vertices[vertex].endCurves[i]
-            if (i in this.vertices[lastVertex].startCurves) {
-              region.push(new Bezier(curve.points.toReversed()))
-            }
-          }
-        }
-        lastVertex = vertex
-      }
-      for (let i in this.vertices[firstVertex].startCurves) {
-        let curve = this.vertices[firstVertex].startCurves[i]
-        if (i in this.vertices[lastVertex].endCurves) {
-          region.push(curve)
-        }
-      }
-      for (let i in this.vertices[firstVertex].endCurves) {
-        let curve = this.vertices[firstVertex].endCurves[i]
-        if (i in this.vertices[lastVertex].startCurves) {
-          region.push(new Bezier(curve.points.toReversed()))
-        }
-      }
-      if (region.length > 1) {
-        // Filter out single curves
-        this.regions.push(region)
-      }
-    }*/
   }
   draw(context) {
     let ctx = context.ctx;
@@ -993,6 +899,8 @@ class Shape {
       // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
       // ctx.fill()
     }
+    // Debug, show quadtree
+    // this.quadtree.draw(ctx)
 
   }
 }
@@ -1216,8 +1124,45 @@ window.addEventListener("keypress", (e) => {
     undo()
   } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
     redo()
+  } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
+    saveFile()
   }
 })
+
+async function saveTextFile() {
+  console.log(await documentDir())
+  const path = await save({
+    filters: [
+      {
+        name: 'Lightningbeam files (.beam)',
+        extensions: ['beam'],
+      },
+    ],
+    defaultPath: await join(await documentDir(), "untitled.beam")
+  });
+  console.log(path)
+  // console.log("saving")
+  // console.log(BaseDirectory)
+  try {
+    const fileData = {
+      version: "1.0",
+      actions: undoStack
+    }
+    const contents = JSON.stringify(fileData );
+    await writeTextFile(path, contents)//, {
+  //     baseDir: BaseDirectory.Document,
+    // });
+
+  //   console.log("Text file saved successfully!");
+  } catch (error) {
+    console.error("Error saving text file:", error);
+  }
+}
+
+function saveFile() {
+  console.log("gonna save")
+  saveTextFile()
+}
 
 function stage() {
   let stage = document.createElement("canvas")
@@ -1339,7 +1284,6 @@ function stage() {
         let line = {p1: mouse, p2: {x: mouse.x + 3000, y: mouse.y}}
         for (let shape of context.activeObject.currentFrame.shapes) {
           for (let region of shape.regions) {
-            
             let intersect_count = 0;
             for (let curve of region.curves) {
               intersect_count += curve.intersects(line).length
@@ -1347,7 +1291,8 @@ function stage() {
             console.log(region)
             console.log(intersect_count)
             if (intersect_count%2==1) {
-              region.fillStyle = context.fillStyle
+              // region.fillStyle = context.fillStyle
+              actions.colorRegion.create(region, context.fillStyle)
             }
           }
         }
