@@ -1,6 +1,7 @@
 const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
+import earcut from './earcut.js';
 
 
 let simplifyPolyline = simplify
@@ -590,6 +591,8 @@ class Shape {
     this.starty = starty;
     this.curves = [];
     this.vertices = [];
+    this.triangles = [];
+    this.regions = [];
     this.fillStyle = context.fillStyle;
     this.fillImage = context.fillImage;
     this.strokeStyle = context.strokeStyle;
@@ -714,6 +717,7 @@ class Shape {
         newCurves.push(this.curves[i])
       }
     }
+    console.log(structuredClone(newCurves))
     for (let curve of newCurves) {
       curve.color = context.strokeStyle
     }
@@ -729,12 +733,28 @@ class Shape {
       this.starty = this.curves[0].points[0].y
     }
   }
+  getClockwiseCurves(point, otherPoints) {
+    // Returns array of {x, y, idx, angle}
+
+    let points = []
+    for (let point of otherPoints) {
+      points.push({...this.vertices[point].point, idx: point})
+    }
+    // Add an angle property to each point using tan(angle) = y/x
+    const angles = points.map(({ x, y, idx }) => {
+      return { x, y, idx, angle: Math.atan2(y - point.y, x - point.x) * 180 / Math.PI };
+    });
+    // Sort your points by angle
+    const pointsSorted = angles.sort((a, b) => a.angle - b.angle);
+    return pointsSorted
+  }
   updateVertices() {
     this.vertices = []
     let utils = Bezier.getUtils()
     let epsilon = 1.5 // big epsilon whoa
     let tooClose;
     let i = 0;
+    // Generate vertices
     for (let curve of this.curves) {
       for (let index of [0, 3]) {
         tooClose = false
@@ -750,12 +770,12 @@ class Shape {
             this.vertices.push({
               point:curve.points[index],
               startCurves: {[i]:curve},
-              endCurves: []
+              endCurves: {}
             })
           } else {
             this.vertices.push({
               point:curve.points[index],
-              startCurves: [],
+              startCurves: {},
               endCurves: {[i]:curve}
             })
           }
@@ -763,6 +783,122 @@ class Shape {
       }
       i++;
     }
+    // Generate enclosed regions
+    let graph = {}
+    let edges = []
+    this.vertices.forEach((vertex, i) => {
+      this.vertices.forEach((otherVertex, j) => {
+        for (let curve in vertex.startCurves) {
+          if (curve in otherVertex.endCurves) {
+            edges.push([i, j])
+            if (graph[i]) {
+              graph[i].push(j)
+            } else {
+              graph[i] = [j]
+            }
+          }
+        }
+        for (let curve in vertex.endCurves) {
+          if (curve in otherVertex.startCurves) {
+            edges.push([i, j])
+            if (graph[i]) {
+              graph[i].push(j)
+            } else {
+              graph[i] = [j]
+            }
+          }
+        }
+      })
+    })
+    // for (let vertex in graph) {
+    //   let node = vertex
+    //   let seenNodes = []
+    //   for (let i=0; i<graph.length; i++) {
+    //     let clockwiseCurves = this.getClockwiseCurves(node, graph[node])
+    //     node = clockwiseCurves
+    //   }
+    // }
+    function findEnclosedPolygons(edges) {
+      const polygons = [];
+      const visited = new Set();
+    
+      function dfs(node, path) {
+        if (visited.has(node)) {
+          const polygon = path.slice(path.indexOf(node)).sort();
+          // Allow degenerate polygons, because the edges can be curved
+          if (polygon.length > 1) {
+            for (let otherPolygon of polygons) {
+              if (polygon.every((val, idx) => val === otherPolygon[idx])) {
+                return;
+              }
+            }
+            polygons.push(polygon);
+          }
+          return;
+        }
+    
+        visited.add(node);
+        for (const edge of edges) {
+          if (edge[0] === node) {
+            dfs(edge[1], [...path, node]);
+          } else if (edge[1] === node) {
+            dfs(edge[0], [...path, node]);
+          }
+        }
+      }
+    
+      for (const edge of edges) {
+        dfs(edge[0], []);
+      }
+    
+      return polygons;
+    }
+    
+    
+    const polygons = findEnclosedPolygons(edges);
+    this.regions = []
+
+    for (let polygon of polygons) {
+      let region = []
+      let firstVertex = undefined
+      let lastVertex = undefined
+      for (let vertex of polygon) {
+        firstVertex ||= vertex
+        if (lastVertex) {
+          for (let i in this.vertices[vertex].startCurves) {
+            let curve = this.vertices[vertex].startCurves[i]
+            if (i in this.vertices[lastVertex].endCurves) {
+              region.push(curve)
+            }
+          }
+          for (let i in this.vertices[vertex].endCurves) {
+            let curve = this.vertices[vertex].endCurves[i]
+            if (i in this.vertices[lastVertex].startCurves) {
+              region.push(new Bezier(curve.points.toReversed()))
+            }
+          }
+        }
+        lastVertex = vertex
+      }
+      for (let i in this.vertices[firstVertex].startCurves) {
+        let curve = this.vertices[firstVertex].startCurves[i]
+        if (i in this.vertices[lastVertex].endCurves) {
+          region.push(curve)
+        }
+      }
+      for (let i in this.vertices[firstVertex].endCurves) {
+        let curve = this.vertices[firstVertex].endCurves[i]
+        if (i in this.vertices[lastVertex].startCurves) {
+          region.push(new Bezier(curve.points.toReversed()))
+        }
+      }
+      if (region.length > 1) {
+        // Filter out single curves
+        this.regions.push(region)
+      }
+    }
+    console.log("regions")
+    console.log(this.regions)
   }
   draw(context) {
     let ctx = context.ctx;
@@ -797,6 +933,17 @@ class Shape {
       // ctx.beginPath()
       // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
       // ctx.fill()
+    }
+    for (let region of this.regions) {
+      ctx.fillStyle = `#${Math.random().toString(16).slice(-6)}`
+      ctx.beginPath()
+      for (let curve of region) {
+        ctx.lineTo(curve.points[0].x, curve.points[0].y)
+        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                          curve.points[2].x, curve.points[2].y,
+                          curve.points[3].x, curve.points[3].y)
+      }
+      ctx.fill()
     }
 
   }
