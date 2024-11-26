@@ -2,8 +2,8 @@ const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
-const { writeTextFile, BaseDirectory }=  window.__TAURI__.fs;
-const { save } = window.__TAURI__.dialog;
+const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
+const { open: openFileDialog, save: saveFileDialog, message: messageDialog } = window.__TAURI__.dialog;
 const { documentDir, join } = window.__TAURI__.path;
 
 let simplifyPolyline = simplify
@@ -23,6 +23,9 @@ let undoStack = [];
 let redoStack = [];
 
 let layoutElements = []
+
+let minFileVersion = "1.0"
+let maxFileVersion = "2.0"
 
 
 let tools = {
@@ -98,6 +101,7 @@ let config = {
     undo: "z",
     redo: "Z",
     save: "s",
+    open: "o"
   }
 }
 
@@ -1087,7 +1091,7 @@ class GraphicsObject {
   }
 }
 
-let root = new GraphicsObject();
+let root = new GraphicsObject("root");
 context.activeObject = root
 
 async function greet() {
@@ -1125,13 +1129,14 @@ window.addEventListener("keypress", (e) => {
   } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
     redo()
   } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
-    saveFile()
+    save()
+  } else if (e.key == config.shortcuts.open && e.ctrlKey == true) {
+    open()
   }
 })
 
-async function saveTextFile() {
-  console.log(await documentDir())
-  const path = await save({
+async function save() { 
+  const path = await saveFileDialog({
     filters: [
       {
         name: 'Lightningbeam files (.beam)',
@@ -1140,28 +1145,72 @@ async function saveTextFile() {
     ],
     defaultPath: await join(await documentDir(), "untitled.beam")
   });
-  console.log(path)
-  // console.log("saving")
-  // console.log(BaseDirectory)
   try {
     const fileData = {
       version: "1.0",
       actions: undoStack
     }
-    const contents = JSON.stringify(fileData );
-    await writeTextFile(path, contents)//, {
-  //     baseDir: BaseDirectory.Document,
-    // });
-
-  //   console.log("Text file saved successfully!");
+    const contents = JSON.stringify(fileData   );
+    await writeTextFile(path, contents)
+    console.log(`${path} saved successfully!`);
   } catch (error) {
     console.error("Error saving text file:", error);
   }
 }
 
-function saveFile() {
-  console.log("gonna save")
-  saveTextFile()
+async function open() {
+  console.log("gonna open")
+  const path = await openFileDialog({
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: 'Lightningbeam files (.beam)',
+        extensions: ['beam'],
+      },
+    ],
+    defaultPath: await documentDir(),
+  });
+  if (path) {
+    try {
+      const contents = await readTextFile(path)
+      let file = JSON.parse(contents)
+      if (file.version == undefined) {
+        await messageDialog("Could not read file version!", { title: "Load error", kind: 'error' })
+        return
+      }
+      if (file.version >= minFileVersion) {
+        if (file.version < maxFileVersion) {
+          root = new GraphicsObject("root");
+          context.activeObject = root
+          if (file.actions == undefined) {
+            await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
+            return
+          }
+          for (let action of file.actions) {
+            if (!(action.name in actions)) {
+              await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
+              return
+            }
+            actions[action.name].execute(action.action)
+            undoStack.push(action)
+          }
+          updateUI()
+        } else {
+          await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
+        }
+      } else {
+        await messageDialog(`File ${path} is too old to be opened in this version of Lightningbeam.`, { title: 'File version mismatch', kind: 'error' });
+      }
+    } catch (e) {
+      console.log(e )
+      if (e instanceof SyntaxError) {
+        await messageDialog(`Could not parse ${path}, ${e.message}`, { title: 'Error', kind: 'error' })
+      } else if (e.startsWith("failed to read file as text")) {
+        await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
+      }
+    }
+  }
 }
 
 function stage() {

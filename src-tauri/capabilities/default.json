@@ -25,6 +25,14 @@
         }
       ]
     },
+    {
+      "identifier": "fs:allow-app-read-recursive",
+      "allow": [
+        {
+          "path": "$DOCUMENT/*"
+        }
+      ]
+    },
     "dialog:default"
   ]
 }
