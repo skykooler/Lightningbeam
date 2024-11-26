@@ -3,8 +3,18 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
-const { open: openFileDialog, save: saveFileDialog, message: messageDialog } = window.__TAURI__.dialog;
+const {
+  open: openFileDialog,
+  save: saveFileDialog,
+  message: messageDialog,
+  confirm: confirmDialog,
+} = window.__TAURI__.dialog;
 const { documentDir, join } = window.__TAURI__.path;
+const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
+const { getCurrentWindow } = window.__TAURI__.window;
+
+
+const macOS = navigator.userAgent.includes('Macintosh')
 
 let simplifyPolyline = simplify
 
@@ -24,8 +34,11 @@ let redoStack = [];
 
 let layoutElements = []
 
+let appVersion = "0.6.1-alpha"
 let minFileVersion = "1.0"
 let maxFileVersion = "2.0"
+
+let filePath = undefined
 
 
 let tools = {
@@ -101,7 +114,9 @@ let config = {
     undo: "z",
     redo: "Z",
     save: "s",
-    open: "o"
+    saveAs: "S",
+    open: "o",
+    quit: "q",
   }
 }
 
@@ -1130,12 +1145,39 @@ window.addEventListener("keypress", (e) => {
     redo()
   } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
     save()
+  } else if (e.key == config.shortcuts.saveAs && e.ctrlKey == true) {
+    saveAs()
   } else if (e.key == config.shortcuts.open && e.ctrlKey == true) {
     open()
+  } else if (e.key == config.shortcuts.quit && e.ctrlKey == true) {
+    quit()
   }
 })
 
-async function save() { 
+async function _save(path) {
+  try {
+    const fileData = {
+      version: "1.0",
+      actions: undoStack
+    }
+    const contents = JSON.stringify(fileData   );
+    await writeTextFile(path, contents)
+    filePath = path
+    console.log(`${path} saved successfully!`);
+  } catch (error) {
+    console.error("Error saving text file:", error);
+  }
+}
+
+async function save() {
+  if (filePath) {
+    _save(filePath)
+  } else {
+    saveAs()
+  }
+}
+
+async function saveAs() { 
   const path = await saveFileDialog({
     filters: [
       {
@@ -1145,17 +1187,7 @@ async function save() {
     ],
     defaultPath: await join(await documentDir(), "untitled.beam")
   });
-  try {
-    const fileData = {
-      version: "1.0",
-      actions: undoStack
-    }
-    const contents = JSON.stringify(fileData   );
-    await writeTextFile(path, contents)
-    console.log(`${path} saved successfully!`);
-  } catch (error) {
-    console.error("Error saving text file:", error);
-  }
+  if (path != undefined) _save(path);
 }
 
 async function open() {
@@ -1210,6 +1242,16 @@ async function open() {
         await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
       }
     }
+  }
+}
+
+async function quit() {
+  if (undoStack.length) {
+    if (await confirmDialog("Are you sure you want to quit?", {title: 'Really quit?', kind: "warning"})) {
+      getCurrentWindow().close()
+    }
+  } else {
+    getCurrentWindow().close()
   }
 }
 
@@ -1656,6 +1698,102 @@ function infopanel() {
   }
   return panel
 }
+
+async function setupMenu() {
+  const fileSubmenu = await Submenu.new({
+    text: 'File',
+    items: [
+      {
+        text: 'Save',
+        enabled: true,
+        action: save,
+      },
+      {
+        text: 'Save As...',
+        enabled: true,
+        action: saveAs,
+      },
+      {
+        text: 'Open File...',
+        enabled: true,
+        action: open,
+      },
+      {
+        text: 'Quit',
+        enabled: true,
+        action: quit,
+      },
+    ]
+  })
+
+  const editSubmenu = await Submenu.new({
+    text: "Edit",
+    items: [
+      {
+        text: "Undo",
+        enabled: true,
+        action: undo
+      },
+      {
+        text: "Redo",
+        enabled: true,
+        action: redo
+      },
+      {
+        text: "Cut",
+        enabled: true,
+        action: () => {}
+      },
+      {
+        text: "Copy",
+        enabled: true,
+        action: () => {}
+      },
+      {
+        text: "Paste",
+        enabled: true,
+        action: () => {}
+      },
+    ]
+  });
+  const viewSubmenu = await Submenu.new({
+    text: "View",
+    items: [
+      {
+        text: "Zoom In",
+        enabled: true,
+        action: () => {}
+      },
+      {
+        text: "Zoom Out",
+        enabled: true,
+        action: () => {}
+      },
+    ]
+  });
+  const helpSubmenu = await Submenu.new({
+    text: "Help",
+    items: [
+      {
+        text: "About...",
+        enabled: true,
+        action: () => {
+          messageDialog(`Lightningbeam version ${appVersion}\nDeveloped by Skyler Lehmkuhl`,
+            {title: 'About', kind: "info"}
+          )
+        }
+      }
+    ]
+});
+
+  const menu = await Menu.new({
+    items: [fileSubmenu, editSubmenu, viewSubmenu, helpSubmenu],
+  })
+  await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
+}
+
+// Initialize the menu when the app starts
+setupMenu();
 
 function createPane(content=undefined) {
   let div = document.createElement("div")
