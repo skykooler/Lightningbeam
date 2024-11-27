@@ -286,7 +286,31 @@ button {
 .frame:hover {
   background-color: #555555;
 }
-
+.frame.active {
+  background-color: #666666;
+}
+.frame.keyframe {
+  position: relative;
+}
+.frame.keyframe::before {
+  content: ''; /* Creates a pseudo-element */
+  position: absolute;
+  bottom: 0; /* Position the circle at the bottom of the div */
+  left: 50%; /* Center the circle horizontally */
+  transform: translateX(-50%); /* Adjust for perfect centering */
+  width: 50%; /* Set the width of the circle to half of the div's width */
+  height: 0; /* Initially set to 0 */
+  padding-bottom: 50%; /* Set padding-bottom to 50% of the div's width to create a circle */
+  border-radius: 50%; /* Make the shape a circle */
+  background-color: #222; /* Set the color of the circle (black in this case) */
+  margin-bottom: 5px;
+}
+.frame-highlight {
+  background-color: red;
+  width: 25px;
+  height: calc( 2 * var(--lineheight) - 2px);
+  position: relative;
+}
 
 .hidden {
   display: none;

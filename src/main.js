@@ -591,9 +591,10 @@ function redo() {
 
 
 class Frame {
-  constructor(uuid) {
+  constructor(frameType="normal", uuid=undefined) {
     this.keys = {}
     this.shapes = []
+    this.frameType = frameType
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -608,7 +609,7 @@ class Frame {
 
 class Layer {
   constructor(uuid) {
-    this.frames = [new Frame()]
+    this.frames = [new Frame("keyframe")]
     this.children = []
     if (!uuid) {
       this.idx = uuidv4()
@@ -955,7 +956,21 @@ class GraphicsObject {
     return this.layers[this.currentLayer].children
   }
   get currentFrame() {
-    return this.layers[this.currentLayer].frames[this.currentFrameNum]
+    if (this.layers[this.currentLayer].frames[this.currentFrameNum]) {
+      if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "keyframe") {
+        return this.layers[this.currentLayer].frames[this.currentFrameNum]
+      } else if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "motion") {
+        
+      } else if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "shape") {
+        
+      } else {
+        for (let i=this.currentFrameNum; i>=0; i--) {
+          if (this.layers[this.currentLayer].frames[i].frameType == "keyframe") {
+            return this.layers[this.currentLayer].frames[i]
+          }
+        }
+      }
+    }
   }
   get maxFrame() {
     let maxFrames = []
@@ -1134,7 +1149,7 @@ window.addEventListener("resize", () => {
   updateAll()
 })
 
-window.addEventListener("keypress", (e) => {
+window.addEventListener("keydown", (e) => {
   // let shortcuts = {}
   // for (let shortcut of config.shortcuts) {
     // shortcut = shortcut.split("+")
@@ -1158,7 +1173,27 @@ window.addEventListener("keypress", (e) => {
   } else if (e.key == config.shortcuts.quit && e.ctrlKey == true) {
     quit()
   }
+  else if (e.key == "ArrowRight") {
+    advanceFrame()
+  }
+  else if (e.key == "ArrowLeft") {
+    decrementFrame()
+  }
 })
+
+function advanceFrame() {
+  context.activeObject.currentFrameNum += 1
+  updateLayers()
+  updateMenu()
+}
+
+function decrementFrame() {
+  if (context.activeObject.currentFrameNum > 0) {
+    context.activeObject.currentFrameNum -= 1
+    updateLayers()
+    updateMenu()
+  }
+}
 
 function _newFile(width, height) {
   root = new GraphicsObject("root");
@@ -1727,106 +1762,6 @@ function infopanel() {
   return panel
 }
 
-async function setupMenu() {
-  const fileSubmenu = await Submenu.new({
-    text: 'File',
-    items: [
-      {
-        text: 'New file...',
-        enabled: true,
-        action: newFile,
-      },
-      {
-        text: 'Save',
-        enabled: true,
-        action: save,
-      },
-      {
-        text: 'Save As...',
-        enabled: true,
-        action: saveAs,
-      },
-      {
-        text: 'Open File...',
-        enabled: true,
-        action: open,
-      },
-      {
-        text: 'Quit',
-        enabled: true,
-        action: quit,
-      },
-    ]
-  })
-
-  const editSubmenu = await Submenu.new({
-    text: "Edit",
-    items: [
-      {
-        text: "Undo",
-        enabled: true,
-        action: undo
-      },
-      {
-        text: "Redo",
-        enabled: true,
-        action: redo
-      },
-      {
-        text: "Cut",
-        enabled: true,
-        action: () => {}
-      },
-      {
-        text: "Copy",
-        enabled: true,
-        action: () => {}
-      },
-      {
-        text: "Paste",
-        enabled: true,
-        action: () => {}
-      },
-    ]
-  });
-  const viewSubmenu = await Submenu.new({
-    text: "View",
-    items: [
-      {
-        text: "Zoom In",
-        enabled: true,
-        action: () => {}
-      },
-      {
-        text: "Zoom Out",
-        enabled: true,
-        action: () => {}
-      },
-    ]
-  });
-  const helpSubmenu = await Submenu.new({
-    text: "Help",
-    items: [
-      {
-        text: "About...",
-        enabled: true,
-        action: () => {
-          messageDialog(`Lightningbeam version ${appVersion}\nDeveloped by Skyler Lehmkuhl`,
-            {title: 'About', kind: "info"}
-          )
-        }
-      }
-    ]
-});
-
-  const menu = await Menu.new({
-    items: [fileSubmenu, editSubmenu, viewSubmenu, helpSubmenu],
-  })
-  await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
-}
-
-// Initialize the menu when the app starts
-setupMenu();
 
 createNewFileDialog(_newFile);
 showNewFileDialog()
@@ -1947,12 +1882,173 @@ function updateLayers() {
       let layerTrack = document.createElement("div")
       layerTrack.className = "layer-track"
       framescontainer.appendChild(layerTrack)
-      for (let frame of layer.frames) {
+      let highlightedFrame = false
+      layer.frames.forEach((frame, i) => {
       // for (let j=0; j<5-i; j++) {
         let frameEl = document.createElement("div")
         frameEl.className = "frame"
+        if (i == context.activeObject.currentFrameNum) {
+          frameEl.classList.add("active")
+          highlightedFrame = true
+        }
+        console.log(frame.frameType)
+        if (frame.frameType == "keyframe") {
+          frameEl.classList.add("keyframe")
+        }
         layerTrack.appendChild(frameEl)
+      })
+      if (!highlightedFrame) {
+        let highlightObj = document.createElement("div")
+        let frameCount = layer.frames.length
+        highlightObj.className = "frame-highlight"
+        highlightObj.style.left = `${(context.activeObject.currentFrameNum - frameCount) * 25}px`;
+        layerTrack.appendChild(highlightObj)
       }
     }
   }
 }
+
+async function updateMenu() {
+  let activeFrame;
+  let newFrameMenuItem;
+  let newKeyframeMenuItem;
+  let deleteFrameMenuItem;
+  
+  
+  if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum]) {
+    activeFrame = true
+  } else {
+    activeFrame = false
+  }
+  const fileSubmenu = await Submenu.new({
+    text: 'File',
+    items: [
+      {
+        text: 'New file...',
+        enabled: true,
+        action: newFile,
+      },
+      {
+        text: 'Save',
+        enabled: true,
+        action: save,
+      },
+      {
+        text: 'Save As...',
+        enabled: true,
+        action: saveAs,
+      },
+      {
+        text: 'Open File...',
+        enabled: true,
+        action: open,
+      },
+      {
+        text: 'Quit',
+        enabled: true,
+        action: quit,
+      },
+    ]
+  })
+
+  const editSubmenu = await Submenu.new({
+    text: "Edit",
+    items: [
+      {
+        text: "Undo",
+        enabled: true,
+        action: undo
+      },
+      {
+        text: "Redo",
+        enabled: true,
+        action: redo
+      },
+      {
+        text: "Cut",
+        enabled: true,
+        action: () => {}
+      },
+      {
+        text: "Copy",
+        enabled: true,
+        action: () => {}
+      },
+      {
+        text: "Paste",
+        enabled: true,
+        action: () => {}
+      },
+    ]
+  });
+
+  newFrameMenuItem = {
+    text: "New Frame",
+    enabled: !activeFrame,
+    action: () => {}
+  }
+  newKeyframeMenuItem = {
+    text: "New Keyframe",
+    enabled: !activeFrame,
+    action: () => {}
+  }
+  deleteFrameMenuItem = {
+    text: "Delete Frame",
+    enabled: activeFrame,
+    action: () => {}
+  }
+
+  const timelineSubmenu = await Submenu.new({
+    text: "Timeline",
+    items: [
+      newFrameMenuItem,
+      newKeyframeMenuItem,
+      deleteFrameMenuItem,
+      {
+        text: "Return to start",
+        enabled: false,
+        action: () => {}
+      },
+      {
+        text: "Play",
+        enabled: false,
+        action: () => {}
+      },
+    ]
+  });
+  const viewSubmenu = await Submenu.new({
+    text: "View",
+    items: [
+      {
+        text: "Zoom In",
+        enabled: false,
+        action: () => {}
+      },
+      {
+        text: "Zoom Out",
+        enabled: false,
+        action: () => {}
+      },
+    ]
+  });
+  const helpSubmenu = await Submenu.new({
+    text: "Help",
+    items: [
+      {
+        text: "About...",
+        enabled: true,
+        action: () => {
+          messageDialog(`Lightningbeam version ${appVersion}\nDeveloped by Skyler Lehmkuhl`,
+            {title: 'About', kind: "info"}
+          )
+        }
+      }
+    ]
+});
+
+  const menu = await Menu.new({
+    items: [fileSubmenu, editSubmenu, timelineSubmenu, viewSubmenu, helpSubmenu],
+  })
+  await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
+}
+updateMenu()
