@@ -2,6 +2,7 @@ const { invoke } = window.__TAURI__.core;
 import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
+import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -39,6 +40,8 @@ let minFileVersion = "1.0"
 let maxFileVersion = "2.0"
 
 let filePath = undefined
+let fileWidth = 1500
+let fileHeight = 1000
 
 
 let tools = {
@@ -113,6 +116,7 @@ let config = {
     // undo: "<ctrl>+z"
     undo: "z",
     redo: "Z",
+    new: "n",
     save: "s",
     saveAs: "S",
     open: "o",
@@ -1143,6 +1147,8 @@ window.addEventListener("keypress", (e) => {
     undo()
   } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
     redo()
+  } else if (e.key == config.shortcuts.new && e.ctrlKey == true) {
+    newFile()
   } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
     save()
   } else if (e.key == config.shortcuts.saveAs && e.ctrlKey == true) {
@@ -1154,10 +1160,33 @@ window.addEventListener("keypress", (e) => {
   }
 })
 
+function _newFile(width, height) {
+  root = new GraphicsObject("root");
+  context.activeObject = root
+  fileWidth = width
+  fileHeight = height
+  for (let stage of document.querySelectorAll(".stage")) {
+    stage.width = width
+    stage.height = height
+    stage.style.width = `${width}px`
+    stage.style.height = `${height}px`
+  }
+  updateUI()
+}
+
+async function newFile() {
+  if (await confirmDialog("Create a new file? Unsaved work will be lost.", {title: "New file", kind: "warning"})) {
+    showNewFileDialog()
+    // updateUI()
+  }
+}
+
 async function _save(path) {
   try {
     const fileData = {
-      version: "1.0",
+      version: "1.1",
+      width: fileWidth,
+      height: fileHeight,
       actions: undoStack
     }
     const contents = JSON.stringify(fileData   );
@@ -1213,8 +1242,7 @@ async function open() {
       }
       if (file.version >= minFileVersion) {
         if (file.version < maxFileVersion) {
-          root = new GraphicsObject("root");
-          context.activeObject = root
+          _newFile(file.width, file.height)
           if (file.actions == undefined) {
             await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
             return
@@ -1704,6 +1732,11 @@ async function setupMenu() {
     text: 'File',
     items: [
       {
+        text: 'New file...',
+        enabled: true,
+        action: newFile,
+      },
+      {
         text: 'Save',
         enabled: true,
         action: save,
@@ -1794,6 +1827,9 @@ async function setupMenu() {
 
 // Initialize the menu when the app starts
 setupMenu();
+
+createNewFileDialog(_newFile);
+showNewFileDialog()
 
 function createPane(content=undefined) {
   let div = document.createElement("div")

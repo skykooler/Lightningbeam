@@ -169,6 +169,7 @@ button {
   overflow: scroll;
   width: 100%;
   height: 100%;
+  background-color: #555;
 }
 .stage {
   width: 1500px;
@@ -284,4 +285,61 @@ button {
 }
 .frame:hover {
   background-color: #555555;
+}
+
+
+.hidden {
+  display: none;
+}
+
+#overlay {
+  display: none; /* Hidden by default */
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999; /* Under the dialog */
+}
+
+/* Scoped styles for the dialog */
+#newFileDialog {
+  display: none; /* Hidden by default */
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background-color: #444;
+  border: 1px solid #333;
+  border-radius: 5px;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+  padding: 20px;
+  width: 300px;
+  z-index: 1000; /* Make sure it's in front of other elements */
+}
+
+#newFileDialog .dialog-label {
+  display: block;
+  margin: 10px 0 5px;
+}
+
+#newFileDialog .dialog-input {
+  width: 100%;
+  padding: 8px;
+  margin: 5px 0;
+  border: 1px solid #333;
+}
+
+#newFileDialog .dialog-button {
+  width: 100%;
+  padding: 10px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+#newFileDialog .dialog-button:hover {
+  background-color: #0056b3;
 }
