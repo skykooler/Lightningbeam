@@ -3,6 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
+import { titleCase } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -748,10 +749,9 @@ class Shape {
     let newCurves = []
     let intersectMap = {}
     for (let i=0; i<this.curves.length-1; i++) {
-      console.log(this.quadtree.query(this.curves[i].bbox()))
       // for (let j=i+1; j<this.curves.length; j++) {
       for (let j of this.quadtree.query(this.curves[i].bbox())) {
-        if (i == j) continue;
+        if (i >= j) continue;
         let intersects = this.curves[i].intersects(this.curves[j])
         if (intersects.length) {
           intersectMap[i] ||= []
@@ -872,7 +872,6 @@ class Shape {
     }
 
     this.vertices.forEach((vertex, i) => {
-      console.log(i)
       for (let i=0; i<Math.min(10,this.regions.length); i++) {
         let region = this.regions[i]
         let regionVertexCurves = []
@@ -1168,17 +1167,26 @@ async function greet() {
 
 window.addEventListener("DOMContentLoaded", () => {
   rootPane = document.querySelector("#root")
-  rootPane.appendChild(createPane(toolbar()))
+  rootPane.appendChild(createPane(panes.toolbar))
   rootPane.addEventListener("mousemove", (e) => {
     mouseEvent = e;
   })
-  let [_toolbar, panel] = splitPane(rootPane, 10, true, createPane(timeline()))
-  let [stageAndTimeline, _infopanel] = splitPane(panel, 70, false, createPane(infopanel()))
-  let [_timeline, _stage] = splitPane(stageAndTimeline, 30, false, createPane(stage()))
+  let [_toolbar, panel] = splitPane(rootPane, 10, true, createPane(panes.timeline))
+  let [stageAndTimeline, _infopanel] = splitPane(panel, 70, false, createPane(panes.infopanel))
+  let [_timeline, _stage] = splitPane(stageAndTimeline, 30, false, createPane(panes.stage))
 });
 
 window.addEventListener("resize", () => {
   updateAll()
+})
+
+window.addEventListener("click", function(event) {
+  const popupMenu = document.getElementById("popupMenu");
+
+  // If the menu exists and the click is outside the menu and any button with the class 'paneButton', remove the menu
+  if (popupMenu && !popupMenu.contains(event.target) && !event.target.classList.contains("paneButton")) {
+      popupMenu.remove();  // Remove the menu from the DOM
+  }
 })
 
 window.addEventListener("keydown", (e) => {
@@ -1187,7 +1195,7 @@ window.addEventListener("keydown", (e) => {
     // shortcut = shortcut.split("+")
     // TODO
   // }
-  console.log(e)
+  // console.log(e)
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
   } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
@@ -1289,7 +1297,6 @@ async function saveAs() {
 }
 
 async function open() {
-  console.log("gonna open")
   const path = await openFileDialog({
     multiple: false,
     directory: false,
@@ -1353,18 +1360,15 @@ async function quit() {
 }
 
 function addFrame() {
-  console.log(context.activeObject.currentFrameNum)
   if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
     for (let i=context.activeObject.activeLayer.frames.length; i<=context.activeObject.currentFrameNum; i++) {
       context.activeObject.activeLayer.frames.push(new Frame())
     }
-    console.log(context.activeObject.activeLayer)
     updateLayers()
   }
 }
 
 function addKeyframe() {
-  console.log(context.activeObject.currentFrameNum)
   let newKeyframe = new Frame("keyframe")
   let latestFrame = context.activeObject.getFrame(Math.max(context.activeObject.currentFrameNum-1, 0))
   for (let key in latestFrame.keys) {
@@ -1381,7 +1385,6 @@ function addKeyframe() {
   } else if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum].frameType != "keyframe") {
     context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum] = newKeyframe
   }
-  console.log(context.activeObject.activeLayer)
   updateLayers()
 }
 
@@ -1509,8 +1512,6 @@ function stage() {
             for (let curve of region.curves) {
               intersect_count += curve.intersects(line).length
             }
-            console.log(region)
-            console.log(intersect_count)
             if (intersect_count%2==1) {
               // region.fillStyle = context.fillStyle
               actions.colorRegion.create(region, context.fillStyle)
@@ -1833,20 +1834,84 @@ function infopanel() {
 createNewFileDialog(_newFile);
 showNewFileDialog()
 
-function createPane(content=undefined) {
-  let div = document.createElement("div")
-  let header = document.createElement("div")
-  if (!content) {
-    content = stage() // TODO: change based on type
+function createPaneMenu(div) {
+  const menuItems = ["Item 1", "Item 2", "Item 3"]; // The items for the menu
+
+  // Get the menu container (create a new div for the menu)
+  const popupMenu = document.createElement("div");
+  popupMenu.id = "popupMenu";  // Set the ID to ensure we can target it later
+
+  // Create a <ul> element to hold the list items
+  const ul = document.createElement("ul");
+
+  // Loop through the menuItems array and create a <li> for each item
+  for (let pane in panes) {
+      const li = document.createElement("li");
+      // Create the <img> element for the icon
+      const img = document.createElement("img");
+      img.src = `assets/${panes[pane].name}.svg`;  // Use the appropriate SVG as the source
+      // img.style.width = "20px";  // Set the icon size
+      // img.style.height = "20px";  // Set the icon size
+      // img.style.marginRight = "10px";  // Add space between the icon and text
+
+      // Append the image to the <li> element
+      li.appendChild(img);
+
+      // Set the text of the item
+      li.appendChild(document.createTextNode(titleCase(panes[pane].name)));
+      li.addEventListener("click", () => {
+        createPane(panes[pane], div)
+        updateUI()
+        updateLayers()
+        updateAll()
+        popupMenu.remove()
+      })
+      ul.appendChild(li); // Append the <li> to the <ul>
   }
+
+  popupMenu.appendChild(ul); // Append the <ul> to the popupMenu div
+  document.body.appendChild(popupMenu); // Append the menu to the body
+  return popupMenu; // Return the created menu element
+}
+
+function createPane(paneType=undefined, div=undefined) {
+  if (!div) {
+    div = document.createElement("div")
+  } else {
+    div.textContent = ''
+  }
+  let header = document.createElement("div")
+  if (!paneType) {
+    paneType = panes.stage // TODO: change based on type
+  }
+  let content = paneType.func()
   header.className = "header"
 
   let button = document.createElement("button")
   header.appendChild(button)
   let icon = document.createElement("img")
   icon.className="icon"
-  icon.src = "/assets/stage.svg"
+  icon.src = `/assets/${paneType.name}.svg`
   button.appendChild(icon)
+  button.addEventListener("click", () => {
+    let popupMenu = document.getElementById("popupMenu");
+
+    // If the menu is already in the DOM, remove it
+    if (popupMenu) {
+        popupMenu.remove(); // Remove the menu from the DOM
+    } else {
+        // Create and append the new menu to the DOM
+        popupMenu = createPaneMenu(div);
+
+        // Position the menu below the button
+        const buttonRect = event.target.getBoundingClientRect();
+        popupMenu.style.left = `${buttonRect.left}px`;
+        popupMenu.style.top = `${buttonRect.bottom + window.scrollY}px`;
+    }
+
+    // Prevent the click event from propagating to the window click listener
+    event.stopPropagation();
+  })
 
   div.className = "vertical-grid"
   header.style.height = "calc( 2 * var(--lineheight))"
@@ -1941,8 +2006,8 @@ function updateLayers() {
     let framescontainer = container.querySelectorAll(".frames-container")[0]
     layerspanel.textContent = ""
     framescontainer.textContent = ""
+    console.log(context.activeObject)
     for (let layer of context.activeObject.layers) {
-    // for (let i=0; i<5; i++) {
       let layerHeader = document.createElement("div")
       layerHeader.className = "layer-header"
       layerspanel.appendChild(layerHeader)
@@ -1959,14 +2024,9 @@ function updateLayers() {
       })
       let highlightedFrame = false
       layer.frames.forEach((frame, i) => {
-      // for (let j=0; j<5-i; j++) {
         let frameEl = document.createElement("div")
         frameEl.className = "frame"
         frameEl.setAttribute("frameNum", i)
-        // frameEl.addEventListener("click", () => {
-        //   context.activeObject.currentFrameNum = frameEl.getAttribute("frameNum")
-        //   updateLayers()
-        // })
         if (i == context.activeObject.currentFrameNum) {
           frameEl.classList.add("active")
           highlightedFrame = true
@@ -2136,3 +2196,22 @@ async function updateMenu() {
   await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
 }
 updateMenu()
+
+const panes = {
+  stage: {
+    name: "stage",
+    func: stage
+  },
+  toolbar: {
+    name: "toolbar",
+    func: toolbar
+  },
+  timeline: {
+    name: "timeline",
+    func: timeline
+  },
+  infopanel: {
+    name: "infopanel",
+    func: infopanel
+  },
+}

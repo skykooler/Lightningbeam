@@ -367,3 +367,33 @@ button {
 #newFileDialog .dialog-button:hover {
   background-color: #0056b3;
 }
+
+#popupMenu {
+  background-color: #222;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+  padding: 20px;
+  position: absolute;
+}
+#popupMenu ul {
+  padding: 0px;
+  margin: 0px;
+}
+#popupMenu li {
+  color: #ccc;
+  list-style-type: none;
+  display: flex;
+  align-items: center;  /* Vertically center the image and text */
+  padding: 5px 0; /* Add padding for better spacing */
+}
+#popupMenu li:hover {
+  background-color: #444;
+  cursor:pointer;
+}
+#popupMenu li:not(:last-child) {
+  border-bottom: 1px solid #444;  /* Horizontal line for all li elements except the last */
+}
+#popupMenu li img {
+  margin-right: 10px; /* Space between the icon and text */
+  width: 20px;  /* Adjust the width of the icon */
+  height: 20px; /* Adjust the height of the icon */
+}
