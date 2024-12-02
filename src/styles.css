@@ -372,6 +372,7 @@ button {
   background-color: #222;
   box-shadow: 0 4px 8px rgba(0,0,0,0.5);
   padding: 20px;
+  border-radius: 5px;
   position: absolute;
 }
 #popupMenu ul {
