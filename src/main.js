@@ -645,6 +645,7 @@ class Shape {
       this.idx = uuid
     }
     pointerList[this.idx] = this
+    this.regionIdx = 0;
   }
   addCurve(curve) {
     this.curves.push(curve)
@@ -668,6 +669,34 @@ class Shape {
   }
   clear() {
     this.curves = []
+  }
+  copy() {
+    let newShape = new Shape(this.startx, this.starty, {})
+    newShape.startx = this.startx;
+    newShape.starty = this.starty;
+    for (let curve of this.curves) {
+      let newCurve = new Bezier(
+        curve.points[0].x, curve.points[0].y,
+        curve.points[1].x, curve.points[1].y,
+        curve.points[2].x, curve.points[2].y,
+        curve.points[3].x, curve.points[3].y,
+      )
+      newCurve.color = curve.color
+      newShape.addCurve(newCurve)
+    }
+    // TODO
+    // for (let vertex of this.vertices) {
+
+    // }
+    newShape.updateVertices()
+    newShape.fillStyle = this.fillStyle;
+    newShape.fillImage = this.fillImage;
+    newShape.strokeStyle = this.strokeStyle;
+    newShape.lineWidth = this.lineWidth
+    newShape.filled = this.filled;
+    newShape.stroked = this.stroked;
+
+    return newShape
   }
   recalculateBoundingBox() {
     for (let curve of this.curves) {
@@ -797,7 +826,7 @@ class Shape {
     let i = 0;
 
 
-    let region = {idx: uuidv4(), curves: [], fillStyle: undefined, filled: false}
+    let region = {idx: `${this.idx}-r${this.regionIdx++}`, curves: [], fillStyle: undefined, filled: false}
     pointerList[region.idx] = region
     this.regions = [region]
     for (let curve of this.curves) {
@@ -870,7 +899,7 @@ class Shape {
           let end = region.curves.indexOf(regionVertexCurves[3])
           if (end > start) {
             let newRegion = {
-              idx: uuidv4(), // TODO: generate this deterministically so that undo/redo works
+              idx: `${this.idx}-r${this.regionIdx++}`, // TODO: generate this deterministically so that undo/redo works
               curves: region.curves.splice(start, end - start),
               fillStyle: region.fillStyle,
               filled: true
@@ -956,15 +985,18 @@ class GraphicsObject {
     return this.layers[this.currentLayer].children
   }
   get currentFrame() {
-    if (this.layers[this.currentLayer].frames[this.currentFrameNum]) {
-      if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "keyframe") {
-        return this.layers[this.currentLayer].frames[this.currentFrameNum]
-      } else if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "motion") {
+    return this.getFrame(this.currentFrameNum)
+  }
+  getFrame(num) {
+    if (this.layers[this.currentLayer].frames[num]) {
+      if (this.layers[this.currentLayer].frames[num].frameType == "keyframe") {
+        return this.layers[this.currentLayer].frames[num]
+      } else if (this.layers[this.currentLayer].frames[num].frameType == "motion") {
         
-      } else if (this.layers[this.currentLayer].frames[this.currentFrameNum].frameType == "shape") {
+      } else if (this.layers[this.currentLayer].frames[num].frameType == "shape") {
         
       } else {
-        for (let i=this.currentFrameNum; i>=0; i--) {
+        for (let i=num; i>=0; i--) {
           if (this.layers[this.currentLayer].frames[i].frameType == "keyframe") {
             return this.layers[this.currentLayer].frames[i]
           }
@@ -1185,6 +1217,7 @@ function advanceFrame() {
   context.activeObject.currentFrameNum += 1
   updateLayers()
   updateMenu()
+  updateUI()
 }
 
 function decrementFrame() {
@@ -1192,6 +1225,7 @@ function decrementFrame() {
     context.activeObject.currentFrameNum -= 1
     updateLayers()
     updateMenu()
+    updateUI()
   }
 }
 
@@ -1316,6 +1350,39 @@ async function quit() {
   } else {
     getCurrentWindow().close()
   }
+}
+
+function addFrame() {
+  console.log(context.activeObject.currentFrameNum)
+  if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
+    for (let i=context.activeObject.activeLayer.frames.length; i<=context.activeObject.currentFrameNum; i++) {
+      context.activeObject.activeLayer.frames.push(new Frame())
+    }
+    console.log(context.activeObject.activeLayer)
+    updateLayers()
+  }
+}
+
+function addKeyframe() {
+  console.log(context.activeObject.currentFrameNum)
+  let newKeyframe = new Frame("keyframe")
+  let latestFrame = context.activeObject.getFrame(Math.max(context.activeObject.currentFrameNum-1, 0))
+  for (let key in latestFrame.keys) {
+    newKeyframe.keys[key] = latestFrame.keys[key]
+  }
+  for (let shape of latestFrame.shapes) {
+    newKeyframe.shapes.push(shape.copy())
+  }
+  if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
+    for (let i=context.activeObject.activeLayer.frames.length; i<context.activeObject.currentFrameNum; i++) {
+      context.activeObject.activeLayer.frames.push(new Frame())
+    }
+    context.activeObject.activeLayer.frames.push(newKeyframe)
+  } else if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum].frameType != "keyframe") {
+    context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum] = newKeyframe
+  }
+  console.log(context.activeObject.activeLayer)
+  updateLayers()
 }
 
 function stage() {
@@ -1882,11 +1949,24 @@ function updateLayers() {
       let layerTrack = document.createElement("div")
       layerTrack.className = "layer-track"
       framescontainer.appendChild(layerTrack)
+      layerTrack.addEventListener("click", (e) => {
+        console.log(layerTrack.getBoundingClientRect())
+        let mouse = getMousePos(layerTrack, e)
+        let frameNum = parseInt(mouse.x/25)
+        context.activeObject.currentFrameNum = frameNum
+        updateLayers()
+        updateMenu()
+      })
       let highlightedFrame = false
       layer.frames.forEach((frame, i) => {
       // for (let j=0; j<5-i; j++) {
         let frameEl = document.createElement("div")
         frameEl.className = "frame"
+        frameEl.setAttribute("frameNum", i)
+        // frameEl.addEventListener("click", () => {
+        //   context.activeObject.currentFrameNum = frameEl.getAttribute("frameNum")
+        //   updateLayers()
+        // })
         if (i == context.activeObject.currentFrameNum) {
           frameEl.classList.add("active")
           highlightedFrame = true
@@ -1910,13 +1990,17 @@ function updateLayers() {
 
 async function updateMenu() {
   let activeFrame;
+  let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
   let deleteFrameMenuItem;
   
-  
+  activeKeyframe = false
   if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum]) {
     activeFrame = true
+    if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum].frameType=="keyframe") {
+      activeKeyframe = true
+    }
   } else {
     activeFrame = false
   }
@@ -1985,12 +2069,12 @@ async function updateMenu() {
   newFrameMenuItem = {
     text: "New Frame",
     enabled: !activeFrame,
-    action: () => {}
+    action: addFrame
   }
   newKeyframeMenuItem = {
     text: "New Keyframe",
-    enabled: !activeFrame,
-    action: () => {}
+    enabled: !activeKeyframe,
+    action: addKeyframe
   }
   deleteFrameMenuItem = {
     text: "Delete Frame",
