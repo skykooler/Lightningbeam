@@ -158,11 +158,11 @@ button {
 }
 /* I don't fully understand this selector but it works for now */
 .horizontal-grid:hover:not(:has(*:hover)) {
-  background: red;
+  background: #666;
   cursor: ew-resize;
 }
 .vertical-grid:hover:not(:has(*:hover)) {
-  background: red;
+  background: #666;
   cursor: ns-resize
 }
 .scroll {

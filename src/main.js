@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase } from './utils.js';
+import { titleCase, getMousePositionFraction } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -1944,6 +1944,30 @@ function splitPane(div, percent, horiz, newPane=undefined) {
     div.className = "vertical-grid"
   }
   div.setAttribute("lb-percent", percent) // TODO: better attribute name
+  div.addEventListener('mousedown', function(event) {
+    // Check if the clicked element is the parent itself and not a child element
+    if (event.target === event.currentTarget) {
+      event.currentTarget.setAttribute("dragging", true)
+      event.currentTarget.style.userSelect = 'none';
+      rootPane.style.userSelect = "none";
+    } else {
+      event.currentTarget.setAttribute("dragging", false)
+    }
+  });
+  div.addEventListener('mousemove', function(event) {
+    // Check if the clicked element is the parent itself and not a child element
+    if (event.currentTarget.getAttribute("dragging")=="true") {
+      const frac = getMousePositionFraction(event, event.currentTarget)
+      div.setAttribute("lb-percent", frac*100)
+      updateAll()
+      console.log(frac); // Ensure the fraction is between 0 and 1
+    }
+  });
+  div.addEventListener('mouseup', (event) => {
+    console.log("mouseup")
+    event.currentTarget.setAttribute("dragging", false)
+    event.currentTarget.style.userSelect = 'auto';
+  })
   Coloris({el: ".color-field"})
   updateAll()
   updateUI()
