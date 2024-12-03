@@ -625,63 +625,6 @@ function moldCurve(curve, mouse, oldmouse) {
   // return curve
 }
 
-function moldCurveMath(curve, mouse) {
-  let interpolated = true
-
-  let p = curve.project({x: mouse.x, y: mouse.y})
-
-  let t1 = p.t;
-  let struts = curve.getStrutPoints(t1);
-  let m = {
-      t: p.t,
-      B: p,
-      e1: struts[7],
-      e2: struts[8]
-  };
-  m.d1 = { x: m.e1.x - m.B.x, y: m.e1.y - m.B.y};
-  m.d2 = { x: m.e2.x - m.B.x, y: m.e2.y - m.B.y};
-
-  const S = curve.points[0],
-        E = curve.points[curve.order],
-        {B, t, e1, e2} = m,
-        org = curve.getABC(t, B),
-        nB = mouse,
-        d1 = { x: e1.x - B.x, y: e1.y - B.y },
-        d2 = { x: e2.x - B.x, y: e2.y - B.y },
-        ne1 = { x: nB.x + d1.x, y: nB.y + d1.y },
-        ne2 = { x: nB.x + d2.x, y: nB.y + d2.y },
-        {A, C} = curve.getABC(t, nB),
-        // The cubic case requires us to derive two control points,
-        // which we'll do in a separate function to keep the code
-        // at least somewhat manageable.
-        {v1, v2, C1, C2} = deriveControlPoints(S, A, E, ne1, ne2, t);
-
-  // if (interpolated) {
-    // For the last example, we need to show what the "ideal" curve
-    // looks like, in addition to the one we actually get when we
-    // rely on the B we picked with the `t` value and e1/e2 points
-    // that point B had...
-    const ideal = getIdealisedCurve(S, nB, E);
-    let idealCurve = new Bezier(ideal.S, ideal.C1, ideal.C2, ideal.E);
-  // }
-  let molded = new Bezier(S,C1,C2,E);
-
-  let falloff = 100
-
-  let d = Bezier.getUtils().dist(ideal.B, p);
-  let t2 = Math.min(falloff, d) / falloff;
-  let iC1 = {
-      x: (1-t2) * molded.points[1].x + t2 * idealCurve.points[1].x,
-      y: (1-t2) * molded.points[1].y + t2 * idealCurve.points[1].y
-  };
-  let iC2 = {
-      x: (1-t2) * molded.points[2].x + t2 * idealCurve.points[2].x,
-      y: (1-t2) * molded.points[2].y + t2 * idealCurve.points[2].y
-  };
-  let interpolatedCurve = new Bezier(molded.points[0], iC1, iC2, molded.points[3]);
-
-  return interpolatedCurve
-}
 
 function deriveControlPoints(S, A, E, e1, e2, t) {
   // Deriving the control points is effectively "doing what
@@ -708,34 +651,6 @@ function deriveControlPoints(S, A, E, e1, e2, t) {
   return {v1, v2, C1, C2};
 }
 
-function getIdealisedCurve(p1, p2, p3) {
-  // This "reruns" the curve composition, but with a `t` value
-  // that is unrelated to the actual point B we picked, instead
-  // using whatever the appropriate `t` value would be if we were
-  // trying to fit a circular arc, as per earlier in the section.
-  const utils = Bezier.getUtils()
-  const c = utils.getccenter(p1, p2, p3),
-        d1 = utils.dist(p1, p2),
-        d2 = utils.dist(p3, p2),
-        t = d1 / (d1 + d2),
-        { A, B, C, S, E } = Bezier.getABC(3, p1, p2, p3, t),
-        angle = (Math.atan2(E.y-S.y, E.x-S.x) - Math.atan2(B.y-S.y, B.x-S.x) + utils.TAU) % utils.TAU,
-        bc = (angle < 0 || angle > utils.PI ? -1 : 1) * utils.dist(S, E)/3,
-        de1 = t * bc,
-        de2 = (1-t) * bc,
-        tangent = [
-          { x: B.x - 10 * (B.y-c.y), y: B.y + 10 * (B.x-c.x) },
-          { x: B.x + 10 * (B.y-c.y), y: B.y - 10 * (B.x-c.x) }
-        ],
-        tlength = utils.dist(tangent[0], tangent[1]),
-        dx = (tangent[1].x - tangent[0].x)/tlength,
-        dy = (tangent[1].y - tangent[0].y)/tlength,
-        e1 = { x: B.x + de1 * dx, y: B.y + de1 * dy},
-        e2 = { x: B.x - de2 * dx, y: B.y - de2 * dy },
-        {v1, v2, C1, C2} = deriveControlPoints(S, A, E, e1, e2, t);
-
-  return {A,B,C,S,E,e1,e2,v1,v2,C1,C2};
-}
 
 function growBoundingBox(bboxa, bboxb) {
   bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min)
@@ -752,31 +667,7 @@ function regionToBbox(region) {
 }
 
 function hitTest(candidate, object) {
-  return hitTestShape(candidate, object)
   let bbox = object.bbox()
-  if (candidate.x.min) {
-    // We're checking a bounding box
-    if (candidate.x.min < bbox.x.max + object.x && candidate.x.max > bbox.x.min + object.x &&
-      candidate.y.min < bbox.y.max + object.y && candidate.y.max > bbox.y.min + object.y) {
-        return true;
-    } else {
-      return false;
-    }
-  } else {
-    // We're checking a point
-    if (candidate.x > bbox.x.min + object.x &&
-      candidate.x < bbox.x.max + object.x &&
-      candidate.y > bbox.y.min + object.y &&
-      candidate.y < bbox.y.max + object.y) {
-        return true;
-    } else {
-      return false
-    }
-  }
-}
-
-function hitTestShape(candidate, shape) {
-  let bbox = shape.bbox()
   if (candidate.x.min) {
     // We're checking a bounding box
     if (candidate.x.min < bbox.x.max && candidate.x.max > bbox.x.min &&
@@ -1921,7 +1812,7 @@ function stage() {
             }
           }
           for (let shape of context.activeObject.currentFrame.shapes) {
-            if (hitTestShape(regionToBbox(context.selectionRect), shape)) {
+            if (hitTest(regionToBbox(context.selectionRect), shape)) {
               context.shapeselection.push(shape)
             }
           }
@@ -1987,7 +1878,7 @@ function toolbar() {
   let strokeColor = document.createElement("input")
   fillColor.className = "color-field"
   strokeColor.className = "color-field"
-  fillColor.value = "#ffffff"
+  fillColor.value = "#ff0000"
   strokeColor.value = "#000000"
   context.fillStyle = fillColor.value
   context.strokeStyle = strokeColor.value
@@ -1998,7 +1889,7 @@ function toolbar() {
       focusInput: true,
       theme: 'default',
       swatches: context.swatches,
-      defaultColor: '#ffffff',
+      defaultColor: '#ff0000',
       onChange: (color) => {
         context.fillStyle = color;
       }
