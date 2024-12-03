@@ -111,6 +111,7 @@ let context = {
   dragging: false,
   selectionRect: undefined,
   selection: [],
+  shapeselection: [],
 }
 
 let config = {
@@ -124,6 +125,7 @@ let config = {
     saveAs: "S",
     open: "o",
     quit: "q",
+    group: "g",
   }
 }
 
@@ -457,6 +459,65 @@ let actions = {
       updateUI()
     }
   },
+  group: {
+    create: () => {
+      redoStack.length = 0
+      let serializableShapes = []
+      let serializableObjects = []
+      for (let shape of context.shapeselection) {
+        serializableShapes.push(shape.idx)
+      }
+      for (let object of context.selection) {
+        serializableObjects.push(object.idx)
+      }
+      context.shapeselection = []
+      context.selection = []
+      let action = {
+        shapes: serializableShapes,
+        objects: serializableObjects,
+        groupUuid: uuidv4(),
+        parent: context.activeObject.idx
+      }
+      undoStack.push({name: 'group', action: action})
+      actions.group.execute(action)
+    },
+    execute: (action) => {
+      // your code here
+      let group = new GraphicsObject(action.groupUuid)
+      let parent = pointerList[action.parent]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        group.addShape(shape)
+        parent.removeShape(shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        group.addObject(object, object.x, object.y)
+        parent.removeChild(object)
+      }
+      parent.addObject(group)
+      if (context.activeObject==parent && context.selection.length==0 && context.shapeselection.length==0) {
+        context.selection.push(group)
+      }
+      updateUI()
+    },
+    rollback: (action) => {
+      let group = pointerList[action.groupUuid]
+      let parent = pointerList[action.parent]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        parent.addShape(shape)
+        group.removeShape(shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        parent.addObject(object, object.x, object.y)
+        group.removeChild(object)
+      }
+      parent.removeChild(group)
+      updateUI()
+    }
+  },
 }
 
 function uuidv4() {
@@ -691,6 +752,7 @@ function regionToBbox(region) {
 }
 
 function hitTest(candidate, object) {
+  return hitTestShape(candidate, object)
   let bbox = object.bbox()
   if (candidate.x.min) {
     // We're checking a bounding box
@@ -711,6 +773,30 @@ function hitTest(candidate, object) {
       return false
     }
   }
+}
+
+function hitTestShape(candidate, shape) {
+  let bbox = shape.bbox()
+  if (candidate.x.min) {
+    // We're checking a bounding box
+    if (candidate.x.min < bbox.x.max && candidate.x.max > bbox.x.min &&
+      candidate.y.min < bbox.y.max && candidate.y.max > bbox.y.min) {
+        return true;
+    } else {
+      return false;
+    }
+  } else {
+    // We're checking a point
+    if (candidate.x > bbox.x.min &&
+      candidate.x < bbox.x.max &&
+      candidate.y > bbox.y.min &&
+      candidate.y < bbox.y.max) {
+        return true;
+    } else {
+      return false
+    }
+  }
+
 }
 
 function undo() {
@@ -812,6 +898,9 @@ class Shape {
                            x, y)
     curve.color = context.strokeStyle
     this.curves.push(curve)
+  }
+  bbox() {
+    return this.boundingBox
   }
   clear() {
     this.curves = []
@@ -1180,19 +1269,24 @@ class GraphicsObject {
   bbox() {
     let bbox;
     if (this.currentFrame.shapes.length > 0) {
-      bbox = this.currentFrame.shapes[0].boundingBox
+      bbox = structuredClone(this.currentFrame.shapes[0].boundingBox)
       for (let shape of this.currentFrame.shapes) {
         growBoundingBox(bbox, shape.boundingBox)
       }
     }
     if (this.children.length > 0) {
       if (!bbox) {
-        bbox = this.children[0].bbox()
+        bbox = structuredClone(this.children[0].bbox())
       }
       for (let child of this.children) {
         growBoundingBox(bbox, child.bbox())
       }
     }
+    bbox.x.min += this.x
+    bbox.x.max += this.x
+    bbox.y.min += this.y
+    bbox.y.max += this.y
+    console.log(bbox)
     return bbox
   }
   draw(context) {
@@ -1203,11 +1297,11 @@ class GraphicsObject {
     //   this.currentFrameNum = 0;
     // }
     for (let shape of this.currentFrame.shapes) {
-      if (false) {
+      if (context.shapeselection.indexOf(shape) >= 0) {
         invertPixels(ctx, fileWidth, fileHeight)
       }
       shape.draw(context)
-      if (false) {
+      if (context.shapeselection.indexOf(shape) >= 0) {
         invertPixels(ctx, fileWidth, fileHeight)
       }
     }
@@ -1268,10 +1362,9 @@ class GraphicsObject {
         ctx.save()
         ctx.strokeStyle = "#00ffff"
         ctx.lineWidth = 1;
-        ctx.translate(item.x, item.y)
         ctx.beginPath()
         let bbox = item.bbox()
-        ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max, bbox.y.max)
+        ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
         ctx.stroke()
         ctx.restore()
       }
@@ -1375,10 +1468,6 @@ window.addEventListener("keydown", (e) => {
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
     playPause()
-  } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
-    undo()
-  } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
-    redo()
   } else if (e.key == config.shortcuts.new && e.ctrlKey == true) {
     newFile()
   } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
@@ -1389,6 +1478,12 @@ window.addEventListener("keydown", (e) => {
     open()
   } else if (e.key == config.shortcuts.quit && e.ctrlKey == true) {
     quit()
+  } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
+    undo()
+  } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
+    redo()
+  } else if (e.key == config.shortcuts.group && e.ctrlKey == true) {
+    actions.group.create()
   }
   else if (e.key == "ArrowRight") {
     advanceFrame()
@@ -1819,9 +1914,15 @@ function stage() {
           context.selectionRect.x2 = mouse.x
           context.selectionRect.y2 = mouse.y
           context.selection = []
+          context.shapeselection = []
           for (let child of context.activeObject.children) {
             if (hitTest(regionToBbox(context.selectionRect), child)) {
               context.selection.push(child)
+            }
+          }
+          for (let shape of context.activeObject.currentFrame.shapes) {
+            if (hitTestShape(regionToBbox(context.selectionRect), shape)) {
+              context.shapeselection.push(shape)
             }
           }
         } else {
@@ -2329,6 +2430,11 @@ async function updateMenu() {
         text: "Paste",
         enabled: true,
         action: () => {}
+      },
+      {
+        text: "Group",
+        enabled: true,
+        action: actions.group.create
       },
     ]
   });
