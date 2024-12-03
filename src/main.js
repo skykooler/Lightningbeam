@@ -418,16 +418,43 @@ let actions = {
   addMotionTween: {
     create: () => {
       redoStack.length = 0
+      let frameNum = context.activeObject.currentFrameNum
+      let layer = context.activeObject.activeLayer
+      let frames = layer.frames
+      let {lastKeyframeBefore, firstKeyframeAfter} = getKeyframesSurrounding(frames, frameNum)
+      
       let action = {
+        frameNum: frameNum,
+        layer: layer.idx,
+        lastBefore: lastKeyframeBefore,
+        firstAfter: firstKeyframeAfter,
       }
       undoStack.push({name: 'addMotionTween', action: action})
       actions.addMotionTween.execute(action)
     },
     execute: (action) => {
-      // your code here
+      let layer = pointerList[action.layer]
+      let frames = layer.frames
+      if ((action.lastBefore != undefined) && (action.firstAfter != undefined)) {
+        for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
+          frames[i].frameType = "motion"
+          frames[i].prev = frames[action.lastBefore]
+          frames[i].next = frames[action.firstAfter]
+          frames[i].prevIndex = action.lastBefore
+          frames[i].nextIndex = action.firstAfter
+        }
+      }
+      updateLayers()
+      updateUI()
     },
     rollback: (action) => {
-      // your code here
+      let layer = pointerList[action.layer]
+      let frames = layer.frames
+      for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
+        frames[i].frameType = "normal"
+      }
+      updateLayers()
+      updateUI()
     }
   },
 }
@@ -1528,20 +1555,7 @@ function addKeyframe() {
 }
 
 function addMotionTween() {
-  let frames = context.activeObject.activeLayer.frames
-  let currentFrame = context.activeObject.currentFrameNum
-  let {lastKeyframeBefore, firstKeyframeAfter} = getKeyframesSurrounding(frames, currentFrame)
-  if ((lastKeyframeBefore != undefined) && (firstKeyframeAfter != undefined)) {
-    for (let i=lastKeyframeBefore + 1; i<firstKeyframeAfter; i++) {
-      frames[i].frameType = "motion"
-      frames[i].prev = frames[lastKeyframeBefore]
-      frames[i].next = frames[firstKeyframeAfter]
-      frames[i].prevIndex = lastKeyframeBefore
-      frames[i].nextIndex = firstKeyframeAfter
-    }
-  }
-  updateLayers()
-  console.log(frames)
+  actions.addMotionTween.create()
 }
 
 function stage() {
