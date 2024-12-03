@@ -305,6 +305,21 @@ button {
   background-color: #222; /* Set the color of the circle (black in this case) */
   margin-bottom: 5px;
 }
+.frame.motion {
+  background-color: #7a00b3;
+  border: none;
+}
+.frame.motion:hover, .frame.motion.active {
+  background-color: #530379;
+  border: none;
+}
+/* :nth-child(1 of .frame.motion) {
+  background-color: blue;
+}
+:nth-last-child(1 of .frame.motion) {
+  background-color: red;
+} */
+
 .frame-highlight {
   background-color: red;
   width: 25px;

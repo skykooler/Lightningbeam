@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -240,43 +240,49 @@ let actions = {
     }
   },
   addImageObject: {
-    create: (x, y, img, parent) => {
+    create: (x, y, imgsrc, ix, parent) => {
       redoStack.length = 0; // Clear redo stack
       let action = {
         shapeUuid: uuidv4(),
         objectUuid: uuidv4(),
         x: x,
         y: y,
-        width: img.width,
-        height: img.height,
-        ix: img.ix,
-        img: img.idx,
+        src: imgsrc,
+        ix: ix,
         parent: parent.idx
+
       }
       undoStack.push({name: "addImageObject", action: action})
       actions.addImageObject.execute(action)
     },
     execute: (action) => {
       let imageObject = new GraphicsObject(action.objectUuid)
-      let img = pointerList[action.img] 
-      let ct = {
-        ...context,
-        fillImage: img,
-        strokeShape: false,
+      // let img = pointerList[action.img] 
+      let img = new Image();
+      img.onload = function() {
+        let ct = {
+          ...context,
+          fillImage: img,
+          strokeShape: false,
+        }
+        let imageShape = new Shape(0, 0, ct, action.shapeUuid)
+        imageShape.addLine(img.width, 0)
+        imageShape.addLine(img.width, img.height)
+        imageShape.addLine(0, img.height)
+        imageShape.addLine(0, 0)
+        imageShape.update()
+        imageShape.regions[0].fillImage = img
+        imageShape.regions[0].filled = true
+        imageObject.addShape(imageShape)
+        let parent = pointerList[action.parent]
+        parent.addObject(
+          imageObject,
+          action.x-img.width/2 + (20*action.ix),
+          action.y-img.height/2 + (20*action.ix)
+        )
+        updateUI();
       }
-      let imageShape = new Shape(0, 0, ct, action.shapeUuid)
-      imageShape.addLine(action.width, 0)
-      imageShape.addLine(action.width, action.height)
-      imageShape.addLine(0, action.height)
-      imageShape.addLine(0, 0)
-      imageShape.update()
-      imageObject.addShape(imageShape)
-      let parent = pointerList[action.parent]
-      parent.addObject(
-        imageObject,
-        action.x-action.width/2 + (20*action.ix),
-        action.y-action.height/2 + (20*action.ix)
-      )
+      img.src = action.src
     },
     rollback: (action) => {
       let shape = pointerList[action.shapeUuid]
@@ -310,6 +316,111 @@ let actions = {
     rollback: (action) => {
       let frame = pointerList[action.frame]
       frame.keys = structuredClone(action.oldState)
+    }
+  },
+  addFrame: {
+    create: () => {
+      redoStack.length = 0
+      let frames = []
+      for (let i=context.activeObject.activeLayer.frames.length; i<=context.activeObject.currentFrameNum; i++) {
+        frames.push(uuidv4())
+      }
+      let action = {
+        frames: frames,
+        layer: context.activeObject.activeLayer.idx
+      }
+      undoStack.push({name: 'addFrame', action: action})
+      actions.addFrame.execute(action)
+    },
+    execute: (action) => {
+      let layer = pointerList[action.layer]
+      for (let frame of action.frames) {
+        layer.frames.push(new Frame("normal", frame))
+      }
+      updateLayers()
+    },
+    rollback: (action) => {
+      let layer = pointerList[action.layer]
+      for (let _frame of action.frames) {
+        layer.frames.pop()
+      }
+      updateLayers()
+    }
+  },
+  addKeyframe: {
+    create: () => {
+      let frameNum = context.activeObject.currentFrameNum
+      let layer = context.activeObject.activeLayer
+      let formerType;
+      let addedFrames = 0;
+      if (frameNum >= layer.frames.length) {
+        formerType = "none"
+        addedFrames = frameNum - layer.frames.length
+      } else if (layer.frames[frameNum].frameType != "keyframe") {
+        formerType = layer.frames[frameNum].frameType
+      } else {
+        console.log("foolish")
+        return // Already a keyframe, nothing to do
+      }
+      redoStack.length = 0
+      let action = {
+        frameNum: frameNum,
+        object: context.activeObject.idx,
+        layer: layer.idx,
+        formerType: formerType,
+        addedFrames: addedFrames
+      }
+      undoStack.push({name: 'addKeyframe', action: action})
+      actions.addKeyframe.execute(action)
+    },
+    execute: (action) => {
+      // your code here
+      let object = pointerList[action.object]
+      let layer = pointerList[action.layer]
+      let latestFrame = object.getFrame(Math.max(action.frameNum-1, 0))
+      let newKeyframe = new Frame("keyframe")
+      for (let key in latestFrame.keys) {
+        newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
+      }
+      for (let shape of latestFrame.shapes) {
+        newKeyframe.shapes.push(shape.copy())
+      }
+      if (action.frameNum >= layer.frames.length) {
+        for (let i=layer.frames.length; i<action.frameNum; i++) {
+          layer.frames.push(new Frame())
+        }
+        layer.frames.push(newKeyframe)
+      } else if (layer.frames[action.frameNum].frameType != "keyframe") {
+        layer.frames[action.frameNum] = newKeyframe
+      }
+      updateLayers()
+    },
+    rollback: (action) => {
+      let layer = pointerList[action.layer]
+      if (action.formerType == "none") {
+        for (let i=0; i<action.addedFrames+1; i++) {
+          layer.frames.pop()
+        }
+      } else {
+        let layer = pointerList[action.layer]
+        layer.frames[action.frameNum].frameType = action.formerType
+      }
+      updateLayers()
+    }
+  },
+  addMotionTween: {
+    create: () => {
+      redoStack.length = 0
+      let action = {
+      }
+      undoStack.push({name: 'addMotionTween', action: action})
+      actions.addMotionTween.execute(action)
+    },
+    execute: (action) => {
+      // your code here
+    },
+    rollback: (action) => {
+      // your code here
     }
   },
 }
@@ -919,7 +1030,7 @@ class Shape {
     ctx.lineCap = "round"
     for (let region of this.regions) {
       // if (region.filled) continue;
-      if (region.fillStyle && region.filled) {
+      if ((region.fillStyle || region.fillImage) && region.filled) {
         // ctx.fillStyle = region.fill
         if (region.fillImage) {
           let pat = ctx.createPattern(region.fillImage, "no-repeat")
@@ -937,19 +1048,21 @@ class Shape {
         ctx.fill()
       }
     }
-    for (let curve of this.curves) {
-      ctx.strokeStyle = curve.color
-      ctx.beginPath()
-      ctx.moveTo(curve.points[0].x, curve.points[0].y)
-      ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                        curve.points[2].x, curve.points[2].y,
-                        curve.points[3].x, curve.points[3].y)
-      ctx.stroke()
+    if (this.stroked) {
+      for (let curve of this.curves) {
+        ctx.strokeStyle = curve.color
+        ctx.beginPath()
+        ctx.moveTo(curve.points[0].x, curve.points[0].y)
+        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                          curve.points[2].x, curve.points[2].y,
+                          curve.points[3].x, curve.points[3].y)
+        ctx.stroke()
 
-      // Debug, show curve endpoints
-      // ctx.beginPath()
-      // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
-      // ctx.fill()
+        // Debug, show curve endpoints
+        // ctx.beginPath()
+        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
+        // ctx.fill()
+      }
     }
     // Debug, show quadtree
     // this.quadtree.draw(ctx)
@@ -981,24 +1094,44 @@ class GraphicsObject {
     return this.layers[this.currentLayer]
   }
   get children() {
-    return this.layers[this.currentLayer].children
+    return this.activeLayer.children
   }
   get currentFrame() {
     return this.getFrame(this.currentFrameNum)
   }
   getFrame(num) {
-    if (this.layers[this.currentLayer].frames[num]) {
-      if (this.layers[this.currentLayer].frames[num].frameType == "keyframe") {
-        return this.layers[this.currentLayer].frames[num]
-      } else if (this.layers[this.currentLayer].frames[num].frameType == "motion") {
-        
-      } else if (this.layers[this.currentLayer].frames[num].frameType == "shape") {
+    if (this.activeLayer.frames[num]) {
+      if (this.activeLayer.frames[num].frameType == "keyframe") {
+        return this.activeLayer.frames[num]
+      } else if (this.activeLayer.frames[num].frameType == "motion") {
+        let frameKeys = {}
+        const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
+        console.log(this.activeLayer.frames[num].prev)
+        for (let key in this.activeLayer.frames[num].prev.keys) {
+          frameKeys[key] = {}
+          let prevKeyDict = this.activeLayer.frames[num].prev.keys[key]
+          let nextKeyDict = this.activeLayer.frames[num].next.keys[key]
+          for (let prop in prevKeyDict) {
+            frameKeys[key][prop] = (1 - t) * prevKeyDict[prop] + t * nextKeyDict[prop];
+          }
+
+        }
+        let frame = new Frame("motion", "temp")
+        frame.keys = frameKeys
+        return frame
+      } else if (this.activeLayer.frames[num].frameType == "shape") {
         
       } else {
-        for (let i=num; i>=0; i--) {
-          if (this.layers[this.currentLayer].frames[i].frameType == "keyframe") {
-            return this.layers[this.currentLayer].frames[i]
+        for (let i=Math.min(num, this.activeLayer.frames.length-1); i>=0; i--) {
+          if (this.activeLayer.frames[i].frameType == "keyframe") {
+            return this.activeLayer.frames[i]
           }
+        }
+      }
+    } else {
+      for (let i=Math.min(num, this.activeLayer.frames.length-1); i>=0; i--) {
+        if (this.activeLayer.frames[i].frameType == "keyframe") {
+          return this.activeLayer.frames[i]
         }
       }
     }
@@ -1032,9 +1165,9 @@ class GraphicsObject {
     let ctx = context.ctx;
     ctx.translate(this.x, this.y)
     ctx.rotate(this.rotation)
-    if (this.currentFrameNum>=this.maxFrame) {
-      this.currentFrameNum = 0;
-    }
+    // if (this.currentFrameNum>=this.maxFrame) {
+    //   this.currentFrameNum = 0;
+    // }
     for (let shape of this.currentFrame.shapes) {
       shape.draw(context)
     }
@@ -1361,31 +1494,30 @@ async function quit() {
 
 function addFrame() {
   if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
-    for (let i=context.activeObject.activeLayer.frames.length; i<=context.activeObject.currentFrameNum; i++) {
-      context.activeObject.activeLayer.frames.push(new Frame())
-    }
-    updateLayers()
+    actions.addFrame.create()
   }
 }
 
 function addKeyframe() {
-  let newKeyframe = new Frame("keyframe")
-  let latestFrame = context.activeObject.getFrame(Math.max(context.activeObject.currentFrameNum-1, 0))
-  for (let key in latestFrame.keys) {
-    newKeyframe.keys[key] = latestFrame.keys[key]
-  }
-  for (let shape of latestFrame.shapes) {
-    newKeyframe.shapes.push(shape.copy())
-  }
-  if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
-    for (let i=context.activeObject.activeLayer.frames.length; i<context.activeObject.currentFrameNum; i++) {
-      context.activeObject.activeLayer.frames.push(new Frame())
+  console.log(context.activeObject.currentFrameNum)
+  actions.addKeyframe.create()
+}
+
+function addMotionTween() {
+  let frames = context.activeObject.activeLayer.frames
+  let currentFrame = context.activeObject.currentFrameNum
+  let {lastKeyframeBefore, firstKeyframeAfter} = getKeyframesSurrounding(frames, currentFrame)
+  if ((lastKeyframeBefore != undefined) && (firstKeyframeAfter != undefined)) {
+    for (let i=lastKeyframeBefore + 1; i<firstKeyframeAfter; i++) {
+      frames[i].frameType = "motion"
+      frames[i].prev = frames[lastKeyframeBefore]
+      frames[i].next = frames[firstKeyframeAfter]
+      frames[i].prevIndex = lastKeyframeBefore
+      frames[i].nextIndex = firstKeyframeAfter
     }
-    context.activeObject.activeLayer.frames.push(newKeyframe)
-  } else if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum].frameType != "keyframe") {
-    context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum] = newKeyframe
   }
   updateLayers()
+  console.log(frames)
 }
 
 function stage() {
@@ -1407,16 +1539,26 @@ function stage() {
         if (item.kind == "file") {
           let file = item.getAsFile()
           if (imageTypes.includes(file.type)) {
-            let img = new Image()
-            img.src = window.URL.createObjectURL(file)
-            img.ix = i
-            img.idx = uuidv4()
-            pointerList[img.idx] = img
-            img.onload = function() {
-              actions.addImageObject.create(
-                mouse.x, mouse.y, img, context.activeObject)
-              updateUI()
-            }
+            let img = new Image();
+            let reader = new FileReader();
+            
+            // Read the file as a data URL
+            reader.readAsDataURL(file);
+            reader.ix = i
+            
+            reader.onload = function(event) {
+              let imgsrc = event.target.result;  // This is the data URL
+              // console.log(imgsrc)
+  
+              // img.onload = function() {
+                actions.addImageObject.create(
+                  mouse.x, mouse.y, imgsrc, reader.ix, context.activeObject);
+              // };
+            };
+  
+            reader.onerror = function(error) {
+              console.error("Error reading file as data URL", error);
+            };
           }
           i++;
         }
@@ -2043,8 +2185,10 @@ function updateLayers() {
         let mouse = getMousePos(layerTrack, e)
         let frameNum = parseInt(mouse.x/25)
         context.activeObject.currentFrameNum = frameNum
+        console.log(context.activeObject  )
         updateLayers()
         updateMenu()
+        updateUI()
       })
       let highlightedFrame = false
       layer.frames.forEach((frame, i) => {
@@ -2055,10 +2199,8 @@ function updateLayers() {
           frameEl.classList.add("active")
           highlightedFrame = true
         }
-        console.log(frame.frameType)
-        if (frame.frameType == "keyframe") {
-          frameEl.classList.add("keyframe")
-        }
+
+        frameEl.classList.add(frame.frameType)
         layerTrack.appendChild(frameEl)
       })
       if (!highlightedFrame) {
@@ -2172,6 +2314,11 @@ async function updateMenu() {
       newFrameMenuItem,
       newKeyframeMenuItem,
       deleteFrameMenuItem,
+      {
+        text: "Add Motion Tween",
+        enabled: activeFrame && (!activeKeyframe),
+        action: addMotionTween
+      },
       {
         text: "Return to start",
         enabled: false,

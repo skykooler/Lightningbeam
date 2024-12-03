@@ -19,4 +19,26 @@ function getMousePositionFraction(event, element) {
     return 0; // If neither class is present, return 0 (or handle as needed)
   }
 
-export { titleCase, getMousePositionFraction };
+function getKeyframesSurrounding(frames, index) {
+    let lastKeyframeBefore = undefined;
+    let firstKeyframeAfter = undefined;
+
+    // Find the last keyframe before the given index
+    for (let i = index - 1; i >= 0; i--) {
+        if (frames[i].frameType === "keyframe") {
+        lastKeyframeBefore = i;
+        break;
+        }
+    }
+
+    // Find the first keyframe after the given index
+    for (let i = index + 1; i < frames.length; i++) {
+        if (frames[i].frameType === "keyframe") {
+        firstKeyframeAfter = i;
+        break;
+        }
+    }
+    return { lastKeyframeBefore, firstKeyframeAfter };
+}
+
+export { titleCase, getMousePositionFraction, getKeyframesSurrounding };
