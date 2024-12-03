@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -43,7 +43,9 @@ let maxFileVersion = "2.0"
 let filePath = undefined
 let fileWidth = 1500
 let fileHeight = 1000
+let fileFps = 12
 
+let playing = false
 
 let tools = {
   select: {
@@ -311,6 +313,8 @@ let actions = {
     },
     execute: (action) => {
       let frame = pointerList[action.frame]
+      console.log(pointerList)
+      console.log(action.frame)
       frame.keys = structuredClone(action.newState)
     },
     rollback: (action) => {
@@ -352,10 +356,12 @@ let actions = {
       let frameNum = context.activeObject.currentFrameNum
       let layer = context.activeObject.activeLayer
       let formerType;
-      let addedFrames = 0;
+      let addedFrames = {};
       if (frameNum >= layer.frames.length) {
         formerType = "none"
-        addedFrames = frameNum - layer.frames.length
+        for (let i=layer.frames.length; i<=frameNum; i++) {
+          addedFrames[i] = uuidv4()
+        }
       } else if (layer.frames[frameNum].frameType != "keyframe") {
         formerType = layer.frames[frameNum].frameType
       } else {
@@ -368,17 +374,17 @@ let actions = {
         object: context.activeObject.idx,
         layer: layer.idx,
         formerType: formerType,
-        addedFrames: addedFrames
+        addedFrames: addedFrames,
+        uuid: uuidv4()
       }
       undoStack.push({name: 'addKeyframe', action: action})
       actions.addKeyframe.execute(action)
     },
     execute: (action) => {
-      // your code here
       let object = pointerList[action.object]
       let layer = pointerList[action.layer]
       let latestFrame = object.getFrame(Math.max(action.frameNum-1, 0))
-      let newKeyframe = new Frame("keyframe")
+      let newKeyframe = new Frame("keyframe", action.uuid)
       for (let key in latestFrame.keys) {
         newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
       }
@@ -386,19 +392,20 @@ let actions = {
         newKeyframe.shapes.push(shape.copy())
       }
       if (action.frameNum >= layer.frames.length) {
-        for (let i=layer.frames.length; i<action.frameNum; i++) {
-          layer.frames.push(new Frame())
+        for (const [index, idx] of Object.entries(action.addedFrames)) {
+          layer.frames[index] = new Frame("normal", idx)
         }
-        layer.frames.push(newKeyframe)
-      } else if (layer.frames[action.frameNum].frameType != "keyframe") {
-        layer.frames[action.frameNum] = newKeyframe
       }
+      //   layer.frames.push(newKeyframe)
+      // } else if (layer.frames[action.frameNum].frameType != "keyframe") {
+        layer.frames[action.frameNum] = newKeyframe
+      // }
       updateLayers()
     },
     rollback: (action) => {
       let layer = pointerList[action.layer]
       if (action.formerType == "none") {
-        for (let i=0; i<action.addedFrames+1; i++) {
+        for (let i in action.addedFrames) {
           layer.frames.pop()
         }
       } else {
@@ -1085,7 +1092,7 @@ class GraphicsObject {
 
     this.currentFrameNum = 0;
     this.currentLayer = 0;
-    this.layers = [new Layer()]
+    this.layers = [new Layer(uuid+"-L1")]
     // this.children = []
 
     this.shapes = []
@@ -1169,7 +1176,13 @@ class GraphicsObject {
     //   this.currentFrameNum = 0;
     // }
     for (let shape of this.currentFrame.shapes) {
+      if (false) {
+        invertPixels(ctx, fileWidth, fileHeight)
+      }
       shape.draw(context)
+      if (false) {
+        invertPixels(ctx, fileWidth, fileHeight)
+      }
     }
     for (let child of this.children) {
       let idx = child.idx
@@ -1180,6 +1193,9 @@ class GraphicsObject {
         child.scale = this.currentFrame.keys[idx].scale;
         ctx.save()
         child.draw(context)
+        if (true) {
+
+        }
         ctx.restore()
       }
     }
@@ -1331,6 +1347,7 @@ window.addEventListener("keydown", (e) => {
   // console.log(e)
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
+    playPause()
   } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
     undo()
   } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
@@ -1354,6 +1371,11 @@ window.addEventListener("keydown", (e) => {
   }
 })
 
+function playPause() {
+  playing = !playing
+  updateUI()
+}
+
 function advanceFrame() {
   context.activeObject.currentFrameNum += 1
   updateLayers()
@@ -1370,11 +1392,12 @@ function decrementFrame() {
   }
 }
 
-function _newFile(width, height) {
+function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.activeObject = root
   fileWidth = width
   fileHeight = height
+  fileFps = fps
   for (let stage of document.querySelectorAll(".stage")) {
     stage.width = width
     stage.height = height
@@ -1397,6 +1420,7 @@ async function _save(path) {
       version: "1.1",
       width: fileWidth,
       height: fileHeight,
+      fps: fileFps,
       actions: undoStack
     }
     const contents = JSON.stringify(fileData   );
@@ -1451,7 +1475,7 @@ async function open() {
       }
       if (file.version >= minFileVersion) {
         if (file.version < maxFileVersion) {
-          _newFile(file.width, file.height)
+          _newFile(file.width, file.height, file.fps)
           if (file.actions == undefined) {
             await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
             return
@@ -2162,6 +2186,9 @@ function updateUI() {
       context.activeShape.draw(context)
     }
 
+  }
+  if (playing) {
+    setTimeout(advanceFrame, 1000/fileFps)
   }
 }
 

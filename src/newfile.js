@@ -44,6 +44,20 @@ function createNewFileDialog(callback) {
     heightInput.value = '1000'; // Default value
     newFileDialog.appendChild(heightInput);
 
+    // Create FPS input
+    const fpsLabel = document.createElement('label');
+    fpsLabel.setAttribute('for', 'fps');
+    fpsLabel.classList.add('dialog-label');
+    fpsLabel.textContent = 'Frames per Second:';
+    newFileDialog.appendChild(fpsLabel);
+
+    const fpsInput = document.createElement('input');
+    fpsInput.type = 'number';
+    fpsInput.id = 'fps';
+    fpsInput.classList.add('dialog-input');
+    fpsInput.value = '12'; // Default value
+    newFileDialog.appendChild(fpsInput);
+
     // Create Create button
     const createButton = document.createElement('button');
     createButton.textContent = 'Create';
@@ -56,9 +70,9 @@ function createNewFileDialog(callback) {
     function createNewFile() {
         const width = document.getElementById('width').value;
         const height = document.getElementById('height').value;
+        const fps = document.getElementById('fps').value;
         console.log(`New file created with width: ${width} and height: ${height}`);
-        console.log(callback)
-        callback(width, height)
+        callback(width, height, fps)
 
         // Add any further logic to handle the new file creation here
 
