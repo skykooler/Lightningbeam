@@ -1,6 +1,0 @@
-style "pcmanfm-menubar-fix"
-{
-	bg_pixmap[NORMAL]			= "Apps/pcmanfm/pcmanfm.png"
-}
-
-widget "FmMainWin.*menubar"			style "pcmanfm-menubar-fix"

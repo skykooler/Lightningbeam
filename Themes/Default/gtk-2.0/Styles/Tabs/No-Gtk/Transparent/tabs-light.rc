@@ -1,3 +1,0 @@
-include						"Styles/Tabs/Mozilla/tabs-light.rc"
-
-widget "GtkWindow.GtkFixed.GtkNotebook" 	style:highest "tabs-light"

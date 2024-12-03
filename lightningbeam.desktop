@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Version=1.0.0-alpha2
-Name=Lightningbeam
-Exec=/usr/bin/lightningbeam
-Icon=lightningbeam
-Terminal=false
-Categories=Graphics

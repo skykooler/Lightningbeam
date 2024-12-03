@@ -1,4 +1,0 @@
-#! /bin/bash
-zenity --error --text 'SWFC was unable to run! This probably means there is no binary compiled for your processor architecture. Or, that Python was unable to properly detect your architecture. HTML5 should still work.'
-
-

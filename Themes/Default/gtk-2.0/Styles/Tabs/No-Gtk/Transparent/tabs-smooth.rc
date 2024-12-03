@@ -1,3 +1,0 @@
-include						"Styles/Tabs/Mozilla/tabs-smooth-flat.rc"
-
-widget "GtkWindow.GtkFixed.GtkNotebook" 	style:highest "tabs-smooth-flat"

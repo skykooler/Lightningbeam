@@ -1,5 +1,0 @@
-Fix TextView.selection_changed so that it only invalidates
-what is necessary.
-
-Check invalidation system and revamp if necessary to support
-regions.
