@@ -4,6 +4,10 @@ body {
   overflow: hidden;
 }
 
+* {
+  user-select: none;
+}
+
 .logo.vanilla:hover {
   filter: drop-shadow(0 0 2em #ffe21c);
 }
@@ -174,7 +178,85 @@ button {
 .stage {
   width: 1500px;
   height: 1000px;
-  overflow: scroll;
+  /* overflow: scroll; */
+}
+.stageWrapper {
+  position: relative;
+  width: 1500px;
+  height: 1500px;
+}
+.selectionRect {
+  position: absolute;
+  width: 500px;
+  height: 300px;
+  left: 100px;
+  top: 100px;
+  border: 1px solid #00ffff;
+  display: none;
+  user-select: none;
+  pointer-events: none;
+}
+.cornerRect {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background-color: black;
+  transition: width 0.2s ease, height 0.2s linear;
+  user-select: none;
+
+  pointer-events: auto;
+}
+.cornerRect:hover {
+  width: 15px;
+  height: 15px;
+}
+.nw {
+  top: 0px;
+  left: 0px;
+  transform: translate(-50%, -50%);
+  cursor:nw-resize;
+}
+.n {
+  top: 0px;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  cursor:n-resize;
+}
+.ne {
+  top: 0px;
+  right: 0px;
+  transform: translate(50%, -50%);
+  cursor:ne-resize;
+}
+.e {
+  top: 50%;
+  right: 0px;
+  transform: translate(50%, -50%);
+  cursor:e-resize;
+}
+.se {
+  bottom: 0px;
+  right: 0px;
+  transform: translate(50%, 50%);
+  cursor:se-resize;
+}
+.s {
+  bottom: 0px;
+  left: 50%;
+  transform: translate(-50%, 50%);
+  cursor:s-resize;
+}
+.sw {
+  bottom: 0px;
+  left: 0px;
+  transform: translate(-50%, 50%);
+  cursor:sw-resize;
+}
+.w {
+  top: 50%;
+  left: 0px;
+  transform: translate(-50%, -50%);
+  cursor:w-resize;
 }
 .toolbar {
   display: flex;

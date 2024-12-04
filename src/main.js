@@ -113,6 +113,7 @@ let context = {
   selectionRect: undefined,
   selection: [],
   shapeselection: [],
+  dragDirection: undefined,     
 }
 
 let config = {
@@ -316,8 +317,6 @@ let actions = {
     },
     execute: (action) => {
       let frame = pointerList[action.frame]
-      console.log(pointerList)
-      console.log(action.frame)
       frame.keys = structuredClone(action.newState)
     },
     rollback: (action) => {
@@ -368,7 +367,6 @@ let actions = {
       } else if (layer.frames[frameNum].frameType != "keyframe") {
         formerType = layer.frames[frameNum].frameType
       } else {
-        console.log("foolish")
         return // Already a keyframe, nothing to do
       }
       redoStack.length = 0
@@ -1200,7 +1198,8 @@ class GraphicsObject {
     this.x = 0;
     this.y = 0;
     this.rotation = 0; // in radians
-    this.scale = 1;
+    this.scale_x = 1;
+    this.scale_y = 1;
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -1234,7 +1233,6 @@ class GraphicsObject {
       } else if (this.activeLayer.frames[num].frameType == "motion") {
         let frameKeys = {}
         const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
-        console.log(this.activeLayer.frames[num].prev)
         for (let key in this.activeLayer.frames[num].prev.keys) {
           frameKeys[key] = {}
           let prevKeyDict = this.activeLayer.frames[num].prev.keys[key]
@@ -1287,17 +1285,19 @@ class GraphicsObject {
         growBoundingBox(bbox, child.bbox())
       }
     }
+    bbox.x.max *= this.scale_x
+    bbox.y.max *= this.scale_y
     bbox.x.min += this.x
     bbox.x.max += this.x
     bbox.y.min += this.y
     bbox.y.max += this.y
-    console.log(bbox)
     return bbox
   }
   draw(context) {
     let ctx = context.ctx;
     ctx.translate(this.x, this.y)
     ctx.rotate(this.rotation)
+    ctx.scale(this.scale_x, this.scale_y)
     // if (this.currentFrameNum>=this.maxFrame) {
     //   this.currentFrameNum = 0;
     // }
@@ -1316,7 +1316,8 @@ class GraphicsObject {
         child.x = this.currentFrame.keys[idx].x;
         child.y = this.currentFrame.keys[idx].y;
         child.rotation = this.currentFrame.keys[idx].rotation;
-        child.scale = this.currentFrame.keys[idx].scale;
+        child.scale_x = this.currentFrame.keys[idx].scale_x;
+        child.scale_y = this.currentFrame.keys[idx].scale_y;
         ctx.save()
         child.draw(context)
         if (true) {
@@ -1363,28 +1364,66 @@ class GraphicsObject {
         ctx.fill()
         ctx.restore()
       }
-      for (let item of context.selection) {
-        ctx.save()
-        ctx.strokeStyle = "#00ffff"
-        ctx.lineWidth = 1;
-        ctx.beginPath()
-        let bbox = item.bbox()
-        ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
-        ctx.stroke()
-        ctx.restore()
-      }
-      if (context.selectionRect) {
-        ctx.save()
-        ctx.strokeStyle = "#00ffff"
-        ctx.lineWidth = 1;
-        ctx.beginPath()
-        ctx.rect(
-          context.selectionRect.x1, context.selectionRect.y1,
-          context.selectionRect.x2 - context.selectionRect.x1,
-          context.selectionRect.y2 - context.selectionRect.y1
-        )
-        ctx.stroke()
-        ctx.restore()
+      if (mode == "select") {
+        for (let item of context.selection) {
+          ctx.save()
+          ctx.strokeStyle = "#00ffff"
+          ctx.lineWidth = 1;
+          ctx.beginPath()
+          let bbox = item.bbox()
+          ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
+          ctx.stroke()
+          ctx.restore()
+        }
+        if (context.selectionRect) {
+          ctx.save()
+          ctx.strokeStyle = "#00ffff"
+          ctx.lineWidth = 1;
+          ctx.beginPath()
+          ctx.rect(
+            context.selectionRect.x1, context.selectionRect.y1,
+            context.selectionRect.x2 - context.selectionRect.x1,
+            context.selectionRect.y2 - context.selectionRect.y1
+          )
+          ctx.stroke()
+          ctx.restore()
+        }
+      } else if (mode == "transform") {
+        let bbox = undefined;
+        for (let item of context.selection) {
+          if (bbox==undefined) {
+            bbox = structuredClone(item.bbox())
+          } else {
+            growBoundingBox(bbox, item.bbox())
+          }
+        }
+        if (bbox != undefined) {
+          // ctx.save()
+          // ctx.strokeStyle = "#00ffff"
+          // ctx.lineWidth = 1;
+          // ctx.beginPath()
+          // let xdiff = bbox.x.max - bbox.x.min
+          // let ydiff =  bbox.y.max - bbox.y.min
+          // ctx.rect(
+          //   bbox.x.min, bbox.y.min,
+          //   xdiff,
+          //  ydiff
+          // )
+          // ctx.stroke()
+          // ctx.fillStyle = "#000000"
+          // let rectRadius = 5
+          // for (let i of [[0,0],[0.5,0],[1,0],[1,0.5],[1,1],[0.5,1],[0,1],[0,0.5]]) {
+          //   ctx.beginPath()
+          //   ctx.rect(
+          //     bbox.x.min + xdiff * i[0] - rectRadius,
+          //     bbox.y.min + ydiff * i[1] - rectRadius,
+          //     rectRadius*2, rectRadius*2
+          //   )
+          //   ctx.fill()
+          // }
+
+          // ctx.restore()
+        }
       }
     }
   }
@@ -1398,7 +1437,8 @@ class GraphicsObject {
       x: x,
       y: y,
       rotation: 0,
-      scale: 1,
+      scale_x: 1, 
+      scale_y: 1,
     }
   }
   removeShape(shape) {
@@ -1659,7 +1699,6 @@ function addFrame() {
 }
 
 function addKeyframe() {
-  console.log(context.activeObject.currentFrameNum)
   actions.addKeyframe.create()
 }
 
@@ -1737,10 +1776,56 @@ async function render() {
 function stage() {
   let stage = document.createElement("canvas")
   let scroller = document.createElement("div")
+  let stageWrapper = document.createElement("div")
   stage.className = "stage"
   stage.width = 1500
   stage.height = 1000
   scroller.className = "scroll"
+  stageWrapper.className = "stageWrapper"
+  let selectionRect = document.createElement("div")
+  selectionRect.className = "selectionRect"
+  for (let i of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
+    let cornerRect = document.createElement("div")
+    cornerRect.classList.add("cornerRect")
+    cornerRect.classList.add(i)
+    cornerRect.addEventListener('mousedown', (e) => {
+      console.log(i)
+      let bbox = undefined;
+      let selection = {}
+      for (let item of context.selection) {
+        if (bbox==undefined) {
+          bbox = structuredClone(item.bbox())
+        } else {
+          growBoundingBox(bbox, item.bbox())
+        }
+        selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y}
+      }
+      if (bbox != undefined) {
+        context.dragDirection = i
+        context.activeTransform = {
+          initial: {
+            x: {min: bbox.x.min, max: bbox.x.max},
+            y: {min: bbox.y.min, max: bbox.y.max},
+            selection: selection
+          },
+          current: {
+            x: {min: bbox.x.min, max: bbox.x.max},
+            y: {min: bbox.y.min, max: bbox.y.max},
+            selection: structuredClone(selection)
+          }
+        }
+      }
+    })
+    cornerRect.addEventListener('mouseup', (e) => {
+      const newEvent = new MouseEvent(e.type, e);
+      stage.dispatchEvent(newEvent)
+    })
+    cornerRect.addEventListener('mousemove', (e) => {
+      const newEvent = new MouseEvent(e.type, e);
+      stage.dispatchEvent(newEvent)
+    })
+    selectionRect.appendChild(cornerRect)
+  }
   stage.addEventListener("drop", (e) => {
     e.preventDefault()
     let mouse = getMousePos(stage, e)
@@ -1784,7 +1869,9 @@ function stage() {
     e.preventDefault()
   })
   canvases.push(stage)
-  scroller.appendChild(stage)
+  stageWrapper.appendChild(stage)
+  stageWrapper.appendChild(selectionRect)
+  scroller.appendChild(stageWrapper)
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e)
     switch (mode) {
@@ -1884,6 +1971,7 @@ function stage() {
   stage.addEventListener("mouseup", (e) => {
     context.mouseDown = false
     context.dragging = false
+    context.dragDirection = undefined
     context.selectionRect = undefined
     let mouse = getMousePos(stage, e)
     switch (mode) {
@@ -2038,6 +2126,40 @@ function stage() {
         }
         context.lastMouse = mouse
         break;
+      case "transform":
+        if (context.dragDirection) {
+          let initial = context.activeTransform.initial
+          let current = context.activeTransform.current
+          let initialSelection = context.activeTransform.initial.selection
+          if (context.dragDirection.indexOf('n') != -1) {
+            current.y.min = mouse.y
+          } else if (context.dragDirection.indexOf('s') != -1) {
+            current.y.max = mouse.y
+          }
+          if (context.dragDirection.indexOf('w') != -1) {
+            current.x.min = mouse.x
+          } else if (context.dragDirection.indexOf('e') != -1) {
+            current.x.max = mouse.x
+          }
+            // Calculate the translation difference between current and initial values
+          const delta_x = current.x.min - initial.x.min;
+          const delta_y = current.y.min - initial.y.min;
+
+          // Calculate the scaling factor based on the difference between current and initial values
+          const scale_x_ratio = (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
+          const scale_y_ratio = (current.y.max - current.y.min) / (initial.y.max - initial.y.min);
+
+          for (let idx in initialSelection) {
+            let item = context.activeObject.currentFrame.keys[idx]
+            let xoffset = initialSelection[idx].x - initial.x.min
+            let yoffset = initialSelection[idx].y - initial.y.min
+            item.x = initial.x.min + delta_x + xoffset * scale_x_ratio
+            item.y = initial.y.min + delta_y + yoffset * scale_y_ratio
+            item.scale_x = initialSelection[idx].scale_x * scale_x_ratio
+            item.scale_y = initialSelection[idx].scale_y * scale_y_ratio
+          }
+        }
+        break;
       default:
         break;
     }
@@ -2060,6 +2182,7 @@ function toolbar() {
     toolbtn.addEventListener("click", () => {
       mode = tool
       updateInfopanel()
+      updateUI()
       console.log(tool)
     })
   }
@@ -2267,7 +2390,6 @@ function splitPane(div, percent, horiz, newPane=undefined) {
       const frac = getMousePositionFraction(event, event.currentTarget)
       div.setAttribute("lb-percent", frac*100)
       updateAll()
-      console.log(frac); // Ensure the fraction is between 0 and 1
     }
   });
   div.addEventListener('mouseup', (event) => {
@@ -2328,17 +2450,38 @@ function updateUI() {
     }
 
   }
-  
+  for (let selectionRect of document.querySelectorAll(".selectionRect")) {
+    selectionRect.style.display = "none"
+  }
+  if (mode == "transform") {
+    if (context.selection.length > 0) {
+      for (let selectionRect of document.querySelectorAll(".selectionRect")) {
+        let bbox = undefined;
+        for (let item of context.selection) {
+          if (bbox==undefined) {
+            bbox = structuredClone(item.bbox())
+          } else {
+            growBoundingBox(bbox, item.bbox())
+          }
+        }
+        if (bbox != undefined) {
+          selectionRect.style.display = "block"
+          selectionRect.style.left = `${bbox.x.min}px`
+          selectionRect.style.top = `${bbox.y.min}px`
+          selectionRect.style.width = `${bbox.x.max - bbox.x.min}px`
+          selectionRect.style.height = `${bbox.y.max - bbox.y.min}px`
+        }
+      }
+    }
+  }
 }
 
 function updateLayers() {
-  console.log(document.querySelectorAll(".layers-container"))
   for (let container of document.querySelectorAll(".layers-container")) {
     let layerspanel = container.querySelectorAll(".layers")[0]
     let framescontainer = container.querySelectorAll(".frames-container")[0]
     layerspanel.textContent = ""
     framescontainer.textContent = ""
-    console.log(context.activeObject)
     for (let layer of context.activeObject.layers) {
       let layerHeader = document.createElement("div")
       layerHeader.className = "layer-header"
@@ -2347,11 +2490,9 @@ function updateLayers() {
       layerTrack.className = "layer-track"
       framescontainer.appendChild(layerTrack)
       layerTrack.addEventListener("click", (e) => {
-        console.log(layerTrack.getBoundingClientRect())
         let mouse = getMousePos(layerTrack, e)
         let frameNum = parseInt(mouse.x/25)
         context.activeObject.currentFrameNum = frameNum
-        console.log(context.activeObject  )
         updateLayers()
         updateMenu()
         updateUI()
