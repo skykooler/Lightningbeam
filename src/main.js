@@ -261,11 +261,20 @@ let actions = {
       undoStack.push({name: "addImageObject", action: action})
       actions.addImageObject.execute(action)
     },
-    execute: (action) => {
+    execute: async (action) => {
       let imageObject = new GraphicsObject(action.objectUuid)
       // let img = pointerList[action.img] 
       let img = new Image();
-      img.onload = function() {
+      function loadImage(src) {
+        return new Promise((resolve, reject) => {
+          let img = new Image();
+          img.onload = () => resolve(img);  // Resolve the promise with the image once loaded
+          img.onerror = (err) => reject(err);  // Reject the promise if there's an error loading the image
+          img.src = src;  // Start loading the image
+        });
+      }
+      img = await loadImage(action.src)
+      // img.onload = function() {
         let ct = {
           ...context,
           fillImage: img,
@@ -287,8 +296,8 @@ let actions = {
           action.y-img.height/2 + (20*action.ix)
         )
         updateUI();
-      }
-      img.src = action.src
+      // }
+      // img.src = action.src
     },
     rollback: (action) => {
       let shape = pointerList[action.shapeUuid]
@@ -307,7 +316,7 @@ let actions = {
   editFrame: {
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
-      let action = {
+      let action = {    
         newState: structuredClone(frame.keys),
         oldState: startProps[frame.idx],
         frame: frame.idx
@@ -318,10 +327,14 @@ let actions = {
     execute: (action) => {
       let frame = pointerList[action.frame]
       frame.keys = structuredClone(action.newState)
+      console.log(structuredClone(frame.keys))
+      console.log(frame.keys)
+      updateUI()
     },
     rollback: (action) => {
       let frame = pointerList[action.frame]
       frame.keys = structuredClone(action.oldState)
+      updateUI()
     }
   },
   addFrame: {
@@ -840,14 +853,14 @@ class Frame {
 }
 
 class Layer {
-  constructor(uuid) {
-    this.frames = [new Frame("keyframe")]
+  constructor(uuid) {         
     this.children = []
     if (!uuid) {
       this.idx = uuidv4()
     } else {
       this.idx = uuid
     }
+    this.frames = [new Frame("keyframe", this.idx+"-F1")]
     pointerList[this.idx] = this
   }
 }
@@ -1465,7 +1478,8 @@ class GraphicsObject {
       x: this.x,
       y: this.y,
       rotation: this.rotation,
-      scale: this.scale
+      scale_x: this.scale_x,
+      scale_y: this.scale_y
     }
   }
 }
@@ -1661,7 +1675,8 @@ async function open() {
               await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
               return
             }
-            actions[action.name].execute(action.action)
+            console.log(action.name)
+            await actions[action.name].execute(action.action)
             undoStack.push(action)
           }
           updateUI()
@@ -1814,6 +1829,7 @@ function stage() {
             selection: structuredClone(selection)
           }
         }
+        context.activeObject.currentFrame.saveState()
       }
     })
     cornerRect.addEventListener('mouseup', (e) => {
@@ -2012,7 +2028,10 @@ function stage() {
           actions.editShape.create(context.activeCurve.shape, newCurves)
         } else if (context.selection.length) {
           actions.editFrame.create(context.activeObject.currentFrame)
-        }
+        } 
+        break;
+      case "transform":
+        actions.editFrame.create(context.activeObject.currentFrame)
         break;
       default:
         break;
@@ -2154,7 +2173,7 @@ function stage() {
             let xoffset = initialSelection[idx].x - initial.x.min
             let yoffset = initialSelection[idx].y - initial.y.min
             item.x = initial.x.min + delta_x + xoffset * scale_x_ratio
-            item.y = initial.y.min + delta_y + yoffset * scale_y_ratio
+            item.y = initial.y.min + delta_y + yoffset * scale_y_ratio    
             item.scale_x = initialSelection[idx].scale_x * scale_x_ratio
             item.scale_y = initialSelection[idx].scale_y * scale_y_ratio
           }
