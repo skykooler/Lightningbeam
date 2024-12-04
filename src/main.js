@@ -4,7 +4,7 @@ import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
 import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels } from './utils.js';
-const { writeTextFile: writeTextFile, readTextFile: readTextFile }=  window.__TAURI__.fs;
+const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
   save: saveFileDialog,
@@ -26,7 +26,7 @@ let rootPane;
 
 let canvases = [];
 
-let mode = "draw"
+let mode = "select"
 
 let minSegmentSize = 5;
 let maxSmoothAngle = 0.6;
@@ -41,6 +41,7 @@ let minFileVersion = "1.0"
 let maxFileVersion = "2.0"
 
 let filePath = undefined
+let fileExportPath = undefined
 let fileWidth = 1500
 let fileHeight = 1000
 let fileFps = 12
@@ -515,6 +516,116 @@ let actions = {
         group.removeChild(object)
       }
       parent.removeChild(group)
+      updateUI()
+    }
+  },
+  sendToBack: {
+    create: () => {
+      redoStack.length = 0
+      let serializableShapes = []
+      let serializableObjects = []
+      let formerIndices = {}
+      for (let shape of context.shapeselection) {
+        serializableShapes.push(shape.idx)
+        formerIndices[shape.idx] = context.activeObject.currentFrame.shapes.indexOf(shape)
+      }
+      for (let object of context.selection) {
+        serializableObjects.push(object.idx)
+        formerIndices[object.idx] = context.activeObject.activeLayer.children.indexOf(object)
+      }
+      let action = {
+        shapes: serializableShapes,
+        objects: serializableObjects,
+        layer: context.activeObject.activeLayer.idx,
+        frame: context.activeObject.currentFrame.idx,
+        formerIndices: formerIndices
+      }
+      undoStack.push({name: 'sendToBack', action: action})
+      actions.sendToBack.execute(action)
+    },
+    execute: (action) => {
+      let frame = pointerList[action.frame]
+      let layer = pointerList[action.layer]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        frame.shapes.splice(frame.shapes.indexOf(shape),1)
+        frame.shapes.unshift(shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        layer.children.splice(layer.children.indexOf(object),1)
+        layer.children.unshift(object)
+      }
+      updateUI()
+    },
+    rollback: (action) => {
+      let frame = pointerList[action.frame]
+      let layer = pointerList[action.layer]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        frame.shapes.splice(frame.shapes.indexOf(shape),1)
+        frame.shapes.splice(action.formerIndices[shapeIdx], 0, shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        layer.children.splice(layer.children.indexOf(object),1)
+        layer.children.splice(action.formerIndices[objectIdx], 0, object  )
+      }
+      updateUI()
+    }
+  },
+  bringToFront: {
+    create: () => {
+      redoStack.length = 0
+      let serializableShapes = []
+      let serializableObjects = []
+      let formerIndices = {}
+      for (let shape of context.shapeselection) {
+        serializableShapes.push(shape.idx)
+        formerIndices[shape.idx] = context.activeObject.currentFrame.shapes.indexOf(shape)
+      }
+      for (let object of context.selection) {
+        serializableObjects.push(object.idx)
+        formerIndices[object.idx] = context.activeObject.activeLayer.children.indexOf(object)
+      }
+      let action = {
+        shapes: serializableShapes,
+        objects: serializableObjects,
+        layer: context.activeObject.activeLayer.idx,
+        frame: context.activeObject.currentFrame.idx,
+        formerIndices: formerIndices
+      }
+      undoStack.push({name: 'bringToFront', action: action})
+      actions.bringToFront.execute(action)
+    },
+    execute: (action) => {
+      let frame = pointerList[action.frame]
+      let layer = pointerList[action.layer]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        frame.shapes.splice(frame.shapes.indexOf(shape),1)
+        frame.shapes.push(shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        layer.children.splice(layer.children.indexOf(object),1)
+        layer.children.push(object)
+      }
+      updateUI()
+    },
+    rollback: (action) => {
+      let frame = pointerList[action.frame]
+      let layer = pointerList[action.layer]
+      for (let shapeIdx of action.shapes) {
+        let shape = pointerList[shapeIdx]
+        frame.shapes.splice(frame.shapes.indexOf(shape),1)
+        frame.shapes.splice(action.formerIndices[shapeIdx], 0, shape)
+      }
+      for (let objectIdx of action.objects) {
+        let object = pointerList[objectIdx]
+        layer.children.splice(layer.children.indexOf(object),1)
+        layer.children.splice(action.formerIndices[objectIdx], 0, object  )
+      }
       updateUI()
     }
   },
@@ -1113,6 +1224,9 @@ class GraphicsObject {
   get currentFrame() {
     return this.getFrame(this.currentFrameNum)
   }
+  get maxFrame() {
+    return Math.max(this.layers.map((layer)=>{return layer.frames.length}))
+  }
   getFrame(num) {
     if (this.activeLayer.frames[num]) {
       if (this.activeLayer.frames[num].frameType == "keyframe") {
@@ -1386,7 +1500,9 @@ window.addEventListener("keydown", (e) => {
 
 function playPause() {
   playing = !playing
-  updateUI()
+  if (playing) {
+    advanceFrame()
+  }
 }
 
 function advanceFrame() {
@@ -1394,6 +1510,13 @@ function advanceFrame() {
   updateLayers()
   updateMenu()
   updateUI()
+  if (playing) {
+    if (context.activeObject.currentFrameNum < context.activeObject.maxFrame - 1) {
+      setTimeout(advanceFrame, 1000/fileFps)
+    } else {
+      playing = false
+    }
+  }
 }
 
 function decrementFrame() {
@@ -1436,7 +1559,7 @@ async function _save(path) {
       fps: fileFps,
       actions: undoStack
     }
-    const contents = JSON.stringify(fileData   );
+    const contents = JSON.stringify(fileData);
     await writeTextFile(path, contents)
     filePath = path
     console.log(`${path} saved successfully!`);
@@ -1542,6 +1665,73 @@ function addKeyframe() {
 
 function addMotionTween() {
   actions.addMotionTween.create()
+}
+async function render() {
+  document.querySelector("body").style.cursor = "wait"
+  const path = await saveFileDialog({
+    filters: [
+      {
+        name: 'APNG files (.png)',
+        extensions: ['png'],
+      },
+    ],
+    defaultPath: await join(await documentDir(), "untitled.png")
+  });
+  if (path != undefined) {
+    
+    // SVG balks on images
+    // let ctx = new C2S(fileWidth, fileHeight)
+    // context.ctx = ctx
+    // root.draw(context)
+    // let serializedSVG = ctx.getSerializedSvg()
+    // await writeTextFile(path, serializedSVG)
+    // fileExportPath = path
+    // console.log("wrote SVG")
+
+
+    const frames = [];
+    const canvas = document.createElement('canvas');
+    canvas.width = fileWidth;  // Set desired width
+    canvas.height = fileHeight; // Set desired height
+    let exportContext = {
+      ...context,
+      ctx: canvas.getContext('2d'),
+      selectionRect: undefined,
+      selection: [],
+      shapeselection: []
+    }
+
+  
+    for (let i = 0; i < root.maxFrame; i++) {
+      
+      root.currentFrameNum = i
+      exportContext.ctx.fillStyle = "white"
+      exportContext.ctx.rect(0,0,fileWidth, fileHeight)
+      exportContext.ctx.fill()
+      root.draw(exportContext)
+
+      // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
+      const imageData = exportContext.ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // Step 2: Create a frame buffer (Uint8Array) from the image data
+      const frameBuffer = new Uint8Array(imageData.data.buffer);
+      
+      frames.push(frameBuffer); // Add the frame buffer to the frames array
+    }
+  
+    // Step 3: Use UPNG.js to create the animated PNG
+    const apng = UPNG.encode(frames, canvas.width, canvas.height, 0, parseInt(100/fileFps));
+  
+    // Step 4: Save the APNG file (in Tauri, use writeFile or in the browser, download it)
+    const apngBlob = new Blob([apng], { type: 'image/png' });
+  
+    // If you're using Tauri:
+    await writeFile(
+      path, // The destination file path for saving
+      new Uint8Array(await apngBlob.arrayBuffer())
+    );
+  }
+  document.querySelector("body").style.cursor = "default"
 }
 
 function stage() {
@@ -1742,6 +1932,7 @@ function stage() {
     context.lastMouse = mouse
     context.activeCurve = undefined
     updateUI()
+    updateMenu()
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
@@ -1868,6 +2059,7 @@ function toolbar() {
     tools_scroller.appendChild(toolbtn)
     toolbtn.addEventListener("click", () => {
       mode = tool
+      updateInfopanel()
       console.log(tool)
     })
   }
@@ -1941,64 +2133,7 @@ function timeline() {
 function infopanel() {
   let panel = document.createElement("div")
   panel.className = "infopanel"
-  let input;
-  let label;
-  let span;
-  // for (let i=0; i<10; i++) {
-  for (let property in tools[mode].properties) {
-    let prop = tools[mode].properties[property]
-    label = document.createElement("label")
-    label.className = "infopanel-field"
-    span = document.createElement("span")
-    span.className = "infopanel-label"
-    span.innerText = prop.label
-    switch (prop.type) {
-      case "number":
-        input = document.createElement("input")
-        input.className = "infopanel-input"
-        input.type = "number"
-        input.value = getProperty(context, property)   
-        break;
-      case "enum":
-        input = document.createElement("select")
-        input.className = "infopanel-input"
-        let optionEl;
-        for (let option of prop.options) {
-          optionEl = document.createElement("option")
-          optionEl.value = option
-          optionEl.innerText = option
-          input.appendChild(optionEl)
-        }
-        input.value = getProperty(context, property)
-        break;
-      case "boolean":
-        input = document.createElement("input")
-        input.className = "infopanel-input"
-        input.type = "checkbox"
-        input.checked = getProperty(context, property)
-        break;
-    }
-    input.addEventListener("input", (e) => {
-      switch (prop.type) {
-        case "number":
-          if (!isNaN(e.target.value) && e.target.value > 0) {
-            setProperty(context, property, e.target.value)
-          }
-          break;
-        case "enum":
-          if (prop.options.indexOf(e.target.value) >= 0) {
-            setProperty(context, property, e.target.value)
-          }
-          break;
-        case "boolean":
-          setProperty(context, property, e.target.checked)
-      }
-
-    })
-    label.appendChild(span)
-    label.appendChild(input)
-    panel.appendChild(label)
-  }
+  updateInfopanel()
   return panel
 }
 
@@ -2193,9 +2328,7 @@ function updateUI() {
     }
 
   }
-  if (playing) {
-    setTimeout(advanceFrame, 1000/fileFps)
-  }
+  
 }
 
 function updateLayers() {
@@ -2243,6 +2376,69 @@ function updateLayers() {
         highlightObj.style.left = `${(context.activeObject.currentFrameNum - frameCount) * 25}px`;
         layerTrack.appendChild(highlightObj)
       }
+    }
+  }
+}
+
+function updateInfopanel() {
+  for (let panel of document.querySelectorAll('.infopanel')) {
+    panel.innerText = ""
+    let input;
+    let label;
+    let span;
+    for (let property in tools[mode].properties) {
+      let prop = tools[mode].properties[property]
+      label = document.createElement("label")
+      label.className = "infopanel-field"
+      span = document.createElement("span")
+      span.className = "infopanel-label"
+      span.innerText = prop.label
+      switch (prop.type) {
+        case "number":
+          input = document.createElement("input")
+          input.className = "infopanel-input"
+          input.type = "number"
+          input.value = getProperty(context, property)   
+          break;
+        case "enum":
+          input = document.createElement("select")
+          input.className = "infopanel-input"
+          let optionEl;
+          for (let option of prop.options) {
+            optionEl = document.createElement("option")
+            optionEl.value = option
+            optionEl.innerText = option
+            input.appendChild(optionEl)
+          }
+          input.value = getProperty(context, property)
+          break;
+        case "boolean":
+          input = document.createElement("input")
+          input.className = "infopanel-input"
+          input.type = "checkbox"
+          input.checked = getProperty(context, property)
+          break;
+      }
+      input.addEventListener("input", (e) => {
+        switch (prop.type) {
+          case "number":
+            if (!isNaN(e.target.value) && e.target.value > 0) {
+              setProperty(context, property, e.target.value)
+            }
+            break;
+          case "enum":
+            if (prop.options.indexOf(e.target.value) >= 0) {
+              setProperty(context, property, e.target.value)
+            }
+            break;
+          case "boolean":
+            setProperty(context, property, e.target.checked)
+        }
+
+      })
+      label.appendChild(span)
+      label.appendChild(input)
+      panel.appendChild(label)
     }
   }
 }
@@ -2322,13 +2518,29 @@ async function updateMenu() {
         enabled: true,
         action: () => {}
       },
-      {
-        text: "Group",
-        enabled: true,
-        action: actions.group.create
-      },
     ]
   });
+
+  const modifySubmenu = await Submenu.new({
+    text: "Modify",
+    items: [
+      {
+        text: "Group",
+        enabled: context.selection.length != 0 || context.shapeselection.length != 0,
+        action: actions.group.create
+      },
+      {
+        text: "Send to back",
+        enabled: context.selection.length != 0 || context.shapeselection.length != 0,
+        action: actions.sendToBack.create
+      },
+      {
+        text: "Bring to front",
+        enabled: context.selection.length != 0 || context.shapeselection.length != 0,
+        action: actions.bringToFront.create
+      },
+    ]
+  })
 
   newFrameMenuItem = {
     text: "New Frame",
@@ -2367,6 +2579,11 @@ async function updateMenu() {
         enabled: false,
         action: () => {}
       },
+      {
+        text: "Export",
+        enabled: true,
+        action: render
+      },
     ]
   });
   const viewSubmenu = await Submenu.new({
@@ -2400,7 +2617,7 @@ async function updateMenu() {
 });
 
   const menu = await Menu.new({
-    items: [fileSubmenu, editSubmenu, timelineSubmenu, viewSubmenu, helpSubmenu],
+    items: [fileSubmenu, editSubmenu, modifySubmenu, timelineSubmenu, viewSubmenu, helpSubmenu],
   })
   await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
 }
