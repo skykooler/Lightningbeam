@@ -1698,28 +1698,29 @@ window.addEventListener("keydown", (e) => {
     // TODO
   // }
   // console.log(e)
+  let mod = macOS ? e.metaKey : e.ctrlKey;
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
     playPause()
-  } else if (e.key == config.shortcuts.new && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.new && mod == true) {
     newFile()
-  } else if (e.key == config.shortcuts.save && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.save && mod == true) {
     save()
-  } else if (e.key == config.shortcuts.saveAs && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.saveAs && mod == true) {
     saveAs()
-  } else if (e.key == config.shortcuts.open && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.open && mod == true) {
     open()
-  } else if (e.key == config.shortcuts.quit && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.quit && mod == true) {
     quit()
-  } else if (e.key == config.shortcuts.undo && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.undo && mod == true) {
     undo()
-  } else if (e.key == config.shortcuts.redo && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.redo && mod == true) {
     redo()
-  } else if (e.key == config.shortcuts.group && e.ctrlKey == true) {
+  } else if (e.key == config.shortcuts.group && mod == true) {
     actions.group.create()
   }
   else if (e.key == "ArrowRight") {
-    if (e.ctrlKey == true) {
+    if (mod == true) {
       advanceFrame()
     } else if (context.selection) {
       context.activeObject.currentFrame.saveState()
@@ -1732,7 +1733,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault()
   }
   else if (e.key == "ArrowLeft") {
-    if (e.ctrlKey == true) {
+    if (mod == true) {
       decrementFrame()
     } else if (context.selection) {
       context.activeObject.currentFrame.saveState()
@@ -1745,7 +1746,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault()
   }
   else if (e.key == "ArrowUp") {
-    if (e.ctrlKey == true) {
+    if (mod == true) {
       // no action yet for ctrl+up
     } else if (context.selection) {
       context.activeObject.currentFrame.saveState()
@@ -1758,7 +1759,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault()
   }
   else if (e.key == "ArrowDown") {
-    if (e.ctrlKey == true) {
+    if (mod == true) {
       // no action yet for ctrl+down
     } else if (context.selection) {
       context.activeObject.currentFrame.saveState()
@@ -3024,8 +3025,7 @@ async function updateMenu() {
         action: () => {}
       },
     ]
-  });
-  console.log(Submenu)
+  }); 
   const helpSubmenu = await Submenu.new({
     text: "Help",
     items: [
