@@ -3092,3 +3092,43 @@ const panes = {
     func: infopanel
   },
 }
+
+
+async function convertToDataURL(filePath) {
+  try {
+    // Read the image file as a binary file (buffer)
+    const binaryData = await readBinaryFile(filePath);
+    const mimeType = getMimeType(filePath);
+    if (!mimeType) {
+      throw new Error('Unsupported image type');
+    }
+
+    const base64Data = binaryData.toString('base64');
+    const dataURL = `data:${mimeType};base64,${base64Data}`;
+
+    return dataURL;
+  } catch (error) {
+    console.error('Error reading the image file:', error);
+    return null;
+  }
+}
+
+// Determine the MIME type based on the file extension
+function getMimeType(filePath) {
+  const ext = filePath.split('.').pop().toLowerCase();
+  switch (ext) {
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'gif':
+      return 'image/gif';
+    case 'bmp':
+      return 'image/bmp';
+    case 'webp':
+      return 'image/webp';
+    default:
+      return null; // Unsupported file type
+  }
+}

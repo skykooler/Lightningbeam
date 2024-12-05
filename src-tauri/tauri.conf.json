@@ -13,7 +13,8 @@
       {
         "title": "Lightningbeam",
         "width": 1500,
-        "height": 1024
+        "height": 1024,
+        "dragDropEnabled": false
       }
     ],
     "security": {
