@@ -14,6 +14,7 @@ const {
 const { documentDir, join } = window.__TAURI__.path;
 const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
 const { getCurrentWindow } = window.__TAURI__.window;
+const { getVersion } = window.__TAURI__.app;
 
 
 const macOS = navigator.userAgent.includes('Macintosh')
@@ -3024,14 +3025,15 @@ async function updateMenu() {
       },
     ]
   });
+  console.log(Submenu)
   const helpSubmenu = await Submenu.new({
     text: "Help",
     items: [
       {
         text: "About...",
         enabled: true,
-        action: () => {
-          messageDialog(`Lightningbeam version ${appVersion}\nDeveloped by Skyler Lehmkuhl`,
+        action: async () => {
+          messageDialog(`Lightningbeam version ${await getVersion()}\nDeveloped by Skyler Lehmkuhl`,
             {title: 'About', kind: "info"}
           )
         }
