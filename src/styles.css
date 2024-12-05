@@ -393,7 +393,17 @@ button {
 }
 .frame.motion:hover, .frame.motion.active {
   background-color: #530379;
+  border-left: 1px solid #450264;
+  border-right: 1px solid #450264;
+}
+.frame.shape {
+  background-color: #9bff9b;
   border: none;
+}
+.frame.shape:hover, .frame.shape.active {
+  background-color: #38f538;
+  border-left: 1px solid #26ac26;
+  border-right: 1px solid #26ac26;
 }
 /* :nth-child(1 of .frame.motion) {
   background-color: blue;

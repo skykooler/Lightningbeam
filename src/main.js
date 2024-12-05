@@ -471,6 +471,48 @@ let actions = {
       updateUI()
     }
   },
+  addShapeTween: {
+    create: () => {
+      redoStack.length = 0
+      let frameNum = context.activeObject.currentFrameNum
+      let layer = context.activeObject.activeLayer
+      let frames = layer.frames
+      let {lastKeyframeBefore, firstKeyframeAfter} = getKeyframesSurrounding(frames, frameNum)
+      
+      let action = {
+        frameNum: frameNum,
+        layer: layer.idx,
+        lastBefore: lastKeyframeBefore,
+        firstAfter: firstKeyframeAfter,
+      }
+      undoStack.push({name: 'addShapeTween', action: action})
+      actions.addShapeTween.execute(action)
+    },
+    execute: (action) => {
+      let layer = pointerList[action.layer]
+      let frames = layer.frames
+      if ((action.lastBefore != undefined) && (action.firstAfter != undefined)) {
+        for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
+          frames[i].frameType = "shape"
+          frames[i].prev = frames[action.lastBefore]
+          frames[i].next = frames[action.firstAfter]
+          frames[i].prevIndex = action.lastBefore
+          frames[i].nextIndex = action.firstAfter
+        }
+      }
+      updateLayers()
+      updateUI()
+    },
+    rollback: (action) => {
+      let layer = pointerList[action.layer]
+      let frames = layer.frames
+      for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
+        frames[i].frameType = "normal"
+      }
+      updateLayers()
+      updateUI()
+    }
+  },
   group: {
     create: () => {
       redoStack.length = 0
@@ -865,14 +907,87 @@ class Layer {
   }
 }
 
-class Shape {
-  constructor(startx, starty, context, uuid=undefined) {
-    this.startx = startx;
-    this.starty = starty;
-    this.curves = [];
+class BaseShape {
+  constructor(startx, starty) {
+    this.startx = startx
+    this.starty = starty
+    this.curves = []
+    this.regions = [];
+  }
+  draw(context) {
+    let ctx = context.ctx;
+    ctx.lineWidth = this.lineWidth
+    ctx.lineCap = "round"
+    for (let region of this.regions) {
+      // if (region.filled) continue;
+      if ((region.fillStyle || region.fillImage) && region.filled) {
+        // ctx.fillStyle = region.fill
+        if (region.fillImage) {
+          let pat = ctx.createPattern(region.fillImage, "no-repeat")
+          ctx.fillStyle = pat
+        } else {
+          ctx.fillStyle = region.fillStyle
+        }
+        ctx.beginPath()
+        for (let curve of region.curves) {
+          ctx.lineTo(curve.points[0].x, curve.points[0].y)
+          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                            curve.points[2].x, curve.points[2].y,
+                            curve.points[3].x, curve.points[3].y)
+        }
+        ctx.fill()
+      }
+    }
+    if (this.regions.length==0 && context.fillShape && this.inProgress) {
+      ctx.beginPath()
+      ctx.fillStyle = context.fillStyle
+      if (this.curves.length > 0) {
+        ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
+        for (let curve of this.curves) {
+          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                            curve.points[2].x, curve.points[2].y,
+                            curve.points[3].x, curve.points[3].y)
+        }
+      }
+      ctx.fill()
+    }
+    if (this.stroked) {
+      for (let curve of this.curves) {
+        ctx.strokeStyle = curve.color
+        ctx.beginPath()
+        ctx.moveTo(curve.points[0].x, curve.points[0].y)
+        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                          curve.points[2].x, curve.points[2].y,
+                          curve.points[3].x, curve.points[3].y)
+        ctx.stroke()
+
+        // Debug, show curve endpoints
+        // ctx.beginPath()
+        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
+        // ctx.fill()
+      }
+    }
+    // Debug, show quadtree
+    // this.quadtree.draw(ctx)
+
+  }
+}
+
+class TempShape extends BaseShape {
+  constructor(startx, starty, curves, lineWidth, stroked) {
+    super(startx, starty)
+    this.curves = curves
+    this.lineWidth = lineWidth
+    this.stroked = stroked
+    this.inProgress = false
+  }
+}
+
+class Shape extends BaseShape {
+  constructor(startx, starty, context, uuid=undefined, shapeId=undefined) {
+    super(startx, starty)
     this.vertices = [];
     this.triangles = [];
-    this.regions = [];
     this.fillStyle = context.fillStyle;
     this.fillImage = context.fillImage;
     this.strokeStyle = context.strokeStyle;
@@ -888,6 +1003,11 @@ class Shape {
       this.idx = uuidv4()
     } else {
       this.idx = uuid
+    }
+    if (!shapeId) {
+      this.shapeId = uuidv4()
+    } else {
+      this.shapeId = shapeId
     }
     pointerList[this.idx] = this
     this.regionIdx = 0;
@@ -920,7 +1040,7 @@ class Shape {
     this.curves = []
   }
   copy() {
-    let newShape = new Shape(this.startx, this.starty, {})
+    let newShape = new Shape(this.startx, this.starty, {}, undefined, this.shapeId)
     newShape.startx = this.startx;
     newShape.starty = this.starty;
     for (let curve of this.curves) {
@@ -1162,63 +1282,7 @@ class Shape {
       }
     })
   }
-  draw(context) {
-    let ctx = context.ctx;
-    ctx.lineWidth = this.lineWidth
-    ctx.lineCap = "round"
-    for (let region of this.regions) {
-      // if (region.filled) continue;
-      if ((region.fillStyle || region.fillImage) && region.filled) {
-        // ctx.fillStyle = region.fill
-        if (region.fillImage) {
-          let pat = ctx.createPattern(region.fillImage, "no-repeat")
-          ctx.fillStyle = pat
-        } else {
-          ctx.fillStyle = region.fillStyle
-        }
-        ctx.beginPath()
-        for (let curve of region.curves) {
-          ctx.lineTo(curve.points[0].x, curve.points[0].y)
-          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                            curve.points[2].x, curve.points[2].y,
-                            curve.points[3].x, curve.points[3].y)
-        }
-        ctx.fill()
-      }
-    }
-    if (this.regions.length==0 && context.fillShape && this.inProgress) {
-      ctx.beginPath()
-      ctx.fillStyle = context.fillStyle
-      if (this.curves.length > 0) {
-        ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
-        for (let curve of this.curves) {
-          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                            curve.points[2].x, curve.points[2].y,
-                            curve.points[3].x, curve.points[3].y)
-        }
-      }
-      ctx.fill()
-    }
-    if (this.stroked) {
-      for (let curve of this.curves) {
-        ctx.strokeStyle = curve.color
-        ctx.beginPath()
-        ctx.moveTo(curve.points[0].x, curve.points[0].y)
-        ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                          curve.points[2].x, curve.points[2].y,
-                          curve.points[3].x, curve.points[3].y)
-        ctx.stroke()
-
-        // Debug, show curve endpoints
-        // ctx.beginPath()
-        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
-        // ctx.fill()
-      }
-    }
-    // Debug, show quadtree
-    // this.quadtree.draw(ctx)
-
-  }
+  
 }
 
 class GraphicsObject {
@@ -1260,11 +1324,13 @@ class GraphicsObject {
         return this.activeLayer.frames[num]
       } else if (this.activeLayer.frames[num].frameType == "motion") {
         let frameKeys = {}
+        let prevFrame = this.activeLayer.frames[num].prev
+        let nextFrame = this.activeLayer.frames[num].next
         const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
-        for (let key in this.activeLayer.frames[num].prev.keys) {
+        for (let key in prevFrame.keys) {
           frameKeys[key] = {}
-          let prevKeyDict = this.activeLayer.frames[num].prev.keys[key]
-          let nextKeyDict = this.activeLayer.frames[num].next.keys[key]
+          let prevKeyDict = prevFrame.keys[key]
+          let nextKeyDict = nextFrame.keys[key]
           for (let prop in prevKeyDict) {
             frameKeys[key][prop] = (1 - t) * prevKeyDict[prop] + t * nextKeyDict[prop];
           }
@@ -1274,7 +1340,56 @@ class GraphicsObject {
         frame.keys = frameKeys
         return frame
       } else if (this.activeLayer.frames[num].frameType == "shape") {
-        
+        let prevFrame = this.activeLayer.frames[num].prev
+        let nextFrame = this.activeLayer.frames[num].next
+        const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
+        let shapes = []
+        for (let shape1 of prevFrame.shapes) {
+          if (shape1.curves.length == 0) continue;
+          let shape2 = undefined
+          for (let i of nextFrame.shapes) {
+            if (shape1.shapeId == i.shapeId) {
+              shape2 = i
+            }
+          }
+          if (shape2 != undefined) {
+            let path1 = [{type: "M", x:shape1.curves[0].points[0].x, y:shape1.curves[0].points[0].y}]
+            for (let curve of shape1.curves) {
+              path1.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
+                x2: curve.points[2].x, y2: curve.points[2].y,
+                x: curve.points[3].x, y:curve.points[3].y
+              })
+            }
+            let path2 = []
+            if (shape2.curves.length > 0) {
+              path2.push({type: "M", x:shape2.curves[0].points[0].x, y:shape2.curves[0].points[0].y})
+              for (let curve of shape2.curves) {
+                path2.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
+                  x2: curve.points[2].x, y2: curve.points[2].y,
+                  x: curve.points[3].x, y:curve.points[3].y
+                })
+              }
+            }
+            console.log(path1)
+            console.log(path2)
+            const interpolator = d3.interpolatePathCommands(path1, path2)
+            let current = interpolator(t)
+            let curves = []
+            let start = current.shift()
+            let {x, y} = start
+            for (let curve of current) {
+              curves.push(new Bezier(x, y, curve.x1, curve.y1, curve.x2, curve.y2, curve.x, curve.y))
+              x = curve.x
+              y = curve.y
+            }
+            console.log(curves)
+            // TODO: lerp lineWidth
+            shapes.push(new TempShape(start.x, start.y, curves, shape1.lineWidth, shape1.stroked))
+          }
+        }
+        let frame = new Frame("shape", "temp")
+        frame.shapes = shapes
+        return frame
       } else {
         for (let i=Math.min(num, this.activeLayer.frames.length-1); i>=0; i--) {
           if (this.activeLayer.frames[i].frameType == "keyframe") {
@@ -1732,9 +1847,6 @@ function addKeyframe() {
   actions.addKeyframe.create()
 }
 
-function addMotionTween() {
-  actions.addMotionTween.create()
-}
 async function render() {
   document.querySelector("body").style.cursor = "wait"
   const path = await saveFileDialog({
@@ -2746,7 +2858,12 @@ async function updateMenu() {
       {
         text: "Add Motion Tween",
         enabled: activeFrame && (!activeKeyframe),
-        action: addMotionTween
+        action: actions.addMotionTween.create
+      },
+      {
+        text: "Add Shape Tween",
+        enabled: activeFrame && (!activeKeyframe),
+        action: actions.addShapeTween.create
       },
       {
         text: "Return to start",
