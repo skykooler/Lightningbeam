@@ -891,6 +891,7 @@ class Shape {
     }
     pointerList[this.idx] = this
     this.regionIdx = 0;
+    this.inProgress = true
   }
   addCurve(curve) {
     this.curves.push(curve)
@@ -953,6 +954,7 @@ class Shape {
   }
   simplify(mode="corners") {
     this.quadtree.clear()
+    this.inProgress = false
     // Mode can be corners, smooth or auto
     if (mode=="corners") {
       let points = [{x: this.startx, y: this.starty}]
@@ -1073,7 +1075,7 @@ class Shape {
     let i = 0;
 
 
-    let region = {idx: `${this.idx}-r${this.regionIdx++}`, curves: [], fillStyle: undefined, filled: false}
+    let region = {idx: `${this.idx}-r${this.regionIdx++}`, curves: [], fillStyle: context.fillStyle, filled: context.fillShape  }
     pointerList[region.idx] = region
     this.regions = [region]
     for (let curve of this.curves) {
@@ -1183,6 +1185,19 @@ class Shape {
         }
         ctx.fill()
       }
+    }
+    if (this.regions.length==0 && context.fillShape && this.inProgress) {
+      ctx.beginPath()
+      ctx.fillStyle = context.fillStyle
+      if (this.curves.length > 0) {
+        ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
+        for (let curve of this.curves) {
+          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                            curve.points[2].x, curve.points[2].y,
+                            curve.points[3].x, curve.points[3].y)
+        }
+      }
+      ctx.fill()
     }
     if (this.stroked) {
       for (let curve of this.curves) {
@@ -1965,15 +1980,19 @@ function stage() {
         break;
       case "paint_bucket":
         let line = {p1: mouse, p2: {x: mouse.x + 3000, y: mouse.y}}
-        for (let shape of context.activeObject.currentFrame.shapes) {
+        // Loop labels in JS!
+        shapeLoop:
+        // Iterate in reverse so we paintbucket the frontmost shape
+        for (let i=context.activeObject.currentFrame.shapes.length-1; i>=0; i--) {
+          let shape = context.activeObject.currentFrame.shapes[i]
           for (let region of shape.regions) {
             let intersect_count = 0;
             for (let curve of region.curves) {
               intersect_count += curve.intersects(line).length
             }
             if (intersect_count%2==1) {
-              // region.fillStyle = context.fillStyle
               actions.colorRegion.create(region, context.fillStyle)
+              break shapeLoop;
             }
           }
         }
