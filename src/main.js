@@ -15,7 +15,21 @@ const { documentDir, join } = window.__TAURI__.path;
 const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
+const { warn, debug, trace, info, error } = window.__TAURI__.log;
 
+function forwardConsole(fnName, logger) {
+  const original = console[fnName];
+  console[fnName] = (message) => {
+    original(message);
+    logger(message);
+  };
+}
+
+// forwardConsole('log', trace);
+forwardConsole('debug', debug);
+forwardConsole('info', info);
+forwardConsole('warn', warn);
+forwardConsole('error', error);
 
 const macOS = navigator.userAgent.includes('Macintosh')
 
@@ -48,6 +62,8 @@ let fileHeight = 1000
 let fileFps = 12
 
 let playing = false
+
+let clipboard = []
 
 let tools = {
   select: {
@@ -128,6 +144,8 @@ let config = {
     saveAs: "S",
     open: "o",
     quit: "q",
+    copy: "c",
+    paste: "v",
     group: "g",
   }
 }
@@ -319,6 +337,31 @@ let actions = {
       if (selectIndex >= 0) {
         context.selection.splice(selectIndex, 1)
       }
+    }
+  },
+  duplicateObject: {
+    create: (object) => {
+      redoStack.length = 0
+      let action = {
+        object: object.idx,
+        uuid: uuidv4()
+      }
+      undoStack.push({name: 'duplicateObject', action: action})
+      actions.duplicateObject.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      // your code here
+      let object = pointerList[action.object]
+      let newObj = object.copy()
+      newObj.idx = action.uuid
+      context.activeObject.addObject(newObj)
+      updateUI()
+    },
+    rollback: (action) => {
+      let object = pointerList[action.uuid]
+      context.activeObject.removeChild(object)
+      updateUI()
     }
   },
   editFrame: {
@@ -912,6 +955,15 @@ class Frame {
   saveState() {
     startProps[this.idx] = structuredClone(this.keys)
   }
+  copy() {
+    let newFrame = new Frame(this.frameType)
+    newFrame.keys = structuredClone(this.keys)
+    newFrame.shapes = []
+    for (let shape of this.shapes) {
+      newFrame.shapes.push(shape.copy())
+    }
+    return newFrame
+  }
 }
 
 class Layer {
@@ -924,6 +976,25 @@ class Layer {
     }
     this.frames = [new Frame("keyframe", this.idx+"-F1")]
     pointerList[this.idx] = this
+  }
+  copy() {
+    let newLayer = new Layer()
+    let idxMapping = {}
+    for (let child of this.children) {
+      let newChild = child.copy()
+      idxMapping[child.idx] = newChild.idx
+      newLayer.children.push(newChild)
+    }
+    newLayer.frames = []
+    for (let frame of this.frames) {
+      let newFrame = frame.copy()
+      newFrame.keys = {}
+      for (let key in frame.keys) {
+        newFrame.keys[idxMapping[key]] = structuredClone(frame.keys[key])
+      }
+      newLayer.frames.push(newFrame)
+    }
+    return newLayer
   }
 }
 
@@ -1656,6 +1727,22 @@ class GraphicsObject {
       scale_y: this.scale_y
     }
   }
+  copy() {
+    let newGO = new GraphicsObject()
+    newGO.x = this.x;
+    newGO.y = this.y;
+    newGO.rotation = this.rotation;
+    newGO.scale_x = this.scale_x;
+    newGO.scale_y = this.scale_y;
+    pointerList[this.idx] = this
+
+    newGO.layers = []
+    for (let layer of this.layers) {
+      newGO.layers.push(layer.copy())
+    }
+
+    return newGO;
+  }
 }
 
 let root = new GraphicsObject("root");
@@ -1716,6 +1803,10 @@ window.addEventListener("keydown", (e) => {
     undo()
   } else if (e.key == config.shortcuts.redo && mod == true) {
     redo()
+  } else if (e.key == config.shortcuts.copy && mod == true) {
+    copy()
+  } else if (e.key == config.shortcuts.paste && mod == true) {
+    paste()
   } else if (e.key == config.shortcuts.group && mod == true) {
     actions.group.create()
   }
@@ -1945,6 +2036,28 @@ async function quit() {
   } else {
     getCurrentWindow().close()
   }
+}
+
+function copy() {
+  clipboard = []
+  for (let object of context.selection) {
+    clipboard.push(object)
+  }
+  for (let shape of context.shapeselection) {
+    clipboard.push(shape)
+  }
+  console.log(clipboard)
+}
+
+function paste() {
+  for (let item of clipboard) {
+    if (item instanceof GraphicsObject) {
+      console.log(item)
+      // context.activeObject.addObject(item.copy())
+      actions.duplicateObject.create(item)
+    }
+  }
+  updateUI()
 }
 
 function addFrame() {
@@ -2979,17 +3092,22 @@ async function updateMenu() {
       },
       {
         text: "Cut",
-        enabled: true,
+        enabled: false,
         action: () => {}
       },
       {
         text: "Copy",
-        enabled: true,
-        action: () => {}
+        enabled: (context.selection.length > 0 || context.shapeselection.length > 0),
+        action: copy
       },
       {
         text: "Paste",
         enabled: true,
+        action: paste
+      },
+      {
+        text: "Delete",
+        enabled: false,
         action: () => {}
       },
     ]
