@@ -2884,28 +2884,26 @@ async function updateMenu() {
   } else {
     activeFrame = false
   }
-  if (macOS) {
-    const appSubmenu = await Submenu.new({
-      text: 'Lightningbeam',
-      items: [
-        {
-          text: 'About Lightningbeam',
-          enabled: true,
-          action:about
-        },
-        {
-          text: 'Settings',
-          enabled: false,
-          action: () => {}
-        },
-        {
-          text: 'Quit Lightningbeam',
-          enabled: true,
-          action: quit,
-        },
-      ]
-    })
-  }
+  const appSubmenu = await Submenu.new({
+    text: 'Lightningbeam',
+    items: [
+      {
+        text: 'About Lightningbeam',
+        enabled: true,
+        action:about
+      },
+      {
+        text: 'Settings',
+        enabled: false,
+        action: () => {}
+      },
+      {
+        text: 'Quit Lightningbeam',
+        enabled: true,
+        action: quit,
+      },
+    ]
+  })
   const fileSubmenu = await Submenu.new({
     text: 'File',
     items: [
@@ -3066,7 +3064,7 @@ async function updateMenu() {
 
   let items = [fileSubmenu, editSubmenu, modifySubmenu, timelineSubmenu, viewSubmenu, helpSubmenu]
   if (macOS) {
-    items.unshift([appSubmenu])
+    items.unshift(appSubmenu)
   }
   const menu = await Menu.new({
     items: items,
