@@ -61,13 +61,13 @@ function invertPixels(ctx, width, height) {
         for (let j = 0; j < patternSize; j++) {
           const index = (i * patternSize + j) * 4;
           // Determine if we should invert the color
-          if ((i + j) % 2 === 0) {
-            data[index] = 255; // Red
+          if ((i + j) % 2 === 0 || j%2===0) {
+            data[index] = 0; // Red
             data[index + 1] = 0; // Green
             data[index + 2] = 0; // Blue
             data[index + 3] = 255; // Alpha
           } else {
-            data[index] = 0; // Red (inverted)
+            data[index] = 255; // Red (inverted)
             data[index + 1] = 255; // Green (inverted)
             data[index + 2] = 255; // Blue (inverted)
             data[index + 3] = 255; // Alpha
