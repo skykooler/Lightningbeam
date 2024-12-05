@@ -2712,7 +2712,8 @@ function updateLayout(element) {
 function updateUI() {
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d")
-    ctx.reset();
+    ctx.resetTransform();
+    ctx.beginPath()
     ctx.fillStyle = "white"
     ctx.fillRect(0,0,canvas.width,canvas.height)
 
