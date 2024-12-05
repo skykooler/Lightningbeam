@@ -2225,7 +2225,7 @@ function stage() {
           let midY = (mouse.y + context.activeShape.starty) / 2
           let xDiff = (mouse.x - context.activeShape.startx) / 2
           let yDiff = (mouse.y - context.activeShape.starty) / 2
-          let ellipseConst = 0.552284749831
+          let ellipseConst = 0.552284749831 // (4/3)*tan(pi/(2n)) where n=4
           context.activeShape.clear()
           context.activeShape.addCurve(new Bezier(
             midX, context.activeShape.starty,
