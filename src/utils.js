@@ -91,4 +91,35 @@ function invertPixels(ctx, width, height) {
     ctx.globalCompositeOperation = "source-over"
 }
 
-export { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels };
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function lerpColor(color1, color2, t) {
+  // Convert hex color to RGB
+  const hexToRgb = (hex) => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return { r, g, b };
+  };
+
+  // Convert RGB to hex color
+  const rgbToHex = (r, g, b) => {
+    return `#${(1 << 24 | (r << 16) | (g << 8) | b).toString(16).slice(1).toUpperCase()}`;
+  };
+
+  // Get RGB values of both colors
+  const start = hexToRgb(color1);
+  const end = hexToRgb(color2);
+
+  // Calculate the interpolated RGB values
+  const r = Math.round(start.r + (end.r - start.r) * t);
+  const g = Math.round(start.g + (end.g - start.g) * t);
+  const b = Math.round(start.b + (end.b - start.b) * t);
+
+  // Convert the interpolated RGB back to hex
+  return rgbToHex(r, g, b);
+}
+
+export { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerp, lerpColor };

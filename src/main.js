@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -276,28 +276,29 @@ let actions = {
         });
       }
       img = await loadImage(action.src)
+      console.log(img.crossOrigin)
       // img.onload = function() {
-        let ct = {
-          ...context,
-          fillImage: img,
-          strokeShape: false,
-        }
-        let imageShape = new Shape(0, 0, ct, action.shapeUuid)
-        imageShape.addLine(img.width, 0)
-        imageShape.addLine(img.width, img.height)
-        imageShape.addLine(0, img.height)
-        imageShape.addLine(0, 0)
-        imageShape.update()
-        imageShape.fillImage = img
-        imageShape.filled = true
-        imageObject.addShape(imageShape)
-        let parent = pointerList[action.parent]
-        parent.addObject(
-          imageObject,
-          action.x-img.width/2 + (20*action.ix),
-          action.y-img.height/2 + (20*action.ix)
-        )
-        updateUI();
+      let ct = {
+        ...context,
+        fillImage: img,
+        strokeShape: false,
+      }
+      let imageShape = new Shape(0, 0, ct, action.shapeUuid)
+      imageShape.addLine(img.width, 0)
+      imageShape.addLine(img.width, img.height)
+      imageShape.addLine(0, img.height)
+      imageShape.addLine(0, 0)
+      imageShape.update()
+      imageShape.fillImage = img
+      imageShape.filled = true
+      imageObject.addShape(imageShape)
+      let parent = pointerList[action.parent]
+      parent.addObject(
+        imageObject,
+        action.x-img.width/2 + (20*action.ix),
+        action.y-img.height/2 + (20*action.ix)
+      )
+      updateUI();
       // }
       // img.src = action.src
     },
@@ -959,6 +960,7 @@ class BaseShape {
       ctx.fill()
     }
     if (this.stroked) {
+      console.log(this.curves)
       for (let curve of this.curves) {
         ctx.strokeStyle = curve.color
         ctx.beginPath()
@@ -968,9 +970,11 @@ class BaseShape {
                           curve.points[3].x, curve.points[3].y)
         ctx.stroke()
 
-        // Debug, show curve endpoints
+        // // Debug, show curve control points
         // ctx.beginPath()
-        // ctx.arc(curve.points[3].x,curve.points[3].y, 3, 0, 2*Math.PI)
+        // ctx.arc(curve.points[1].x,curve.points[1].y, 5, 0, 2*Math.PI)
+        // ctx.arc(curve.points[2].x,curve.points[2].y, 5, 0, 2*Math.PI)
+        // ctx.arc(curve.points[3].x,curve.points[3].y, 5, 0, 2*Math.PI)
         // ctx.fill()
       }
     }
@@ -981,12 +985,14 @@ class BaseShape {
 }
 
 class TempShape extends BaseShape {
-  constructor(startx, starty, curves, lineWidth, stroked, filled) {
+  constructor(startx, starty, curves, lineWidth, stroked, filled, strokeStyle, fillStyle) {
     super(startx, starty)
     this.curves = curves
     this.lineWidth = lineWidth
     this.stroked = stroked
     this.filled = filled
+    this.strokeStyle = strokeStyle
+    this.fillStyle = fillStyle
     this.inProgress = false
   }
 }
@@ -1380,8 +1386,6 @@ class GraphicsObject {
                 })
               }
             }
-            console.log(path1)
-            console.log(path2)
             const interpolator = d3.interpolatePathCommands(path1, path2)
             let current = interpolator(t)
             let curves = []
@@ -1392,9 +1396,16 @@ class GraphicsObject {
               x = curve.x
               y = curve.y
             }
-            console.log(curves)
-            // TODO: lerp lineWidth
-            shapes.push(new TempShape(start.x, start.y, curves, shape1.lineWidth, shape1.stroked))
+            let lineWidth = lerp(shape1.lineWidth, shape2.lineWidth, t)
+            let strokeStyle = lerpColor(shape1.strokeStyle, shape2.strokeStyle, t)
+            let fillStyle;
+            if (!shape1.fillImage) {
+              fillStyle = lerpColor(shape1.fillStyle, shape2.fillStyle, t)
+            }
+            shapes.push(new TempShape(
+              start.x, start.y, curves, shape1.lineWidth,
+              shape1.stroked, shape1.filled, strokeStyle, fillStyle
+            ))
           }
         }
         let frame = new Frame("shape", "temp")
@@ -1899,7 +1910,7 @@ async function render() {
       exportContext.ctx.fillStyle = "white"
       exportContext.ctx.rect(0,0,fileWidth, fileHeight)
       exportContext.ctx.fill()
-      root.draw(exportContext)
+      await root.draw(exportContext)
 
       // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
       const imageData = exportContext.ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1983,7 +1994,7 @@ function stage() {
     e.preventDefault()
     let mouse = getMousePos(stage, e)
     const imageTypes = ['image/png', 'image/gif', 'image/avif', 'image/jpeg',
-       'image/svg+xml', 'image/webp'
+       'image/webp', //'image/svg+xml' // Disabling SVG until we can export them nicely
     ];
     if (e.dataTransfer.items) {
       let i = 0
@@ -2029,6 +2040,7 @@ function stage() {
     let mouse = getMousePos(stage, e)
     switch (mode) {
       case "rectangle":
+      case "ellipse":
       case "draw":
         context.mouseDown = true
         context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
@@ -2141,6 +2153,7 @@ function stage() {
         }
         break;
       case "rectangle":
+      case "ellipse":
         actions.addShape.create(context.activeObject, context.activeShape)
         context.activeShape = undefined
         break;
@@ -2205,6 +2218,41 @@ function stage() {
           context.activeShape.update()
         }
         break;
+      case "ellipse":
+        context.activeCurve = undefined
+        if (context.activeShape) {
+          let midX = (mouse.x + context.activeShape.startx) / 2
+          let midY = (mouse.y + context.activeShape.starty) / 2
+          let xDiff = (mouse.x - context.activeShape.startx) / 2
+          let yDiff = (mouse.y - context.activeShape.starty) / 2
+          let ellipseConst = 0.552284749831
+          context.activeShape.clear()
+          context.activeShape.addCurve(new Bezier(
+            midX, context.activeShape.starty,
+            midX + ellipseConst * xDiff, context.activeShape.starty,
+            mouse.x, midY - ellipseConst * yDiff,
+            mouse.x, midY
+          ))
+          context.activeShape.addCurve(new Bezier(
+            mouse.x, midY,
+            mouse.x, midY + ellipseConst * yDiff,
+            midX + ellipseConst * xDiff, mouse.y,
+            midX, mouse.y
+          ))
+          context.activeShape.addCurve(new Bezier(
+            midX, mouse.y,
+            midX - ellipseConst * xDiff, mouse.y,
+            context.activeShape.startx, midY + ellipseConst * yDiff,
+            context.activeShape.startx, midY
+          ))
+          context.activeShape.addCurve(new Bezier(
+            context.activeShape.startx, midY,
+            context.activeShape.startx, midY - ellipseConst * yDiff,
+            midX - ellipseConst * xDiff, context.activeShape.starty,
+            midX, context.activeShape.starty
+          ))
+          break;
+        }
       case "select":
         if (context.dragging) {
           if (context.activeVertex) {
