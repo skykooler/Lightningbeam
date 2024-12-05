@@ -4,7 +4,7 @@ import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
 import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords } from './utils.js';
-const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile }=  window.__TAURI__.fs;
+const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
   save: saveFileDialog,
@@ -1918,6 +1918,25 @@ async function open() {
   }
 }
 
+async function importImage() {
+  const path = await openFileDialog({
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: 'Image files',
+        extensions: ['png', 'gif', 'avif', 'jpg', 'jpeg'],
+      },
+    ],
+    defaultPath: await documentDir(),
+  });
+  if (path) {
+    const dataURL = await convertToDataURL(path);
+    actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject)
+  }
+  
+}
+
 async function quit() {
   if (undoStack.length) {
     if (await confirmDialog("Are you sure you want to quit?", {title: 'Really quit?', kind: "warning"})) {
@@ -2929,6 +2948,11 @@ async function updateMenu() {
         action: open,
       },
       {
+        text: 'Import Image...',
+        enabled: true,
+        action: importImage,
+      },
+      {
         text: 'Quit',
         enabled: true,
         action: quit,
@@ -3097,13 +3121,13 @@ const panes = {
 async function convertToDataURL(filePath) {
   try {
     // Read the image file as a binary file (buffer)
-    const binaryData = await readBinaryFile(filePath);
+    const binaryData = await readFile(filePath);
     const mimeType = getMimeType(filePath);
     if (!mimeType) {
       throw new Error('Unsupported image type');
     }
 
-    const base64Data = binaryData.toString('base64');
+    const base64Data = btoa(String.fromCharCode(...binaryData))
     const dataURL = `data:${mimeType};base64,${base64Data}`;
 
     return dataURL;
