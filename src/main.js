@@ -2191,7 +2191,11 @@ function stage() {
                       // dragging = true
                     }
                     child.saveState()
-                    context.selection = [child]
+                    if (e.shiftKey) {
+                      context.selection.push(child)
+                    } else {
+                      context.selection = [child]
+                    }
                     context.dragging = true
                     selected = true
                     context.activeObject.currentFrame.saveState()
