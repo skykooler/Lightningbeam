@@ -1044,6 +1044,9 @@ class Shape extends BaseShape {
     this.inProgress = true
   }
   addCurve(curve) {
+    if (curve.color == undefined) {
+      curve.color = context.strokeStyle
+    }
     this.curves.push(curve)
     this.quadtree.insert(curve, this.curves.length - 1)
     growBoundingBox(this.boundingBox, curve.bbox())
@@ -2316,8 +2319,8 @@ function stage() {
             midX - ellipseConst * xDiff, context.activeShape.starty,
             midX, context.activeShape.starty
           ))
-          break;
         }
+        break;
       case "select":
         if (context.dragging) {
           if (context.activeVertex) {
