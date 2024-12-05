@@ -2181,6 +2181,7 @@ function stage() {
               }
               if (!selected) {
                 context.selection = []
+                context.shapeselection = []
                 context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
               }
             }
