@@ -139,6 +139,7 @@ let startProps = {}
 let actions = {
   addShape: {
     create: (parent, shape) => {
+      if (shape.curves.length==0) return;
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = []
       for (let curve of shape.curves) {
