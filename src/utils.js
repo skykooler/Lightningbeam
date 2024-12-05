@@ -122,4 +122,12 @@ function lerpColor(color1, color2, t) {
   return rgbToHex(r, g, b);
 }
 
-export { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerp, lerpColor };
+function camelToWords(camelCaseString) {
+  // Insert a space before each uppercase letter and make it lowercase
+  const words = camelCaseString.replace(/([A-Z])/g, ' $1').toLowerCase();
+  
+  // Capitalize the first letter of each word
+  return words.replace(/\b\w/g, char => char.toUpperCase());
+}
+
+export { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerp, lerpColor, camelToWords };

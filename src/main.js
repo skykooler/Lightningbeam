@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -154,6 +154,7 @@ let actions = {
       }
       undoStack.push({name: "addShape", action: action})
       actions.addShape.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let object = pointerList[action.parent]
@@ -238,6 +239,7 @@ let actions = {
       }
       undoStack.push({name: "colorShape", action: action})
       actions.colorShape.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let shape = pointerList[action.shape]
@@ -263,6 +265,7 @@ let actions = {
       }
       undoStack.push({name: "addImageObject", action: action})
       actions.addImageObject.execute(action)
+      updateMenu()
     },
     execute: async (action) => {
       let imageObject = new GraphicsObject(action.objectUuid)
@@ -327,6 +330,7 @@ let actions = {
       }
       undoStack.push({name: "editFrame", action: action})
       actions.editFrame.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let frame = pointerList[action.frame]
@@ -354,6 +358,7 @@ let actions = {
       }
       undoStack.push({name: 'addFrame', action: action})
       actions.addFrame.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let layer = pointerList[action.layer]
@@ -397,6 +402,7 @@ let actions = {
       }
       undoStack.push({name: 'addKeyframe', action: action})
       actions.addKeyframe.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let object = pointerList[action.object]
@@ -449,6 +455,7 @@ let actions = {
       }
       undoStack.push({name: 'addMotionTween', action: action})
       actions.addMotionTween.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let layer = pointerList[action.layer]
@@ -491,6 +498,7 @@ let actions = {
       }
       undoStack.push({name: 'addShapeTween', action: action})
       actions.addShapeTween.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let layer = pointerList[action.layer]
@@ -538,6 +546,7 @@ let actions = {
       }
       undoStack.push({name: 'group', action: action})
       actions.group.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       // your code here
@@ -599,6 +608,7 @@ let actions = {
       }
       undoStack.push({name: 'sendToBack', action: action})
       actions.sendToBack.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let frame = pointerList[action.frame]
@@ -654,6 +664,7 @@ let actions = {
       }
       undoStack.push({name: 'bringToFront', action: action})
       actions.bringToFront.execute(action)
+      updateMenu()
     },
     execute: (action) => {
       let frame = pointerList[action.frame]
@@ -864,8 +875,10 @@ function undo() {
     actions[action.name].rollback(action.action)
     redoStack.push(action)
     updateUI()
+    updateMenu()
   } else {
     console.log("No actions to undo")
+    updateMenu()
   }
 }
 
@@ -875,8 +888,10 @@ function redo() {
     actions[action.name].execute(action.action)
     undoStack.push(action)
     updateUI()
+    updateMenu()
   } else {
     console.log("No actions to redo")
+    updateMenu()
   }
 }
 
@@ -1450,6 +1465,9 @@ class GraphicsObject {
         growBoundingBox(bbox, child.bbox())
       }
     }
+    if (bbox == undefined) {
+      bbox = {x:{min:0, max:0}, y:{min:0,max:0}}
+    }
     bbox.x.max *= this.scale_x
     bbox.y.max *= this.scale_y
     bbox.x.min += this.x
@@ -1697,10 +1715,56 @@ window.addEventListener("keydown", (e) => {
     actions.group.create()
   }
   else if (e.key == "ArrowRight") {
-    advanceFrame()
+    if (e.ctrlKey == true) {
+      advanceFrame()
+    } else if (context.selection) {
+      context.activeObject.currentFrame.saveState()
+      for (let item of context.selection) {
+        context.activeObject.currentFrame.keys[item.idx].x += 1
+      }
+      actions.editFrame.create(context.activeObject.currentFrame)
+      updateUI()
+    }
+    e.preventDefault()
   }
   else if (e.key == "ArrowLeft") {
-    decrementFrame()
+    if (e.ctrlKey == true) {
+      decrementFrame()
+    } else if (context.selection) {
+      context.activeObject.currentFrame.saveState()
+      for (let item of context.selection) {
+        context.activeObject.currentFrame.keys[item.idx].x -= 1
+      }
+      actions.editFrame.create(context.activeObject.currentFrame)
+      updateUI()
+    }
+    e.preventDefault()
+  }
+  else if (e.key == "ArrowUp") {
+    if (e.ctrlKey == true) {
+      // no action yet for ctrl+up
+    } else if (context.selection) {
+      context.activeObject.currentFrame.saveState()
+      for (let item of context.selection) {
+        context.activeObject.currentFrame.keys[item.idx].y -= 1
+      }
+      actions.editFrame.create(context.activeObject.currentFrame)
+      updateUI()
+    }
+    e.preventDefault()
+  }
+  else if (e.key == "ArrowDown") {
+    if (e.ctrlKey == true) {
+      // no action yet for ctrl+down
+    } else if (context.selection) {
+      context.activeObject.currentFrame.saveState()
+      for (let item of context.selection) {
+        context.activeObject.currentFrame.keys[item.idx].y += 1
+      }
+      actions.editFrame.create(context.activeObject.currentFrame)
+      updateUI()
+    }
+    e.preventDefault()
   }
 })
 
@@ -2844,13 +2908,13 @@ async function updateMenu() {
     text: "Edit",
     items: [
       {
-        text: "Undo",
-        enabled: true,
+        text: "Undo " + ((undoStack.length>0) ? camelToWords(undoStack[undoStack.length-1].name) : ""),
+        enabled: undoStack.length > 0,
         action: undo
       },
       {
-        text: "Redo",
-        enabled: true,
+        text: "Redo " + ((redoStack.length>0) ? camelToWords(redoStack[redoStack.length-1].name) : ""),
+        enabled: redoStack.length > 0,
         action: redo
       },
       {
