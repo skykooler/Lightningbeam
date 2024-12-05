@@ -1937,6 +1937,11 @@ function addFrame() {
 function addKeyframe() {
   actions.addKeyframe.create()
 }
+async function about () {
+  messageDialog(`Lightningbeam version ${await getVersion()}\nDeveloped by Skyler Lehmkuhl`,
+    {title: 'About', kind: "info"}
+  )
+}
 
 async function render() {
   document.querySelector("body").style.cursor = "wait"
@@ -2879,6 +2884,28 @@ async function updateMenu() {
   } else {
     activeFrame = false
   }
+  if (macOS) {
+    const appSubmenu = await Submenu.new({
+      text: 'Lightningbeam',
+      items: [
+        {
+          text: 'About Lightningbeam',
+          enabled: true,
+          action:about
+        },
+        {
+          text: 'Settings',
+          enabled: false,
+          action: () => {}
+        },
+        {
+          text: 'Quit Lightningbeam',
+          enabled: true,
+          action: quit,
+        },
+      ]
+    })
+  }
   const fileSubmenu = await Submenu.new({
     text: 'File',
     items: [
@@ -3032,17 +3059,17 @@ async function updateMenu() {
       {
         text: "About...",
         enabled: true,
-        action: async () => {
-          messageDialog(`Lightningbeam version ${await getVersion()}\nDeveloped by Skyler Lehmkuhl`,
-            {title: 'About', kind: "info"}
-          )
-        }
+        action: about
       }
     ]
-});
+  });
 
+  let items = [fileSubmenu, editSubmenu, modifySubmenu, timelineSubmenu, viewSubmenu, helpSubmenu]
+  if (macOS) {
+    items.unshift([appSubmenu])
+  }
   const menu = await Menu.new({
-    items: [fileSubmenu, editSubmenu, modifySubmenu, timelineSubmenu, viewSubmenu, helpSubmenu],
+    items: items,
   })
   await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu())
 }
