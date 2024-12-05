@@ -3117,6 +3117,15 @@ const panes = {
   },
 }
 
+function _arrayBufferToBase64( buffer ) {
+  var binary = '';
+  var bytes = new Uint8Array( buffer );
+  var len = bytes.byteLength;
+  for (var i = 0; i < len; i++) {
+      binary += String.fromCharCode( bytes[ i ] );
+  }
+  return window.btoa( binary );
+}
 
 async function convertToDataURL(filePath) {
   try {
@@ -3127,7 +3136,7 @@ async function convertToDataURL(filePath) {
       throw new Error('Unsupported image type');
     }
 
-    const base64Data = btoa(String.fromCharCode(...binaryData))
+    const base64Data = _arrayBufferToBase64(binaryData)
     const dataURL = `data:${mimeType};base64,${base64Data}`;
 
     return dataURL;
