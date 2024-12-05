@@ -166,8 +166,10 @@ let actions = {
           curve.points[3].x, curve.points[3].y
         ).setColor(curve.color))
       }
-      shape.update()
-      object.addShape(shape)
+      let shapes = shape.update()
+      for (let newShape of shapes) {
+        object.addShape(newShape)
+      }
     },
     rollback: (action) => {
       let object = pointerList[action.parent]
@@ -225,24 +227,24 @@ let actions = {
       shape.update()
     }
   },
-  colorRegion: {
-    create: (region, color) => {
+  colorShape: {
+    create: (shape, color) => {
       redoStack.length = 0; // Clear redo stack
       let action = {
-        region: region.idx,
-        oldColor: region.fillStyle,
+        shape: shape.idx,
+        oldColor: shape.fillStyle,
         newColor: color
       }
-      undoStack.push({name: "colorRegion", action: action})
-      actions.colorRegion.execute(action)
+      undoStack.push({name: "colorShape", action: action})
+      actions.colorShape.execute(action)
     },
     execute: (action) => {
-      let region = pointerList[action.region]
-      region.fillStyle = action.newColor
+      let shape = pointerList[action.shape]
+      shape.fillStyle = action.newColor
     },
     rollback: (action) => {
-      let region = pointerList[action.region]
-      region.fillStyle = action.oldColor
+      let shape = pointerList[action.shape]
+      shape.fillStyle = action.oldColor
     }
   },
   addImageObject: {
@@ -286,8 +288,8 @@ let actions = {
         imageShape.addLine(0, img.height)
         imageShape.addLine(0, 0)
         imageShape.update()
-        imageShape.regions[0].fillImage = img
-        imageShape.regions[0].filled = true
+        imageShape.fillImage = img
+        imageShape.filled = true
         imageObject.addShape(imageShape)
         let parent = pointerList[action.parent]
         parent.addObject(
@@ -918,29 +920,34 @@ class BaseShape {
     let ctx = context.ctx;
     ctx.lineWidth = this.lineWidth
     ctx.lineCap = "round"
-    for (let region of this.regions) {
-      // if (region.filled) continue;
-      if ((region.fillStyle || region.fillImage) && region.filled) {
-        // ctx.fillStyle = region.fill
-        if (region.fillImage) {
-          let pat = ctx.createPattern(region.fillImage, "no-repeat")
-          ctx.fillStyle = pat
-        } else {
-          ctx.fillStyle = region.fillStyle
-        }
-        ctx.beginPath()
-        for (let curve of region.curves) {
-          ctx.lineTo(curve.points[0].x, curve.points[0].y)
-          ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-                            curve.points[2].x, curve.points[2].y,
-                            curve.points[3].x, curve.points[3].y)
-        }
-        ctx.fill()
-      }
-    }
-    if (this.regions.length==0 && context.fillShape && this.inProgress) {
+    // for (let region of this.regions) {
+    //   // if (region.filled) continue;
+    //   if ((region.fillStyle || region.fillImage) && region.filled) {
+    //     // ctx.fillStyle = region.fill
+    //     if (region.fillImage) {
+    //       let pat = ctx.createPattern(region.fillImage, "no-repeat")
+    //       ctx.fillStyle = pat
+    //     } else {
+    //       ctx.fillStyle = region.fillStyle
+    //     }
+    //     ctx.beginPath()
+    //     for (let curve of region.curves) {
+    //       ctx.lineTo(curve.points[0].x, curve.points[0].y)
+    //       ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+    //                         curve.points[2].x, curve.points[2].y,
+    //                         curve.points[3].x, curve.points[3].y)
+    //     }
+    //     ctx.fill()
+    //   }
+    // }
+    if (this.filled) {
       ctx.beginPath()
-      ctx.fillStyle = context.fillStyle
+      if (this.fillImage) {
+        let pat = ctx.createPattern(this.fillImage, "no-repeat")
+        ctx.fillStyle = pat
+      } else {
+        ctx.fillStyle = this.fillStyle
+      }
       if (this.curves.length > 0) {
         ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
         for (let curve of this.curves) {
@@ -974,11 +981,12 @@ class BaseShape {
 }
 
 class TempShape extends BaseShape {
-  constructor(startx, starty, curves, lineWidth, stroked) {
+  constructor(startx, starty, curves, lineWidth, stroked, filled) {
     super(startx, starty)
     this.curves = curves
     this.lineWidth = lineWidth
     this.stroked = stroked
+    this.filled = filled
     this.inProgress = false
   }
 }
@@ -1171,6 +1179,7 @@ class Shape extends BaseShape {
       this.startx = this.curves[0].points[0].x
       this.starty = this.curves[0].points[0].y
     }
+    return [this]
   }
   getClockwiseCurves(point, otherPoints) {
     // Returns array of {x, y, idx, angle}
@@ -1240,6 +1249,7 @@ class Shape extends BaseShape {
       i++;
     }
 
+    let shapes = [this]
     this.vertices.forEach((vertex, i) => {
       for (let i=0; i<Math.min(10,this.regions.length); i++) {
         let region = this.regions[i]
@@ -2097,16 +2107,16 @@ function stage() {
         // Iterate in reverse so we paintbucket the frontmost shape
         for (let i=context.activeObject.currentFrame.shapes.length-1; i>=0; i--) {
           let shape = context.activeObject.currentFrame.shapes[i]
-          for (let region of shape.regions) {
+          // for (let region of shape.regions) {
             let intersect_count = 0;
-            for (let curve of region.curves) {
+            for (let curve of shape.curves) {
               intersect_count += curve.intersects(line).length
             }
             if (intersect_count%2==1) {
-              actions.colorRegion.create(region, context.fillStyle)
+              actions.colorShape.create(shape, context.fillStyle)
               break shapeLoop;
             }
-          }
+          // }
         }
         break;
       default:
@@ -2545,7 +2555,7 @@ function splitPane(div, percent, horiz, newPane=undefined) {
   div.addEventListener('mouseup', (event) => {
     console.log("mouseup")
     event.currentTarget.setAttribute("dragging", false)
-    event.currentTarget.style.userSelect = 'auto';
+    // event.currentTarget.style.userSelect = 'auto';
   })
   Coloris({el: ".color-field"})
   updateAll()
