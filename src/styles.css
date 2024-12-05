@@ -108,30 +108,11 @@ button {
   margin-right: 5px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
 
 .header {
   height: 60px;
   min-width: 100%;
-  background-color: #3f3f3f;
+  background-color: #ccc;
   text-align: left;
   z-index: 1;
 }
@@ -149,7 +130,7 @@ button {
 .horizontal-grid, .vertical-grid {
   display: flex;
   gap: 5px;
-  background-color: #0f0f0f;
+  background-color: #555;
   width: 100%;
   height: 100%;
   contain: strict;
@@ -270,14 +251,17 @@ button {
 .toolbtn {
   width: calc( 3 * var(--lineheight) );
   height: calc( 3 * var(--lineheight) );
-  background-color: #2f2f2f;
+  background-color: #ccc;
+}
+.toolbtn img {
+  filter: invert(1);
 }
 
 .horiz_break {
   width: 100%;
   height: 5px;
 
-  background-color: #2f2f2f;
+  background-color: #999;
 }
 .clr-field {
   width: 100%;
@@ -294,7 +278,7 @@ button {
 .infopanel {
   width: 100%;
   height: 100%;
-  background-color: #3f3f3f;
+  background-color: #aaa;
   display: flex;
   box-sizing: border-box;
   gap: calc( var(--lineheight) / 2 );
@@ -320,14 +304,14 @@ button {
   overflow-y: scroll;
 }
 .layers {
-  background-color: #222222;
+  background-color: #aaa;
   display: flex;
   flex-direction: column;
   flex-wrap: nowrap;
   min-height: 100%;
 }
 .frames-container {
-  background-color: #222222;
+  background-color: #aaa;
   display: flex;
   flex-direction: column;
   flex-wrap: nowrap;
@@ -338,38 +322,38 @@ button {
 .layer-header {
   width: 100%;
   height: calc( 2 * var(--lineheight));
-  background-color: #3f3f3f;
-  border-top: 1px solid #4f4f4f;
-  border-bottom: 1px solid #222222;
+  background-color: #ccc;
+  border-top: 1px solid #ddd;
+  border-bottom: 1px solid #bbb;
   flex-shrink: 0;
 }
 .layer-track {
   min-width: 100%;
   height: calc( 2 * var(--lineheight));
-  background: repeating-linear-gradient(to right, transparent, transparent 24px, #3f3f3f 24px, #3f3f3f 25px),
-              repeating-linear-gradient(to right, #222222, #222222 100px, #151515 100px, #151515 125px);
+  background: repeating-linear-gradient(to right, transparent, transparent 24px, #aaa 24px, #aaa 25px),
+              repeating-linear-gradient(to right, #bbb, #bbb 100px, #aaa 100px, #aaa 125px);
 
   display: flex;
   flex-direction: row;
-  border-top: 1px solid #222222;
-  border-bottom: 1px solid #3f3f3f;
+  border-top: 1px solid #bbb;
+  border-bottom: 1px solid #ccc;
   flex-shrink: 0;
 }
 .frame {
   width: 25px;
   height: 100%;
 
-  background-color: #4f4f4f;
+  background-color: #ccc;
   flex-grow: 0;
   flex-shrink: 0;
-  border-right: 1px solid #3f3f3f;
-  border-left: 1px solid #555555;
+  border-right: 1px solid #bbb;
+  border-left: 1px solid #ddd;
 }
 .frame:hover {
   background-color: #555555;
 }
 .frame.active {
-  background-color: #666666;
+  background-color: #fff;
 }
 .frame.keyframe {
   position: relative;
@@ -413,7 +397,7 @@ button {
 } */
 
 .frame-highlight {
-  background-color: red;
+  background-color: #888;
   width: 25px;
   height: calc( 2 * var(--lineheight) - 2px);
   position: relative;
@@ -441,8 +425,8 @@ button {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  background-color: #444;
-  border: 1px solid #333;
+  background-color: #ddd;
+  border: 1px solid #aaa;
   border-radius: 5px;
   box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
   padding: 20px;
@@ -456,15 +440,16 @@ button {
 }
 
 #newFileDialog .dialog-input {
-  width: 100%;
+  width: calc(100% - 20px);
   padding: 8px;
   margin: 5px 0;
-  border: 1px solid #333;
+  border: 1px solid #aaa;
 }
 
 #newFileDialog .dialog-button {
   width: 100%;
   padding: 10px;
+  margin-top: 10px;
   background-color: #007bff;
   color: white;
   border: none;
@@ -476,7 +461,7 @@ button {
 }
 
 #popupMenu {
-  background-color: #222;
+  background-color: #eee;
   box-shadow: 0 4px 8px rgba(0,0,0,0.5);
   padding: 20px;
   border-radius: 5px;
@@ -487,21 +472,108 @@ button {
   margin: 0px;
 }
 #popupMenu li {
-  color: #ccc;
+  color: #222;
   list-style-type: none;
   display: flex;
   align-items: center;  /* Vertically center the image and text */
   padding: 5px 0; /* Add padding for better spacing */
 }
 #popupMenu li:hover {
-  background-color: #444;
+  background-color: #fff;
   cursor:pointer;
 }
 #popupMenu li:not(:last-child) {
-  border-bottom: 1px solid #444;  /* Horizontal line for all li elements except the last */
+  border-bottom: 1px solid #ccc;  /* Horizontal line for all li elements except the last */
 }
 #popupMenu li img {
   margin-right: 10px; /* Space between the icon and text */
   width: 20px;  /* Adjust the width of the icon */
   height: 20px; /* Adjust the height of the icon */
+}
+
+
+@media (prefers-color-scheme: dank) {
+  :root {
+    color: #f6f6f6;
+    background-color: #2f2f2f;
+  }
+
+  a:hover {
+    color: #24c8db;
+  }
+
+  input,
+  button {
+    color: #ffffff;
+    background-color: #0f0f0f98;
+  }
+  button:active {
+    background-color: #0f0f0f69;
+  }
+
+  #newFileDialog {
+    background-color: #444;
+    border: 1px solid #333;
+  }
+  #newFileDialog .dialog-input {
+    border: 1px solid #333;
+  }
+  #popupMenu {
+    background-color: #222;
+  }
+  #popupMenu li {
+    color: #ccc;
+  }
+  #popupMenu li:hover {
+    background-color: #444;
+  }
+  #popupMenu li:not(:last-child) {
+    border-bottom: 1px solid #444;
+  }
+  .layers {
+    background-color: #222222;
+  }
+  .frames-container {
+    background-color: #222222;
+  }
+  .layer-header {
+    background-color: #3f3f3f;
+    border-top: 1px solid #4f4f4f;
+    border-bottom: 1px solid #222222;
+  }
+  .layer-track {
+    background: repeating-linear-gradient(to right, transparent, transparent 24px, #3f3f3f 24px, #3f3f3f 25px),
+                repeating-linear-gradient(to right, #222222, #222222 100px, #151515 100px, #151515 125px);
+    border-top: 1px solid #222222;
+    border-bottom: 1px solid #3f3f3f;
+  }
+  .frame {
+    background-color: #4f4f4f;
+    border-right: 1px solid #3f3f3f;
+    border-left: 1px solid #555555;
+  }
+  .frame:hover {
+    background-color: #555555;
+  }
+  .frame.active {
+    background-color: #666666;
+  }
+  .infopanel {
+    background-color: #3f3f3f;
+  }
+  .header {
+    background-color: #3f3f3f;
+  }
+  .horizontal-grid, .vertical-grid {
+    background-color: #0f0f0f;
+  }
+  .toolbtn {
+    background-color: #2f2f2f;
+  }
+  .toolbtn img {
+    filter:none;
+  }
+  .horiz_break {
+    background-color: #2f2f2f;
+  }
 }
