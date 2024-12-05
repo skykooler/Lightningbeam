@@ -301,9 +301,6 @@ button {
   flex: 1 1 50%;
   width: 50%;
 }
-.layers-container {
-  overflow-y: scroll;
-}
 .layers {
   background-color: #aaa;
   display: flex;
@@ -319,6 +316,7 @@ button {
   /* overflow-x: scroll; */
   /* overflow-y:inherit; */
   min-height: 100%;
+  overflow-x: scroll;
 }
 .layer-header {
   width: 100%;
