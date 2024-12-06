@@ -51,7 +51,6 @@ let redoStack = [];
 
 let layoutElements = []
 
-let appVersion = "0.6.1-alpha"
 let minFileVersion = "1.0"
 let maxFileVersion = "2.0"
 
@@ -60,6 +59,8 @@ let fileExportPath = undefined
 let fileWidth = 1500
 let fileHeight = 1000
 let fileFps = 12
+
+let zoomLevel = 1
 
 let playing = false
 
@@ -148,6 +149,8 @@ let config = {
     paste: "v",
     delete: "Backspace",
     group: "g",
+    zoomIn: "+",
+    zoomOut: "-",
   }
 }
 
@@ -1091,7 +1094,6 @@ class BaseShape {
       ctx.fill()
     }
     if (this.stroked) {
-      console.log(this.curves)
       for (let curve of this.curves) {
         ctx.strokeStyle = curve.color
         ctx.beginPath()
@@ -1856,6 +1858,10 @@ window.addEventListener("keydown", (e) => {
     delete_action()
   } else if (e.key == config.shortcuts.group && mod == true) {
     actions.group.create()
+  } else if (e.key == config.shortcuts.zoomIn && mod == true) {
+    zoomIn()
+  } else if (e.key == config.shortcuts.zoomOut && mod == true) {
+    zoomOut()
   }
   else if (e.key == "ArrowRight") {
     if (mod == true) {
@@ -2197,6 +2203,26 @@ async function render() {
     );
   }
   document.querySelector("body").style.cursor = "default"
+}
+
+function zoomIn() {
+  if (zoomLevel < 8) {
+    zoomLevel *= 2
+    updateUI()
+    updateMenu()
+  }
+}
+function zoomOut() {
+  if (zoomLevel > 1/8) {
+    zoomLevel /= 2
+    updateUI()
+    updateMenu()
+  }
+}
+function resetZoom() {
+  zoomLevel = 1;
+  updateUI()
+  updateMenu()
 }
 
 function stage() {
@@ -2915,11 +2941,16 @@ function updateLayout(element) {
 
 function updateUI() {
   for (let canvas of canvases) {
+    canvas.width = fileWidth * zoomLevel
+    canvas.height = fileHeight * zoomLevel
+    canvas.style.width = `${fileWidth * zoomLevel}px`
+    canvas.style.height = `${fileHeight * zoomLevel}px`
     let ctx = canvas.getContext("2d")
     ctx.resetTransform();
+    ctx.scale(zoomLevel, zoomLevel)
     ctx.beginPath()
     ctx.fillStyle = "white"
-    ctx.fillRect(0,0,canvas.width,canvas.height)
+    ctx.fillRect(0,0,fileWidth,fileHeight)
 
     context.ctx = ctx;
     root.draw(context)
@@ -3245,13 +3276,18 @@ async function updateMenu() {
     items: [
       {
         text: "Zoom In",
-        enabled: false,
-        action: () => {}
+        enabled: true,
+        action: zoomIn
       },
       {
         text: "Zoom Out",
-        enabled: false,
-        action: () => {}
+        enabled: true,
+        action: zoomOut
+      },
+      {
+        text: "Reset Zoom",
+        enabled: zoomLevel != 1,
+        action: resetZoom
       },
     ]
   }); 
