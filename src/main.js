@@ -146,6 +146,7 @@ let config = {
     quit: "q",
     copy: "c",
     paste: "v",
+    delete: "Backspace",
     group: "g",
   }
 }
@@ -361,6 +362,37 @@ let actions = {
     rollback: (action) => {
       let object = pointerList[action.uuid]
       context.activeObject.removeChild(object)
+      updateUI()
+    }
+  },
+  deleteObjects: {
+    create: (objects) => {
+      redoStack.length = 0
+      let serializableObjects = []
+      for (let object of objects) {
+        serializableObjects.push(object.idx)
+      }
+      let action = {
+        objects: serializableObjects,
+        frame: context.activeObject.currentFrame.idx,
+        oldState: structuredClone(context.activeObject.currentFrame.keys)
+      }
+      undoStack.push({name: 'deleteObjects', action: action})
+      actions.deleteObjects.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let frame = pointerList[action.frame]
+      for (let object of action.objects) {
+        delete frame.keys[object]
+      }
+      updateUI()
+    },
+    rollback: (action) => {
+      let frame = pointerList[action.frame]
+      for (let object of action.objects) {
+        frame.keys[object] = action.oldState[object]
+      }
       updateUI()
     }
   },
@@ -1624,14 +1656,16 @@ class GraphicsObject {
       }
       if (mode == "select") {
         for (let item of context.selection) {
-          ctx.save()
-          ctx.strokeStyle = "#00ffff"
-          ctx.lineWidth = 1;
-          ctx.beginPath()
-          let bbox = item.bbox()
-          ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
-          ctx.stroke()
-          ctx.restore()
+          if (item.idx in this.currentFrame.keys) {
+            ctx.save()
+            ctx.strokeStyle = "#00ffff"
+            ctx.lineWidth = 1;
+            ctx.beginPath()
+            let bbox = item.bbox()
+            ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
+            ctx.stroke()
+            ctx.restore()
+          }
         }
         if (context.selectionRect) {
           ctx.save()
@@ -1784,7 +1818,7 @@ window.addEventListener("keydown", (e) => {
     // shortcut = shortcut.split("+")
     // TODO
   // }
-  // console.log(e)
+  console.log(e)
   let mod = macOS ? e.metaKey : e.ctrlKey;
   if (e.key == config.shortcuts.playAnimation) {
     console.log("Spacebar pressed")
@@ -1807,6 +1841,8 @@ window.addEventListener("keydown", (e) => {
     copy()
   } else if (e.key == config.shortcuts.paste && mod == true) {
     paste()
+  } else if (e.key == config.shortcuts.delete) {
+    delete_action()
   } else if (e.key == config.shortcuts.group && mod == true) {
     actions.group.create()
   }
@@ -2060,6 +2096,14 @@ function paste() {
   updateUI()
 }
 
+function delete_action() {
+  if (context.selection) {
+    actions.deleteObjects.create(context.selection)
+    context.selection = []
+  }
+  updateUI()
+}
+
 function addFrame() {
   if (context.activeObject.currentFrameNum >= context.activeObject.activeLayer.frames.length) {
     actions.addFrame.create()
@@ -2298,6 +2342,7 @@ function stage() {
               // Have to iterate in reverse order to grab the frontmost object when two overlap
               for (let i=context.activeObject.children.length-1; i>=0; i--) {
                 child = context.activeObject.children[i]
+                if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
                 // let bbox = child.bbox()
                 if (hitTest(mouse, child)) {
                     if (context.selection.indexOf(child) != -1) {
