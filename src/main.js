@@ -357,8 +357,10 @@ let actions = {
       updateMenu()
     },
     execute: async (action) => {
-      const player = new Tone.Player().toDestination();
-      await player.load(action.audiosrc)
+      const player = new Tone.Sampler().toDestination();
+      let buffer = new Tone.ToneAudioBuffer()
+      await buffer.load(action.audiosrc)
+      player.add("C1", buffer)
       // player.autostart = true;
       let newAudioLayer = new AudioLayer()
       let object = pointerList[action.object]
@@ -371,9 +373,11 @@ let actions = {
       }
       pointerList[action.uuid] = soundObj
       newAudioLayer.sounds[action.uuid] = soundObj
+      // TODO: change start time
+      newAudioLayer.track.add(0,action.uuid)
       object.audioLayers.push(newAudioLayer)
       // TODO: compute image height better
-      generateWaveform(img, player.buffer, 50, 25, fileFps)
+      generateWaveform(img, buffer, 50, 25, fileFps)
       updateLayers()
     },
     rollback: (action) => {
@@ -1085,6 +1089,16 @@ class Layer {
 class AudioLayer {
   constructor(uuid) {
     this.sounds = {}
+      this.track = new Tone.Part(((time, sound) => {
+        console.log(this.sounds[sound])
+        this.sounds[sound].player.triggerAttack("C1", time)
+      }))
+    // const synth = new Tone.Synth().toDestination();
+    // this.track = new Tone.Part(((time, note) => {
+    //     // the notes given as the second element in the array
+    //     // will be passed in as the second argument
+    //     synth.triggerAttackRelease(note, "8n", time);
+    // }), [[0, "C2"], ["0:2", "C3"], ["0:3:2", "G2"]]).start(0);
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -2004,7 +2018,30 @@ window.addEventListener("keydown", (e) => {
 function playPause() {
   playing = !playing
   if (playing) {
+    // Tone.getTransport().clear()    
+    for (let audioLayer of context.activeObject.audioLayers) {
+      console.log(1)
+      audioLayer.track.start(0)
+    }
+    Tone.getTransport().seconds = 0
+    console.log(2)
+    console.log(Tone.getTransport().state)  
+    Tone.getTransport().start()
+    console.log(3)
     advanceFrame()
+  } else {
+    console.log(4)
+    for (let audioLayer of context.activeObject.audioLayers) {
+      for (let i in audioLayer.sounds) {
+        let sound = audioLayer.sounds[i]
+        console.log(sound.player)
+        sound.player.releaseAll()
+      }
+    }
+    console.log(5)
+    // Tone.getTransport().stop()
+    console.log(6)
+
   }
 }
 
@@ -2018,6 +2055,7 @@ function advanceFrame() {
       setTimeout(advanceFrame, 1000/fileFps)
     } else {
       playing = false
+      Tone.getTransport().stop()
     }
   }
 }
@@ -3485,3 +3523,23 @@ function getMimeType(filePath) {
       return null; // Unsupported file type
   }
 }
+
+function startToneOnUserInteraction() {
+  // Function to handle the first interaction (click or key press)
+  const startTone = () => {
+    Tone.start().then(() => {
+      console.log("Tone.js started!");
+    }).catch(err => {
+      console.error("Error starting Tone.js:", err);
+    });
+
+    // Remove the event listeners to prevent them from firing again
+    document.removeEventListener("click", startTone);
+    document.removeEventListener("keydown", startTone);
+  };
+
+  // Add event listeners for mouse click and key press
+  document.addEventListener("click", startTone);
+  document.addEventListener("keydown", startTone);
+}
+startToneOnUserInteraction()
