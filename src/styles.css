@@ -327,6 +327,11 @@ button {
   border-bottom: 1px solid #bbb;
   flex-shrink: 0;
 }
+.layer-header.audio {
+  background-color: #8281cc;
+  border-top: 1px solid #9a99db;
+  border-bottom: 1px solid #817db9;
+}
 .layer-track {
   min-width: 100%;
   height: calc( 2 * var(--lineheight));
@@ -547,6 +552,11 @@ button {
     border-top: 1px solid #4f4f4f;
     border-bottom: 1px solid #222222;
   }
+  .layer-header.audio {
+    background-color: #23253b;
+    border-top: 1px solid #403f4e;
+    border-bottom: 1px solid #1f1e24;
+  }
   .layer-track {
     background-image: 
       linear-gradient(to right, transparent 23px, #1a1a1a 23px 25px), /* Dark mode frame dividers */
@@ -582,5 +592,8 @@ button {
   }
   .horiz_break {
     background-color: #2f2f2f;
+  }
+  .audioWaveform {
+    filter: invert(1);
   }
 }

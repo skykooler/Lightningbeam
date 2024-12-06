@@ -130,4 +130,84 @@ function camelToWords(camelCaseString) {
   return words.replace(/\b\w/g, char => char.toUpperCase());
 }
 
-export { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerp, lerpColor, camelToWords };
+function generateWaveform(img, buffer, imgHeight, frameWidth, framesPerSecond) {
+  // Total duration of the audio in seconds
+  const duration = buffer.duration;
+  const canvasWidth = Math.ceil(frameWidth * framesPerSecond * duration);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = canvasWidth;
+  canvas.height = imgHeight;
+
+  // Get the audio buffer's data (mono or stereo channels)
+  const channels = buffer.numberOfChannels;
+  const leftChannelData = buffer.getChannelData(0); // Left channel
+  const rightChannelData = channels > 1 ? buffer.getChannelData(1) : null;  // Right channel, if stereo
+  const width = canvas.width;
+  const step = Math.ceil(leftChannelData.length / width); // Step size for drawing
+  const halfHeight = canvas.height / 2;
+  ctx.fillStyle = '#000';
+    
+  function drawChannel(channelData) {
+    const samples = [];
+
+    // Draw the waveform by taking the maximum value of samples in each window
+    for (let i = 0; i < width; i++) {
+      let maxSample = -Infinity;
+
+      // Calculate the maximum value within the window
+      for (let j = i * step; j < (i + 1) * step && j < channelData.length; j++) {
+        maxSample = Math.max(maxSample, Math.abs(channelData[j])); // Find the maximum absolute sample
+      }
+
+      // Normalize and scale the max sample to fit within the canvas height
+      const y = maxSample * halfHeight;
+
+      samples.push([i, y]);
+    }
+
+    // Fill the waveform
+    if (samples.length > 0) {
+      ctx.beginPath();
+      ctx.moveTo(samples[0][0], samples[0][1]);
+      for (let i = 0; i < samples.length; i++) {
+        ctx.lineTo(samples[i][0], samples[i][1]);
+      }
+      for (let i = samples.length - 1; i >= 0; i--) {
+        ctx.lineTo(samples[i][0], -samples[i][1]);
+      }
+      ctx.fill();
+    }
+  }
+
+  if (channels>1) {
+    ctx.save();
+    ctx.translate(0, halfHeight*0.5);
+    drawChannel(leftChannelData);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(0, halfHeight*1.5);
+    drawChannel(rightChannelData);
+    ctx.restore();
+  } else {
+    ctx.save();
+    ctx.translate(0, halfHeight);
+    drawChannel(leftChannelData);
+    ctx.restore();
+  }
+  
+  const dataUrl = canvas.toDataURL("image/png");
+  img.src = dataUrl;
+}
+
+
+export {
+  titleCase,
+  getMousePositionFraction,
+  getKeyframesSurrounding,
+  invertPixels,
+  lerp,
+  lerpColor,
+  camelToWords,
+  generateWaveform
+};

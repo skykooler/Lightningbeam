@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -341,6 +341,44 @@ let actions = {
       if (selectIndex >= 0) {
         context.selection.splice(selectIndex, 1)
       }
+    }
+  },
+  addAudio: {
+    create: (audiosrc, object) => {
+      redoStack.length = 0
+      let action = {
+        audiosrc:audiosrc,
+        uuid: uuidv4(),
+        frameNum: object.currentFrameNum,
+        object: object.idx
+      }
+      undoStack.push({name: 'addAudio', action: action})
+      actions.addAudio.execute(action)
+      updateMenu()
+    },
+    execute: async (action) => {
+      const player = new Tone.Player().toDestination();
+      await player.load(action.audiosrc)
+      // player.autostart = true;
+      let newAudioLayer = new AudioLayer()
+      let object = pointerList[action.object]
+      const img = new Image();
+      img.className = "audioWaveform"
+      let soundObj = {
+        player: player,
+        start: action.frameNum,
+        img: img
+      }
+      pointerList[action.uuid] = soundObj
+      newAudioLayer.sounds[action.uuid] = soundObj
+      object.audioLayers.push(newAudioLayer)
+      // TODO: compute image height better
+      generateWaveform(img, player.buffer, 50, 25, fileFps)
+      updateLayers()
+    },
+    rollback: (action) => {
+      // your code here
+      updateLayers()
     }
   },
   duplicateObject: {
@@ -1044,6 +1082,30 @@ class Layer {
   }
 }
 
+class AudioLayer {
+  constructor(uuid) {
+    this.sounds = {}
+    if (!uuid) {
+      this.idx = uuidv4()
+    } else {
+      this.idx = uuid
+    }
+  }
+  copy() {
+    let newAudioLayer = new AudioLayer()
+    for (let sound of this.sounds) {
+      let newPlayer = new Tone.Player(sound.buffer()).toDestination()
+      let idx = uuidv4()
+      let soundObj = {
+        player: newPlayer,
+        start: sound.start
+      }
+      pointerList[idx] = soundObj
+      newAudioLayer.sounds[idx] = soundObj
+    }
+  }
+}
+
 class BaseShape {
   constructor(startx, starty) {
     this.startx = startx
@@ -1454,6 +1516,7 @@ class GraphicsObject {
     this.currentFrameNum = 0;
     this.currentLayer = 0;
     this.layers = [new Layer(uuid+"-L1")]
+    this.audioLayers = []
     // this.children = []
 
     this.shapes = []
@@ -1786,6 +1849,9 @@ class GraphicsObject {
     newGO.layers = []
     for (let layer of this.layers) {
       newGO.layers.push(layer.copy())
+    }
+    for (let audioLayer of this.audioLayers) {
+      newGO.audioLayers.push(audioLayer.copy())
     }
 
     return newGO;
@@ -2303,6 +2369,7 @@ function stage() {
     const imageTypes = ['image/png', 'image/gif', 'image/avif', 'image/jpeg',
        'image/webp', //'image/svg+xml' // Disabling SVG until we can export them nicely
     ];
+    const audioTypes = ['audio/mpeg'] // TODO: figure out what other audio formats Tone.js accepts
     if (e.dataTransfer.items) {
       let i = 0
       for (let item of e.dataTransfer.items) {
@@ -2318,17 +2385,22 @@ function stage() {
             
             reader.onload = function(event) {
               let imgsrc = event.target.result;  // This is the data URL
-              // console.log(imgsrc)
-  
-              // img.onload = function() {
-                actions.addImageObject.create(
-                  mouse.x, mouse.y, imgsrc, reader.ix, context.activeObject);
-              // };
+              actions.addImageObject.create(
+                mouse.x, mouse.y, imgsrc, reader.ix, context.activeObject);
             };
   
             reader.onerror = function(error) {
               console.error("Error reading file as data URL", error);
             };
+          } else if (audioTypes.includes(file.type)) {
+            let reader = new FileReader();
+            
+            // Read the file as a data URL
+            reader.readAsDataURL(file);
+            reader.onload = function(event) {
+              let audiosrc = event.target.result;
+              actions.addAudio.create(audiosrc, context.activeObject)
+            }
           }
           i++;
         }
@@ -3043,6 +3115,21 @@ function updateLayers() {
         highlightObj.className = "frame-highlight"
         highlightObj.style.left = `${(context.activeObject.currentFrameNum - frameCount) * 25}px`;
         layerTrack.appendChild(highlightObj)
+      }
+    }
+    for (let audioLayer of context.activeObject.audioLayers) {
+      let layerHeader = document.createElement("div")
+      layerHeader.className = "layer-header"
+      layerHeader.classList.add("audio")
+      layerspanel.appendChild(layerHeader)
+      let layerTrack = document.createElement("div")
+      layerTrack.className = "layer-track"
+      layerTrack.classList.add("audio")
+      framescontainer.appendChild(layerTrack)
+      console.log(audioLayer)
+      for (let i in audioLayer.sounds) {
+        let sound = audioLayer.sounds[i]
+        layerTrack.appendChild(sound.img)
       }
     }
   }
