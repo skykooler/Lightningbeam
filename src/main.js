@@ -366,14 +366,19 @@ let actions = {
     }
   },
   deleteObjects: {
-    create: (objects) => {
+    create: (objects, shapes) => {
       redoStack.length = 0
       let serializableObjects = []
+      let serializableShapes = []
       for (let object of objects) {
         serializableObjects.push(object.idx)
       }
+      for (let shape of shapes) {
+        serializableShapes.push(shape.idx)
+      }
       let action = {
         objects: serializableObjects,
+        shapes: serializableShapes,
         frame: context.activeObject.currentFrame.idx,
         oldState: structuredClone(context.activeObject.currentFrame.keys)
       }
@@ -386,12 +391,18 @@ let actions = {
       for (let object of action.objects) {
         delete frame.keys[object]
       }
+      for (let shape of action.shapes) {
+        frame.shapes.splice(frame.shapes.indexOf(pointerList[shape]),1)
+      }
       updateUI()
     },
     rollback: (action) => {
       let frame = pointerList[action.frame]
       for (let object of action.objects) {
         frame.keys[object] = action.oldState[object]
+      }
+      for (let shape of action.shapes) {
+        frame.shapes.push(pointerList[shape])
       }
       updateUI()
     }
@@ -2097,8 +2108,8 @@ function paste() {
 }
 
 function delete_action() {
-  if (context.selection) {
-    actions.deleteObjects.create(context.selection)
+  if (context.selection.length || context.shapeselection.length) {
+    actions.deleteObjects.create(context.selection, context.shapeselection)
     context.selection = []
   }
   updateUI()
