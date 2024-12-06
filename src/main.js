@@ -1954,12 +1954,13 @@ function _newFile(width, height, fps) {
     stage.style.height = `${height}px`
   }
   updateUI()
+  updateLayers()
+  updateMenu()
 }
 
 async function newFile() {
   if (await confirmDialog("Create a new file? Unsaved work will be lost.", {title: "New file", kind: "warning"})) {
     showNewFileDialog()
-    // updateUI()
   }
 }
 
