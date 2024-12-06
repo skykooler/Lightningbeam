@@ -72,7 +72,8 @@ input,
 button {
   border-radius: 8px;
   border: 1px solid transparent;
-  padding: 0.6em 1.2em;
+  /* padding: 0.6em 1.2em; */
+  padding: 0.4em 1em;
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
@@ -329,9 +330,15 @@ button {
 .layer-track {
   min-width: 100%;
   height: calc( 2 * var(--lineheight));
-  background: repeating-linear-gradient(to right, transparent, transparent 24px, #aaa 24px, #aaa 25px),
-              repeating-linear-gradient(to right, #bbb, #bbb 100px, #aaa 100px, #aaa 125px);
-
+  /* background: repeating-linear-gradient(to right, transparent, transparent 24px, #aaa 24px, #aaa 25px),
+              repeating-linear-gradient(to right, #bbb, #bbb 100px, #aaa 100px, #aaa 125px); */
+  background-image: 
+    /* Layer 1: frame dividers */
+    linear-gradient(to right, transparent 24px, #aaa 24px 25px),
+    /* Layer 2: highlight every 5th frame */
+    linear-gradient(to right, #bbb 100px, #aaa 100px 125px);
+  background-repeat: repeat-x, repeat-x;
+  background-size: 25px 100%, 125px 100%;
   display: flex;
   flex-direction: row;
   border-top: 1px solid #bbb;
@@ -541,8 +548,9 @@ button {
     border-bottom: 1px solid #222222;
   }
   .layer-track {
-    background: repeating-linear-gradient(to right, transparent, transparent 24px, #3f3f3f 24px, #3f3f3f 25px),
-                repeating-linear-gradient(to right, #222222, #222222 100px, #151515 100px, #151515 125px);
+    background-image: 
+      linear-gradient(to right, transparent 23px, #1a1a1a 23px 25px), /* Dark mode frame dividers */
+      linear-gradient(to right, #121212 100px, #0a0a0a 100px 125px); /* Dark mode frame highlights */
     border-top: 1px solid #222222;
     border-bottom: 1px solid #3f3f3f;
   }
