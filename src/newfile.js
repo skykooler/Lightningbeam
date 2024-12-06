@@ -55,7 +55,7 @@ function createNewFileDialog(callback) {
     fpsInput.type = 'number';
     fpsInput.id = 'fps';
     fpsInput.classList.add('dialog-input');
-    fpsInput.value = '12'; // Default value
+    fpsInput.value = '24'; // Default value
     newFileDialog.appendChild(fpsInput);
 
     // Create Create button
