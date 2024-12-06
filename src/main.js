@@ -3152,8 +3152,8 @@ async function updateMenu() {
       },
       {
         text: "Delete",
-        enabled: false,
-        action: () => {}
+        enabled: (context.selection.length > 0 || context.shapeselection.length > 0),
+        action: delete_action
       },
     ]
   });
