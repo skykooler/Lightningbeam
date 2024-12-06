@@ -138,19 +138,19 @@ let config = {
   shortcuts: {
     playAnimation: " ",
     // undo: "<ctrl>+z"
-    undo: "z",
-    redo: "Z",
-    new: "n",
-    save: "s",
-    saveAs: "S",
-    open: "o",
-    quit: "q",
-    copy: "c",
-    paste: "v",
+    undo: "<mod>z",
+    redo: "<mod>Z",
+    new: "<mod>n",
+    save: "<mod>s",
+    saveAs: "<mod>S",
+    open: "<mod>o",
+    quit: "<mod>q",
+    copy: "<mod>c",
+    paste: "<mod>v",
     delete: "Backspace",
-    group: "g",
-    zoomIn: "+",
-    zoomOut: "-",
+    group: "<mod>g",
+    zoomIn: "<mod>+",
+    zoomOut: "<mod>-",
   }
 }
 
@@ -1833,87 +1833,105 @@ window.addEventListener("keydown", (e) => {
   // }
   console.log(e)
   let mod = macOS ? e.metaKey : e.ctrlKey;
-  if (e.key == config.shortcuts.playAnimation) {
-    console.log("Spacebar pressed")
-    playPause()
-  } else if (e.key == config.shortcuts.new && mod == true) {
-    newFile()
-  } else if (e.key == config.shortcuts.save && mod == true) {
-    save()
-  } else if (e.key == config.shortcuts.saveAs && mod == true) {
-    saveAs()
-  } else if (e.key == config.shortcuts.open && mod == true) {
-    open()
-  } else if (e.key == config.shortcuts.quit && mod == true) {
-    quit()
-  } else if (e.key == config.shortcuts.undo && mod == true) {
-    undo()
-  } else if (e.key == config.shortcuts.redo && mod == true) {
-    redo()
-  } else if (e.key == config.shortcuts.copy && mod == true) {
-    copy()
-  } else if (e.key == config.shortcuts.paste && mod == true) {
-    paste()
-  } else if (e.key == config.shortcuts.delete) {
-    delete_action()
-  } else if (e.key == config.shortcuts.group && mod == true) {
-    actions.group.create()
-  } else if (e.key == config.shortcuts.zoomIn && mod == true) {
-    zoomIn()
-  } else if (e.key == config.shortcuts.zoomOut && mod == true) {
-    zoomOut()
-  }
-  else if (e.key == "ArrowRight") {
-    if (mod == true) {
+  let key = (mod ? "<mod>" : "") + e.key
+  switch(key) {
+    case config.shortcuts.playAnimation:
+      console.log("Spacebar pressed")
+      playPause()
+      break;
+    case config.shortcuts.new:
+      newFile()
+      break;
+    case config.shortcuts.save:
+      save()
+      break;
+    case config.shortcuts.saveAs:
+      saveAs()
+      break;
+    case config.shortcuts.open:
+      open()
+      break;
+    case config.shortcuts.quit:
+      quit()
+      break;
+    case config.shortcuts.undo:
+      undo()
+      break;
+    case config.shortcuts.redo:
+      redo()
+      break;
+    case config.shortcuts.copy:
+      copy()
+      break;
+    case config.shortcuts.paste:
+      paste()
+      break;
+    case config.shortcuts.delete:
+      delete_action()
+      break;
+    case config.shortcuts.group:
+      actions.group.create()
+      break;
+    case config.shortcuts.zoomIn:
+      zoomIn()
+      break;
+    case config.shortcuts.zoomOut:
+      zoomOut()
+      break;
+    // TODO: put these in shortcuts
+    case "<mod>ArrowRight":
       advanceFrame()
-    } else if (context.selection) {
-      context.activeObject.currentFrame.saveState()
-      for (let item of context.selection) {
-        context.activeObject.currentFrame.keys[item.idx].x += 1
+      e.preventDefault()
+      break;
+    case "ArrowRight":
+      if (context.selection) {
+        context.activeObject.currentFrame.saveState()
+        for (let item of context.selection) {
+          context.activeObject.currentFrame.keys[item.idx].x += 1
+        }
+        actions.editFrame.create(context.activeObject.currentFrame)
+        updateUI()
       }
-      actions.editFrame.create(context.activeObject.currentFrame)
-      updateUI()
-    }
-    e.preventDefault()
-  }
-  else if (e.key == "ArrowLeft") {
-    if (mod == true) {
+      e.preventDefault()
+      break;
+    case "<mod>ArrowLeft":
       decrementFrame()
-    } else if (context.selection) {
-      context.activeObject.currentFrame.saveState()
-      for (let item of context.selection) {
-        context.activeObject.currentFrame.keys[item.idx].x -= 1
+      break;
+    case "ArrowLeft":
+      if (context.selection) {
+        context.activeObject.currentFrame.saveState()
+        for (let item of context.selection) {
+          context.activeObject.currentFrame.keys[item.idx].x -= 1
+        }
+        actions.editFrame.create(context.activeObject.currentFrame)
+        updateUI()
       }
-      actions.editFrame.create(context.activeObject.currentFrame)
-      updateUI()
-    }
-    e.preventDefault()
-  }
-  else if (e.key == "ArrowUp") {
-    if (mod == true) {
-      // no action yet for ctrl+up
-    } else if (context.selection) {
-      context.activeObject.currentFrame.saveState()
-      for (let item of context.selection) {
-        context.activeObject.currentFrame.keys[item.idx].y -= 1
+      e.preventDefault()
+      break;
+    case "ArrowUp":
+     if (context.selection) {
+        context.activeObject.currentFrame.saveState()
+        for (let item of context.selection) {
+          context.activeObject.currentFrame.keys[item.idx].y -= 1
+        }
+        actions.editFrame.create(context.activeObject.currentFrame)
+        updateUI()
       }
-      actions.editFrame.create(context.activeObject.currentFrame)
-      updateUI()
-    }
-    e.preventDefault()
-  }
-  else if (e.key == "ArrowDown") {
-    if (mod == true) {
-      // no action yet for ctrl+down
-    } else if (context.selection) {
-      context.activeObject.currentFrame.saveState()
-      for (let item of context.selection) {
-        context.activeObject.currentFrame.keys[item.idx].y += 1
+      e.preventDefault()
+      break;
+    case "ArrowDown":
+      if (context.selection) {
+        context.activeObject.currentFrame.saveState()
+        for (let item of context.selection) {
+          context.activeObject.currentFrame.keys[item.idx].y += 1
+        }
+        actions.editFrame.create(context.activeObject.currentFrame)
+        updateUI()
       }
-      actions.editFrame.create(context.activeObject.currentFrame)
-      updateUI()
-    }
-    e.preventDefault()
+      e.preventDefault()
+      break;
+    default:
+      break
   }
 })
 
