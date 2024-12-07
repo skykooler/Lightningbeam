@@ -506,6 +506,29 @@ let actions = {
       updateLayers()
     }
   },
+  changeLayerName: {
+    create: (layer, newName) => {
+      redoStack.length = 0
+      let action = {
+        layer: layer.idx,
+        newName: newName,
+        oldName: layer.name
+      }
+      undoStack.push({name: 'changeLayerName', action: action})
+      actions.changeLayerName.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let layer = pointerList[action.layer]
+      layer.name = action.newName
+      updateLayers()
+    },
+    rollback: (action) => {
+      let layer = pointerList[action.layer]
+      layer.name = action.oldName
+      updateLayers()
+    }
+  },
   editFrame: {
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
@@ -1959,6 +1982,9 @@ window.addEventListener("keydown", (e) => {
     // shortcut = shortcut.split("+")
     // TODO
   // }
+  if (e.target.contentEditable == "plaintext-only") {
+    return;
+  }
   console.log(e)
   let mod = macOS ? e.metaKey : e.ctrlKey;
   let key = (mod ? "<mod>" : "") + e.key
@@ -3173,6 +3199,13 @@ function updateLayers() {
       layerspanel.appendChild(layerHeader)
       let layerName = document.createElement("div")
       layerName.className = "layer-name"
+      layerName.contentEditable = "plaintext-only"
+      layerName.addEventListener("click", (e) => {
+        e.stopPropagation()
+      })
+      layerName.addEventListener("blur", (e) => {
+        actions.changeLayerName.create(layer, layerName.innerText)
+      })
       layerName.innerText = layer.name
       layerHeader.appendChild(layerName)
       layerHeader.addEventListener("click", (e) => {

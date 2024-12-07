@@ -326,6 +326,7 @@ button {
   border-top: 1px solid #ddd;
   border-bottom: 1px solid #aaa;
   flex-shrink: 0;
+  cursor: pointer;
 }
 .layer-header.active {
   background-color: #ccc;
@@ -338,6 +339,8 @@ button {
 .layer-name {
   padding-left: 1em;
   padding-top: 5px;
+  display: inline-block;
+  cursor: text;
 }
 .layer-track {
   min-width: 100%;
