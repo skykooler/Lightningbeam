@@ -48,6 +48,7 @@ let maxSmoothAngle = 0.6;
 
 let undoStack = [];
 let redoStack = [];
+let lastSaveIndex = 0;
 
 let layoutElements = []
 
@@ -2177,6 +2178,7 @@ async function _save(path) {
     const contents = JSON.stringify(fileData);
     await writeTextFile(path, contents)
     filePath = path
+    lastSaveIndex = undoStack.length - 1;
     console.log(`${path} saved successfully!`);
   } catch (error) {
     console.error("Error saving text file:", error);
@@ -2240,6 +2242,7 @@ async function open() {
             await actions[action.name].execute(action.action)
             undoStack.push(action)
           }
+          lastSaveIndex = undoStack.length - 1;
           updateUI()
         } else {
           await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
@@ -2255,6 +2258,12 @@ async function open() {
         await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
       }
     }
+  }
+}
+
+function revert() {
+  for (let _=0; undoStack.length > lastSaveIndex+1; _++) {
+    undo()
   }
 }
 
@@ -3427,6 +3436,11 @@ async function updateMenu() {
         text: 'Open File...',
         enabled: true,
         action: open,
+      },
+      {
+        text: 'Revert',
+        enabled: undoStack.length > lastSaveIndex,
+        action: revert,
       },
       {
         text: 'Import Image...',
