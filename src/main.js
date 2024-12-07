@@ -401,8 +401,8 @@ let actions = {
     execute: (action) => {
       // your code here
       let object = pointerList[action.object]
-      let newObj = object.copy()
-      newObj.idx = action.uuid
+      let newObj = object.copy(action.uuid)
+      // newObj.idx = action.uuid
       context.activeObject.addObject(newObj)
       updateUI()
     },
@@ -617,13 +617,16 @@ let actions = {
     execute: (action) => {
       let object = pointerList[action.object]
       let layer = pointerList[action.layer]
+      console.log(pointerList)
+      console.log(action.object)
+      console.log(object)
       let latestFrame = object.getFrame(Math.max(action.frameNum-1, 0))
       let newKeyframe = new Frame("keyframe", action.uuid)
       for (let key in latestFrame.keys) {
         newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
       }
       for (let shape of latestFrame.shapes) {
-        newKeyframe.shapes.push(shape.copy())
+        newKeyframe.shapes.push(shape.copy(action.uuid))
       }
       if (action.frameNum >= layer.frames.length) {
         for (const [index, idx] of Object.entries(action.addedFrames)) {
@@ -976,6 +979,7 @@ function selectVertex(context, mouse) {
   let closestDist = mouseTolerance;
   let closestVertex = undefined
   let closestShape = undefined
+  console.log(context.activeObject.currentFrame.shapes)
   for (let shape of context.activeObject.currentFrame.shapes) {
     if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
         mouse.x < shape.boundingBox.x.max + mouseTolerance &&
@@ -1121,12 +1125,12 @@ class Frame {
   saveState() {
     startProps[this.idx] = structuredClone(this.keys)
   }
-  copy() {
-    let newFrame = new Frame(this.frameType)
+  copy(idx) {
+    let newFrame = new Frame(this.frameType, idx.slice(0,8)+this.idx.slice(8))
     newFrame.keys = structuredClone(this.keys)
     newFrame.shapes = []
     for (let shape of this.shapes) {
-      newFrame.shapes.push(shape.copy())
+      newFrame.shapes.push(shape.copy(idx))
     }
     return newFrame
   }
@@ -1236,17 +1240,17 @@ class Layer {
       }
     }
   }
-  copy() {
-    let newLayer = new Layer()
+  copy(idx) {
+    let newLayer = new Layer(idx.slice(0,8)+this.idx.slice(8))
     let idxMapping = {}
     for (let child of this.children) {
-      let newChild = child.copy()
+      let newChild = child.copy(idx)
       idxMapping[child.idx] = newChild.idx
       newLayer.children.push(newChild)
     }
     newLayer.frames = []
     for (let frame of this.frames) {
-      let newFrame = frame.copy()
+      let newFrame = frame.copy(idx)
       newFrame.keys = {}
       for (let key in frame.keys) {
         newFrame.keys[idxMapping[key]] = structuredClone(frame.keys[key])
@@ -1270,11 +1274,12 @@ class AudioLayer {
       this.idx = uuid
     }
   }
-  copy() {
-    let newAudioLayer = new AudioLayer()
-    for (let sound of this.sounds) {
+  copy(idx) {
+    let newAudioLayer = new AudioLayer(idx.slice(0,8)+this.idx.slice(8))
+    for (let soundIdx in this.sounds) {
+      let sound = this.sounds[soundIdx]
       let newPlayer = new Tone.Player(sound.buffer()).toDestination()
-      let idx = uuidv4()
+      let idx = this.idx.slice(0,8)+soundIdx.slice(8)
       let soundObj = {
         player: newPlayer,
         start: sound.start
@@ -1430,8 +1435,8 @@ class Shape extends BaseShape {
   clear() {
     this.curves = []
   }
-  copy() {
-    let newShape = new Shape(this.startx, this.starty, {}, undefined, this.shapeId)
+  copy(idx) {
+    let newShape = new Shape(this.startx, this.starty, {}, idx.slice(0,8)+this.idx.slice(8), this.shapeId)
     newShape.startx = this.startx;
     newShape.starty = this.starty;
     for (let curve of this.curves) {
@@ -1925,8 +1930,10 @@ class GraphicsObject {
       scale_y: this.scale_y
     }
   }
-  copy() {
-    let newGO = new GraphicsObject()
+  copy(idx) {
+    let newGO = new GraphicsObject(idx.slice(0,8)+this.idx.slice(8))
+    console.log(pointerList)
+    console.log(newGO.idx)
     newGO.x = this.x;
     newGO.y = this.y;
     newGO.rotation = this.rotation;
@@ -1936,10 +1943,10 @@ class GraphicsObject {
 
     newGO.layers = []
     for (let layer of this.layers) {
-      newGO.layers.push(layer.copy())
+      newGO.layers.push(layer.copy(idx))
     }
     for (let audioLayer of this.audioLayers) {
-      newGO.audioLayers.push(audioLayer.copy())
+      newGO.audioLayers.push(audioLayer.copy(idx))
     }
 
     return newGO;
@@ -2567,10 +2574,11 @@ function stage() {
       case "ellipse":
       case "draw":
         context.mouseDown = true
-        context.activeShape = new Shape(mouse.x, mouse.y, context, true, true)
+        context.activeShape = new Shape(mouse.x, mouse.y, context, uuidv4())
         context.lastMouse = mouse
         break;
       case "select":
+        if (context.activeObject.currentFrame.frameType != "keyframe") break;
         let selection = selectVertex(context, mouse)
         if (selection) {
           context.dragging = true
@@ -2785,6 +2793,7 @@ function stage() {
         }
         break;
       case "select":
+        if (context.activeObject.currentFrame.frameType!="keyframe") break;
         if (context.dragging) {
           if (context.activeVertex) {
             let vert = context.activeVertex
