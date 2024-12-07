@@ -61,7 +61,6 @@ let fileWidth = 1500
 let fileHeight = 1000
 let fileFps = 12
 
-let zoomLevel = 1
 
 let playing = false
 
@@ -132,7 +131,8 @@ let context = {
   selectionRect: undefined,
   selection: [],
   shapeselection: [],
-  dragDirection: undefined,     
+  dragDirection: undefined,
+  zoomLevel: 1,
 }
 
 let config = {
@@ -921,8 +921,8 @@ function vectorDist(a, b) {
 function getMousePos(canvas, evt) {
   var rect = canvas.getBoundingClientRect();
   return {
-    x: (evt.clientX - rect.left) / zoomLevel,
-    y: (evt.clientY - rect.top) / zoomLevel
+    x: (evt.clientX - rect.left) / context.zoomLevel,
+    y: (evt.clientY - rect.top) / context.zoomLevel
   };
 }
 
@@ -2409,22 +2409,48 @@ async function render() {
   document.querySelector("body").style.cursor = "default"
 }
 
+function updateScrollPosition(zoomFactor) {
+  if (context.mousePos) {
+    for (let scroller of document.querySelectorAll(".scroll")) {
+      let stage = scroller.querySelector('.stage')
+      let scrollLeft = scroller.scrollLeft;
+      let scrollTop = scroller.scrollTop;
+
+      // Get the mouse position relative to the scroller (taking into account the scroller's position)
+      let scrollerMouseX = context.mousePos.x + scrollLeft;
+      let scrollerMouseY = context.mousePos.y + scrollTop;
+
+      let newScrollLeft = scrollerMouseX - (context.mousePos.x * zoomFactor);
+      let newScrollTop = scrollerMouseY - (context.mousePos.y * zoomFactor);
+
+      // Apply the scroll position adjustments
+      console.log(context.mousePos, scrollerMouseX, scrollerMouseY, newScrollLeft, newScrollTop)
+      scroller.scrollLeft = -newScrollLeft;
+      scroller.scrollTop = -newScrollTop;
+    }
+  }
+}
+
 function zoomIn() {
-  if (zoomLevel < 8) {
-    zoomLevel *= 2
+  let zoomFactor = 2
+  if (context.zoomLevel < 8) {
+    context.zoomLevel *= zoomFactor
+    updateScrollPosition(zoomFactor)
     updateUI()
     updateMenu()
   }
 }
 function zoomOut() {
-  if (zoomLevel > 1/8) {
-    zoomLevel /= 2
+  let zoomFactor = 0.5
+  if (context.zoomLevel > 1/8) {
+    context.zoomLevel *= zoomFactor
+    updateScrollPosition(zoomFactor)
     updateUI()
     updateMenu()
   }
 }
 function resetZoom() {
-  zoomLevel = 1;
+  context.zoomLevel = 1;
   updateUI()
   updateMenu()
 }
@@ -2445,7 +2471,6 @@ function stage() {
     cornerRect.classList.add("cornerRect")
     cornerRect.classList.add(i)
     cornerRect.addEventListener('mousedown', (e) => {
-      console.log(i)
       let bbox = undefined;
       let selection = {}
       for (let item of context.selection) {
@@ -2702,6 +2727,7 @@ function stage() {
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
+    context.mousePos = mouse
     switch (mode) {
       case "draw":
         context.activeCurve = undefined
@@ -3187,13 +3213,13 @@ function updateLayout(element) {
 
 function updateUI() {
   for (let canvas of canvases) {
-    canvas.width = fileWidth * zoomLevel
-    canvas.height = fileHeight * zoomLevel
-    canvas.style.width = `${fileWidth * zoomLevel}px`
-    canvas.style.height = `${fileHeight * zoomLevel}px`
+    canvas.width = fileWidth * context.zoomLevel
+    canvas.height = fileHeight * context.zoomLevel
+    canvas.style.width = `${fileWidth * context.zoomLevel}px`
+    canvas.style.height = `${fileHeight * context.zoomLevel}px`
     let ctx = canvas.getContext("2d")
     ctx.resetTransform();
-    ctx.scale(zoomLevel, zoomLevel)
+    ctx.scale(context.zoomLevel, context.zoomLevel)
     ctx.beginPath()
     ctx.fillStyle = "white"
     ctx.fillRect(0,0,fileWidth,fileHeight)
@@ -3592,7 +3618,7 @@ async function updateMenu() {
       },
       {
         text: "Reset Zoom",
-        enabled: zoomLevel != 1,
+        enabled: context.zoomLevel != 1,
         action: resetZoom
       },
     ]
