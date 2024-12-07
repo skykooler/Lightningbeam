@@ -357,10 +357,8 @@ let actions = {
       updateMenu()
     },
     execute: async (action) => {
-      const player = new Tone.Sampler().toDestination();
-      let buffer = new Tone.ToneAudioBuffer()
-      await buffer.load(action.audiosrc)
-      player.add("C1", buffer)
+      const player = new Tone.Player().toDestination();
+      await player.load(action.audiosrc)
       // player.autostart = true;
       let newAudioLayer = new AudioLayer()
       let object = pointerList[action.object]
@@ -377,7 +375,7 @@ let actions = {
       newAudioLayer.track.add(0,action.uuid)
       object.audioLayers.push(newAudioLayer)
       // TODO: compute image height better
-      generateWaveform(img, buffer, 50, 25, fileFps)
+      generateWaveform(img, player.buffer, 50, 25, fileFps)
       updateLayers()
     },
     rollback: (action) => {
@@ -1091,7 +1089,7 @@ class AudioLayer {
     this.sounds = {}
       this.track = new Tone.Part(((time, sound) => {
         console.log(this.sounds[sound])
-        this.sounds[sound].player.triggerAttack("C1", time)
+        this.sounds[sound].player.start(time)
       }))
     // const synth = new Tone.Synth().toDestination();
     // this.track = new Tone.Part(((time, note) => {
@@ -2018,29 +2016,21 @@ window.addEventListener("keydown", (e) => {
 function playPause() {
   playing = !playing
   if (playing) {
-    // Tone.getTransport().clear()    
     for (let audioLayer of context.activeObject.audioLayers) {
       console.log(1)
-      audioLayer.track.start(0)
+      for (let i in audioLayer.sounds) {
+        let sound = audioLayer.sounds[i]
+        sound.player.start(0,context.activeObject.currentFrameNum / fileFps)
+      }
     }
-    Tone.getTransport().seconds = 0
-    console.log(2)
-    console.log(Tone.getTransport().state)  
-    Tone.getTransport().start()
-    console.log(3)
     advanceFrame()
   } else {
-    console.log(4)
     for (let audioLayer of context.activeObject.audioLayers) {
       for (let i in audioLayer.sounds) {
         let sound = audioLayer.sounds[i]
-        console.log(sound.player)
-        sound.player.releaseAll()
+        sound.player.stop()
       }
     }
-    console.log(5)
-    // Tone.getTransport().stop()
-    console.log(6)
 
   }
 }
@@ -2055,7 +2045,12 @@ function advanceFrame() {
       setTimeout(advanceFrame, 1000/fileFps)
     } else {
       playing = false
-      Tone.getTransport().stop()
+      for (let audioLayer of context.activeObject.audioLayers) {
+        for (let i in audioLayer.sounds) {
+          let sound = audioLayer.sounds[i]
+          sound.player.stop()
+        }
+      }
     }
   }
 }
