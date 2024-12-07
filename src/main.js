@@ -1761,6 +1761,7 @@ class GraphicsObject {
         }
       }
       for (let child of layer.children) {
+        if (child==context.activeObject) continue;
         let idx = child.idx
         if (idx in frame.keys) {
           child.x = frame.keys[idx].x;
@@ -1885,6 +1886,7 @@ class GraphicsObject {
   }
   addObject(object, x=0, y=0) {
     this.children.push(object)
+    object.parent = this
     let idx = object.idx
     this.currentFrame.keys[idx] = {
       x: x,
@@ -2867,6 +2869,42 @@ function stage() {
     }
     updateUI()
   })
+  stage.addEventListener("dblclick", (e) => {
+    context.mouseDown = false
+    context.dragging = false
+    context.dragDirection = undefined
+    context.selectionRect = undefined
+    let mouse = getMousePos(stage, e)
+    modeswitcher:
+    switch(mode) {
+      case "select":
+        for (let i=context.activeObject.children.length-1; i>=0; i--) {
+          let child = context.activeObject.children[i]
+          if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
+          if (hitTest(mouse, child)) {
+            context.activeObject = child;
+            context.selection = [];
+            context.shapeselection = [];
+            updateUI()
+            updateLayers()
+            updateMenu()
+            break modeswitcher;
+          }
+        }
+        // we didn't click on a child, go up a level
+        if (context.activeObject.parent) {
+          context.selection = [context.activeObject]
+          context.shapeselection = []
+          context.activeObject = context.activeObject.parent
+          updateUI()
+          updateLayers()
+          updateMenu()
+        }
+        break
+      default:
+        break;
+    }
+  })
   return scroller
 }
 
@@ -3153,6 +3191,11 @@ function updateUI() {
 
     context.ctx = ctx;
     root.draw(context)
+    if (context.activeObject != root) {
+      ctx.fillStyle = "rgba(255,255,255,0.5)"
+      ctx.fillRect(0,0,fileWidth,fileHeight)
+      context.activeObject.draw(context)
+    }
     if (context.activeShape) {
       context.activeShape.draw(context)
     }
