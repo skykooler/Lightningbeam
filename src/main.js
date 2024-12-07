@@ -954,6 +954,7 @@ function selectCurve(context, mouse) {
   let closestCurve = undefined
   let closestShape = undefined
   for (let shape of context.activeObject.currentFrame.shapes) {
+    if (shape instanceof TempShape) continue;
     if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
         mouse.x < shape.boundingBox.x.max + mouseTolerance &&
         mouse.y > shape.boundingBox.y.min - mouseTolerance &&
@@ -979,8 +980,8 @@ function selectVertex(context, mouse) {
   let closestDist = mouseTolerance;
   let closestVertex = undefined
   let closestShape = undefined
-  console.log(context.activeObject.currentFrame.shapes)
   for (let shape of context.activeObject.currentFrame.shapes) {
+    if (shape instanceof TempShape) continue;
     if (mouse.x > shape.boundingBox.x.min - mouseTolerance &&
         mouse.x < shape.boundingBox.x.max + mouseTolerance &&
         mouse.y > shape.boundingBox.y.min - mouseTolerance &&
@@ -1296,6 +1297,15 @@ class BaseShape {
     this.starty = starty
     this.curves = []
     this.regions = [];
+    this.boundingBox = {
+      x: {min: startx, max: starty},
+      y: {min: starty, max: starty}
+    }
+  }
+  recalculateBoundingBox() {
+    for (let curve of this.curves) {
+      growBoundingBox(this.boundingBox, curve.bbox())
+    }
   }
   draw(context) {
     let ctx = context.ctx;
@@ -1373,6 +1383,7 @@ class TempShape extends BaseShape {
     this.strokeStyle = strokeStyle
     this.fillStyle = fillStyle
     this.inProgress = false
+    this.recalculateBoundingBox()
   }
 }
 
@@ -1387,10 +1398,6 @@ class Shape extends BaseShape {
     this.lineWidth = context.lineWidth
     this.filled = context.fillShape;
     this.stroked = context.strokeShape;
-    this.boundingBox = {
-      x: {min: startx, max: starty},
-      y: {min: starty, max: starty}
-    }
     this.quadtree = new Quadtree({x: {min: 0, max: 500}, y: {min: 0, max: 500}}, 4)
     if (!uuid) {
       this.idx = uuidv4()
@@ -1462,11 +1469,6 @@ class Shape extends BaseShape {
     newShape.stroked = this.stroked;
 
     return newShape
-  }
-  recalculateBoundingBox() {
-    for (let curve of this.curves) {
-      growBoundingBox(this.boundingBox, curve.bbox())
-    }
   }
   simplify(mode="corners") {
     this.quadtree.clear()
@@ -1939,6 +1941,7 @@ class GraphicsObject {
     newGO.rotation = this.rotation;
     newGO.scale_x = this.scale_x;
     newGO.scale_y = this.scale_y;
+    newGO.parent = this.parent;
     pointerList[this.idx] = this
 
     newGO.layers = []
@@ -2793,7 +2796,6 @@ function stage() {
         }
         break;
       case "select":
-        if (context.activeObject.currentFrame.frameType!="keyframe") break;
         if (context.dragging) {
           if (context.activeVertex) {
             let vert = context.activeVertex
