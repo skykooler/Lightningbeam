@@ -349,6 +349,7 @@ let actions = {
       let action = {
         audiosrc:audiosrc,
         uuid: uuidv4(),
+        layeruuid: uuidv4(),
         frameNum: object.currentFrameNum,
         object: object.idx
       }
@@ -360,7 +361,7 @@ let actions = {
       const player = new Tone.Player().toDestination();
       await player.load(action.audiosrc)
       // player.autostart = true;
-      let newAudioLayer = new AudioLayer()
+      let newAudioLayer = new AudioLayer(action.layeruuid)
       let object = pointerList[action.object]
       const img = new Image();
       img.className = "audioWaveform"
@@ -379,7 +380,9 @@ let actions = {
       updateLayers()
     },
     rollback: (action) => {
-      // your code here
+      let object = pointerList[action.object]
+      let layer = pointerList[action.layeruuid]
+      object.audioLayers.splice(object.audioLayers.indexOf(layer),1)
       updateLayers()
     }
   },
@@ -448,6 +451,59 @@ let actions = {
         frame.shapes.push(pointerList[shape])
       }
       updateUI()
+    }
+  },
+  addLayer: {
+    create: () => {
+      redoStack.length = 0
+      let action = {
+        object: context.activeObject.idx,
+        uuid: uuidv4()
+      }
+      undoStack.push({name: 'addLayer', action: action})
+      actions.addLayer.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let object = pointerList[action.object]
+      let layer = new Layer(action.uuid)
+      layer.name = `Layer ${object.layers.length + 1}`
+      object.layers.push(layer)
+      updateLayers()
+    },
+    rollback: (action) => {
+      let object = pointerList[action.object]
+      let layer = pointerList[action.uuid]
+      object.layers.splice(object.layers.indexOf(layer),1)
+      updateLayers()
+    }
+  },
+  deleteLayer: {
+    create: (layer) => {
+      redoStack.length = 0
+      if (!(layer instanceof Layer)) {
+        layer = context.activeObject.activeLayer
+      }
+      let action = {
+        object: context.activeObject.idx,
+        layer: layer.idx,
+        index: context.activeObject.layers.indexOf(layer)
+      }
+      undoStack.push({name: 'deleteLayer', action: action})
+      actions.deleteLayer.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let object = pointerList[action.object]
+      let layer = pointerList[action.layer]
+      object.layers.splice(object.layers.indexOf(layer),1)
+      updateLayers()
+    },
+    rollback: (action) => {
+      let object = pointerList[action.object]
+      let layer = pointerList[action.layer]
+      object.layers.splice(action.index,0,layer)
+      updateLayers()
     }
   },
   editFrame: {
@@ -1060,8 +1116,101 @@ class Layer {
     } else {
       this.idx = uuid
     }
+    this.name = "Layer"
     this.frames = [new Frame("keyframe", this.idx+"-F1")]
     pointerList[this.idx] = this
+  }
+  getFrame(num) {
+    if (this.frames[num]) {
+      if (this.frames[num].frameType == "keyframe") {
+        return this.frames[num]
+      } else if (this.frames[num].frameType == "motion") {
+        let frameKeys = {}
+        let prevFrame = this.frames[num].prev
+        let nextFrame = this.frames[num].next
+        const t = (num - this.frames[num].prevIndex) / (this.frames[num].nextIndex - this.frames[num].prevIndex);
+        for (let key in prevFrame.keys) {
+          frameKeys[key] = {}
+          let prevKeyDict = prevFrame.keys[key]
+          let nextKeyDict = nextFrame.keys[key]
+          for (let prop in prevKeyDict) {
+            frameKeys[key][prop] = (1 - t) * prevKeyDict[prop] + t * nextKeyDict[prop];
+          }
+
+        }
+        let frame = new Frame("motion", "temp")
+        frame.keys = frameKeys
+        return frame
+      } else if (this.frames[num].frameType == "shape") {
+        let prevFrame = this.frames[num].prev
+        let nextFrame = this.frames[num].next
+        const t = (num - this.frames[num].prevIndex) / (this.frames[num].nextIndex - this.frames[num].prevIndex);
+        let shapes = []
+        for (let shape1 of prevFrame.shapes) {
+          if (shape1.curves.length == 0) continue;
+          let shape2 = undefined
+          for (let i of nextFrame.shapes) {
+            if (shape1.shapeId == i.shapeId) {
+              shape2 = i
+            }
+          }
+          if (shape2 != undefined) {
+            let path1 = [{type: "M", x:shape1.curves[0].points[0].x, y:shape1.curves[0].points[0].y}]
+            for (let curve of shape1.curves) {
+              path1.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
+                x2: curve.points[2].x, y2: curve.points[2].y,
+                x: curve.points[3].x, y:curve.points[3].y
+              })
+            }
+            let path2 = []
+            if (shape2.curves.length > 0) {
+              path2.push({type: "M", x:shape2.curves[0].points[0].x, y:shape2.curves[0].points[0].y})
+              for (let curve of shape2.curves) {
+                path2.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
+                  x2: curve.points[2].x, y2: curve.points[2].y,
+                  x: curve.points[3].x, y:curve.points[3].y
+                })
+              }
+            }
+            const interpolator = d3.interpolatePathCommands(path1, path2)
+            let current = interpolator(t)
+            let curves = []
+            let start = current.shift()
+            let {x, y} = start
+            for (let curve of current) {
+              curves.push(new Bezier(x, y, curve.x1, curve.y1, curve.x2, curve.y2, curve.x, curve.y))
+              x = curve.x
+              y = curve.y
+            }
+            let lineWidth = lerp(shape1.lineWidth, shape2.lineWidth, t)
+            let strokeStyle = lerpColor(shape1.strokeStyle, shape2.strokeStyle, t)
+            let fillStyle;
+            if (!shape1.fillImage) {
+              fillStyle = lerpColor(shape1.fillStyle, shape2.fillStyle, t)
+            }
+            shapes.push(new TempShape(
+              start.x, start.y, curves, shape1.lineWidth,
+              shape1.stroked, shape1.filled, strokeStyle, fillStyle
+            ))
+          }
+        }
+        let frame = new Frame("shape", "temp")
+        frame.shapes = shapes
+        return frame
+      } else {
+        for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
+          if (this.frames[i].frameType == "keyframe") {
+            return this.frames[i]
+          }
+        }
+      }
+    } else {
+      for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
+        if (this.frames[i].frameType == "keyframe") {
+          return this.frames[i]
+        }
+      }
+    }
   }
   copy() {
     let newLayer = new Layer()
@@ -1091,12 +1240,6 @@ class AudioLayer {
         console.log(this.sounds[sound])
         this.sounds[sound].player.start(time)
       }))
-    // const synth = new Tone.Synth().toDestination();
-    // this.track = new Tone.Part(((time, note) => {
-    //     // the notes given as the second element in the array
-    //     // will be passed in as the second argument
-    //     synth.triggerAttackRelease(note, "8n", time);
-    // }), [[0, "C2"], ["0:2", "C3"], ["0:3:2", "G2"]]).start(0);
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -1546,103 +1689,7 @@ class GraphicsObject {
     return Math.max(this.layers.map((layer)=>{return layer.frames.length}))
   }
   getFrame(num) {
-    if (this.activeLayer.frames[num]) {
-      if (this.activeLayer.frames[num].frameType == "keyframe") {
-        return this.activeLayer.frames[num]
-      } else if (this.activeLayer.frames[num].frameType == "motion") {
-        let frameKeys = {}
-        let prevFrame = this.activeLayer.frames[num].prev
-        let nextFrame = this.activeLayer.frames[num].next
-        const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
-        for (let key in prevFrame.keys) {
-          frameKeys[key] = {}
-          let prevKeyDict = prevFrame.keys[key]
-          let nextKeyDict = nextFrame.keys[key]
-          for (let prop in prevKeyDict) {
-            frameKeys[key][prop] = (1 - t) * prevKeyDict[prop] + t * nextKeyDict[prop];
-          }
-
-        }
-        let frame = new Frame("motion", "temp")
-        frame.keys = frameKeys
-        return frame
-      } else if (this.activeLayer.frames[num].frameType == "shape") {
-        let prevFrame = this.activeLayer.frames[num].prev
-        let nextFrame = this.activeLayer.frames[num].next
-        const t = (num - this.activeLayer.frames[num].prevIndex) / (this.activeLayer.frames[num].nextIndex - this.activeLayer.frames[num].prevIndex);
-        let shapes = []
-        for (let shape1 of prevFrame.shapes) {
-          if (shape1.curves.length == 0) continue;
-          let shape2 = undefined
-          for (let i of nextFrame.shapes) {
-            if (shape1.shapeId == i.shapeId) {
-              shape2 = i
-            }
-          }
-          if (shape2 != undefined) {
-            let path1 = [{type: "M", x:shape1.curves[0].points[0].x, y:shape1.curves[0].points[0].y}]
-            for (let curve of shape1.curves) {
-              path1.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
-                x2: curve.points[2].x, y2: curve.points[2].y,
-                x: curve.points[3].x, y:curve.points[3].y
-              })
-            }
-            let path2 = []
-            if (shape2.curves.length > 0) {
-              path2.push({type: "M", x:shape2.curves[0].points[0].x, y:shape2.curves[0].points[0].y})
-              for (let curve of shape2.curves) {
-                path2.push({type:"C", x1:curve.points[1].x, y1:curve.points[1].y, 
-                  x2: curve.points[2].x, y2: curve.points[2].y,
-                  x: curve.points[3].x, y:curve.points[3].y
-                })
-              }
-            }
-            const interpolator = d3.interpolatePathCommands(path1, path2)
-            let current = interpolator(t)
-            let curves = []
-            let start = current.shift()
-            let {x, y} = start
-            for (let curve of current) {
-              curves.push(new Bezier(x, y, curve.x1, curve.y1, curve.x2, curve.y2, curve.x, curve.y))
-              x = curve.x
-              y = curve.y
-            }
-            let lineWidth = lerp(shape1.lineWidth, shape2.lineWidth, t)
-            let strokeStyle = lerpColor(shape1.strokeStyle, shape2.strokeStyle, t)
-            let fillStyle;
-            if (!shape1.fillImage) {
-              fillStyle = lerpColor(shape1.fillStyle, shape2.fillStyle, t)
-            }
-            shapes.push(new TempShape(
-              start.x, start.y, curves, shape1.lineWidth,
-              shape1.stroked, shape1.filled, strokeStyle, fillStyle
-            ))
-          }
-        }
-        let frame = new Frame("shape", "temp")
-        frame.shapes = shapes
-        return frame
-      } else {
-        for (let i=Math.min(num, this.activeLayer.frames.length-1); i>=0; i--) {
-          if (this.activeLayer.frames[i].frameType == "keyframe") {
-            return this.activeLayer.frames[i]
-          }
-        }
-      }
-    } else {
-      for (let i=Math.min(num, this.activeLayer.frames.length-1); i>=0; i--) {
-        if (this.activeLayer.frames[i].frameType == "keyframe") {
-          return this.activeLayer.frames[i]
-        }
-      }
-    }
-  }
-  get maxFrame() {
-    let maxFrames = []
-    for (let layer of this.layers) {
-      maxFrames.push(layer.frames.length)
-    }
-    return Math.max(maxFrames)
+    return this.activeLayer.getFrame(num)
   }
   bbox() {
     let bbox;
@@ -1679,29 +1726,32 @@ class GraphicsObject {
     // if (this.currentFrameNum>=this.maxFrame) {
     //   this.currentFrameNum = 0;
     // }
-    for (let shape of this.currentFrame.shapes) {
-      if (context.shapeselection.indexOf(shape) >= 0) {
-        invertPixels(ctx, fileWidth, fileHeight)
-      }
-      shape.draw(context)
-      if (context.shapeselection.indexOf(shape) >= 0) {
-        invertPixels(ctx, fileWidth, fileHeight)
-      }
-    }
-    for (let child of this.children) {
-      let idx = child.idx
-      if (idx in this.currentFrame.keys) {
-        child.x = this.currentFrame.keys[idx].x;
-        child.y = this.currentFrame.keys[idx].y;
-        child.rotation = this.currentFrame.keys[idx].rotation;
-        child.scale_x = this.currentFrame.keys[idx].scale_x;
-        child.scale_y = this.currentFrame.keys[idx].scale_y;
-        ctx.save()
-        child.draw(context)
-        if (true) {
-
+    for (let layer of this.layers) {
+      let frame = layer.getFrame(this.currentFrameNum)
+      for (let shape of frame.shapes) {
+        if (context.shapeselection.indexOf(shape) >= 0) {
+          invertPixels(ctx, fileWidth, fileHeight)
         }
-        ctx.restore()
+        shape.draw(context)
+        if (context.shapeselection.indexOf(shape) >= 0) {
+          invertPixels(ctx, fileWidth, fileHeight)
+        }
+      }
+      for (let child of layer.children) {
+        let idx = child.idx
+        if (idx in frame.keys) {
+          child.x = frame.keys[idx].x;
+          child.y = frame.keys[idx].y;
+          child.rotation = frame.keys[idx].rotation;
+          child.scale_x = frame.keys[idx].scale_x;
+          child.scale_y = frame.keys[idx].scale_y;
+          ctx.save()
+          child.draw(context)
+          if (true) {
+
+          }
+          ctx.restore()
+        }
       }
     }
     if (this == context.activeObject) {
@@ -3117,7 +3167,19 @@ function updateLayers() {
     for (let layer of context.activeObject.layers) {
       let layerHeader = document.createElement("div")
       layerHeader.className = "layer-header"
+      if (context.activeObject.activeLayer == layer) {
+        layerHeader.classList.add("active")
+      }
       layerspanel.appendChild(layerHeader)
+      let layerName = document.createElement("div")
+      layerName.className = "layer-name"
+      layerName.innerText = layer.name
+      layerHeader.appendChild(layerName)
+      layerHeader.addEventListener("click", (e) => {
+        context.activeObject.currentLayer = context.activeObject.layers.indexOf(layer)
+        updateLayers()
+        updateUI()
+      })
       let layerTrack = document.createElement("div")
       layerTrack.className = "layer-track"
       framescontainer.appendChild(layerTrack)
@@ -3360,6 +3422,22 @@ async function updateMenu() {
     ]
   })
 
+  const layerSubmenu = await Submenu.new({
+    text: "Layer",
+    items: [
+      {
+        text: "Add Layer",
+        enabled: true,
+        action: actions.addLayer.create
+      },
+      {
+        text: "Delete Layer",
+        enabled: context.activeObject.layers.length > 1,
+        action: actions.deleteLayer.create
+      },
+    ]
+  })
+
   newFrameMenuItem = {
     text: "New Frame",
     enabled: !activeFrame,
@@ -3440,7 +3518,7 @@ async function updateMenu() {
     ]
   });
 
-  let items = [fileSubmenu, editSubmenu, modifySubmenu, timelineSubmenu, viewSubmenu, helpSubmenu]
+  let items = [fileSubmenu, editSubmenu, modifySubmenu, layerSubmenu, timelineSubmenu, viewSubmenu, helpSubmenu]
   if (macOS) {
     items.unshift(appSubmenu)
   }

@@ -322,15 +322,22 @@ button {
 .layer-header {
   width: 100%;
   height: calc( 2 * var(--lineheight));
-  background-color: #ccc;
+  background-color: #bbb;
   border-top: 1px solid #ddd;
-  border-bottom: 1px solid #bbb;
+  border-bottom: 1px solid #aaa;
   flex-shrink: 0;
+}
+.layer-header.active {
+  background-color: #ccc;
 }
 .layer-header.audio {
   background-color: #8281cc;
   border-top: 1px solid #9a99db;
   border-bottom: 1px solid #817db9;
+}
+.layer-name {
+  padding-left: 1em;
+  padding-top: 5px;
 }
 .layer-track {
   min-width: 100%;
@@ -551,6 +558,9 @@ button {
     background-color: #3f3f3f;
     border-top: 1px solid #4f4f4f;
     border-bottom: 1px solid #222222;
+  }
+  .layer-header.active {
+    background-color: #444;
   }
   .layer-header.audio {
     background-color: #23253b;
