@@ -345,10 +345,11 @@ let actions = {
     }
   },
   addAudio: {
-    create: (audiosrc, object) => {
+    create: (audiosrc, object, audioname) => {
       redoStack.length = 0
       let action = {
         audiosrc:audiosrc,
+        audioname: audioname,
         uuid: uuidv4(),
         layeruuid: uuidv4(),
         frameNum: object.currentFrameNum,
@@ -362,7 +363,7 @@ let actions = {
       const player = new Tone.Player().toDestination();
       await player.load(action.audiosrc)
       // player.autostart = true;
-      let newAudioLayer = new AudioLayer(action.layeruuid)
+      let newAudioLayer = new AudioLayer(action.layeruuid, action.audioname)
       let object = pointerList[action.object]
       const img = new Image();
       img.className = "audioWaveform"
@@ -1263,7 +1264,7 @@ class Layer {
 }
 
 class AudioLayer {
-  constructor(uuid) {
+  constructor(uuid, name) {
     this.sounds = {}
       this.track = new Tone.Part(((time, sound) => {
         console.log(this.sounds[sound])
@@ -1274,9 +1275,14 @@ class AudioLayer {
     } else {
       this.idx = uuid
     }
+    if (!name) {
+      this.name = "Audio"
+    } else {
+      this.name = name
+    }
   }
   copy(idx) {
-    let newAudioLayer = new AudioLayer(idx.slice(0,8)+this.idx.slice(8))
+    let newAudioLayer = new AudioLayer(idx.slice(0,8)+this.idx.slice(8), this.name)
     for (let soundIdx in this.sounds) {
       let sound = this.sounds[soundIdx]
       let newPlayer = new Tone.Player(sound.buffer()).toDestination()
@@ -2554,7 +2560,7 @@ function stage() {
             reader.readAsDataURL(file);
             reader.onload = function(event) {
               let audiosrc = event.target.result;
-              actions.addAudio.create(audiosrc, context.activeObject)
+              actions.addAudio.create(audiosrc, context.activeObject, file.name)
             }
           }
           i++;
@@ -3348,6 +3354,17 @@ function updateLayers() {
         let sound = audioLayer.sounds[i]
         layerTrack.appendChild(sound.img)
       }
+      let layerName = document.createElement("div")
+      layerName.className = "layer-name"
+      layerName.contentEditable = "plaintext-only"
+      layerName.addEventListener("click", (e) => {
+        e.stopPropagation()
+      })
+      layerName.addEventListener("blur", (e) => {
+        actions.changeLayerName.create(audioLayer, layerName.innerText)
+      })
+      layerName.innerText = audioLayer.name
+      layerHeader.appendChild(layerName)
     }
   }
 }
