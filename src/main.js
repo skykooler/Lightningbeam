@@ -3502,6 +3502,11 @@ async function updateMenu() {
         action: importImage,
       },
       {
+        text: "Export...",
+        enabled: true,
+        action: render
+      },
+      {
         text: 'Quit',
         enabled: true,
         action: quit,
@@ -3623,11 +3628,6 @@ async function updateMenu() {
         text: "Play",
         enabled: false,
         action: () => {}
-      },
-      {
-        text: "Export",
-        enabled: true,
-        action: render
       },
     ]
   });
