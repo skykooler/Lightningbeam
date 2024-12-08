@@ -189,10 +189,18 @@ button {
   user-select: none;
 
   pointer-events: auto;
+  /* z-index: 2; */
 }
 .cornerRect:hover {
   width: 15px;
   height: 15px;
+}
+.cornerRotateRect {
+  position: absolute;
+  width: 50px;
+  height: 50px;
+  /* background-color: blue; */
+  pointer-events: auto;
 }
 .nw {
   top: 0px;
@@ -241,6 +249,10 @@ button {
   left: 0px;
   transform: translate(-50%, -50%);
   cursor:w-resize;
+}
+.cornerRotateRect.nw,.cornerRotateRect.ne,.cornerRotateRect.se,.cornerRotateRect.sw {
+  /* cursor: url("assets/arrow-counterclockwise.svg") 12 12, auto;   */
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' fill='currentColor' class='bi bi-arrow-counterclockwise' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z'/%3E%3Cpath d='M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466'/%3E%3C/svg%3E") 12 12, auto;
 }
 .toolbar {
   display: flex;

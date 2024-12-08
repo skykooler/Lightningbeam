@@ -2482,6 +2482,20 @@ function stage() {
   stageWrapper.className = "stageWrapper"
   let selectionRect = document.createElement("div")
   selectionRect.className = "selectionRect"
+  for (let i of ["nw", "ne", "se", "sw"]) {
+    let cornerRotateRect = document.createElement("div")
+    cornerRotateRect.classList.add("cornerRotateRect")
+    cornerRotateRect.classList.add(i)
+    cornerRotateRect.addEventListener('mouseup', (e) => {
+      const newEvent = new MouseEvent(e.type, e);
+      stage.dispatchEvent(newEvent)
+    })
+    cornerRotateRect.addEventListener('mousemove', (e) => {
+      const newEvent = new MouseEvent(e.type, e);
+      stage.dispatchEvent(newEvent)
+    })
+    selectionRect.appendChild(cornerRotateRect)
+  }
   for (let i of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
     let cornerRect = document.createElement("div")
     cornerRect.classList.add("cornerRect")
@@ -2524,6 +2538,7 @@ function stage() {
     })
     selectionRect.appendChild(cornerRect)
   }
+
   stage.addEventListener("drop", (e) => {
     e.preventDefault()
     let mouse = getMousePos(stage, e)
