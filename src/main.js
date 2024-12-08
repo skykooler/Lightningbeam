@@ -2179,7 +2179,7 @@ async function newFile() {
 async function _save(path) {
   try {
     const fileData = {
-      version: "1.1",
+      version: "1.2",
       width: fileWidth,
       height: fileHeight,
       fps: fileFps,
