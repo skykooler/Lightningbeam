@@ -3645,7 +3645,7 @@ async function updateMenu() {
         action: zoomOut
       },
       {
-        text: "Reset Zoom",
+        text: "Actual Size",
         enabled: context.zoomLevel != 1,
         action: resetZoom
       },
