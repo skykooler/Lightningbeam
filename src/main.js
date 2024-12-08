@@ -3653,8 +3653,8 @@ async function updateMenu() {
       },
       {
         text: "Play",
-        enabled: false,
-        action: () => {}
+        enabled: !playing,
+        action: playPause
       },
     ]
   });
