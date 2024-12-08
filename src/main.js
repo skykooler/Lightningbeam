@@ -483,6 +483,8 @@ let actions = {
   deleteLayer: {
     create: (layer) => {
       redoStack.length = 0
+      // Don't allow deleting the only layer
+      if (context.activeObject.layers.length==1) return;
       if (!(layer instanceof Layer)) {
         layer = context.activeObject.activeLayer
       }
@@ -498,13 +500,22 @@ let actions = {
     execute: (action) => {
       let object = pointerList[action.object]
       let layer = pointerList[action.layer]
+      let changelayer = false
+      if (object.activeLayer == layer) {
+        changelayer = true
+      }
       object.layers.splice(object.layers.indexOf(layer),1)
+      if (changelayer) {
+        object.currentLayer = 0
+      }
+      updateUI()
       updateLayers()
     },
     rollback: (action) => {
       let object = pointerList[action.object]
       let layer = pointerList[action.layer]
       object.layers.splice(action.index,0,layer)
+      updateUI( )
       updateLayers()
     }
   },
