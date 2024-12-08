@@ -335,9 +335,9 @@ button {
 .layer-header {
   width: 100%;
   height: calc( 2 * var(--lineheight));
-  background-color: #bbb;
+  background-color: #aaa;
   border-top: 1px solid #ddd;
-  border-bottom: 1px solid #aaa;
+  border-bottom: 1px solid #999;
   flex-shrink: 0;
   cursor: pointer;
 }
@@ -353,7 +353,11 @@ button {
   padding-left: 1em;
   padding-top: 5px;
   display: inline-block;
+  color: #666;
   cursor: text;
+}
+.layer-header.active > .layer-name {
+  color: #000;
 }
 .layer-track {
   min-width: 100%;
@@ -571,12 +575,18 @@ button {
     background-color: #222222;
   }
   .layer-header {
-    background-color: #3f3f3f;
+    background-color: #222;
     border-top: 1px solid #4f4f4f;
-    border-bottom: 1px solid #222222;
+    border-bottom: 1px solid #111;
   }
   .layer-header.active {
     background-color: #444;
+  }
+  .layer-name {
+    color: #aaa
+  }
+  .layer-header.active > .layer-name {
+    color: #fff;
   }
   .layer-header.audio {
     background-color: #23253b;
