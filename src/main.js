@@ -471,6 +471,7 @@ let actions = {
       let layer = new Layer(action.uuid)
       layer.name = `Layer ${object.layers.length + 1}`
       object.layers.push(layer)
+      object.currentLayer = object.layers.indexOf(layer)
       updateLayers()
     },
     rollback: (action) => {
