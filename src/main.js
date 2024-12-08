@@ -1160,6 +1160,7 @@ class Layer {
     }
     this.name = "Layer"
     this.frames = [new Frame("keyframe", this.idx+"-F1")]
+    this.visible = true
     pointerList[this.idx] = this
   }
   getFrame(num) {
@@ -1272,6 +1273,11 @@ class Layer {
       newLayer.frames.push(newFrame)
     }
     return newLayer
+  }
+  toggleVisibility() {
+    this.visible = !this.visible
+    updateUI()
+    updateMenu()
   }
 }
 
@@ -1776,6 +1782,7 @@ class GraphicsObject {
     //   this.currentFrameNum = 0;
     // }
     for (let layer of this.layers) {
+      if (!layer.visible) continue;
       let frame = layer.getFrame(this.currentFrameNum)
       for (let shape of frame.shapes) {
         if (context.shapeselection.indexOf(shape) >= 0) {
@@ -3611,6 +3618,11 @@ async function updateMenu() {
         enabled: context.activeObject.layers.length > 1,
         action: actions.deleteLayer.create
       },
+      {
+        text: context.activeObject.activeLayer.visible ? "Hide Layer" : "Show Layer",
+        enabled: true,
+        action: () => {context.activeObject.activeLayer.toggleVisibility()}
+      }
     ]
   })
 
