@@ -32,7 +32,7 @@ forwardConsole('warn', warn);
 forwardConsole('error', error);
 
 // Debug flags
-const debugQuadtree =false
+const debugQuadtree = false
 const debugPaintbucket = false
 
 const macOS = navigator.userAgent.includes('Macintosh')
@@ -112,7 +112,13 @@ let tools = {
   },
   paint_bucket: {
     icon: "/assets/paint_bucket.svg",
-    properties: {}
+    properties: {
+      "fillGaps": {
+        type: "number",
+        label: "Fill Gaps",
+        min: 1,
+      }
+    }
   }
 }
 
@@ -135,6 +141,7 @@ let context = {
   simplifyMode: "smooth",
   fillShape: true,
   strokeShape: true,
+  fillGaps: 5,
   dragging: false,
   selectionRect: undefined,
   selection: [],
@@ -2730,7 +2737,7 @@ function stage() {
         let line = {p1: mouse, p2: {x: mouse.x + 3000, y: mouse.y}}
         debugCurves = []
         debugPoints = []
-        let epsilon = 5;
+        let epsilon = context.fillGaps;
         let min_x = Infinity;
         let curveB = undefined
         let point = undefined
@@ -3547,7 +3554,13 @@ function updateInfopanel() {
           input = document.createElement("input")
           input.className = "infopanel-input"
           input.type = "number"
-          input.value = getProperty(context, property)   
+          input.value = getProperty(context, property)
+          if (prop.min) {
+            input.min = prop.min
+          }
+          if (prop.max) {
+            input.max = prop.max
+          }
           break;
         case "enum":
           input = document.createElement("select")
@@ -3572,7 +3585,7 @@ function updateInfopanel() {
         switch (prop.type) {
           case "number":
             if (!isNaN(e.target.value) && e.target.value > 0) {
-              setProperty(context, property, e.target.value)
+              setProperty(context, property, parseInt(e.target.value))
             }
             break;
           case "enum":
