@@ -139,7 +139,7 @@ let context = {
   ],
   lineWidth: 5,
   simplifyMode: "smooth",
-  fillShape: true,
+  fillShape: false,
   strokeShape: true,
   fillGaps: 5,
   dragging: false,
