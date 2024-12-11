@@ -11,7 +11,7 @@ const {
   message: messageDialog,
   confirm: confirmDialog,
 } = window.__TAURI__.dialog;
-const { documentDir, join } = window.__TAURI__.path;
+const { documentDir, join, basename } = window.__TAURI__.path;
 const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
@@ -160,6 +160,7 @@ let config = {
     save: "<mod>s",
     saveAs: "<mod>S",
     open: "<mod>o",
+    import: "<mod>i",
     quit: "<mod>q",
     copy: "<mod>c",
     paste: "<mod>v",
@@ -2086,6 +2087,9 @@ window.addEventListener("keydown", (e) => {
     case config.shortcuts.open:
       open()
       break;
+    case config.shortcuts.import:
+      importFile()
+      break;
     case config.shortcuts.quit:
       quit()
       break;
@@ -2347,7 +2351,7 @@ function revert() {
   }
 }
 
-async function importImage() {
+async function importFile() {
   const path = await openFileDialog({
     multiple: false,
     directory: false,
@@ -2356,12 +2360,45 @@ async function importImage() {
         name: 'Image files',
         extensions: ['png', 'gif', 'avif', 'jpg', 'jpeg'],
       },
+      {
+        name: 'Audio files',
+        extensions: ['mp3'],
+      },
     ],
     defaultPath: await documentDir(),
+    title: "Import File"
   });
+  const imageMimeTypes = [
+    "image/jpeg",   // JPEG
+    "image/png",    // PNG
+    "image/gif",    // GIF
+    "image/webp",   // WebP
+    // "image/svg+xml",// SVG
+    "image/bmp",    // BMP
+    // "image/tiff",   // TIFF
+    // "image/x-icon", // ICO
+    // "image/heif",   // HEIF
+    // "image/avif"    // AVIF
+  ];
+  const audioMimeTypes = [
+    "audio/mpeg",      // MP3
+    // "audio/wav",       // WAV
+    // "audio/ogg",       // OGG
+    // "audio/webm",      // WebM
+    // "audio/aac",       // AAC
+    // "audio/flac",      // FLAC
+    // "audio/midi",      // MIDI
+    // "audio/x-wav",     // X-WAV (older WAV files)
+    // "audio/opus"       // Opus
+  ];
   if (path) {
-    const dataURL = await convertToDataURL(path);
-    actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject)
+    const filename = await basename(path)
+    const {dataURL, mimeType} = await convertToDataURL(path, imageMimeTypes.concat(audioMimeTypes));
+    if (imageMimeTypes.indexOf(mimeType) != -1) {
+      actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject)
+    } else {
+      actions.addAudio.create(dataURL, context.activeObject, filename)
+    }
   }
   
 }
@@ -3676,9 +3713,9 @@ async function updateMenu() {
         action: revert,
       },
       {
-        text: 'Import Image...',
+        text: 'Import...',
         enabled: true,
-        action: importImage,
+        action: importFile,
       },
       {
         text: "Export...",
@@ -3886,21 +3923,25 @@ function _arrayBufferToBase64( buffer ) {
   return window.btoa( binary );
 }
 
-async function convertToDataURL(filePath) {
+async function convertToDataURL(filePath, allowedMimeTypes) {
   try {
     // Read the image file as a binary file (buffer)
     const binaryData = await readFile(filePath);
     const mimeType = getMimeType(filePath);
     if (!mimeType) {
-      throw new Error('Unsupported image type');
+      throw new Error('Unsupported file type');
+    }
+    if (allowedMimeTypes.indexOf(mimeType)==-1) {
+      throw new Error(`Unsupported MIME type ${mimeType}`)
     }
 
     const base64Data = _arrayBufferToBase64(binaryData)
     const dataURL = `data:${mimeType};base64,${base64Data}`;
 
-    return dataURL;
+    return {dataURL, mimeType};
   } catch (error) {
-    console.error('Error reading the image file:', error);
+    console.log(error)
+    console.error('Error reading the file:', error);
     return null;
   }
 }
@@ -3920,6 +3961,8 @@ function getMimeType(filePath) {
       return 'image/bmp';
     case 'webp':
       return 'image/webp';
+    case 'mp3':
+      return 'audio/mpeg'
     default:
       return null; // Unsupported file type
   }
