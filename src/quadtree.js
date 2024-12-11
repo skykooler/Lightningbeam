@@ -41,7 +41,11 @@ class Quadtree {
 
     insert (curve, curveIdx) {
         const bbox = curve.bbox()
-        if (!this.intersects(curve.bbox())) {
+        const isOutside = bbox.x.min < this.boundary.x.min || 
+                      bbox.x.max > this.boundary.x.max ||
+                      bbox.y.min < this.boundary.y.min || 
+                      bbox.y.max > this.boundary.y.max;
+        if (isOutside) {
             let newNode = new Quadtree(this.boundary, this.capacity)
             newNode.curveIndexes = this.curveIndexes;
             newNode.curves = this.curves;
@@ -84,6 +88,10 @@ class Quadtree {
   
     // Insert a curve into the quadtree, subdividing if necessary
     _insert(curve, curveIdx) {
+      if (curve.points[0].x==381.703125) {
+        console.log(this.intersects(curve.bbox()))
+        console.log(this.boundary)
+      }
       // If the curve's bounding box doesn't intersect this node's boundary, do nothing
       if (!this.intersects(curve.bbox())) {
         return false;
@@ -91,9 +99,17 @@ class Quadtree {
   
       // If the node has space, insert the curve here
       if (this.curves.length < this.capacity) {
+
+        if (curve.points[0].x==381.703125) {
+          "inserting"
+        }
         this.curves.push(curve);
         this.curveIndexes.push(curveIdx)
         return true;
+      }
+
+      if (curve.points[0].x==381.703125) {
+        console.log("going down a level")
       }
   
       // Otherwise, subdivide and insert the curve into the appropriate quadrant
@@ -101,12 +117,13 @@ class Quadtree {
         this.subdivide();
       }
   
-      return (
-        this.nw._insert(curve, curveIdx) || 
-        this.ne._insert(curve, curveIdx) || 
-        this.sw._insert(curve, curveIdx) || 
-        this.se._insert(curve, curveIdx)
-      );
+      const resultNw = this.nw._insert(curve, curveIdx);
+      const resultNe = this.ne._insert(curve, curveIdx);
+      const resultSw = this.sw._insert(curve, curveIdx);
+      const resultSe = this.se._insert(curve, curveIdx);
+
+      // Return true if any of the insert operations returned true
+      return resultNw || resultNe || resultSw || resultSe;
     }
   
     // Query all curves that intersect with a given bounding box

@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -31,6 +31,10 @@ forwardConsole('info', info);
 forwardConsole('warn', warn);
 forwardConsole('error', error);
 
+// Debug flags
+const debugQuadtree =false
+const debugPaintbucket = false
+
 const macOS = navigator.userAgent.includes('Macintosh')
 
 let simplifyPolyline = simplify
@@ -40,6 +44,9 @@ let greetMsgEl;
 let rootPane;
 
 let canvases = [];
+
+let debugCurves = [];
+let debugPoints = [];
 
 let mode = "select"
 
@@ -113,6 +120,7 @@ let mouseEvent;
 
 let context = {
   mouseDown: false,
+  mousePos: {x: 0, y: 0},
   swatches: [
     "#000000",
     "#FFFFFF",
@@ -162,18 +170,27 @@ let startProps = {}
 
 let actions = {
   addShape: {
-    create: (parent, shape) => {
+    create: (parent, shape, ctx) => {
       if (shape.curves.length==0) return;
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = []
       for (let curve of shape.curves) {
         serializableCurves.push({ points: curve.points, color: curve.color })
       }
+      let c = {
+        ...context,
+        ...ctx
+      }
       let action = {
         parent: parent.idx,
         curves: serializableCurves,
         startx: shape.startx,
         starty: shape.starty,
+        context: {
+          fillShape: c.fillShape,
+          strokeShape: c.strokeShape,
+          fillStyle: c.fillStyle
+        },
         uuid: uuidv4()
       }
       undoStack.push({name: "addShape", action: action})
@@ -183,7 +200,11 @@ let actions = {
     execute: (action) => {
       let object = pointerList[action.parent]
       let curvesList = action.curves
-      let shape = new Shape(action.startx, action.starty, context, action.uuid)
+      let cxt = {
+        ...context,
+        ...action.context
+      }
+      let shape = new Shape(action.startx, action.starty, cxt, action.uuid)
       for (let curve of curvesList) {
         shape.addCurve(new Bezier(
           curve.points[0].x, curve.points[0].y,
@@ -1363,6 +1384,9 @@ class BaseShape {
       } else {
         ctx.fillStyle = this.fillStyle
       }
+      if (context.debugColor) {
+        ctx.fillStyle = context.debugColor
+      }
       if (this.curves.length > 0) {
         ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
         for (let curve of this.curves) {
@@ -1373,7 +1397,7 @@ class BaseShape {
       }
       ctx.fill()
     }
-    if (this.stroked) {
+    if (this.stroked && !context.debugColor) {
       for (let curve of this.curves) {
         ctx.strokeStyle = curve.color
         ctx.beginPath()
@@ -1392,7 +1416,9 @@ class BaseShape {
       }
     }
     // Debug, show quadtree
-    // this.quadtree.draw(ctx)
+    if (debugQuadtree && this.quadtree && !context.debugColor) {
+      this.quadtree.draw(ctx)
+    }
 
   }
 }
@@ -1458,6 +1484,7 @@ class Shape extends BaseShape {
                            midpoint.x, midpoint.y,
                            x, y)
     curve.color = context.strokeStyle
+    this.quadtree.insert(curve, this.curves.length - 1)
     this.curves.push(curve)
   }
   bbox() {
@@ -1494,6 +1521,20 @@ class Shape extends BaseShape {
 
     return newShape
   }
+  fromPoints(points, error=30) {
+    console.log(error)
+    this.curves = []
+    let curves = fitCurve.fitCurve(points, error)
+    for (let curve of curves) {
+      let bezier = new Bezier(curve[0][0], curve[0][1],
+                              curve[1][0],curve[1][1],
+                              curve[2][0], curve[2][1],
+                              curve[3][0], curve[3][1])
+      this.curves.push(bezier)
+      this.quadtree.insert(bezier, this.curves.length - 1)
+    }
+    return this
+  }
   simplify(mode="corners") {
     this.quadtree.clear()
     this.inProgress = false
@@ -1524,17 +1565,7 @@ class Shape extends BaseShape {
       for (let curve of this.curves) {
         points.push([curve.points[3].x, curve.points[3].y])
       }
-      this.curves = []
-      let curves = fitCurve.fitCurve(points, error)
-      for (let curve of curves) {
-        let bezier = new Bezier(curve[0][0], curve[0][1],
-                                curve[1][0],curve[1][1],
-                                curve[2][0], curve[2][1],
-                                curve[3][0], curve[3][1])
-        this.curves.push(bezier)
-        this.quadtree.insert(bezier, this.curves.length - 1)
-
-      }
+      this.fromPoints(points, error)
     }
     let epsilon = 0.01
     let newCurves = []
@@ -2184,6 +2215,8 @@ function _newFile(width, height, fps) {
   fileWidth = width
   fileHeight = height
   fileFps = fps
+  undoStack = []
+  redoStack = []
   for (let stage of document.querySelectorAll(".stage")) {
     stage.width = width
     stage.height = height
@@ -2695,6 +2728,139 @@ function stage() {
         break;
       case "paint_bucket":
         let line = {p1: mouse, p2: {x: mouse.x + 3000, y: mouse.y}}
+        debugCurves = []
+        debugPoints = []
+        let epsilon = 5;
+        let min_x = Infinity;
+        let curveB = undefined
+        let point = undefined
+        let regionPoints
+        
+        // First, see if there's an existing shape to change the color of
+        const startTime = performance.now()
+        let pointShape = getShapeAtPoint(mouse, context.activeObject.currentFrame.shapes)
+        const endTime = performance.now()
+
+        console.log(pointShape)
+        console.log(`getShapeAtPoint took ${endTime - startTime} milliseconds.`)
+
+        if (pointShape) {
+          actions.colorShape.create(pointShape, context.fillStyle);
+          break;
+        }
+        
+        // We didn't find an existing region to paintbucket, see if we can make one
+        try {
+          regionPoints = floodFillRegion(mouse,epsilon,fileWidth,fileHeight,context, debugPoints, debugPaintbucket)
+        } catch (e) {
+          updateUI()
+          throw e;
+          
+        }
+        console.log(regionPoints.length)
+        if (regionPoints.length>0 && regionPoints.length < 10) {
+          // probably a very small area, rerun with minimum epsilon
+          regionPoints = floodFillRegion(mouse,1,fileWidth,fileHeight,context, debugPoints)
+        }
+        let points = []
+        for (let point of regionPoints) {
+          points.push([point.x, point.y])
+        }
+        let cxt = {
+          ...context,
+          fillShape: true,
+          strokeShape: false,
+        }
+        let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt)
+        shape.fromPoints(points, 1)
+        actions.addShape.create(context.activeObject, shape, cxt)
+        /*
+        for (let i in context.activeObject.currentFrame.shapes) {
+          let shape = context.activeObject.currentFrame.shapes[i]
+          for (let curve of shape.curves) {
+            let intersects = curve.intersects(line)
+            for (let intersect of intersects) {
+              let pos = curve.compute(intersect)
+              if (pos.x < min_x) {
+                curveB = curve
+                min_x = pos.x
+                point = intersect
+              }
+            }
+          }
+        }
+        let previousCurves = [];
+        let previousCurveIds = [];
+        if (curveB) {
+          previousCurves.push(curveB.toString())
+          previousCurveIds.push(curveB.toString())
+          let derivative = curveB.derivative(point)
+          // if curve is moving downward at intersection
+          let splitCurve = curveB.split(point)
+          let curveA;
+          if (derivative.y > 0) {
+            curveA = splitCurve.right
+          } else {
+            curveA = splitCurve.left.reverse()
+          }
+          // debugCurves.push(curveA)
+          for (let i=0; i<2; i++) {
+          
+            let min_intersect = Infinity
+            let nextCurve = undefined
+            for (let i in context.activeObject.currentFrame.shapes) {
+              let shape = context.activeObject.currentFrame.shapes[i]
+              for (let j of shape.quadtree.query(curveA.bbox())) {
+                let curve = shape.curves[j]
+                console.log(previousCurveIds)
+                console.log(curve.toString())
+                console.log(curve==(previousCurves.length?previousCurves[0]:undefined))
+                console.log(curve.toString()==(previousCurves.length?previousCurves[0].toString():undefined))
+                if (previousCurves.indexOf(curve.toString()) != -1) {
+                  console.log("skipping")
+                  continue;
+                }
+                let intersects = curveA.intersects(curve)
+                // if (intersects.length > 4) continue;
+                console.log(intersects)
+                console.log(curve)
+                for (let intersect of intersects) {
+                  intersect = intersect.split('/')
+                  let intersect_a = parseFloat(intersect[0])
+                  let intersect_b = parseFloat(intersect[1])
+                  if (intersect_a < min_intersect) {
+                    // console.log(curve)
+                    min_intersect = intersect_a
+                    nextCurve = curve
+                    point = intersect_b
+                  }
+                }
+              }
+            }
+            curveB = nextCurve
+            if (curveB) {
+              // debugCurves.push(curveB)
+              console.log(min_intersect)
+              let splitCurve = curveB.split(point)
+              let d_A = curveA.derivative(min_intersect)
+              let d_B = curveB.derivative(point)
+              curveA = curveA.split(min_intersect).left
+              debugCurves.push(curveA)
+              if ((d_A.x * d_B.y - d_A.y * d_B.x) < 0) {
+                curveA = splitCurve.left.reverse()
+              } else {
+                curveA = splitCurve.right
+              }
+              // debugCurves.push(curveB)
+            } else {
+              break
+            }
+          }
+
+          // for (let)
+        }
+        */
+        break
         // Loop labels in JS!
         shapeLoop:
         // Iterate in reverse so we paintbucket the frontmost shape
@@ -3284,6 +3450,52 @@ function updateUI() {
     }
     if (context.activeShape) {
       context.activeShape.draw(context)
+    }
+
+    // Debug rendering
+    if (debugQuadtree) {
+
+      ctx.fillStyle = "rgba(255,255,255,0.5)"
+      ctx.fillRect(0,0,fileWidth,fileHeight)
+      const ep = 2.5
+      const bbox = {
+        x: { min: context.mousePos.x - ep, max: context.mousePos.x + ep },
+        y: { min: context.mousePos.y - ep, max: context.mousePos.y + ep }
+      };
+      debugCurves = []
+      for (let shape of context.activeObject.currentFrame.shapes) {
+        for (let i of shape.quadtree.query(bbox)) {
+          debugCurves.push(shape.curves[i])
+        }
+      }
+    }
+    // let i=4;
+    for (let curve of debugCurves) {
+      ctx.beginPath()
+      // ctx.strokeStyle = `#ff${i}${i}${i}${i}`
+      // i = (i+3)%10
+      ctx.strokeStyle = '#'+(Math.random()*0xFFFFFF<<0).toString(16);
+      ctx.moveTo(curve.points[0].x, curve.points[0].y)
+      ctx.bezierCurveTo(
+        curve.points[1].x, curve.points[1].y,
+        curve.points[2].x, curve.points[2].y,
+        curve.points[3].x, curve.points[3].y
+      )
+      ctx.stroke()
+      ctx.beginPath()
+      let bbox = curve.bbox()
+      ctx.rect(bbox.x.min,bbox.y.min,bbox.x.max-bbox.x.min,bbox.y.max-bbox.y.min)
+      ctx.stroke()
+    }
+    let i=0;
+    for (let point of debugPoints) {
+      ctx.beginPath()
+      let j = i.toString(16).padStart(2, '0');
+      ctx.fillStyle = `#${j}ff${j}`
+      i+=1
+      i %= 255
+      ctx.arc(point.x, point.y, 3, 0, 2*Math.PI)
+      ctx.fill()
     }
 
   }

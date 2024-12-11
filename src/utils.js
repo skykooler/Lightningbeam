@@ -200,6 +200,167 @@ function generateWaveform(img, buffer, imgHeight, frameWidth, framesPerSecond) {
   img.src = dataUrl;
 }
 
+function floodFillRegion(startPoint, epsilon, fileWidth, fileHeight, context, debugPoints, debugPaintbucket) {
+  // Helper function to check if the point is at the boundary of the region
+  function isBoundaryPoint(point) {
+    return point.x <= 0 || point.x >= fileWidth || point.y <= 0 || point.y >= fileHeight;
+  }
+  let halfEpsilon = epsilon/2
+
+  // Helper function to check if a point is near any curve in the shape
+  function isNearCurve(point, shape) {
+    // Generate bounding box around the point for quadtree query
+    const bbox = {
+      x: { min: point.x - halfEpsilon, max: point.x + halfEpsilon },
+      y: { min: point.y - halfEpsilon, max: point.y + halfEpsilon }
+    };
+    // Get the list of curve indices that are near the point
+    const nearbyCurveIndices = shape.quadtree.query(bbox);
+    // const nearbyCurveIndices = shape.curves.keys()
+    // Check if any of the curves are close enough to the point
+    for (const idx of nearbyCurveIndices) {
+      const curve = shape.curves[idx];
+      const projection = curve.project(point);
+      if (projection.d < epsilon) {
+        return projection;
+      }
+    }
+    return false;
+  }
+
+  const shapes = context.activeObject.currentFrame.shapes;
+  const visited = new Set();
+  const stack = [startPoint];
+  const regionPoints = [];
+
+  // Begin the flood fill process
+  while (stack.length > 0) {
+    const currentPoint = stack.pop();
+
+    // If we reach the boundary of the region, throw an exception
+    if (isBoundaryPoint(currentPoint)) {
+      throw new Error("Flood fill reached the boundary of the area.");
+    }
+
+    // If the current point is already visited, skip it
+    const pointKey = `${currentPoint.x},${currentPoint.y}`;
+    if (visited.has(pointKey)) {
+      continue;
+    }
+    visited.add(pointKey);
+    if (debugPaintbucket) {
+      debugPoints.push(currentPoint)
+    }
+
+    let isNearAnyCurve = false;
+    for (const shape of shapes) {
+      let projection = isNearCurve(currentPoint, shape)
+      if (projection) {
+        isNearAnyCurve = true;
+        regionPoints.push(projection)
+        break;
+      }
+    }
+
+    // Skip the points that are near curves, to prevent jumping past them
+    if (!isNearAnyCurve) {
+      const neighbors = [
+        { x: currentPoint.x - epsilon, y: currentPoint.y },
+        { x: currentPoint.x + epsilon, y: currentPoint.y },
+        { x: currentPoint.x, y: currentPoint.y - epsilon },
+        { x: currentPoint.x, y: currentPoint.y + epsilon }
+      ];
+      // Add unvisited neighbors to the stack
+      for (const neighbor of neighbors) {
+        const neighborKey = `${neighbor.x},${neighbor.y}`;
+        if (!visited.has(neighborKey)) {
+          stack.push(neighbor);
+        }
+      }
+    }
+  }
+
+  // Return the region points in connected order
+  return sortPointsByProximity(regionPoints)
+}
+
+function sortPointsByProximity(points) {
+  if (points.length <= 1) return points;
+
+  // Start with the first point as the initial sorted point
+  const sortedPoints = [points[0]];
+  points.splice(0, 1); // Remove the first point from the original list
+
+  // Iterate through the remaining points and find the nearest neighbor
+  while (points.length > 0) {
+    const lastPoint = sortedPoints[sortedPoints.length - 1];
+    
+    // Find the closest point to the last point
+    let closestIndex = -1;
+    let closestDistance = Infinity;
+
+    for (let i = 0; i < points.length; i++) {
+      const currentPoint = points[i];
+      const distance = Math.sqrt(Math.pow(currentPoint.x - lastPoint.x, 2) + Math.pow(currentPoint.y - lastPoint.y, 2));
+
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = i;
+      }
+    }
+
+    // Add the closest point to the sorted points
+    sortedPoints.push(points[closestIndex]);
+    points.splice(closestIndex, 1); // Remove the closest point from the original list
+  }
+
+  return sortedPoints;
+}
+
+function getShapeAtPoint(point, shapes) {
+  // Create a 1x1 off-screen canvas and translate so it is in the first pixel
+  const offscreenCanvas = document.createElement('canvas');
+  offscreenCanvas.width = 1;
+  offscreenCanvas.height = 1;
+  const ctx = offscreenCanvas.getContext('2d');
+
+  ctx.translate(-point.x, -point.y);
+  const colorToShapeMap = {};
+  
+  // Generate a unique color for each shape (start from #000001 and increment)
+  let colorIndex = 1;
+
+  // Draw all shapes to the off-screen canvas with their unique colors
+  shapes.forEach(shape => {
+      // Generate a unique color for this shape
+      const debugColor = intToHexColor(colorIndex);
+      colorToShapeMap[debugColor] = shape;
+
+      const context = {
+          ctx: ctx,
+          debugColor: debugColor
+      };
+      shape.draw(context);
+      colorIndex++;
+  });
+
+  const pixel = ctx.getImageData(0, 0, 1, 1).data;
+  const sampledColor = rgbToHex(pixel[0], pixel[1], pixel[2]);
+  return colorToShapeMap[sampledColor] || null;
+}
+
+// Helper function to convert a number (0-16777215) to a hex color code
+function intToHexColor(value) {
+  // Ensure the value is between 0 and 16777215 (0xFFFFFF)
+  value = value & 0xFFFFFF;
+  return '#' + value.toString(16).padStart(6, '0').toUpperCase();
+}
+
+// Helper function to convert RGB to hex (for sampling)
+function rgbToHex(r, g, b) {
+  return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1).toUpperCase();
+}
+
 
 export {
   titleCase,
@@ -209,5 +370,7 @@ export {
   lerp,
   lerpColor,
   camelToWords,
-  generateWaveform
+  generateWaveform,
+  floodFillRegion,
+  getShapeAtPoint
 };
