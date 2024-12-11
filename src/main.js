@@ -1788,9 +1788,12 @@ class GraphicsObject {
   }
   bbox() {
     let bbox;
-    if (this.currentFrame.shapes.length > 0) {
-      bbox = structuredClone(this.currentFrame.shapes[0].boundingBox)
-      for (let shape of this.currentFrame.shapes) {
+    for (let layer of this.layers) {
+      let frame = layer.getFrame(this.currentFrameNum)
+      if (frame.shapes.length > 0 && bbox == undefined) {
+        bbox = structuredClone(frame.shapes[0].boundingBox)
+      }
+      for (let shape of frame.shapes) {
         growBoundingBox(bbox, shape.boundingBox)
       }
     }
