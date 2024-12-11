@@ -196,7 +196,8 @@ let actions = {
         context: {
           fillShape: c.fillShape,
           strokeShape: c.strokeShape,
-          fillStyle: c.fillStyle
+          fillStyle: c.fillStyle,
+          sendToBack: c.sendToBack
         },
         uuid: uuidv4()
       }
@@ -222,7 +223,7 @@ let actions = {
       }
       let shapes = shape.update()
       for (let newShape of shapes) {
-        object.addShape(newShape)
+        object.addShape(newShape, cxt.sendToBack)
       }
     },
     rollback: (action) => {
@@ -1952,8 +1953,12 @@ class GraphicsObject {
       }
     }
   }
-  addShape(shape) {
-    this.currentFrame.shapes.push(shape)
+  addShape(shape, sendToBack=false) {
+    if (sendToBack) {
+      this.currentFrame.shapes.unshift(shape)
+    } else {
+      this.currentFrame.shapes.push(shape)
+    }
   }
   addObject(object, x=0, y=0) {
     this.children.push(object)
@@ -2777,6 +2782,7 @@ function stage() {
           ...context,
           fillShape: true,
           strokeShape: false,
+          sendToBack: true
         }
         let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt)
         shape.fromPoints(points, 1)
