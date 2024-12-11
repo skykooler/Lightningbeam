@@ -1825,7 +1825,7 @@ class GraphicsObject {
     //   this.currentFrameNum = 0;
     // }
     for (let layer of this.layers) {
-      if (!layer.visible) continue;
+      if (context.activeObject==this && !layer.visible) continue;
       let frame = layer.getFrame(this.currentFrameNum)
       for (let shape of frame.shapes) {
         if (context.shapeselection.indexOf(shape) >= 0) {
