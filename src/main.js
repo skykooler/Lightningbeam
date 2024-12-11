@@ -1308,6 +1308,7 @@ class Layer {
     this.visible = !this.visible
     updateUI()
     updateMenu()
+    updateLayers()
   }
 }
 
@@ -3516,6 +3517,22 @@ function updateLayers() {
       })
       layerName.innerText = layer.name
       layerHeader.appendChild(layerName)
+      // Visibility icon element
+      let visibilityIcon = document.createElement("img")
+      visibilityIcon.className = "visibility-icon"
+      visibilityIcon.src = layer.visible ? "assets/eye-fill.svg" : "assets/eye-slash.svg"
+
+      // Toggle visibility on click
+      visibilityIcon.addEventListener("click", (e) => {
+        e.stopPropagation() // Prevent click from bubbling to the layerHeader click listener
+        layer.visible = !layer.visible
+        // visibilityIcon.src = layer.visible ? "assets/eye-fill.svg" : "assets/eye-slash.svg"
+        updateUI()
+        updateMenu()
+        updateLayers()
+      })
+
+      layerHeader.appendChild(visibilityIcon)
       layerHeader.addEventListener("click", (e) => {
         context.activeObject.currentLayer = context.activeObject.layers.indexOf(layer)
         updateLayers()
@@ -3523,6 +3540,9 @@ function updateLayers() {
       })
       let layerTrack = document.createElement("div")
       layerTrack.className = "layer-track"
+      if (!layer.visible) {
+        layerTrack.classList.add("invisible")
+      }
       framescontainer.appendChild(layerTrack)
       layerTrack.addEventListener("click", (e) => {
         let mouse = getMousePos(layerTrack, e)

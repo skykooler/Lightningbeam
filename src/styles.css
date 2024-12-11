@@ -339,6 +339,10 @@ button {
   border-top: 1px solid #ddd;
   border-bottom: 1px solid #999;
   flex-shrink: 0;
+
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   cursor: pointer;
 }
 .layer-header.active {
@@ -359,6 +363,13 @@ button {
 .layer-header.active > .layer-name {
   color: #000;
 }
+/* Visibility icon positioning */
+.visibility-icon {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  margin-right: 10px;
+} 
 .layer-track {
   min-width: 100%;
   height: calc( 2 * var(--lineheight));
@@ -376,6 +387,9 @@ button {
   border-top: 1px solid #bbb;
   border-bottom: 1px solid #ccc;
   flex-shrink: 0;
+}
+.layer-track.invisible {
+  opacity: 0.3;
 }
 .frame {
   width: 25px;
@@ -630,6 +644,9 @@ button {
     background-color: #2f2f2f;
   }
   .audioWaveform {
+    filter: invert(1);
+  }
+  .visibility-icon {
     filter: invert(1);
   }
 }
