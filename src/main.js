@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp } from './utils.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -3149,39 +3149,230 @@ function toolbar() {
   let tools_break = document.createElement("div")
   tools_break.className = "horiz_break"
   tools_scroller.appendChild(tools_break)
-  let fillColor = document.createElement("input")
-  let strokeColor = document.createElement("input")
+  let fillColor = document.createElement("div")
+  let strokeColor = document.createElement("div")
   fillColor.className = "color-field"
   strokeColor.className = "color-field"
+  fillColor.style.setProperty('--color', "#ff0000");
+  strokeColor.style.setProperty('--color', "#000000");
+  fillColor.type="color"
   fillColor.value = "#ff0000"
   strokeColor.value = "#000000"
   context.fillStyle = fillColor.value
   context.strokeStyle = strokeColor.value
+  let evtListener;
+  let padding = 10
+  let gradwidth = 25
+  let ccwidth = 300
+  let mainSize = ccwidth - (3*padding + gradwidth)
   fillColor.addEventListener('click', e => {
-    Coloris({
-      el: ".color-field",
-      selectInput: true,
-      focusInput: true,
-      theme: 'default',
-      swatches: context.swatches,
-      defaultColor: '#ff0000',
-      onChange: (color) => {
-        context.fillStyle = color;
+    // Coloris({
+    //   el: ".color-field",
+    //   selectInput: true,
+    //   focusInput: true,
+    //   theme: 'default',
+    //   swatches: context.swatches,
+    //   defaultColor: '#ff0000',
+    //   onChange: (color) => {
+    //     context.fillStyle = color;
+    //   }
+    // })
+    let colorCvs = document.querySelector("#color-cvs")
+    if (colorCvs==null) {
+      console.log('creating new one')
+      colorCvs = document.createElement("canvas")
+      colorCvs.id = "color-cvs"
+      document.body.appendChild(colorCvs)
+      colorCvs.width = ccwidth
+      colorCvs.height = 500
+      colorCvs.style.width = "300px"
+      colorCvs.style.height = "500px"
+      colorCvs.style.position = "absolute"
+      colorCvs.style.left = '500px'
+      colorCvs.style.top = '500px'
+      colorCvs.style.boxShadow = "0 2px 2px rgba(0,0,0,0.2)"
+      colorCvs.style.cursor = "crosshair"
+      colorCvs.currentColor = "#00ffba88"
+      colorCvs.draw = function() {
+        const darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        let ctx = colorCvs.getContext('2d')
+        if (darkMode) {
+          ctx.fillStyle = "#333"
+        } else {
+          ctx.fillStyle = "#ccc" //TODO
+        }
+        ctx.fillRect(0,0,colorCvs.width, colorCvs.height)
+
+        // draw current color
+        drawCheckerboardBackground(ctx, padding, padding, colorCvs.width - 2*padding, 50, 10)
+        ctx.fillStyle = colorCvs.currentColor //TODO
+        ctx.fillRect(padding,padding,colorCvs.width-2*padding, 50)
+
+        // Draw main gradient
+        let mainGradient = ctx.createImageData(mainSize, mainSize)
+        let data = mainGradient.data
+        let {h, s, v} = hexToHsv(colorCvs.currentColor)
+        for (let i=0; i<data.length; i+=4) {
+          let x = ((i/4)%mainSize) / mainSize
+          let y = Math.floor((i/4) / mainSize) / mainSize;
+          let hue = h
+          let rgb = hsvToRgb(hue, x, 1-y)
+          data[i+0] = rgb.r;
+          data[i+1] = rgb.g;
+          data[i+2] = rgb.b;
+          data[i+3] = 255;
+        }
+        ctx.putImageData(mainGradient, padding, 2*padding + 50)
+        ctx.beginPath()
+        ctx.arc(s*mainSize + padding, (1-v)*mainSize + 2*padding + 50, 3, 0, 2*Math.PI)
+        ctx.strokeStyle = "white"
+        ctx.stroke()
+
+
+        let hueGradient = ctx.createImageData(mainSize, gradwidth)
+        data = hueGradient.data
+        for (let i=0; i<data.length; i+=4) {
+          let x = ((i/4)%mainSize) / mainSize
+          let y = Math.floor((i/4) / gradwidth)
+          let rgb = hslToRgb(x, 1, 0.5)
+          data[i+0] = rgb.r;
+          data[i+1] = rgb.g;
+          data[i+2] = rgb.b;
+          data[i+3] = 255;
+        }
+        ctx.putImageData(hueGradient, padding, 3*padding + 50 + mainSize)
+        drawCheckerboardBackground(ctx, colorCvs.width - (padding + gradwidth), 2*padding+50, gradwidth, mainSize, 10)
+        const gradient = ctx.createLinearGradient(0, 2*padding+50, 0, 2*padding+50+mainSize); // Vertical gradient
+        gradient.addColorStop(0, `${colorCvs.currentColor.slice(0,7)}ff`); // Full color at the top
+        gradient.addColorStop(1, `${colorCvs.currentColor.slice(0,7)}00`)
+        ctx.fillStyle = gradient
+        ctx.fillRect(colorCvs.width - (padding + gradwidth), 2*padding+50, gradwidth, mainSize)
       }
+      colorCvs.addEventListener('mousedown', (e) => {
+        colorCvs.clickedMainGradient = false
+        colorCvs.clickedHueGradient = false
+        colorCvs.clickedAlphaGradient = false
+        let mouse = getMousePos(colorCvs, e)
+        let {h, s, v} = hexToHsv(colorCvs.currentColor)
+        if (mouse.x > padding && mouse.x < padding + mainSize &&
+          mouse.y > 2*padding + 50 && mouse.y < 2*padding + 50 + mainSize) {
+          // we clicked in the main gradient
+          let x = (mouse.x - padding) / mainSize
+          let y = (mouse.y - (2*padding + 50)) / mainSize
+          let rgb = hsvToRgb(h, x, 1-y)
+          let alpha = colorCvs.currentColor.slice(7,9) || 'ff'
+          colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
+          colorCvs.clickedMainGradient = true
+        } else if (mouse.x > padding && mouse.x < padding + mainSize &&
+          mouse.y > 3*padding + 50+ mainSize && mouse.y < 3*padding + 50 + mainSize + gradwidth
+        ) {
+          // we clicked in the hue gradient
+          let x = (mouse.x - padding) / mainSize
+          let rgb = hsvToRgb(x, s, v)
+          let alpha = colorCvs.currentColor.slice(7,9) || 'ff'
+          colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
+          colorCvs.clickedHueGradient = true
+        } else if (mouse.x > colorCvs.width - (padding + gradwidth) && mouse.x < colorCvs.width - padding &&
+          mouse.y > 2 * padding + 50 && mouse.y < 2 * padding + 50 + mainSize
+        ) {
+          // we clicked in the alpha gradient
+          let y = 1 - ((mouse.y - (2 * padding + 50)) / mainSize)
+          let alpha = Math.round(y*255).toString(16)
+          colorCvs.currentColor = `${colorCvs.currentColor.slice(0,7)}${alpha}`
+          colorCvs.clickedAlphaGradient = true
+        }
+        fillColor.style.setProperty('--color', colorCvs.currentColor);
+        colorCvs.draw()
+      })
+      
+      window.addEventListener('mouseup', (e) => {
+        let mouse = getMousePos(colorCvs, e)
+        colorCvs.clickedMainGradient = false
+        colorCvs.clickedHueGradient = false
+        colorCvs.clickedAlphaGradient = false
+        if (e.target != colorCvs) {
+          colorCvs.style.display = 'none'
+          window.removeEventListener('mousemove', evtListener)
+        }
+      })
+    } else {
+      colorCvs.style.display = "block"
+    }
+    evtListener = window.addEventListener('mousemove', (e) => {
+      let mouse = getMousePos(colorCvs, e)
+      let {h, s, v} = hexToHsv(colorCvs.currentColor)
+      if (colorCvs.clickedMainGradient) {
+        let x = clamp((mouse.x - padding) / mainSize)
+        let y = clamp((mouse.y - (2*padding + 50)) / mainSize)
+        let rgb = hsvToRgb(h, x, 1-y)
+        let alpha = colorCvs.currentColor.slice(7,9) || 'ff'
+        colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
+        colorCvs.draw()
+      } else if (colorCvs.clickedHueGradient) {
+        let x = clamp((mouse.x - padding) / mainSize)
+        let rgb = hsvToRgb(x, s, v)
+        let alpha = colorCvs.currentColor.slice(7,9) || 'ff'
+        colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
+        colorCvs.draw()
+      } else if (colorCvs.clickedAlphaGradient) {
+        let y = clamp(1 - ((mouse.y - (2 * padding + 50)) / mainSize))
+        let alpha = Math.round(y * 255).toString(16).padStart(2, '0');
+        colorCvs.currentColor = `${colorCvs.currentColor.slice(0,7)}${alpha}`
+        colorCvs.draw()
+      }
+      console.log(colorCvs.currentColor)
+      fillColor.style.setProperty('--color', colorCvs.currentColor);
     })
+    // Get mouse coordinates relative to the viewport
+    const mouseX = e.clientX + window.scrollX;
+    const mouseY = e.clientY + window.scrollY;
+
+    const divWidth = colorCvs.offsetWidth;
+    const divHeight = colorCvs.offsetHeight;
+    const windowWidth = window.innerWidth;
+    const windowHeight = window.innerHeight;
+
+    // Default position to the mouse cursor
+    let left = mouseX;
+    let top = mouseY;
+
+    // If the window is narrower than twice the width, center horizontally
+    if (windowWidth < divWidth * 2) {
+        left = (windowWidth - divWidth) / 2;
+    } else {
+        // If it would overflow on the right side, position it to the left of the cursor
+        if (left + divWidth > windowWidth) {
+            left = mouseX - divWidth;
+        }
+    }
+
+    // If the window is shorter than twice the height, center vertically
+    if (windowHeight < divHeight * 2) {
+        top = (windowHeight - divHeight) / 2;
+    } else {
+        // If it would overflow at the bottom, position it above the cursor
+        if (top + divHeight > windowHeight) {
+            top = mouseY - divHeight;
+        }
+    }
+
+    colorCvs.style.left = `${left}px`;
+    colorCvs.style.top = `${top}px`;
+    colorCvs.draw()
+    e.preventDefault()
   })
   strokeColor.addEventListener('click', e => {
-    Coloris({
-      el: ".color-field",
-      selectInput: true,
-      focusInput: true,
-      theme: 'default',
-      swatches: context.swatches,
-      defaultColor: '#000000',
-      onChange: (color) => {
-        context.strokeStyle = color;
-      }
-    })
+    // Coloris({
+    //   el: ".color-field",
+    //   selectInput: true,
+    //   focusInput: true,
+    //   theme: 'default',
+    //   swatches: context.swatches,
+    //   defaultColor: '#000000',
+    //   onChange: (color) => {
+    //     context.strokeStyle = color;
+    //   }
+    // })
   })
   // Fill and stroke colors use the same set of swatches
   fillColor.addEventListener("change", e => {
@@ -3357,7 +3548,7 @@ function splitPane(div, percent, horiz, newPane=undefined) {
     event.currentTarget.setAttribute("dragging", false)
     // event.currentTarget.style.userSelect = 'auto';
   })
-  Coloris({el: ".color-field"})
+  // Coloris({el: ".color-field"})
   updateAll()
   updateUI()
   updateLayers()

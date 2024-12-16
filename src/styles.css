@@ -80,7 +80,7 @@ button {
   color: #0f0f0f;
   background-color: #ffffff;
   transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 4px rgba(0, 0, 0, 0.2);
   box-sizing: border-box;
   min-height: var(--lineheight);
 }
@@ -278,9 +278,35 @@ button {
 
   background-color: #999;
 }
-.clr-field {
+.color-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-left: 10px;
   width: 100%;
+  height: calc(2 * var(--lineheight));
+  --color: red; /* CSS variable for the pseudo-element color */
 }
+
+.color-field::before {
+  content: "Color:";
+  font-size: 16px;
+  color: black;
+  margin-right: 10px;
+}
+
+.color-field::after {
+  content: "";
+  flex-grow: 1;
+  height: 100%;
+  border-radius: 5px;
+  background:
+  linear-gradient(to right, var(--color), var(--color)),
+  repeating-conic-gradient(#B0B0B0 0% 25%, #E0E0E0 0% 50%) 
+      50% / 20px 20px,
+  linear-gradient(to right, white, white);
+}
+
 .clr-field button {
   width: 50% !important;
   /* height: 100% !important; */
@@ -581,6 +607,9 @@ button {
   }
   #popupMenu li:not(:last-child) {
     border-bottom: 1px solid #444;
+  }
+  .color-field::before {
+    color: #eee;
   }
   .layers {
     background-color: #222222;

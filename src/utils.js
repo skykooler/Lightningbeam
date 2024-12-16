@@ -104,11 +104,6 @@ function lerpColor(color1, color2, t) {
     return { r, g, b };
   };
 
-  // Convert RGB to hex color
-  const rgbToHex = (r, g, b) => {
-    return `#${(1 << 24 | (r << 16) | (g << 8) | b).toString(16).slice(1).toUpperCase()}`;
-  };
-
   // Get RGB values of both colors
   const start = hexToRgb(color1);
   const end = hexToRgb(color2);
@@ -356,11 +351,201 @@ function intToHexColor(value) {
   return '#' + value.toString(16).padStart(6, '0').toUpperCase();
 }
 
-// Helper function to convert RGB to hex (for sampling)
-function rgbToHex(r, g, b) {
-  return '#' + (1 << 24 | r << 16 | g << 8 | b).toString(16).slice(1).toUpperCase();
+function hslToRgb(h, s, l) {
+  // Ensure that the input values are within the expected range [0, 1]
+  h = h % 1;  // Hue wraps around at 1
+  s = Math.min(Math.max(s, 0), 1);  // Saturation should be between 0 and 1
+  l = Math.min(Math.max(l, 0), 1);  // Lightness should be between 0 and 1
+
+  // Handle case where saturation is 0 (the color is gray)
+  if (s === 0) {
+      const gray = Math.round(l * 255);  // All RGB values are equal to the lightness value
+      return { r: gray, g: gray, b: gray };
+  }
+
+  // Calculate temporary values
+  const temp2 = (l < 0.5) ? (l * (1 + s)) : (l + s - l * s);
+  const temp1 = 2 * l - temp2;
+
+  // Pre-calculate hues at the different points to avoid repeating calculations
+  const r = hueToRgb(temp1, temp2, h + 1 / 3);
+  const g = hueToRgb(temp1, temp2, h);
+  const b = hueToRgb(temp1, temp2, h - 1 / 3);
+
+  // Return RGB values in 0-255 range, rounding the result
+  return {
+      r: Math.round(r * 255),
+      g: Math.round(g * 255),
+      b: Math.round(b * 255)
+  };
 }
 
+function hueToRgb(t1, t2, t3) {
+  // Normalize hue to be between 0 and 1
+  if (t3 < 0) t3 += 1;
+  if (t3 > 1) t3 -= 1;
+
+  // Efficient calculation of RGB component
+  if (6 * t3 < 1) return t1 + (t2 - t1) * 6 * t3;
+  if (2 * t3 < 1) return t2;
+  if (3 * t3 < 2) return t1 + (t2 - t1) * (2 / 3 - t3) * 6;
+  return t1;
+}
+
+function hsvToRgb(h, s, v) {
+  let r, g, b;
+
+  if (s === 0) {
+      // If saturation is 0, the color is a shade of gray
+      r = g = b = v;  // All channels are equal
+  } else {
+      // Calculate the hue sector (6 sectors, for each of the primary and secondary colors)
+      const i = Math.floor(h * 6); // The integer part of the hue value
+      const f = h * 6 - i;         // The fractional part of the hue
+      const p = v * (1 - s);        // The value at the lower boundary
+      const q = v * (1 - f * s);    // Intermediate value
+      const t = v * (1 - (1 - f) * s); // Another intermediate value
+
+      // Use the hue sector index (i) to determine which RGB component will be maximum
+      switch (i % 6) {
+          case 0: r = v; g = t; b = p; break;
+          case 1: r = q; g = v; b = p; break;
+          case 2: r = p; g = v; b = t; break;
+          case 3: r = p; g = q; b = v; break;
+          case 4: r = t; g = p; b = v; break;
+          case 5: r = v; g = p; b = q; break;
+      }
+  }
+
+  // Return RGB values between 0 and 255 (scaled from 0-1 to 0-255)
+  return {
+      r: Math.round(r * 255),
+      g: Math.round(g * 255),
+      b: Math.round(b * 255)
+  };
+}
+
+let cachedPattern = null; // Cache the pattern
+
+function drawCheckerboardBackground(ctx, x, y, width, height, squareSize) {
+    // If the pattern is not cached, create and cache it
+    if (!cachedPattern) {
+        // Define two shades of gray for the checkerboard
+        const color1 = '#E0E0E0';  // Light gray
+        const color2 = '#B0B0B0';  // Dark gray
+        
+        // Create a 2x2 checkerboard pattern with four squares
+        const patternCanvas = document.createElement('canvas');
+        const patternCtx = patternCanvas.getContext('2d');
+        
+        // Set the pattern canvas size to 2x2 squares (width and height)
+        patternCanvas.width = 2 * squareSize;
+        patternCanvas.height = 2 * squareSize;
+
+        // Fill the four squares to create the checkerboard pattern
+        patternCtx.fillStyle = color1; // Light gray for the first square
+        patternCtx.fillRect(0, 0, squareSize, squareSize); // Top-left square
+
+        patternCtx.fillStyle = color2; // Dark gray for the second square
+        patternCtx.fillRect(squareSize, 0, squareSize, squareSize); // Top-right square
+
+        patternCtx.fillStyle = color2; // Dark gray for the third square
+        patternCtx.fillRect(0, squareSize, squareSize, squareSize); // Bottom-left square
+
+        patternCtx.fillStyle = color1; // Light gray for the fourth square
+        patternCtx.fillRect(squareSize, squareSize, squareSize, squareSize); // Bottom-right square
+
+        // Cache the repeating pattern
+        cachedPattern = ctx.createPattern(patternCanvas, 'repeat');
+    }
+    
+    // Set the cached pattern as the fill style for the rectangle
+    ctx.fillStyle = cachedPattern;
+
+    // Draw the rectangle with the repeating checkerboard pattern
+    ctx.fillRect(x, y, width, height);
+}
+
+function hexToHsl(hex) {
+  // Step 1: Convert hex to RGB
+  let r = parseInt(hex.substring(1, 3), 16) / 255;
+  let g = parseInt(hex.substring(3, 5), 16) / 255;
+  let b = parseInt(hex.substring(5, 7), 16) / 255;
+
+  // Step 2: Find the maximum and minimum values of r, g, and b
+  let max = Math.max(r, g, b);
+  let min = Math.min(r, g, b);
+
+  // Step 3: Calculate Lightness (L)
+  let l = (max + min) / 2;
+
+  // Step 4: Calculate Saturation (S)
+  let s = 0;
+  if (max !== min) {
+      s = (l > 0.5) ? (max - min) / (2 - max - min) : (max - min) / (max + min);
+  }
+
+  // Step 5: Calculate Hue (H)
+  let h = 0;
+  if (max === r) {
+      h = (g - b) / (max - min);
+  } else if (max === g) {
+      h = (b - r) / (max - min) + 2;
+  } else {
+      h = (r - g) / (max - min) + 4;
+  }
+
+  h = (h / 6) % 1;  // Normalize hue to be between 0 and 1
+
+  // Return HSL values with H, S, and L scaled to [0.0, 1.0]
+  return { h: h, s: s, l: l };
+}
+
+function hexToHsv(hex) {
+  // Step 1: Convert hex to RGB
+  let r = parseInt(hex.substring(1, 3), 16) / 255;
+  let g = parseInt(hex.substring(3, 5), 16) / 255;
+  let b = parseInt(hex.substring(5, 7), 16) / 255;
+
+  // Step 2: Calculate Min and Max RGB values
+  let min = Math.min(r, g, b);
+  let max = Math.max(r, g, b);
+  let delta = max - min;
+
+  // Step 3: Calculate Hue
+  let h = 0;
+  if (delta !== 0) {
+      if (max === r) {
+          h = (g - b) / delta; // Red is max
+      } else if (max === g) {
+          h = (b - r) / delta + 2; // Green is max
+      } else {
+          h = (r - g) / delta + 4; // Blue is max
+      }
+      h = (h / 6 + 1) % 1;  // Normalize to [0, 1]
+  }
+
+  // Step 4: Calculate Saturation
+  let s = 0;
+  if (max !== 0) {
+      s = delta / max;
+  }
+
+  // Step 5: Calculate Value
+  let v = max;
+
+  // Return HSV values, with H, S, and V between 0.0 and 1.0
+  return { h: h, s: s, v: v };
+}
+
+const rgbToHex = (r, g, b) => {
+  return `#${(1 << 24 | (r << 16) | (g << 8) | b).toString(16).slice(1).toUpperCase()}`;
+};
+
+function clamp(n) {
+  // Clamps a value between 0 and 1
+  return Math.min(Math.max(n,0),1)
+}
 
 export {
   titleCase,
@@ -372,5 +557,12 @@ export {
   camelToWords,
   generateWaveform,
   floodFillRegion,
-  getShapeAtPoint
+  getShapeAtPoint,
+  hslToRgb,
+  hsvToRgb,
+  hexToHsl,
+  hexToHsv,
+  rgbToHex,
+  drawCheckerboardBackground,
+  clamp
 };
