@@ -104,11 +104,29 @@ let tools = {
   },
   rectangle: {
     icon: "/assets/rectangle.svg",
-    properties: {}
+    properties: {
+      "lineWidth": {
+        type: "number",
+        label: "Line Width"
+      },
+      "fillShape": {
+        type: "boolean",
+        label: "Fill Shape"
+      }
+    }
   },
   ellipse: {
     icon: "assets/ellipse.svg",
-    properties: {}
+    properties: {
+      "lineWidth": {
+        type: "number",
+        label: "Line Width"
+      },
+      "fillShape": {
+        type: "boolean",
+        label: "Fill Shape"
+      }
+    }
   },
   paint_bucket: {
     icon: "/assets/paint_bucket.svg",
@@ -165,6 +183,7 @@ let config = {
     copy: "<mod>c",
     paste: "<mod>v",
     delete: "Backspace",
+    selectAll: "<mod>a",
     group: "<mod>g",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
@@ -2112,6 +2131,10 @@ window.addEventListener("keydown", (e) => {
     case config.shortcuts.delete:
       delete_action()
       break;
+    case config.shortcuts.selectAll:
+      selectAll()
+      e.preventDefault()
+      break;
     case config.shortcuts.group:
       actions.group.create()
       break;
@@ -2443,6 +2466,21 @@ function delete_action() {
   if (context.selection.length || context.shapeselection.length) {
     actions.deleteObjects.create(context.selection, context.shapeselection)
     context.selection = []
+  }
+  updateUI()
+}
+
+function selectAll() {
+  context.selection = []
+  context.shapeselection = []
+  for (let child of context.activeObject.activeLayer.children) {
+    let idx = child.idx
+    if (idx in context.activeObject.currentFrame.keys) {
+      context.selection.push(child)
+    }
+  }
+  for (let shape of context.activeObject.currentFrame.shapes) {
+    context.shapeselection.push(shape)
   }
   updateUI()
 }
@@ -3979,6 +4017,11 @@ async function updateMenu() {
         text: "Delete",
         enabled: (context.selection.length > 0 || context.shapeselection.length > 0),
         action: delete_action
+      },
+      {
+        text: "Select All",
+        enabled: true,
+        action: selectAll
       },
     ]
   });
