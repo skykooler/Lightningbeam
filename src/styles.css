@@ -286,10 +286,11 @@ button {
   width: 100%;
   height: calc(2 * var(--lineheight));
   --color: red; /* CSS variable for the pseudo-element color */
+  --label-text: "Color:"; /* CSS variable for the label text */
 }
 
 .color-field::before {
-  content: "Color:";
+  content: var(--label-text);;
   font-size: 16px;
   color: black;
   margin-right: 10px;
@@ -303,8 +304,7 @@ button {
   background:
   linear-gradient(to right, var(--color), var(--color)),
   repeating-conic-gradient(#B0B0B0 0% 25%, #E0E0E0 0% 50%) 
-      50% / 20px 20px,
-  linear-gradient(to right, white, white);
+      50% / 20px 20px;
 }
 
 .clr-field button {

@@ -3153,30 +3153,29 @@ function toolbar() {
   let strokeColor = document.createElement("div")
   fillColor.className = "color-field"
   strokeColor.className = "color-field"
-  fillColor.style.setProperty('--color', "#ff0000");
-  strokeColor.style.setProperty('--color', "#000000");
+  fillColor.setColor = (color) => {
+    fillColor.style.setProperty('--color', color)
+    fillColor.color = color
+    context.fillStyle = color
+  }
+  strokeColor.setColor = (color) => {
+    strokeColor.style.setProperty('--color', color)
+    strokeColor.color = color
+    context.strokeStyle = color
+  }
+  fillColor.setColor("#ff0000");
+  strokeColor.setColor("#000000");
+  fillColor.style.setProperty('--label-text', `"Fill color:"`)
+  strokeColor.style.setProperty('--label-text', `"Stroke color:"`)
   fillColor.type="color"
   fillColor.value = "#ff0000"
   strokeColor.value = "#000000"
-  context.fillStyle = fillColor.value
-  context.strokeStyle = strokeColor.value
   let evtListener;
   let padding = 10
   let gradwidth = 25
   let ccwidth = 300
   let mainSize = ccwidth - (3*padding + gradwidth)
-  fillColor.addEventListener('click', e => {
-    // Coloris({
-    //   el: ".color-field",
-    //   selectInput: true,
-    //   focusInput: true,
-    //   theme: 'default',
-    //   swatches: context.swatches,
-    //   defaultColor: '#ff0000',
-    //   onChange: (color) => {
-    //     context.fillStyle = color;
-    //   }
-    // })
+  let colorClickHandler = (e) => {
     let colorCvs = document.querySelector("#color-cvs")
     if (colorCvs==null) {
       console.log('creating new one')
@@ -3196,6 +3195,7 @@ function toolbar() {
       colorCvs.draw = function() {
         const darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         let ctx = colorCvs.getContext('2d')
+        ctx.lineWidth = 2;
         if (darkMode) {
           ctx.fillStyle = "#333"
         } else {
@@ -3205,7 +3205,7 @@ function toolbar() {
 
         // draw current color
         drawCheckerboardBackground(ctx, padding, padding, colorCvs.width - 2*padding, 50, 10)
-        ctx.fillStyle = colorCvs.currentColor //TODO
+        ctx.fillStyle = colorCvs.currentColor
         ctx.fillRect(padding,padding,colorCvs.width-2*padding, 50)
 
         // Draw main gradient
@@ -3223,6 +3223,7 @@ function toolbar() {
           data[i+3] = 255;
         }
         ctx.putImageData(mainGradient, padding, 2*padding + 50)
+        // draw pointer
         ctx.beginPath()
         ctx.arc(s*mainSize + padding, (1-v)*mainSize + 2*padding + 50, 3, 0, 2*Math.PI)
         ctx.strokeStyle = "white"
@@ -3241,12 +3242,24 @@ function toolbar() {
           data[i+3] = 255;
         }
         ctx.putImageData(hueGradient, padding, 3*padding + 50 + mainSize)
+        // draw pointer
+        ctx.beginPath()
+        ctx.rect(h * mainSize + padding - 2, 3*padding + 50 + mainSize, 4, gradwidth)
+        ctx.strokeStyle = "white"
+        ctx.stroke()
+
         drawCheckerboardBackground(ctx, colorCvs.width - (padding + gradwidth), 2*padding+50, gradwidth, mainSize, 10)
         const gradient = ctx.createLinearGradient(0, 2*padding+50, 0, 2*padding+50+mainSize); // Vertical gradient
         gradient.addColorStop(0, `${colorCvs.currentColor.slice(0,7)}ff`); // Full color at the top
         gradient.addColorStop(1, `${colorCvs.currentColor.slice(0,7)}00`)
         ctx.fillStyle = gradient
         ctx.fillRect(colorCvs.width - (padding + gradwidth), 2*padding+50, gradwidth, mainSize)
+        let alpha = parseInt(colorCvs.currentColor.slice(7,9) || 'ff', 16) / 255;
+        // draw pointer
+        ctx.beginPath()
+        ctx.rect(colorCvs.width - (padding + gradwidth), 2*padding+50 + (1-alpha) * mainSize - 2, gradwidth, 4)
+        ctx.strokeStyle = "white"
+        ctx.stroke()
       }
       colorCvs.addEventListener('mousedown', (e) => {
         colorCvs.clickedMainGradient = false
@@ -3281,7 +3294,7 @@ function toolbar() {
           colorCvs.currentColor = `${colorCvs.currentColor.slice(0,7)}${alpha}`
           colorCvs.clickedAlphaGradient = true
         }
-        fillColor.style.setProperty('--color', colorCvs.currentColor);
+        colorCvs.colorEl.setColor(colorCvs.currentColor);
         colorCvs.draw()
       })
       
@@ -3321,7 +3334,7 @@ function toolbar() {
         colorCvs.draw()
       }
       console.log(colorCvs.currentColor)
-      fillColor.style.setProperty('--color', colorCvs.currentColor);
+      colorCvs.colorEl.setColor(colorCvs.currentColor);
     })
     // Get mouse coordinates relative to the viewport
     const mouseX = e.clientX + window.scrollX;
@@ -3358,22 +3371,13 @@ function toolbar() {
 
     colorCvs.style.left = `${left}px`;
     colorCvs.style.top = `${top}px`;
+    colorCvs.colorEl = e.target
+    colorCvs.currentColor = e.target.color
     colorCvs.draw()
     e.preventDefault()
-  })
-  strokeColor.addEventListener('click', e => {
-    // Coloris({
-    //   el: ".color-field",
-    //   selectInput: true,
-    //   focusInput: true,
-    //   theme: 'default',
-    //   swatches: context.swatches,
-    //   defaultColor: '#000000',
-    //   onChange: (color) => {
-    //     context.strokeStyle = color;
-    //   }
-    // })
-  })
+  }
+  fillColor.addEventListener('click', colorClickHandler)
+  strokeColor.addEventListener('click', colorClickHandler)
   // Fill and stroke colors use the same set of swatches
   fillColor.addEventListener("change", e => {
     context.swatches.unshift(fillColor.value)
@@ -3548,7 +3552,6 @@ function splitPane(div, percent, horiz, newPane=undefined) {
     event.currentTarget.setAttribute("dragging", false)
     // event.currentTarget.style.userSelect = 'auto';
   })
-  // Coloris({el: ".color-field"})
   updateAll()
   updateUI()
   updateLayers()
