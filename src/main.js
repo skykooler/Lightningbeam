@@ -2314,7 +2314,8 @@ async function save() {
   }
 }
 
-async function saveAs() { 
+async function saveAs() {
+  const filename = filePath ? await basename(filePath) : "untitled.beam"
   const path = await saveFileDialog({
     filters: [
       {
@@ -2322,7 +2323,7 @@ async function saveAs() {
         extensions: ['beam'],
       },
     ],
-    defaultPath: await join(await documentDir(), "untitled.beam")
+    defaultPath: await join(await documentDir(), filename)
   });
   if (path != undefined) _save(path);
 }
@@ -2364,6 +2365,7 @@ async function open() {
             undoStack.push(action)
           }
           lastSaveIndex = undoStack.length - 1;
+          filePath = path
           updateUI()
         } else {
           await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
