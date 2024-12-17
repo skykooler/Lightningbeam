@@ -2049,7 +2049,16 @@ class GraphicsObject {
 }
 
 let root = new GraphicsObject("root");
-context.activeObject = root
+Object.defineProperty(
+  context, 
+  'activeObject', 
+  {
+      get: function() { 
+          return this.objectStack.at(-1)
+      }
+  }
+);
+context.objectStack = [root]
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -2254,7 +2263,7 @@ function decrementFrame() {
 
 function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
-  context.activeObject = root
+  context.objectStack = [root]
   fileWidth = width
   fileHeight = height
   fileFps = fps
@@ -3140,7 +3149,7 @@ function stage() {
           let child = context.activeObject.children[i]
           if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
           if (hitTest(mouse, child)) {
-            context.activeObject = child;
+            context.objectStack.push(child)
             context.selection = [];
             context.shapeselection = [];
             updateUI()
@@ -3153,7 +3162,7 @@ function stage() {
         if (context.activeObject.parent) {
           context.selection = [context.activeObject]
           context.shapeselection = []
-          context.activeObject = context.activeObject.parent
+          context.objectStack.pop()
           updateUI()
           updateLayers()
           updateMenu()
