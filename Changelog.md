@@ -1,3 +1,22 @@
+# 0.6.3-alpha:
+Changes:
+- "Reset Zoom" renamed to "Actual Size"
+- "Fill shape" now defaults to off
+
+New features:
+- Paintbucket can now be used on un-filled shapes
+- Layers can be hidden
+- New color picker
+- Navigation breadcrumbs
+
+Bugfixes:
+- Audio layers had no names
+- Deleting a layer didn't rerender immediately
+- Active layer was hard to see
+- New layers were not active by default
+- "Play" menu item did nothing
+- Objects with multiple layers had incorrect bounding boxes
+
 # 0.6.2-alpha:
 New features:
 - Delete objects and shapes
