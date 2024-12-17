@@ -59,7 +59,7 @@ let lastSaveIndex = 0;
 
 let layoutElements = []
 
-let minFileVersion = "1.0"
+let minFileVersion = "1.2"
 let maxFileVersion = "2.0"
 
 let filePath = undefined
@@ -1782,6 +1782,7 @@ class GraphicsObject {
       this.idx = uuid
     }
     pointerList[this.idx] = this
+    this.name = this.idx
 
     this.currentFrameNum = 0;
     this.currentLayer = 0;
@@ -2289,7 +2290,7 @@ async function newFile() {
 async function _save(path) {
   try {
     const fileData = {
-      version: "1.2",
+      version: "1.3",
       width: fileWidth,
       height: fileHeight,
       fps: fileFps,
@@ -3155,6 +3156,7 @@ function stage() {
             updateUI()
             updateLayers()
             updateMenu()
+            updateInfopanel()
             break modeswitcher;
           }
         }
@@ -3166,6 +3168,7 @@ function stage() {
           updateUI()
           updateLayers()
           updateMenu()
+          updateInfopanel()
         }
         break
       default:
@@ -3849,6 +3852,54 @@ function updateInfopanel() {
     let input;
     let label;
     let span;
+    let breadcrumbs = document.createElement("div")
+    const bctitle = document.createElement('span');
+    bctitle.style.cursor = "default"
+    bctitle.textContent = "Active object: ";
+    breadcrumbs.appendChild(bctitle);
+    let crumbs = []
+    for (let object of context.objectStack) {
+      crumbs.push({name: object.name, object: object})
+    }
+    crumbs.forEach((crumb, index) => {
+      const crumbText = document.createElement('span');
+      crumbText.textContent = crumb.name;
+      breadcrumbs.appendChild(crumbText);
+
+      if (index < crumbs.length - 1) {
+        const separator = document.createElement('span');
+        separator.textContent = ' > ';
+        separator.style.cursor = "default"
+        crumbText.style.cursor = "pointer"
+        breadcrumbs.appendChild(separator);
+      } else {
+        crumbText.style.cursor = "default"
+      }
+    });
+
+    breadcrumbs.addEventListener('click', function(event) {
+      const span = event.target;
+
+      // Only handle clicks on the breadcrumb text segments (not the separators)
+      if (span.tagName === 'SPAN' && span.textContent !== ' > ') {
+        const clickedText = span.textContent;
+
+        // Find the crumb associated with the clicked text
+        const crumb = crumbs.find(c => c.name === clickedText);
+        if (crumb) {
+          const index = context.objectStack.indexOf(crumb.object);
+          if (index !== -1) {
+            // Keep only the objects up to the clicked one and add the clicked one as the last item
+            context.objectStack = context.objectStack.slice(0, index + 1);
+            updateUI()
+            updateLayers()
+            updateMenu()
+            updateInfopanel()
+          }
+        }
+      }
+    });
+    panel.appendChild(breadcrumbs)
     for (let property in tools[mode].properties) {
       let prop = tools[mode].properties[property]
       label = document.createElement("label")
