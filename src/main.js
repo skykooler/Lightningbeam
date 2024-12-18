@@ -1521,6 +1521,7 @@ class Shape extends BaseShape {
   }
   clear() {
     this.curves = []
+    this.quadtree.clear()
   }
   copy(idx) {
     let newShape = new Shape(this.startx, this.starty, {}, idx.slice(0,8)+this.idx.slice(8), this.shapeId)
