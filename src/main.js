@@ -1979,6 +1979,14 @@ class GraphicsObject {
       }
     }
   }
+  transformMouse(mouse) {
+    if (this.parent) {
+      mouse = this.parent.transformMouse(mouse)
+    }
+    mouse.x -= this.x
+    mouse.y -= this.y
+    return mouse
+  }
   addShape(shape, sendToBack=false) {
     if (sendToBack) {
       this.currentFrame.shapes.unshift(shape)
@@ -2749,6 +2757,7 @@ function stage() {
   scroller.appendChild(stageWrapper)
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e)
+    mouse = context.activeObject.transformMouse(mouse)
     switch (mode) {
       case "rectangle":
       case "ellipse":
@@ -2909,6 +2918,7 @@ function stage() {
     context.dragDirection = undefined
     context.selectionRect = undefined
     let mouse = getMousePos(stage, e)
+    mouse = context.activeObject.transformMouse(mouse)
     switch (mode) {
       case "draw":
         if (context.activeShape) {
@@ -2963,6 +2973,7 @@ function stage() {
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
+    mouse = context.activeObject.transformMouse(mouse)
     context.mousePos = mouse
     switch (mode) {
       case "draw":
