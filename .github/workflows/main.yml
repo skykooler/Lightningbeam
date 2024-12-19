@@ -34,10 +34,11 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Set version for Windows build
+        if: matrix.platform == 'windows-latest'
         run: |
           # Get the version from the Git tag (e.g., v0.6.3-alpha)
           VERSION=$(echo ${GITHUB_REF#refs/tags/})
-          
+    
           # Replace '-alpha' with '-0' and '-beta' with '-1' only for Windows version
           if [[ $VERSION == *"-alpha"* ]]; then
             WINDOWS_VERSION=${VERSION%-alpha}-0
@@ -49,7 +50,10 @@ jobs:
 
           # Copy tauri.conf.json to tauri.windows.conf.json and substitute version number for Windows
           cp src-tauri/tauri.conf.json src-tauri/tauri.windows.conf.json
-          sed -i "s/\"version\": \".*\"/\"version\": \"${WINDOWS_VERSION}\"/" src-tauri/tauri.windows.conf.json
+
+          # Use sed with an empty argument for in-place editing to ensure compatibility
+          sed -i '' "s/\"version\": \".*\"/\"version\": \"${WINDOWS_VERSION}\"/" src-tauri/tauri.windows.conf.json
+
        
 
       - name: setup pnpm
