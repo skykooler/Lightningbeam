@@ -131,6 +131,7 @@ let tools = {
             if (context.selection.length != 1) return undefined
             const selectedObject = context.selection[0]
             context.activeObject.currentFrame.keys[selectedObject.idx].playFromFrame = val
+            selectedObject.playing = true
             updateUI()
           }
         }
@@ -1376,14 +1377,18 @@ class Layer {
       } else {
         for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
           if (this.frames[i].frameType == "keyframe") {
-            return this.frames[i]
+            let tempFrame = this.frames[i].copy("tempFrame")
+            tempFrame.frameType = "normal"
+            return tempFrame
           }
         }
       }
     } else {
       for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
         if (this.frames[i].frameType == "keyframe") {
-          return this.frames[i]
+          let tempFrame = this.frames[i].copy("tempFrame")
+          tempFrame.frameType = "normal"
+          return tempFrame
         }
       }
     }
@@ -1899,13 +1904,39 @@ class GraphicsObject {
     return this.activeLayer.getFrame(num)
   }
   setFrameNum(num) {
-    // this.currentFrameNum = Math.max(0, Math.min(this.maxFrame, num))
-    this.currentFrameNum = Math.max(0, num)
-    if (this.currentFrame.frameType=="keyframe") {
+    num = Math.max(0, num)
+    for (let layer of this.layers) {
+      this.currentFrameNum = num
+      let frame = layer.getFrame(num)
       for (let child of this.children) {
-        if (this.currentFrame.keys[child.idx].goToFrame != undefined) {
-          // Frames are 1-indexed
-          child.setFrameNum(this.currentFrame.keys[child.idx].goToFrame - 1)
+        
+        let idx = child.idx
+        if (idx in frame.keys) {
+          child.x = frame.keys[idx].x;
+          child.y = frame.keys[idx].y;
+          child.rotation = frame.keys[idx].rotation;
+          child.scale_x = frame.keys[idx].scale_x;
+          child.scale_y = frame.keys[idx].scale_y;
+          child.playFromFrame = frame.keys[idx].playFromFrame;
+          if (frame.frameType=="keyframe" &&
+            frame.keys[idx].goToFrame != undefined) {
+            // Frames are 1-indexed
+            child.setFrameNum(frame.keys[idx].goToFrame - 1)
+            if (child.playFromFrame) {
+              child.playing = true
+            } else {
+              child.playing = false
+            }
+          } else if (child.playing) {
+            let lastFrame = 0;
+            for (let i=num; i>=0; i--) {
+              if (layer.frames[i].frameType=="keyframe" && layer.frames[i].keys[idx].playFromFrame) {
+                lastFrame = i;
+                break
+              }
+            }
+            child.setFrameNum(num - lastFrame)
+          }
         }
       }
     }
