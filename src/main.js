@@ -112,6 +112,8 @@ let tools = {
             if (context.selection.length != 1) return undefined
             const selectedObject = context.selection[0]
             context.activeObject.currentFrame.keys[selectedObject.idx].goToFrame = val
+            selectedObject.setFrameNum(val-1)
+            updateUI()
           }
         }
       },
@@ -1884,7 +1886,8 @@ class GraphicsObject {
     return this.activeLayer.getFrame(num)
   }
   setFrameNum(num) {
-    this.currentFrameNum = Math.max(0, Math.min(this.maxFrame, num))
+    // this.currentFrameNum = Math.max(0, Math.min(this.maxFrame, num))
+    this.currentFrameNum = Math.max(0, num)
     if (this.currentFrame.frameType=="keyframe") {
       for (let child of this.children) {
         if (this.currentFrame.keys[child.idx].goToFrame != undefined) {
@@ -3896,6 +3899,7 @@ function updateLayers() {
         updateLayers()
         updateMenu()
         updateUI()
+        updateInfopanel()
       })
       let highlightedFrame = false
       layer.frames.forEach((frame, i) => {
