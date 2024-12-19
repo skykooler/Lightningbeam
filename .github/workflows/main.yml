@@ -34,7 +34,6 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Set version for Windows build
-        if: matrix.platform == 'windows-latest'
         run: |
           # Get the version from the Git tag (e.g., v0.6.3-alpha)
           VERSION=$(echo ${GITHUB_REF#refs/tags/})
