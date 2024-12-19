@@ -547,6 +547,54 @@ function clamp(n) {
   return Math.min(Math.max(n,0),1)
 }
 
+function drawBorderedRect(ctx, x, y, width, height, top, bottom, left, right) {
+  ctx.fillRect(x, y, width, height)
+  if (top) {
+    ctx.strokeStyle = top
+    ctx.beginPath()
+    ctx.moveTo(x, y)
+    ctx.lineTo(x+width, y)
+    ctx.stroke()
+  }
+  if (bottom) {
+    ctx.strokeStyle = bottom
+    ctx.beginPath()
+    ctx.moveTo(x, y+height)
+    ctx.lineTo(x+width, y+height)
+    ctx.stroke()
+  }
+  if (left) {
+    ctx.strokeStyle = left
+    ctx.beginPath()
+    ctx.moveTo(x, y)
+    ctx.lineTo(x, y+height)
+    ctx.stroke()
+  }
+  if (right) {
+    ctx.strokeStyle = right
+    ctx.beginPath()
+    ctx.moveTo(x+width, y)
+    ctx.lineTo(x+width, y+height)
+    ctx.stroke()
+  }
+}
+
+function drawCenteredText(ctx, text, x, y, height) {
+  // Set the font size and family based on the 'height' parameter
+  ctx.font = `${height}px Arial`; // You can customize the font style if needed
+
+  // Calculate the width of the text
+  const textWidth = ctx.measureText(text).width;
+  
+  // Calculate the position to center the text
+  const centerX = x - textWidth / 2;
+  const centerY = y + height / 4; // Adjust for vertical centering
+
+  // Draw the text centered at (x, y) with the specified font size
+  ctx.fillStyle = 'black';  // Set the color for the text
+  ctx.fillText(text, centerX, centerY);
+}
+
 export {
   titleCase,
   getMousePositionFraction,
@@ -564,5 +612,7 @@ export {
   hexToHsv,
   rgbToHex,
   drawCheckerboardBackground,
-  clamp
+  clamp,
+  drawBorderedRect,
+  drawCenteredText
 };

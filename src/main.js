@@ -3,7 +3,8 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText } from './utils.js';
+import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -224,6 +225,7 @@ let context = {
   selectionRect: undefined,
   selection: [],
   shapeselection: [],
+  selectedFrames: [],
   dragDirection: undefined,
   zoomLevel: 1,
 }
@@ -3591,19 +3593,73 @@ function toolbar() {
 }
 
 function timeline() {
-  let container = document.createElement("div")
-  let layerspanel = document.createElement("div")
-  let framescontainer = document.createElement("div")
-  container.classList.add("horizontal-grid")
-  container.classList.add("layers-container")
-  layerspanel.className = "layers"
-  framescontainer.className = "frames-container"
-  container.appendChild(layerspanel)
-  container.appendChild(framescontainer)
-  layoutElements.push(container)
-  container.setAttribute("lb-percent", 20)
+  // let container = document.createElement("div")
+  // let layerspanel = document.createElement("div")
+  // let framescontainer = document.createElement("div")
+  // container.classList.add("horizontal-grid")
+  // container.classList.add("layers-container")
+  // layerspanel.className = "layers"
+  // framescontainer.className = "frames-container"
+  // container.appendChild(layerspanel)
+  // container.appendChild(framescontainer)
+  // layoutElements.push(container)
+  // container.setAttribute("lb-percent", 20)
 
-  return container
+  // return container
+
+  let timeline_cvs = document.createElement("canvas")
+  timeline_cvs.className = "timeline"
+
+  function updateTimelineCanvasSize() {
+    const canvasStyles = window.getComputedStyle(timeline_cvs);
+
+    timeline_cvs.width = parseInt(canvasStyles.width);
+    timeline_cvs.height = parseInt(canvasStyles.height);
+    updateLayers()
+  }
+
+  // Set up ResizeObserver to watch for changes in the canvas size
+  const resizeObserver = new ResizeObserver(updateTimelineCanvasSize);
+  resizeObserver.observe(timeline_cvs);
+
+  let scrollSpeed = 1;
+  timeline_cvs.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const deltaX = event.deltaX * scrollSpeed;
+    const deltaY = event.deltaY * scrollSpeed;
+  
+    timeline_cvs.offsetX = Math.max(0, timeline_cvs.offsetX + deltaX);
+    timeline_cvs.offsetY = Math.max(0, timeline_cvs.offsetY + deltaY);
+    
+    updateLayers()
+  });
+  timeline_cvs.addEventListener("mousedown", (e) => {
+    let mouse = getMousePos(timeline_cvs, e)
+    mouse.y += timeline_cvs.offsetY
+    if (mouse.x > layerWidth) {
+      mouse.x += timeline_cvs.offsetX - layerWidth
+      timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth)
+      context.activeObject.setFrameNum(timeline_cvs.clicked_frame)
+      updateLayers()
+    }
+    console.log(mouse)
+  })
+  timeline_cvs.addEventListener("mouseup", (e) => {
+    let mouse = getMousePos(timeline_cvs, e)
+    mouse.y += timeline_cvs.offsetY
+    if (mouse.x > layerWidth) {
+      mouse.x += timeline_cvs.offsetX - layerWidth
+    
+      updateLayers()
+      updateMenu()
+    }
+    console.log(mouse)
+  })
+
+  timeline_cvs.offsetX = 0;
+  timeline_cvs.offsetY = 0;
+  updateTimelineCanvasSize();
+  return timeline_cvs
 }
 
 function infopanel() {
@@ -3886,6 +3942,107 @@ function updateUI() {
 }
 
 function updateLayers() {
+  
+
+  for (let canvas of document.querySelectorAll(".timeline")) {
+    const width = canvas.width
+    const height = canvas.height
+    const ctx = canvas.getContext("2d")
+    const offsetX = canvas.offsetX
+    const offsetY = canvas.offsetY
+    const frameCount = (width + offsetX - layerWidth) / frameWidth
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(0,0,width,height)
+    ctx.lineWidth = 1;
+
+    // Draw timeline top
+    ctx.save()
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(layerWidth,0,width-layerWidth,height)
+      ctx.clip()
+      ctx.translate(layerWidth - offsetX, 0)
+        for (let j=Math.floor(offsetX / (5 * frameWidth)) * 5; j<frameCount + 1; j+=5) {
+          drawCenteredText(ctx, j.toString(), (j-0.5)*frameWidth, gutterHeight/2, gutterHeight)
+        }
+      ctx.restore()
+      ctx.translate(0,gutterHeight)
+
+      ctx.save()
+      ctx.rect(0,0,width,height)
+      ctx.clip()
+        ctx.translate(0, -offsetY)
+        // Draw layer headers
+        let i=0;
+        for (let layer of context.activeObject.layers) {
+          if (context.activeObject.activeLayer == layer) {
+            ctx.fillStyle = darkMode ? "#444" : "#ccc"
+          } else {
+            ctx.fillStyle = darkMode ? "#222" : "#aaa"
+          }
+          drawBorderedRect(ctx, 0, i*layerHeight, layerWidth, layerHeight, highlight, shadow)
+          ctx.save()
+            ctx.beginPath()
+            ctx.rect(layerWidth, i*layerHeight,width,layerHeight)
+            ctx.clip()
+            ctx.translate(layerWidth - offsetX, i*layerHeight)
+            // Draw empty frames
+            for (let j=Math.floor(offsetX / frameWidth); j<frameCount; j++) {
+              ctx.fillStyle = (j+1)%5 == 0 ? shade : backgroundColor
+              drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, shadow, highlight, shadow, shadow)
+            }
+            // Draw existing frames
+            layer.frames.forEach((frame, j) => {
+              switch (frame.frameType) {
+                case "keyframe":
+                  ctx.fillStyle = foregroundColor
+                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, backgroundColor, backgroundColor)
+                  ctx.fillStyle = "#111"
+                  ctx.beginPath()
+                  ctx.arc((j+0.5)*frameWidth, layerHeight*0.75, frameWidth*0.25, 0, 2*Math.PI)
+                  ctx.fill()
+                  break;
+                case "normal":
+                  ctx.fillStyle = foregroundColor
+                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, backgroundColor, backgroundColor)
+                  break;
+                case "motion":
+                  ctx.fillStyle = "#7a00b3"
+                  ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
+                  break;
+                case "shape":
+                  ctx.fillStyle = "#9bff9b"
+                  ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
+                  break;
+              }
+            })
+            // Draw highlighted frame
+            // if (context.activeObject.currentFrameNum) 
+          ctx.restore()
+          i++;
+        }
+      ctx.restore()
+
+
+      // Draw scrubber bar
+      ctx.save()
+        ctx.beginPath()
+        ctx.rect(layerWidth, -gutterHeight, width, height)
+        ctx.clip()
+        ctx.translate(layerWidth - offsetX, 0)
+        let frameNum = context.activeObject.currentFrameNum
+        ctx.strokeStyle = scrubberColor
+        ctx.beginPath()
+        ctx.moveTo((frameNum + 0.5) * frameWidth, 0)
+        ctx.lineTo((frameNum + 0.5) * frameWidth, height)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.fillStyle = scrubberColor
+        ctx.fillRect(frameNum * frameWidth, -gutterHeight, frameWidth, gutterHeight)
+        drawCenteredText(ctx, (frameNum+1).toString(), (frameNum + 0.5) * frameWidth, -gutterHeight/2, gutterHeight)
+      ctx.restore()
+    ctx.restore()
+  }
   for (let container of document.querySelectorAll(".layers-container")) {
     let layerspanel = container.querySelectorAll(".layers")[0]
     let framescontainer = container.querySelectorAll(".frames-container")[0]
