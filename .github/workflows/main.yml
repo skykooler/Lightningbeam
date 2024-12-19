@@ -53,7 +53,11 @@ jobs:
           sed -i "s/\"version\": \".*\"/\"version\": \"${WINDOWS_VERSION}\"/" src-tauri/tauri.windows.conf.json
         shell: bash
 
-       
+      - name: Set version for all platforms
+        run: |
+          # Extract the version from the Git tag (it should be the same across platforms)
+          VERSION=$(echo ${GITHUB_REF#refs/tags/})
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: setup pnpm
         uses: pnpm/action-setup@v2
@@ -85,8 +89,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: "app-v${VERSION}"  # Use the original version tag for the release
-          releaseName: "App v${VERSION}"
+          tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
+          releaseName: "App v${{ env.VERSION }}"
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: false  # Set to true if you want the release to be a draft
           prerelease: true
