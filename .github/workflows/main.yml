@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           # Read the version from src-tauri/tauri.conf.json
-          VERSION=$(jq -r '.package.version' src-tauri/tauri.conf.json)
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           
           # For Windows, modify version if it contains '-alpha' or '-beta'
           if [[ "$VERSION" == *"-alpha"* ]]; then
@@ -61,7 +61,7 @@ jobs:
         run: |
           # Read the version from src-tauri/tauri.conf.json
           $tauriConf = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
-          $VERSION = $tauriConf.package.version
+          $VERSION = $tauriConf.version
       
           # Replace '-alpha' with '-0' and '-beta' with '-1' for Windows version
           if ($VERSION -match "-alpha") {
