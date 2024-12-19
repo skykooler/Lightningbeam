@@ -52,6 +52,7 @@ jobs:
           cp src-tauri/tauri.conf.json src-tauri/tauri.windows.conf.json
 
           sed -i "s/\"version\": \".*\"/\"version\": \"${WINDOWS_VERSION}\"/" src-tauri/tauri.windows.conf.json
+        shell: bash
 
        
 
