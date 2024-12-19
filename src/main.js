@@ -76,7 +76,51 @@ let clipboard = []
 let tools = {
   select: {
     icon: "/assets/select.svg",
-    properties: {}
+    properties: {
+      "selectedObjects": {
+        type: "text",
+        label: "Selected Object",
+        enabled: () => context.selection.length==1,
+        value: {
+          get: () => {
+            if (context.selection.length==1) {
+              return context.selection[0].name
+            } else if (context.selection.length==0) {
+              return ""
+            } else {
+              return "<multiple>"
+            }
+          },
+          set: (val) => {
+            if (context.selection.length==1) {
+              actions.setName.create(context.selection[0], val)
+            }
+          }
+        }
+      },
+      "goToFrame": {
+        type: "number",
+        label: "Go To Frame",
+        enabled: () => context.selection.length==1,
+        value: {
+          get: () => {
+            if (context.selection.length != 1) return undefined
+            const selectedObject = context.selection[0]
+            return context.activeObject.currentFrame.keys[selectedObject.idx].goToFrame
+          },
+          set: (val) => {
+            if (context.selection.length != 1) return undefined
+            const selectedObject = context.selection[0]
+            context.activeObject.currentFrame.keys[selectedObject.idx].goToFrame = val
+          }
+        }
+      },
+      "play": {
+        type: "boolean",
+        label: "Play",
+        enabled: () => context.selection.length==1
+      }
+    }
 
   },
   transform: {
@@ -842,6 +886,7 @@ let actions = {
         context.selection.push(group)
       }
       updateUI()
+      updateInfopanel()
     },
     rollback: (action) => {
       let group = pointerList[action.groupUuid]
@@ -858,6 +903,7 @@ let actions = {
       }
       parent.removeChild(group)
       updateUI()
+      updateInfopanel()
     }
   },
   sendToBack: {
@@ -970,6 +1016,29 @@ let actions = {
         layer.children.splice(action.formerIndices[objectIdx], 0, object  )
       }
       updateUI()
+    }
+  },
+  setName: {
+    create: (object, name) => {
+      redoStack.length = 0
+      let action = {
+        object: object.idx,
+        newName: name,
+        oldName: object.name
+      }
+      undoStack.push({name: 'setName', action: action})
+      actions.setName.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let object = pointerList[action.object]
+      object.name = action.newName
+      updateInfopanel()
+    },
+    rollback: (action) => {
+      let object = pointerList[action.object]
+      object.name = action.oldName
+      updateInfopanel()
     }
   },
 }
@@ -1805,8 +1874,25 @@ class GraphicsObject {
   get maxFrame() {
     return Math.max(this.layers.map((layer)=>{return layer.frames.length}))
   }
+  advanceFrame() {
+    this.setFrameNum(this.currentFrameNum + 1)
+  }
+  decrementFrame() {
+    this.setFrameNum(this.currentFrameNum - 1)
+  }
   getFrame(num) {
     return this.activeLayer.getFrame(num)
+  }
+  setFrameNum(num) {
+    this.currentFrameNum = Math.max(0, Math.min(this.maxFrame, num))
+    if (this.currentFrame.frameType=="keyframe") {
+      for (let child of this.children) {
+        if (this.currentFrame.keys[child.idx].goToFrame != undefined) {
+          // Frames are 1-indexed
+          child.setFrameNum(this.currentFrame.keys[child.idx].goToFrame - 1)
+        }
+      }
+    }
   }
   bbox() {
     let bbox;
@@ -2004,6 +2090,7 @@ class GraphicsObject {
       rotation: 0,
       scale_x: 1, 
       scale_y: 1,
+      goToFrame: 1,
     }
   }
   removeShape(shape) {
@@ -2243,7 +2330,7 @@ function playPause() {
 }
 
 function advanceFrame() {
-  context.activeObject.currentFrameNum += 1
+  context.activeObject.advanceFrame()
   updateLayers()
   updateMenu()
   updateUI()
@@ -2263,12 +2350,10 @@ function advanceFrame() {
 }
 
 function decrementFrame() {
-  if (context.activeObject.currentFrameNum > 0) {
-    context.activeObject.currentFrameNum -= 1
-    updateLayers()
-    updateMenu()
-    updateUI()
-  }
+  context.activeObject.decrementFrame()
+  updateLayers()
+  updateMenu()
+  updateUI()
 }
 
 function _newFile(width, height, fps) {
@@ -2911,6 +2996,7 @@ function stage() {
     }
     context.lastMouse = mouse
     updateUI()
+    updateInfopanel()
   })
   stage.addEventListener("mouseup", (e) => {
     context.mouseDown = false
@@ -2970,6 +3056,7 @@ function stage() {
     context.activeCurve = undefined
     updateUI()
     updateMenu()
+    updateInfopanel()
   })
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
@@ -3805,7 +3892,7 @@ function updateLayers() {
       layerTrack.addEventListener("click", (e) => {
         let mouse = getMousePos(layerTrack, e)
         let frameNum = parseInt(mouse.x/25)
-        context.activeObject.currentFrameNum = frameNum
+        context.activeObject.setFrameNum(frameNum)
         updateLayers()
         updateMenu()
         updateUI()
@@ -3926,7 +4013,12 @@ function updateInfopanel() {
           input = document.createElement("input")
           input.className = "infopanel-input"
           input.type = "number"
-          input.value = getProperty(context, property)
+          input.disabled = prop.enabled==undefined ? false : !prop.enabled()
+          if (prop.value) {
+            input.value = prop.value.get()
+          } else {
+            input.value = getProperty(context, property)
+          }
           if (prop.min) {
             input.min = prop.min
           }
@@ -3937,6 +4029,7 @@ function updateInfopanel() {
         case "enum":
           input = document.createElement("select")
           input.className = "infopanel-input"
+          input.disabled = prop.enabled==undefined ? false : !prop.enabled()
           let optionEl;
           for (let option of prop.options) {
             optionEl = document.createElement("option")
@@ -3944,20 +4037,43 @@ function updateInfopanel() {
             optionEl.innerText = option
             input.appendChild(optionEl)
           }
-          input.value = getProperty(context, property)
+          if (prop.value) {
+            input.value = prop.value.get()
+          } else {
+            input.value = getProperty(context, property)
+          }
           break;
         case "boolean":
           input = document.createElement("input")
           input.className = "infopanel-input"
           input.type = "checkbox"
-          input.checked = getProperty(context, property)
+          input.disabled = prop.enabled==undefined ? false : !prop.enabled()
+          if (prop.value) {
+            input.checked = prop.value.get()
+          } else {
+            input.checked = getProperty(context, property)
+          }
+          break;
+        case "text":
+          input = document.createElement("input")
+          input.className = "infopanel-input"
+          input.disabled = prop.enabled==undefined ? false : !prop.enabled()
+          if (prop.value) {
+            input.value = prop.value.get()
+          } else {
+            input.value = getProperty(context, property)
+          }
           break;
       }
       input.addEventListener("input", (e) => {
         switch (prop.type) {
           case "number":
             if (!isNaN(e.target.value) && e.target.value > 0) {
-              setProperty(context, property, parseInt(e.target.value))
+              if (prop.value) {
+                prop.value.set(parseInt(e.target.value))
+              } else {
+                setProperty(context, property, parseInt(e.target.value))
+              }
             }
             break;
           case "enum":
@@ -3966,7 +4082,19 @@ function updateInfopanel() {
             }
             break;
           case "boolean":
-            setProperty(context, property, e.target.checked)
+            if (prop.value) {
+              prop.value.set(e.target.value)
+            } else {
+              setProperty(context, property, e.target.checked)
+            }
+            break;
+          case "text":
+            if (prop.value) {
+              prop.value.set(e.target.value)
+            } else {
+              setProperty(context, property, parseInt(e.target.value))
+            }
+            break;
         }
 
       })
