@@ -3593,22 +3593,13 @@ function toolbar() {
 }
 
 function timeline() {
-  // let container = document.createElement("div")
-  // let layerspanel = document.createElement("div")
-  // let framescontainer = document.createElement("div")
-  // container.classList.add("horizontal-grid")
-  // container.classList.add("layers-container")
-  // layerspanel.className = "layers"
-  // framescontainer.className = "frames-container"
-  // container.appendChild(layerspanel)
-  // container.appendChild(framescontainer)
-  // layoutElements.push(container)
-  // container.setAttribute("lb-percent", 20)
-
-  // return container
-
   let timeline_cvs = document.createElement("canvas")
   timeline_cvs.className = "timeline"
+
+
+  // Variable to store the last time updateTimelineCanvasSize was called
+  let lastResizeTime = 0;
+  const throttleIntervalMs = 20;
 
   function updateTimelineCanvasSize() {
     const canvasStyles = window.getComputedStyle(timeline_cvs);
@@ -3619,7 +3610,16 @@ function timeline() {
   }
 
   // Set up ResizeObserver to watch for changes in the canvas size
-  const resizeObserver = new ResizeObserver(updateTimelineCanvasSize);
+  const resizeObserver = new ResizeObserver(() => {
+    const currentTime = Date.now();
+
+    // Only call updateTimelineCanvasSize if enough time has passed since the last call
+    // This prevents error messages about a ResizeObserver loop
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateTimelineCanvasSize();
+    }
+  });
   resizeObserver.observe(timeline_cvs);
 
   let scrollSpeed = 1;
