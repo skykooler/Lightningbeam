@@ -57,9 +57,9 @@ jobs:
       
           # Replace '-alpha' with '-0' and '-beta' with '-1' for Windows version
           if ($VERSION -match "-alpha") {
-            $WINDOWS_VERSION = $VERSION -replace "-alpha$", "-0"
+            $WINDOWS_VERSION = $VERSION -replace "-alpha", "-1"
           } elseif ($VERSION -match "-beta") {
-            $WINDOWS_VERSION = $VERSION -replace "-beta$", "-1"
+            $WINDOWS_VERSION = $VERSION -replace "-beta", "-2"
           } else {
             $WINDOWS_VERSION = $VERSION
           }
@@ -72,7 +72,12 @@ jobs:
           
           echo "VERSION=$VERSION" >> $env:GITHUB_ENV
 
-
+      - name: Print contents of tauri.windows.conf.json (Windows)
+        if: matrix.platform == 'windows-latest'  # Only run on Windows
+        shell: pwsh
+        run: |
+          Write-Host "Contents of src-tauri/tauri.windows.conf.json:"
+          Get-Content src-tauri/tauri.windows.conf.json
 
       - name: setup pnpm
         uses: pnpm/action-setup@v2
@@ -105,7 +110,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
-          releaseName: "App v${{ env.VERSION }}"
+          releaseName: "Lightningbeam v${{ env.VERSION }}"
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
