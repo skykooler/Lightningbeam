@@ -72,7 +72,12 @@ jobs:
           
           echo "VERSION=$VERSION" >> $env:GITHUB_ENV
 
-
+      - name: Print contents of tauri.windows.conf.json (Windows)
+        if: matrix.platform == 'windows-latest'  # Only run on Windows
+        shell: pwsh
+        run: |
+          Write-Host "Contents of src-tauri/tauri.windows.conf.json:"
+          Get-Content src-tauri/tauri.windows.conf.json
 
       - name: setup pnpm
         uses: pnpm/action-setup@v2
