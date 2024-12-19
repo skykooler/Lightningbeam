@@ -50,7 +50,7 @@ jobs:
           # Copy tauri.conf.json to tauri.windows.conf.json and substitute version number for Windows
           cp src-tauri/tauri.conf.json src-tauri/tauri.windows.conf.json
 
-          sed -i "s/\"version\": \".*\"/\"version\": \"${WINDOWS_VERSION}\"/" src-tauri/tauri.windows.conf.json
+          sed -i "s|\"version\": \".*\"|\"version\": \"${WINDOWS_VERSION}\"|" src-tauri/tauri.windows.conf.json
         shell: bash
 
       - name: Set version for all platforms
