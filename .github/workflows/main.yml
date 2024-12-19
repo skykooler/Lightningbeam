@@ -110,7 +110,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
-          releaseName: "App v${{ env.VERSION }}"
+          releaseName: "Lightningbeam v${{ env.VERSION }}"
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
