@@ -33,14 +33,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Install jq on Windows
+        if: matrix.platform == 'windows-latest'
+        run: |
+          choco install jq
+
+      - name: Set version for all platforms
+        shell: bash
+        run: |
+          # Read the version from src-tauri/tauri.conf.json
+          VERSION=$(jq -r '.package.version' src-tauri/tauri.conf.json)
+          
+          # For Windows, modify version if it contains '-alpha' or '-beta'
+          if [[ "$VERSION" == *"-alpha"* ]]; then
+            VERSION="${VERSION/-alpha/-0}"
+          elif [[ "$VERSION" == *"-beta"* ]]; then
+            VERSION="${VERSION/-beta/-1}"
+          fi
+      
+          # Set the version in the environment variable
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+        if: matrix.platform != 'windows-latest'
+      
       - name: Set version for Windows build
         if: matrix.platform == 'windows-latest'  # Only run on Windows
         shell: pwsh  # Use PowerShell on Windows runners
         run: |
-          # Get the version from the Git tag (e.g., v0.6.3-alpha)
-          $VERSION = ${GITHUB_REF.Substring('refs/tags/'.Length)}
+          # Read the version from src-tauri/tauri.conf.json
+          $tauriConf = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
+          $VERSION = $tauriConf.package.version
       
-          # Replace '-alpha' with '-0' and '-beta' with '-1' only for Windows version
+          # Replace '-alpha' with '-0' and '-beta' with '-1' for Windows version
           if ($VERSION -match "-alpha") {
             $WINDOWS_VERSION = $VERSION -replace "-alpha$", "-0"
           } elseif ($VERSION -match "-beta") {
@@ -48,25 +71,14 @@ jobs:
           } else {
             $WINDOWS_VERSION = $VERSION
           }
-      
-          # Copy tauri.conf.json to tauri.windows.conf.json and substitute version number for Windows
           Copy-Item src-tauri/tauri.conf.json -Destination src-tauri/tauri.windows.conf.json
-      
+
           # Modify the version in tauri.windows.conf.json
           (Get-Content src-tauri/tauri.windows.conf.json) | ForEach-Object {
-            $_ -replace '"version": ".*"', ('"version": "' + $WINDOWS_VERSION + '"')
+            $_ -replace '"version": ".*"', '"version": "' + $WINDOWS_VERSION + '"'
           } | Set-Content src-tauri/tauri.windows.conf.json
-      
-          # Export the Windows version for use in subsequent steps
-          echo "WINDOWS_VERSION=$WINDOWS_VERSION" >> $env:GITHUB_ENV
 
 
-      - name: Set version for all platforms
-        run: |
-          # Extract the version from the Git tag (it should be the same across platforms)
-          VERSION=$(echo ${GITHUB_REF#refs/tags/})
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-        if: matrix.platform != 'windows-latest'
 
       - name: setup pnpm
         uses: pnpm/action-setup@v2
