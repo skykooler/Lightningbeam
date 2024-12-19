@@ -72,10 +72,10 @@ jobs:
             $WINDOWS_VERSION = $VERSION
           }
           Copy-Item src-tauri/tauri.conf.json -Destination src-tauri/tauri.windows.conf.json
-
+      
           # Modify the version in tauri.windows.conf.json
           (Get-Content src-tauri/tauri.windows.conf.json) | ForEach-Object {
-            $_ -replace '"version": ".*"', '"version": "' + $WINDOWS_VERSION + '"'
+            $_ -replace '"version": ".*"', ('"version": "' + $WINDOWS_VERSION + '"')
           } | Set-Content src-tauri/tauri.windows.conf.json
 
 
