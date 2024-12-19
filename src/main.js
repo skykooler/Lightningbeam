@@ -117,10 +117,23 @@ let tools = {
           }
         }
       },
-      "play": {
+      "playFromFrame": {
         type: "boolean",
-        label: "Play",
-        enabled: () => context.selection.length==1
+        label: "Play From Frame",
+        enabled: () => context.selection.length==1,
+        value: {
+          get: () => {
+            if (context.selection.length != 1) return undefined
+            const selectedObject = context.selection[0]
+            return context.activeObject.currentFrame.keys[selectedObject.idx].playFromFrame
+          },
+          set: (val) => {
+            if (context.selection.length != 1) return undefined
+            const selectedObject = context.selection[0]
+            context.activeObject.currentFrame.keys[selectedObject.idx].playFromFrame = val
+            updateUI()
+          }
+        }
       }
     }
 
