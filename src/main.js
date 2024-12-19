@@ -4161,7 +4161,7 @@ function updateInfopanel() {
     let breadcrumbs = document.createElement("div")
     const bctitle = document.createElement('span');
     bctitle.style.cursor = "default"
-    bctitle.textContent = "Active object: ";
+    bctitle.textContent = "Context: ";
     breadcrumbs.appendChild(bctitle);
     let crumbs = []
     for (let object of context.objectStack) {
