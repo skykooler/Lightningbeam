@@ -57,9 +57,9 @@ jobs:
       
           # Replace '-alpha' with '-0' and '-beta' with '-1' for Windows version
           if ($VERSION -match "-alpha") {
-            $WINDOWS_VERSION = $VERSION -replace "-alpha$", "-1"
+            $WINDOWS_VERSION = $VERSION -replace "-alpha", "-1"
           } elseif ($VERSION -match "-beta") {
-            $WINDOWS_VERSION = $VERSION -replace "-beta$", "-2"
+            $WINDOWS_VERSION = $VERSION -replace "-beta", "-2"
           } else {
             $WINDOWS_VERSION = $VERSION
           }
