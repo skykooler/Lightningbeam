@@ -1,3 +1,15 @@
+# 0.6.4-alpha:
+Changes:
+- "Save As" dialog will use the existing filename as a default
+
+New features:
+- Added option to play objects from specific frames
+- Added automatic builds for Linux, macOS and Windows
+
+Bugfixes:
+- Fixed performance issues with drawing ellipses and rectangles
+- Fixed mouse coordinates being incorrect inside a moved object
+
 # 0.6.3-alpha:
 Changes:
 - "Reset Zoom" renamed to "Actual Size"
