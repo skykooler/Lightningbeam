@@ -3640,8 +3640,14 @@ function timeline() {
       mouse.x += timeline_cvs.offsetX - layerWidth
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth)
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame)
-      updateLayers()
+    } else {
+      mouse.y -= gutterHeight
+      let l = Math.floor(mouse.y / layerHeight)
+      if (l < context.activeObject.layers.length) {
+        context.activeObject.currentLayer = context.activeObject.layers.length - (l+1)
+      }
     }
+    updateLayers()
     console.log(mouse)
   })
   timeline_cvs.addEventListener("mouseup", (e) => {
@@ -3974,7 +3980,8 @@ function updateLayers() {
         ctx.translate(0, -offsetY)
         // Draw layer headers
         let i=0;
-        for (let layer of context.activeObject.layers) {
+        for (let k = context.activeObject.layers.length - 1; k >= 0; k--) {
+          let layer = context.activeObject.layers[k];
           if (context.activeObject.activeLayer == layer) {
             ctx.fillStyle = darkMode ? "#444" : "#ccc"
           } else {
