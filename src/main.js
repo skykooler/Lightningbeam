@@ -3313,6 +3313,7 @@ function stage() {
         // we didn't click on a child, go up a level
         if (context.activeObject.parent) {
           context.selection = [context.activeObject]
+          context.activeObject.currentFrameNum = 0;
           context.shapeselection = []
           context.objectStack.pop()
           updateUI()
@@ -4318,9 +4319,6 @@ function updateInfopanel() {
 
       })
       input.addEventListener("blur", (e) => {
-        // Handle when the input field loses focus
-        console.log("Input lost focus");
-        // Your logic here
         switch (prop.type) {
           case "text":
             if (prop.value) {
