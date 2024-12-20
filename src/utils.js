@@ -580,8 +580,7 @@ function drawBorderedRect(ctx, x, y, width, height, top, bottom, left, right) {
 }
 
 function drawCenteredText(ctx, text, x, y, height) {
-  // Set the font size and family based on the 'height' parameter
-  ctx.font = `${height}px Arial`; // You can customize the font style if needed
+  ctx.font = `${height}px Arial`; // TODO: allow configuring font somewhere
 
   // Calculate the width of the text
   const textWidth = ctx.measureText(text).width;
@@ -591,8 +590,14 @@ function drawCenteredText(ctx, text, x, y, height) {
   const centerY = y + height / 4; // Adjust for vertical centering
 
   // Draw the text centered at (x, y) with the specified font size
-  ctx.fillStyle = 'black';  // Set the color for the text
   ctx.fillText(text, centerX, centerY);
+}
+
+function drawHorizontallyCenteredText(ctx, text, x, y, height) {
+  ctx.font = `${height}px Arial`; // TODO: allow configuring font somewhere
+  const centerY = y + height / 4; // Adjust for vertical centering
+
+  ctx.fillText(text, x, centerY);
 }
 
 export {
@@ -614,5 +619,6 @@ export {
   drawCheckerboardBackground,
   clamp,
   drawBorderedRect,
-  drawCenteredText
+  drawCenteredText,
+  drawHorizontallyCenteredText
 };

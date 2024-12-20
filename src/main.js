@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
@@ -3974,6 +3974,7 @@ function updateLayers() {
       ctx.rect(layerWidth,0,width-layerWidth,height)
       ctx.clip()
       ctx.translate(layerWidth - offsetX, 0)
+        ctx.fillStyle = darkMode ? "white" : "black"
         for (let j=Math.floor(offsetX / (5 * frameWidth)) * 5; j<frameCount + 1; j+=5) {
           drawCenteredText(ctx, j.toString(), (j-0.5)*frameWidth, gutterHeight/2, gutterHeight)
         }
@@ -3994,6 +3995,8 @@ function updateLayers() {
             ctx.fillStyle = darkMode ? "#222" : "#aaa"
           }
           drawBorderedRect(ctx, 0, i*layerHeight, layerWidth, layerHeight, highlight, shadow)
+          ctx.fillStyle = darkMode ? "white": "black"
+          drawHorizontallyCenteredText(ctx, layer.name, 5, (i+0.5)*layerHeight, layerHeight*0.4)
           ctx.save()
             ctx.beginPath()
             ctx.rect(layerWidth, i*layerHeight,width,layerHeight)
@@ -4009,7 +4012,7 @@ function updateLayers() {
               switch (frame.frameType) {
                 case "keyframe":
                   ctx.fillStyle = foregroundColor
-                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, backgroundColor, backgroundColor)
+                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, shadow, shadow)
                   ctx.fillStyle = "#111"
                   ctx.beginPath()
                   ctx.arc((j+0.5)*frameWidth, layerHeight*0.75, frameWidth*0.25, 0, 2*Math.PI)
@@ -4052,10 +4055,12 @@ function updateLayers() {
         ctx.beginPath()
         ctx.fillStyle = scrubberColor
         ctx.fillRect(frameNum * frameWidth, -gutterHeight, frameWidth, gutterHeight)
+        ctx.fillStyle = "white"
         drawCenteredText(ctx, (frameNum+1).toString(), (frameNum + 0.5) * frameWidth, -gutterHeight/2, gutterHeight)
       ctx.restore()
     ctx.restore()
   }
+  return
   for (let container of document.querySelectorAll(".layers-container")) {
     let layerspanel = container.querySelectorAll(".layers")[0]
     let framescontainer = container.querySelectorAll(".frames-container")[0]
