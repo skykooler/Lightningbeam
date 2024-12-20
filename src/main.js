@@ -3627,11 +3627,17 @@ function timeline() {
     event.preventDefault();
     const deltaX = event.deltaX * scrollSpeed;
     const deltaY = event.deltaY * scrollSpeed;
+
+    let maxScroll = context.activeObject.layers.length * layerHeight + gutterHeight - timeline_cvs.height
   
     timeline_cvs.offsetX = Math.max(0, timeline_cvs.offsetX + deltaX);
-    timeline_cvs.offsetY = Math.max(0, timeline_cvs.offsetY + deltaY);
+    timeline_cvs.offsetY = Math.max(0, Math.min(maxScroll, timeline_cvs.offsetY + deltaY));
     
-    updateLayers()
+    const currentTime = Date.now();
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateLayers();
+    }
   });
   timeline_cvs.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(timeline_cvs, e)
