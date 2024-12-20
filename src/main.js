@@ -2242,8 +2242,8 @@ window.addEventListener("keydown", (e) => {
     // shortcut = shortcut.split("+")
     // TODO
   // }
-  if (e.target.contentEditable == "plaintext-only") {
-    return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) {
+    return; // Do nothing if the event target is an input field, textarea, or contenteditable element
   }
   console.log(e)
   let mod = macOS ? e.metaKey : e.ctrlKey;
@@ -4312,6 +4312,17 @@ function updateInfopanel() {
             }
             break;
           case "text":
+            // Do nothing because this event fires for every character typed
+            break;
+        }
+
+      })
+      input.addEventListener("blur", (e) => {
+        // Handle when the input field loses focus
+        console.log("Input lost focus");
+        // Your logic here
+        switch (prop.type) {
+          case "text":
             if (prop.value) {
               prop.value.set(e.target.value)
             } else {
@@ -4319,8 +4330,13 @@ function updateInfopanel() {
             }
             break;
         }
-
-      })
+      });
+      
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.target.blur()
+        }
+      });
       label.appendChild(span)
       label.appendChild(input)
       panel.appendChild(label)
