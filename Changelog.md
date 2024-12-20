@@ -1,3 +1,16 @@
+# 0.6.6-alpha:
+Changes:
+- Rename "Active Object" to "Context"
+- Objects display their first frame when not editing them
+
+New features:
+- Added scrubber to timeline
+
+Bugfixes:
+- Fixed timeline not rendering frame backgrounds when scrolled
+- Layers were in reverse order
+- Fixed delete keyboard shortcut being triggered when typing in a text box
+
 # 0.6.4-alpha:
 Changes:
 - "Save As" dialog will use the existing filename as a default
