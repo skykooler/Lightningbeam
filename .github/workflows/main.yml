@@ -114,3 +114,4 @@ jobs:
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
+          args: ${{ matrix.args }}
