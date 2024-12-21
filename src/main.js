@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
@@ -246,6 +246,7 @@ let config = {
     saveAs: "<mod>S",
     open: "<mod>o",
     import: "<mod>i",
+    export: "<mod>e",
     quit: "<mod>q",
     copy: "<mod>c",
     paste: "<mod>v",
@@ -254,6 +255,7 @@ let config = {
     group: "<mod>g",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
+    resetZoom: "<mod>0"
   },
   fileWidth: 800,
   fileHeight: 600,
@@ -261,14 +263,25 @@ let config = {
   recentFiles: []
 }
 
+function getShortcut(shortcut) {
+  if (!(shortcut in config.shortcuts)) return undefined;
+
+  let shortcutValue = config.shortcuts[shortcut].replace("<mod>", "CmdOrCtrl+");
+  const key = shortcutValue.slice(-1);
+
+  // If the last character is uppercase, prepend "Shift+" to it
+  return key === key.toUpperCase() && key !== key.toLowerCase() 
+    ? shortcutValue.replace(key, `Shift+${key}`)
+    : shortcutValue.replace("++", "+Shift+="); // Hardcode uppercase from = to +
+}
+
 // Load the configuration from the file system
 async function loadConfig() {
   try {
     const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
     const configData = await readTextFile(configPath);
-    config = JSON.parse(configData);
+    config = deepMerge({...config}, JSON.parse(configData));
     updateUI()
-    console.log(config)
   } catch (error) {
     console.log('Error loading config, returning default config:', error);
   }
@@ -4460,21 +4473,25 @@ async function updateMenu() {
         text: 'New file...',
         enabled: true,
         action: newFile,
+        accelerator: getShortcut("new")
       },
       {
         text: 'Save',
         enabled: true,
         action: save,
+        accelerator: getShortcut("save")
       },
       {
         text: 'Save As...',
         enabled: true,
         action: saveAs,
+        accelerator: getShortcut("saveAs")
       },
       {
         text: 'Open File...',
         enabled: true,
         action: open,
+        accelerator: getShortcut("open")
       },
       {
         text: 'Revert',
@@ -4485,16 +4502,19 @@ async function updateMenu() {
         text: 'Import...',
         enabled: true,
         action: importFile,
+        accelerator: getShortcut("import")
       },
       {
         text: "Export...",
         enabled: true,
-        action: render
+        action: render,
+        accelerator: getShortcut("export")
       },
       {
         text: 'Quit',
         enabled: true,
         action: quit,
+        accelerator: getShortcut("quit")
       },
     ]
   })
@@ -4505,12 +4525,14 @@ async function updateMenu() {
       {
         text: "Undo " + ((undoStack.length>0) ? camelToWords(undoStack[undoStack.length-1].name) : ""),
         enabled: undoStack.length > 0,
-        action: undo
+        action: undo,
+        accelerator: getShortcut("undo")
       },
       {
         text: "Redo " + ((redoStack.length>0) ? camelToWords(redoStack[redoStack.length-1].name) : ""),
         enabled: redoStack.length > 0,
-        action: redo
+        action: redo,
+        accelerator: getShortcut("redo")
       },
       {
         text: "Cut",
@@ -4520,22 +4542,26 @@ async function updateMenu() {
       {
         text: "Copy",
         enabled: (context.selection.length > 0 || context.shapeselection.length > 0),
-        action: copy
+        action: copy,
+        accelerator: getShortcut("copy")
       },
       {
         text: "Paste",
         enabled: true,
-        action: paste
+        action: paste,
+        accelerator: getShortcut("paste")
       },
       {
         text: "Delete",
         enabled: (context.selection.length > 0 || context.shapeselection.length > 0),
-        action: delete_action
+        action: delete_action,
+        accelerator: getShortcut("delete")
       },
       {
         text: "Select All",
         enabled: true,
-        action: selectAll
+        action: selectAll,
+        accelerator: getShortcut("selectAll")
       },
     ]
   });
@@ -4546,7 +4572,8 @@ async function updateMenu() {
       {
         text: "Group",
         enabled: context.selection.length != 0 || context.shapeselection.length != 0,
-        action: actions.group.create
+        action: actions.group.create,
+        accelerator: getShortcut("group")
       },
       {
         text: "Send to back",
@@ -4622,7 +4649,8 @@ async function updateMenu() {
       {
         text: "Play",
         enabled: !playing,
-        action: playPause
+        action: playPause,
+        accelerator: getShortcut("playAnimation")
       },
     ]
   });
@@ -4632,17 +4660,20 @@ async function updateMenu() {
       {
         text: "Zoom In",
         enabled: true,
-        action: zoomIn
+        action: zoomIn,
+        accelerator: getShortcut("zoomIn")
       },
       {
         text: "Zoom Out",
         enabled: true,
-        action: zoomOut
+        action: zoomOut,
+        accelerator: getShortcut("zoomOut")
       },
       {
         text: "Actual Size",
         enabled: context.zoomLevel != 1,
-        action: resetZoom
+        action: resetZoom,
+        accelerator: getShortcut("resetZoom")
       },
     ]
   }); 
@@ -4741,6 +4772,7 @@ function getMimeType(filePath) {
       return null; // Unsupported file type
   }
 }
+
 
 function startToneOnUserInteraction() {
   // Function to handle the first interaction (click or key press)

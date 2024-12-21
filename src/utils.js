@@ -600,6 +600,28 @@ function drawHorizontallyCenteredText(ctx, text, x, y, height) {
   ctx.fillText(text, x, centerY);
 }
 
+function deepMerge(target, source) {
+  // If either target or source is not an object, return source (base case)
+  if (typeof target !== 'object' || target === null) {
+    return source;
+  }
+
+  // If target is an object, recursively merge
+  if (typeof source === 'object' && source !== null) {
+    for (let key in source) {
+      // If the key exists in both objects, and both are objects, recursively merge
+      if (target.hasOwnProperty(key) && typeof target[key] === 'object' && typeof source[key] === 'object') {
+        target[key] = deepMerge(target[key], source[key]);
+      } else {
+        // Otherwise, just assign the source value to target
+        target[key] = source[key];
+      }
+    }
+  }
+
+  return target;
+}
+
 export {
   titleCase,
   getMousePositionFraction,
@@ -620,5 +642,6 @@ export {
   clamp,
   drawBorderedRect,
   drawCenteredText,
-  drawHorizontallyCenteredText
+  drawHorizontallyCenteredText,
+  deepMerge
 };
