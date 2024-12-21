@@ -128,15 +128,20 @@ button {
 .panecontainer {
   width: 100%;
   height: 100%;
+  border-radius: 5px;
+  overflow: hidden;
 }
 
 .horizontal-grid, .vertical-grid {
   display: flex;
-  gap: 5px;
   background-color: #555;
   width: 100%;
   height: 100%;
   contain: strict;
+}
+.horizontal-grid:not(.panecontainer > .horizontal-grid),
+.vertical-grid:not(.panecontainer > .vertical-grid) {
+  gap: 3px;
 }
 .horizontal-grid {
   flex-direction: row;
@@ -145,11 +150,11 @@ button {
   flex-direction: column;
 }
 /* I don't fully understand this selector but it works for now */
-.horizontal-grid:hover:not(:has(*:hover)) {
+.horizontal-grid:hover:not(:has(*:hover)):not(.panecontainer > .horizontal-grid) {
   background: #666;
   cursor: ew-resize;
 }
-.vertical-grid:hover:not(:has(*:hover)) {
+.vertical-grid:hover:not(:has(*:hover)):not(.panecontainer > .vertical-grid) {
   background: #666;
   cursor: ns-resize
 }
