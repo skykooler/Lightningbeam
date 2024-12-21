@@ -4,7 +4,8 @@ import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
 import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText } from './utils.js';
-import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
+import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
+import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
   open: openFileDialog,
@@ -404,8 +405,6 @@ let actions = {
     },
     execute: async (action) => {
       let imageObject = new GraphicsObject(action.objectUuid)
-      // let img = pointerList[action.img] 
-      let img = new Image();
       function loadImage(src) {
         return new Promise((resolve, reject) => {
           let img = new Image();
@@ -414,7 +413,7 @@ let actions = {
           img.src = src;  // Start loading the image
         });
       }
-      img = await loadImage(action.src)
+      let img = await loadImage(action.src)
       console.log(img.crossOrigin)
       // img.onload = function() {
       let ct = {
@@ -3597,6 +3596,11 @@ function timeline() {
   let timeline_cvs = document.createElement("canvas")
   timeline_cvs.className = "timeline"
 
+  // Load icons for show/hide layer
+  timeline_cvs.icons = {}
+  timeline_cvs.icons.eye_fill = new Icon('assets/eye-fill.svg');
+  timeline_cvs.icons.eye_slash = new Icon('assets/eye-slash.svg');
+
 
   // Variable to store the last time updateTimelineCanvasSize was called
   let lastResizeTime = 0;
@@ -3651,7 +3655,20 @@ function timeline() {
       mouse.y -= gutterHeight
       let l = Math.floor(mouse.y / layerHeight)
       if (l < context.activeObject.layers.length) {
-        context.activeObject.currentLayer = context.activeObject.layers.length - (l+1)
+        let i = context.activeObject.layers.length - (l+1)
+        mouse.y -= l*layerHeight
+        if (
+          mouse.x > layerWidth - iconSize - 5 &&
+          mouse.x < layerWidth - 5 &&
+          mouse.y > 0.5 * (layerHeight - iconSize) &&
+          mouse.y < 0.5 * (layerHeight + iconSize)
+        ) {
+          context.activeObject.layers[i].visible = !context.activeObject.layers[i].visible
+          updateUI()
+          updateMenu()
+        } else {
+          context.activeObject.currentLayer = i
+        }
       }
     }
     updateLayers()
@@ -3975,7 +3992,7 @@ function updateLayers() {
       ctx.rect(layerWidth,0,width-layerWidth,height)
       ctx.clip()
       ctx.translate(layerWidth - offsetX, 0)
-        ctx.fillStyle = darkMode ? "white" : "black"
+        ctx.fillStyle = labelColor
         for (let j=Math.floor(offsetX / (5 * frameWidth)) * 5; j<frameCount + 1; j+=5) {
           drawCenteredText(ctx, j.toString(), (j-0.5)*frameWidth, gutterHeight/2, gutterHeight)
         }
@@ -3998,6 +4015,10 @@ function updateLayers() {
           drawBorderedRect(ctx, 0, i*layerHeight, layerWidth, layerHeight, highlight, shadow)
           ctx.fillStyle = darkMode ? "white": "black"
           drawHorizontallyCenteredText(ctx, layer.name, 5, (i+0.5)*layerHeight, layerHeight*0.4)
+          ctx.save()
+            const visibilityIcon = layer.visible ? canvas.icons.eye_fill : canvas.icons.eye_slash
+            visibilityIcon.render(ctx, layerWidth - iconSize - 5, (i+0.5)*layerHeight - iconSize*0.5, iconSize, iconSize, labelColor)
+          ctx.restore()
           ctx.save()
             ctx.beginPath()
             ctx.rect(layerWidth, i*layerHeight,width,layerHeight)
