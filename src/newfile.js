@@ -1,7 +1,11 @@
+const { basename, dirname, join } = window.__TAURI__.path;
+
 let overlay;
 let newFileDialog;
 
-function createNewFileDialog(callback) {
+let displayFiles
+
+function createNewFileDialog(newFileCallback, openFileCallback, config) {
     overlay = document.createElement('div');
     overlay.id = 'overlay';
     document.body.appendChild(overlay);
@@ -11,7 +15,6 @@ function createNewFileDialog(callback) {
     newFileDialog.classList.add('hidden');
     document.body.appendChild(newFileDialog);
 
-    // Create dialog content dynamically
     const title = document.createElement('h3');
     title.textContent = 'Create New File';
     newFileDialog.appendChild(title);
@@ -27,7 +30,8 @@ function createNewFileDialog(callback) {
     widthInput.type = 'number';
     widthInput.id = 'width';
     widthInput.classList.add('dialog-input');
-    widthInput.value = '1500'; // Default value
+    console.log(config.fileWidth)
+    widthInput.value = config.fileWidth;
     newFileDialog.appendChild(widthInput);
 
     // Create Height input
@@ -41,7 +45,7 @@ function createNewFileDialog(callback) {
     heightInput.type = 'number';
     heightInput.id = 'height';
     heightInput.classList.add('dialog-input');
-    heightInput.value = '1000'; // Default value
+    heightInput.value = config.fileHeight;
     newFileDialog.appendChild(heightInput);
 
     // Create FPS input
@@ -55,7 +59,7 @@ function createNewFileDialog(callback) {
     fpsInput.type = 'number';
     fpsInput.id = 'fps';
     fpsInput.classList.add('dialog-input');
-    fpsInput.value = '24'; // Default value
+    fpsInput.value = config.framerate;
     newFileDialog.appendChild(fpsInput);
 
     // Create Create button
@@ -65,31 +69,87 @@ function createNewFileDialog(callback) {
     createButton.onclick = createNewFile;
     newFileDialog.appendChild(createButton);
 
+    // Recent Files Section
+    const recentFilesTitle = document.createElement('h4');
+    recentFilesTitle.textContent = 'Recent Files';
+    newFileDialog.appendChild(recentFilesTitle);
 
-    // Create the new file (simulation)
+    const recentFilesList = document.createElement('ul');
+    recentFilesList.id = 'recentFilesList';
+    newFileDialog.appendChild(recentFilesList);
+
     function createNewFile() {
-        const width = document.getElementById('width').value;
-        const height = document.getElementById('height').value;
-        const fps = document.getElementById('fps').value;
+        const width = parseInt(document.getElementById('width').value);
+        const height = parseInt(document.getElementById('height').value);
+        const fps = parseInt(document.getElementById('fps').value);
         console.log(`New file created with width: ${width} and height: ${height}`);
-        callback(width, height, fps)
-
-        // Add any further logic to handle the new file creation here
-
-        closeDialog(); // Close the dialog after file creation
+        newFileCallback(width, height, fps)
+        closeDialog();
     }
 
-    // Close the dialog if the overlay is clicked
+
+    async function displayRecentFiles(recentFiles) {
+        const recentFilesList = document.getElementById('recentFilesList');
+        const recentFilesTitle = document.querySelector('h4');
+
+        recentFilesList.innerHTML = '';
+
+        // Only show the list if there are recent files
+        if (recentFiles.length === 0) {
+            recentFilesTitle.style.display = 'none';
+        } else {
+            recentFilesTitle.style.display = 'block';
+            const filenames = {};
+
+            for (let filePath of recentFiles) {
+                const filename = await basename(filePath);
+                const dirPath = await dirname(filePath);
+
+                if (!filenames[filename]) {
+                    filenames[filename] = [];
+                }
+                filenames[filename].push(dirPath);
+            }
+
+            Object.keys(filenames).forEach((filename) => {
+                const filePaths = filenames[filename];
+
+                // If only one directory, just display the filename
+                if (filePaths.length === 1) {
+                    const listItem = document.createElement('li');
+                    listItem.textContent = filename;
+                    listItem.onclick = () => openFile(filePaths[0], filename);
+                    recentFilesList.appendChild(listItem);
+                } else {
+                    // For duplicates, display each directory with the filename
+                    filePaths.forEach((dirPath) => {
+                        const listItem = document.createElement('li');
+                        listItem.innerHTML = `${filename} (${dirPath}/)`;
+                        listItem.onclick = () => openFile(dirPath, filename);
+                        recentFilesList.appendChild(listItem);
+                    });
+                }
+            });
+        }
+    }
+
+    displayFiles = displayRecentFiles
+
+    async function openFile(dirPath, filename) {
+        console.log(await join(dirPath, filename))
+        openFileCallback(await join(dirPath, filename))
+        closeDialog()
+    }
+
     overlay.onclick = closeDialog;
 }
 
-// Show the dialog
-function showNewFileDialog() {
+function showNewFileDialog(config) {
     overlay.style.display = 'block';
     newFileDialog.style.display = 'block';
+    displayFiles(config.recentFiles); // Reload the recent files
 }
 
-// Close the dialog
 function closeDialog() {
     overlay.style.display = 'none';
     newFileDialog.style.display = 'none';

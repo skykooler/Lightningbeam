@@ -537,6 +537,25 @@ button {
 #newFileDialog .dialog-button:hover {
   background-color: #0056b3;
 }
+#recentFilesList li {
+  word-wrap: break-word;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+  padding: 5px;
+}
+
+#recentFilesList {
+  list-style-type: none;
+  padding-left: 0;
+}
+
+#recentFilesList li:hover {
+  cursor: pointer;
+  background-color: #f0f0f0;
+  border-radius: 5px;
+  box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.1);
+}
 
 #popupMenu {
   background-color: #eee;
@@ -596,6 +615,13 @@ button {
   #newFileDialog .dialog-input {
     border: 1px solid #333;
   }
+  #recentFilesList li:hover {
+    cursor: pointer;
+    background-color: #555;
+    border-radius: 5px;
+    box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.2);
+  }
+  
   #popupMenu {
     background-color: #222;
   }

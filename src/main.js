@@ -13,7 +13,7 @@ const {
   message: messageDialog,
   confirm: confirmDialog,
 } = window.__TAURI__.dialog;
-const { documentDir, join, basename } = window.__TAURI__.path;
+const { documentDir, join, basename, appLocalDataDir } = window.__TAURI__.path;
 const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
@@ -66,14 +66,18 @@ let maxFileVersion = "2.0"
 
 let filePath = undefined
 let fileExportPath = undefined
-let fileWidth = 1500
-let fileHeight = 1000
-let fileFps = 12
+// let fileWidth = 1500
+// let fileHeight = 1000
+// let fileFps = 12
 
 
 let playing = false
 
 let clipboard = []
+
+const CONFIG_FILE_PATH = 'config.json';
+const defaultConfig = {
+};
 
 let tools = {
   select: {
@@ -250,6 +254,43 @@ let config = {
     group: "<mod>g",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
+  },
+  fileWidth: 800,
+  fileHeight: 600,
+  framerate: 24,
+  recentFiles: []
+}
+
+// Load the configuration from the file system
+async function loadConfig() {
+  try {
+    const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
+    const configData = await readTextFile(configPath);
+    config = JSON.parse(configData);
+    updateUI()
+    console.log(config)
+  } catch (error) {
+    console.log('Error loading config, returning default config:', error);
+  }
+}
+
+// Save the configuration to a file
+async function saveConfig() {
+  try {
+    const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
+    await writeTextFile(configPath, JSON.stringify(config, null, 2));
+  } catch (error) {
+    console.error('Error saving config:', error);
+  }
+}
+
+async function addRecentFile(filePath) {
+  if (!config.recentFiles.includes(filePath)) {
+    config.recentFiles.unshift(filePath);
+    if (config.recentFiles.length > 10) {
+      config.recentFiles = config.recentFiles.slice(0, 10);
+    }
+    await saveConfig(config);
   }
 }
 
@@ -488,7 +529,7 @@ let actions = {
       newAudioLayer.track.add(0,action.uuid)
       object.audioLayers.push(newAudioLayer)
       // TODO: compute image height better
-      generateWaveform(img, player.buffer, 50, 25, fileFps)
+      generateWaveform(img, player.buffer, 50, 25, config.framerate)
       updateLayers()
     },
     rollback: (action) => {
@@ -1985,11 +2026,11 @@ class GraphicsObject {
       let frame = layer.getFrame(this.currentFrameNum)
       for (let shape of frame.shapes) {
         if (context.shapeselection.indexOf(shape) >= 0) {
-          invertPixels(ctx, fileWidth, fileHeight)
+          invertPixels(ctx, config.fileWidth, config.fileHeight)
         }
         shape.draw(context)
         if (context.shapeselection.indexOf(shape) >= 0) {
-          invertPixels(ctx, fileWidth, fileHeight)
+          invertPixels(ctx, config.fileWidth, config.fileHeight)
         }
       }
       for (let child of layer.children) {
@@ -2362,7 +2403,7 @@ function playPause() {
       console.log(1)
       for (let i in audioLayer.sounds) {
         let sound = audioLayer.sounds[i]
-        sound.player.start(0,context.activeObject.currentFrameNum / fileFps)
+        sound.player.start(0,context.activeObject.currentFrameNum / config.framerate)
       }
     }
     advanceFrame()
@@ -2384,7 +2425,7 @@ function advanceFrame() {
   updateUI()
   if (playing) {
     if (context.activeObject.currentFrameNum < context.activeObject.maxFrame - 1) {
-      setTimeout(advanceFrame, 1000/fileFps)
+      setTimeout(advanceFrame, 1000/config.framerate)
     } else {
       playing = false
       for (let audioLayer of context.activeObject.audioLayers) {
@@ -2407,9 +2448,10 @@ function decrementFrame() {
 function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.objectStack = [root]
-  fileWidth = width
-  fileHeight = height
-  fileFps = fps
+  config.fileWidth = width
+  config.fileHeight = height
+  config.framerate = fps
+  saveConfig()
   undoStack = []
   redoStack = []
   for (let stage of document.querySelectorAll(".stage")) {
@@ -2425,7 +2467,7 @@ function _newFile(width, height, fps) {
 
 async function newFile() {
   if (await confirmDialog("Create a new file? Unsaved work will be lost.", {title: "New file", kind: "warning"})) {
-    showNewFileDialog()
+    showNewFileDialog(config)
   }
 }
 
@@ -2433,14 +2475,15 @@ async function _save(path) {
   try {
     const fileData = {
       version: "1.3",
-      width: fileWidth,
-      height: fileHeight,
-      fps: fileFps,
+      width: config.fileWidth,
+      height: config.fileHeight,
+      fps: config.framerate,
       actions: undoStack
     }
     const contents = JSON.stringify(fileData);
     await writeTextFile(path, contents)
     filePath = path
+    addRecentFile(path)
     lastSaveIndex = undoStack.length - 1;
     console.log(`${path} saved successfully!`);
   } catch (error) {
@@ -2470,6 +2513,50 @@ async function saveAs() {
   if (path != undefined) _save(path);
 }
 
+async function _open(path) {
+  try {
+    const contents = await readTextFile(path)
+    let file = JSON.parse(contents)
+    if (file.version == undefined) {
+      await messageDialog("Could not read file version!", { title: "Load error", kind: 'error' })
+      return
+    }
+    if (file.version >= minFileVersion) {
+      if (file.version < maxFileVersion) {
+        _newFile(file.width, file.height, file.fps)
+        if (file.actions == undefined) {
+          await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
+          return
+        }
+        for (let action of file.actions) {
+          if (!(action.name in actions)) {
+            await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
+            return
+          }
+          console.log(action.name)
+          await actions[action.name].execute(action.action)
+          undoStack.push(action)
+        }
+        lastSaveIndex = undoStack.length - 1;
+        filePath = path
+        addRecentFile(path)
+        updateUI()
+      } else {
+        await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
+      }
+    } else {
+      await messageDialog(`File ${path} is too old to be opened in this version of Lightningbeam.`, { title: 'File version mismatch', kind: 'error' });
+    }
+  } catch (e) {
+    console.log(e )
+    if (e instanceof SyntaxError) {
+      await messageDialog(`Could not parse ${path}, ${e.message}`, { title: 'Error', kind: 'error' })
+    } else if (e.startsWith("failed to read file as text")) {
+      await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
+    }
+  }
+}
+
 async function open() {
   closeDialog()
   const path = await openFileDialog({
@@ -2484,46 +2571,7 @@ async function open() {
     defaultPath: await documentDir(),
   });
   if (path) {
-    try {
-      const contents = await readTextFile(path)
-      let file = JSON.parse(contents)
-      if (file.version == undefined) {
-        await messageDialog("Could not read file version!", { title: "Load error", kind: 'error' })
-        return
-      }
-      if (file.version >= minFileVersion) {
-        if (file.version < maxFileVersion) {
-          _newFile(file.width, file.height, file.fps)
-          if (file.actions == undefined) {
-            await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
-            return
-          }
-          for (let action of file.actions) {
-            if (!(action.name in actions)) {
-              await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
-              return
-            }
-            console.log(action.name)
-            await actions[action.name].execute(action.action)
-            undoStack.push(action)
-          }
-          lastSaveIndex = undoStack.length - 1;
-          filePath = path
-          updateUI()
-        } else {
-          await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
-        }
-      } else {
-        await messageDialog(`File ${path} is too old to be opened in this version of Lightningbeam.`, { title: 'File version mismatch', kind: 'error' });
-      }
-    } catch (e) {
-      console.log(e )
-      if (e instanceof SyntaxError) {
-        await messageDialog(`Could not parse ${path}, ${e.message}`, { title: 'Error', kind: 'error' })
-      } else if (e.startsWith("failed to read file as text")) {
-        await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
-      }
-    }
+    _open(path)
   }
 }
 
@@ -2680,8 +2728,8 @@ async function render() {
 
     const frames = [];
     const canvas = document.createElement('canvas');
-    canvas.width = fileWidth;  // Set desired width
-    canvas.height = fileHeight; // Set desired height
+    canvas.width = config.fileWidth;  // Set desired width
+    canvas.height = config.fileHeight; // Set desired height
     let exportContext = {
       ...context,
       ctx: canvas.getContext('2d'),
@@ -2695,7 +2743,7 @@ async function render() {
       
       root.currentFrameNum = i
       exportContext.ctx.fillStyle = "white"
-      exportContext.ctx.rect(0,0,fileWidth, fileHeight)
+      exportContext.ctx.rect(0,0,config.fileWidth, config.fileHeight)
       exportContext.ctx.fill()
       await root.draw(exportContext)
 
@@ -2709,7 +2757,7 @@ async function render() {
     }
   
     // Step 3: Use UPNG.js to create the animated PNG
-    const apng = UPNG.encode(frames, canvas.width, canvas.height, 0, parseInt(100/fileFps));
+    const apng = UPNG.encode(frames, canvas.width, canvas.height, 0, parseInt(100/config.framerate));
   
     // Step 4: Save the APNG file (in Tauri, use writeFile or in the browser, download it)
     const apngBlob = new Blob([apng], { type: 'image/png' });
@@ -2774,8 +2822,8 @@ function stage() {
   let scroller = document.createElement("div")
   let stageWrapper = document.createElement("div")
   stage.className = "stage"
-  stage.width = 1500
-  stage.height = 1000
+  stage.width = config.fileWidth
+  stage.height = config.fileHeight
   scroller.className = "scroll"
   stageWrapper.className = "stageWrapper"
   let selectionRect = document.createElement("div")
@@ -2998,7 +3046,7 @@ function stage() {
         
         // We didn't find an existing region to paintbucket, see if we can make one
         try {
-          regionPoints = floodFillRegion(mouse,epsilon,fileWidth,fileHeight,context, debugPoints, debugPaintbucket)
+          regionPoints = floodFillRegion(mouse,epsilon,config.fileWidth,config.fileHeight,context, debugPoints, debugPaintbucket)
         } catch (e) {
           updateUI()
           throw e;
@@ -3007,7 +3055,7 @@ function stage() {
         console.log(regionPoints.length)
         if (regionPoints.length>0 && regionPoints.length < 10) {
           // probably a very small area, rerun with minimum epsilon
-          regionPoints = floodFillRegion(mouse,1,fileWidth,fileHeight,context, debugPoints)
+          regionPoints = floodFillRegion(mouse,1,config.fileWidth,config.fileHeight,context, debugPoints)
         }
         let points = []
         for (let point of regionPoints) {
@@ -3700,9 +3748,14 @@ function infopanel() {
   return panel
 }
 
+async function startup() {
+  await loadConfig()
+  createNewFileDialog(_newFile, _open, config);
+  showNewFileDialog(config)
 
-createNewFileDialog(_newFile);
-showNewFileDialog()
+}
+
+startup()
 
 function createPaneMenu(div) {
   const menuItems = ["Item 1", "Item 2", "Item 3"]; // The items for the menu
@@ -3877,22 +3930,22 @@ function updateLayout(element) {
 
 function updateUI() {
   for (let canvas of canvases) {
-    canvas.width = fileWidth * context.zoomLevel
-    canvas.height = fileHeight * context.zoomLevel
-    canvas.style.width = `${fileWidth * context.zoomLevel}px`
-    canvas.style.height = `${fileHeight * context.zoomLevel}px`
+    canvas.width = config.fileWidth * context.zoomLevel
+    canvas.height = config.fileHeight * context.zoomLevel
+    canvas.style.width = `${config.fileWidth * context.zoomLevel}px`
+    canvas.style.height = `${config.fileHeight * context.zoomLevel}px`
     let ctx = canvas.getContext("2d")
     ctx.resetTransform();
     ctx.scale(context.zoomLevel, context.zoomLevel)
     ctx.beginPath()
     ctx.fillStyle = "white"
-    ctx.fillRect(0,0,fileWidth,fileHeight)
+    ctx.fillRect(0,0,config.fileWidth,config.fileHeight)
 
     context.ctx = ctx;
     root.draw(context)
     if (context.activeObject != root) {
       ctx.fillStyle = "rgba(255,255,255,0.5)"
-      ctx.fillRect(0,0,fileWidth,fileHeight)
+      ctx.fillRect(0,0,config.fileWidth,config.fileHeight)
       context.activeObject.draw(context)
     }
     if (context.activeShape) {
@@ -3903,7 +3956,7 @@ function updateUI() {
     if (debugQuadtree) {
 
       ctx.fillStyle = "rgba(255,255,255,0.5)"
-      ctx.fillRect(0,0,fileWidth,fileHeight)
+      ctx.fillRect(0,0,config.fileWidth,config.fileHeight)
       const ep = 2.5
       const bbox = {
         x: { min: context.mousePos.x - ep, max: context.mousePos.x + ep },
@@ -4708,3 +4761,4 @@ function startToneOnUserInteraction() {
   document.addEventListener("keydown", startTone);
 }
 startToneOnUserInteraction()
+
