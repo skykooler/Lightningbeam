@@ -592,6 +592,25 @@ button {
   width: 20px;  /* Adjust the width of the icon */
   height: 20px; /* Adjust the height of the icon */
 }
+.splitIndicator {
+  position: absolute;
+  display: flex;
+  background-color: rgba(128, 128, 128, 0.31);
+  z-index: 500;
+  /* flex-direction: row; */
+  gap: 5px;
+}
+.first-half, .second-half {
+  border-radius: 10px;
+  box-sizing: border-box;
+}
+.first-half {
+  background-color: rgba(0, 128, 0, 0.3); /* Just for demo, adjust as needed */
+}
+
+.second-half {
+  background-color: rgba(128, 0, 0, 0.3); /* Just for demo, adjust as needed */
+}
 
 
 @media (prefers-color-scheme: dark) {

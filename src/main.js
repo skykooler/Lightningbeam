@@ -14,7 +14,7 @@ const {
   confirm: confirmDialog,
 } = window.__TAURI__.dialog;
 const { documentDir, join, basename, appLocalDataDir } = window.__TAURI__.path;
-const { Menu, MenuItem, Submenu } = window.__TAURI__.menu ;
+const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu ;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
 const { warn, debug, trace, info, error } = window.__TAURI__.log;
@@ -70,6 +70,7 @@ let fileExportPath = undefined
 // let fileHeight = 1000
 // let fileFps = 12
 
+let state = "normal"
 
 let playing = false
 
@@ -3881,15 +3882,133 @@ function splitPane(div, percent, horiz, newPane=undefined) {
   }
   div.setAttribute("lb-percent", percent) // TODO: better attribute name
   div.addEventListener('mousedown', function(event) {
+    console.log("click")
     // Check if the clicked element is the parent itself and not a child element
     if (event.target === event.currentTarget) {
-      event.currentTarget.setAttribute("dragging", true)
-      event.currentTarget.style.userSelect = 'none';
-      rootPane.style.userSelect = "none";
+      if (event.button === 0) { // Left click
+        event.currentTarget.setAttribute("dragging", true)
+        event.currentTarget.style.userSelect = 'none';
+        rootPane.style.userSelect = "none";
+      }
     } else {
       event.currentTarget.setAttribute("dragging", false)
     }
   });
+  div.addEventListener('contextmenu', async function(event) {
+    if (event.target === event.currentTarget) {
+      event.preventDefault(); // Prevent the default context menu from appearing
+      event.stopPropagation()
+      
+      function createSplit(direction) {
+        let splitIndicator = document.createElement('div')
+        splitIndicator.className = "splitIndicator"
+        splitIndicator.style.flexDirection = direction=="vertical" ? "column" : "row"
+        document.body.appendChild(splitIndicator)
+        splitIndicator.addEventListener("mousemove", (e) => {
+          const { clientX: mouseX, clientY: mouseY } = e;
+          const rect = splitIndicator.getBoundingClientRect();
+        
+          // Create child elements and divider if not already present
+          let firstHalf = splitIndicator.querySelector('.first-half');
+          let secondHalf = splitIndicator.querySelector('.second-half');
+          let divider = splitIndicator.querySelector('.divider');
+        
+          if (!firstHalf || !secondHalf || !divider) {
+            firstHalf = document.createElement('div');
+            secondHalf = document.createElement('div');
+            divider = document.createElement('div');
+            firstHalf.classList.add('first-half');
+            secondHalf.classList.add('second-half');
+            divider.classList.add('divider');
+            splitIndicator.innerHTML = ''; // Clear previous children
+            splitIndicator.append(firstHalf, divider, secondHalf);
+          }
+        
+          const isVertical = direction === "vertical";
+        
+          // Calculate dimensions for halves
+          const [first, second] = isVertical ? 
+            [mouseY - rect.top, rect.bottom - mouseY] : 
+            [mouseX - rect.left, rect.right - mouseX];
+          
+          const firstSize = `${first}px` 
+          const secondSize = `${second}px`;
+
+          splitIndicator.percent = isVertical ? 
+          (mouseY - rect.top) / (rect.bottom - rect.top) * 100 : 
+          (mouseX - rect.left) / (rect.right - rect.left) * 100;
+        
+          // Apply styles for first and second halves
+          firstHalf.style[isVertical ? 'height' : 'width'] = firstSize;
+          secondHalf.style[isVertical ? 'height' : 'width'] = secondSize;
+          firstHalf.style[isVertical ? 'width' : 'height'] = '100%';
+          secondHalf.style[isVertical ? 'width' : 'height'] = '100%';
+        
+          // Apply divider styles
+          divider.style.backgroundColor = "#000";
+          if (isVertical) {
+            divider.style.height = '2px';
+            divider.style.width = '100%';
+            divider.style.left = `${mouseX - rect.left}px`;
+          } else {
+            divider.style.width = '2px';
+            divider.style.height = '100%';
+            divider.style.top = `${mouseY - rect.top}px`;
+          }
+        });
+        splitIndicator.addEventListener("click", (e) => {
+          if (splitIndicator.percent) {
+            splitPane(splitIndicator.targetElement, splitIndicator.percent, direction=="horizontal", createPane(panes.timeline))
+            document.body.removeChild(splitIndicator)
+            document.removeEventListener("mousemove", splitListener)
+            setTimeout(updateUI,20)
+          }
+        })
+        
+        const splitListener = document.addEventListener("mousemove", (e) => {
+          const mouseX = e.clientX;
+          const mouseY = e.clientY;
+
+          // Get all elements under the mouse pointer
+          const elementsUnderMouse = document.querySelectorAll(':hover');
+
+          let targetElement = null
+          for (let element of elementsUnderMouse) {
+            if (element.matches('.horizontal-grid > .panecontainer, .vertical-grid > .panecontainer')) {
+              targetElement = element
+            }
+          }
+          if (targetElement) {
+            const rect = targetElement.getBoundingClientRect();
+            splitIndicator.style.left = `${rect.left}px`;
+            splitIndicator.style.top = `${rect.top}px`;
+            splitIndicator.style.width = `${rect.width}px`;
+            splitIndicator.style.height = `${rect.height}px`;
+
+            splitIndicator.targetElement = targetElement
+          }
+        })
+      }
+      // TODO: use icon menu items
+      // See https://github.com/tauri-apps/tauri/blob/dev/packages/api/src/menu/iconMenuItem.ts
+      const menu = await Menu.new({
+        items: [
+          { id: "ctx_option0", text: "Area options", enabled: false },
+          { id: "ctx_option1", text: "Vertical Split", action: () => createSplit('vertical') },
+          { id: "ctx_option2", text: "Horizontal Split", action: () => createSplit('horizontal') },
+          new PredefinedMenuItem('Separator'),
+          { id: "ctx_option3", text: horiz ? "Join Left" : "Join Up" },
+          { id: "ctx_option4", text: horiz ? "Join Right" : "Join Down" },
+          ],
+      });
+      console.log(event)
+      menu.popup({x: event.clientX, y: event.clientY})
+    }
+    
+
+    console.log('Right-click on the element');
+    // Your custom logic here
+});
   div.addEventListener('mousemove', function(event) {
     // Check if the clicked element is the parent itself and not a child element
     if (event.currentTarget.getAttribute("dragging")=="true") {
@@ -4065,6 +4184,11 @@ function updateLayers() {
         }
       ctx.restore()
       ctx.translate(0,gutterHeight)
+      ctx.strokeStyle = shadow
+      ctx.beginPath()
+      ctx.moveTo(layerWidth, 0)
+      ctx.lineTo(layerWidth, height)
+      ctx.stroke()
 
       ctx.save()
       ctx.rect(0,0,width,height)
