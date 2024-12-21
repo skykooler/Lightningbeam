@@ -2471,6 +2471,7 @@ async function saveAs() {
 }
 
 async function open() {
+  closeDialog()
   const path = await openFileDialog({
     multiple: false,
     directory: false,
