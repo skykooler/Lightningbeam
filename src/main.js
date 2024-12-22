@@ -2472,6 +2472,7 @@ function _newFile(width, height, fps) {
   config.fileWidth = width
   config.fileHeight = height
   config.framerate = fps
+  filePath = undefined
   saveConfig()
   undoStack = []
   redoStack = []
