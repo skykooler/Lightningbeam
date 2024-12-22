@@ -254,6 +254,7 @@ let config = {
     delete: "Backspace",
     selectAll: "<mod>a",
     group: "<mod>g",
+    addLayer: "<mod>l",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
     resetZoom: "<mod>0"
@@ -4759,7 +4760,8 @@ async function updateMenu() {
       {
         text: "Add Layer",
         enabled: true,
-        action: actions.addLayer.create
+        action: actions.addLayer.create,
+        accelerator: getShortcut("addLayer")
       },
       {
         text: "Delete Layer",
