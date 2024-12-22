@@ -3716,6 +3716,7 @@ function timeline() {
       mouse.x += timeline_cvs.offsetX - layerWidth
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth)
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame)
+      updateUI()
     } else {
       mouse.y -= gutterHeight
       let l = Math.floor(mouse.y / layerHeight)
