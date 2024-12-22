@@ -3142,7 +3142,7 @@ function stage() {
     updateUI()
     updateInfopanel()
   })
-  stage.addEventListener("mouseup", (e) => {
+  stage.mouseup = (e) => {
     context.mouseDown = false
     context.dragging = false
     context.dragDirection = undefined
@@ -3201,11 +3201,18 @@ function stage() {
     updateUI()
     updateMenu()
     updateInfopanel()
-  })
+  }
+  stage.addEventListener("mouseup", stage.mouseup)
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e)
     mouse = context.activeObject.transformMouse(mouse)
     context.mousePos = mouse
+    // if mouse is released, even if it happened outside the stage
+    if (e.buttons==0 && 
+      (context.mouseDown || context.dragging || context.dragDirection || context.selectionRect)) {
+        stage.mouseup(e)
+        return
+    }
     switch (mode) {
       case "draw":
         context.activeCurve = undefined
