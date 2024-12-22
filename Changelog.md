@@ -1,3 +1,20 @@
+# 0.6.8-alpha:
+Changes:
+- Improve stage rendering
+
+New features:
+- Add "verbatim" mode to shape drawing
+- Add keyboard shortcut for "Add Layer"
+
+Bugfixes:
+- Fixed severe bug where all shapes end up on first frame after loading a saved file
+- Fixed clicking on frames not updating the stage
+- Fixed "Are you sure you want to quit?" message showing up even if the file had just been saved
+- Fixed layers in clips preventing playback
+- Fixed default filename not getting reset after creating a new file
+- Fixed various tools getting confused if the mouse let go of the button outside the window
+- Fixed undoing an add layer keeping the removed layer active
+
 # 0.6.7-alpha:
 Changes:
 - Default configuration is saved between app launches
