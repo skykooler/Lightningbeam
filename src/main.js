@@ -648,6 +648,7 @@ let actions = {
       let object = pointerList[action.object]
       let layer = pointerList[action.uuid]
       object.layers.splice(object.layers.indexOf(layer),1)
+      object.currentLayer = Math.min(object.currentLayer, object.layers.length-1)
       updateLayers()
     }
   },
