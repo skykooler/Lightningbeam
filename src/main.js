@@ -1970,7 +1970,7 @@ class GraphicsObject {
     return this.getFrame(this.currentFrameNum)
   }
   get maxFrame() {
-    return Math.max(this.layers.map((layer)=>{return layer.frames.length}))
+    return Math.max(...this.layers.map((layer)=>{return layer.frames.length}))
   }
   advanceFrame() {
     this.setFrameNum(this.currentFrameNum + 1)
