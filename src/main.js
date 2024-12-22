@@ -61,14 +61,14 @@ let lastSaveIndex = 0;
 
 let layoutElements = []
 
-let minFileVersion = "1.2"
+// Version changes:
+// 1.4: addShape uses frame as a reference instead of object
+
+let minFileVersion = "1.3"
 let maxFileVersion = "2.0"
 
 let filePath = undefined
 let fileExportPath = undefined
-// let fileWidth = 1500
-// let fileHeight = 1000
-// let fileFps = 12
 
 let state = "normal"
 
@@ -261,7 +261,8 @@ let config = {
   fileWidth: 800,
   fileHeight: 600,
   framerate: 24,
-  recentFiles: []
+  recentFiles: [],
+  scrollSpeed: 1
 }
 
 function getShortcut(shortcut) {
@@ -1132,9 +1133,11 @@ function vectorDist(a, b) {
 
 function getMousePos(canvas, evt) {
   var rect = canvas.getBoundingClientRect();
+  const offsetX = canvas.offsetX || 0;
+  const offsetY = canvas.offsetY || 0;
   return {
-    x: (evt.clientX - rect.left) / context.zoomLevel,
-    y: (evt.clientY - rect.top) / context.zoomLevel
+    x: (evt.clientX + offsetX - rect.left) / context.zoomLevel,
+    y: (evt.clientY + offsetY - rect.top) / context.zoomLevel
   };
 }
 
@@ -2470,12 +2473,6 @@ function _newFile(width, height, fps) {
   saveConfig()
   undoStack = []
   redoStack = []
-  for (let stage of document.querySelectorAll(".stage")) {
-    stage.width = width
-    stage.height = height
-    stage.style.width = `${width}px`
-    stage.style.height = `${height}px`
-  }
   updateUI()
   updateLayers()
   updateMenu()
@@ -2490,7 +2487,7 @@ async function newFile() {
 async function _save(path) {
   try {
     const fileData = {
-      version: "1.3",
+      version: "1.4",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -2790,24 +2787,12 @@ async function render() {
 
 function updateScrollPosition(zoomFactor) {
   if (context.mousePos) {
-    for (let scroller of document.querySelectorAll(".scroll")) {
-      let stage = scroller.querySelector('.stage')
-      let scrollLeft = scroller.scrollLeft;
-      let scrollTop = scroller.scrollTop;
-
-      // Get the mouse position relative to the scroller (taking into account the scroller's position)
-      let scrollerMouseX = context.mousePos.x + scrollLeft;
-      let scrollerMouseY = context.mousePos.y + scrollTop;
-
-      let newScrollLeft = scrollerMouseX - (context.mousePos.x * zoomFactor);
-      let newScrollTop = scrollerMouseY - (context.mousePos.y * zoomFactor);
-
-      // Apply the scroll position adjustments
-      console.log(context.mousePos, scrollerMouseX, scrollerMouseY, newScrollLeft, newScrollTop)
-      scroller.scrollLeft = -newScrollLeft;
-      scroller.scrollTop = -newScrollTop;
+    for (let canvas of canvases) {
+      canvas.offsetX = (canvas.offsetX + context.mousePos.x) * zoomFactor - context.mousePos.x;
+      canvas.offsetY = (canvas.offsetY + context.mousePos.y) * zoomFactor - context.mousePos.y;  
     }
   }
+  
 }
 
 function zoomIn() {
@@ -2830,77 +2815,117 @@ function zoomOut() {
 }
 function resetZoom() {
   context.zoomLevel = 1;
+  for (let canvas of canvases) {
+    canvas.offsetX = canvas.offsetY = 0;
+  }
   updateUI()
   updateMenu()
 }
 
 function stage() {
   let stage = document.createElement("canvas")
-  let scroller = document.createElement("div")
-  let stageWrapper = document.createElement("div")
+  // let scroller = document.createElement("div")
+  // let stageWrapper = document.createElement("div")
   stage.className = "stage"
-  stage.width = config.fileWidth
-  stage.height = config.fileHeight
-  scroller.className = "scroll"
-  stageWrapper.className = "stageWrapper"
-  let selectionRect = document.createElement("div")
-  selectionRect.className = "selectionRect"
-  for (let i of ["nw", "ne", "se", "sw"]) {
-    let cornerRotateRect = document.createElement("div")
-    cornerRotateRect.classList.add("cornerRotateRect")
-    cornerRotateRect.classList.add(i)
-    cornerRotateRect.addEventListener('mouseup', (e) => {
-      const newEvent = new MouseEvent(e.type, e);
-      stage.dispatchEvent(newEvent)
-    })
-    cornerRotateRect.addEventListener('mousemove', (e) => {
-      const newEvent = new MouseEvent(e.type, e);
-      stage.dispatchEvent(newEvent)
-    })
-    selectionRect.appendChild(cornerRotateRect)
+  // stage.width = config.fileWidth
+  // stage.height = config.fileHeight
+  stage.offsetX = 0
+  stage.offsetY = 0
+
+  let lastResizeTime = 0;
+  const throttleIntervalMs = 20;
+
+  function updateStageCanvasSize() {
+    const canvasStyles = window.getComputedStyle(stage);
+
+    stage.width = parseInt(canvasStyles.width);
+    stage.height = parseInt(canvasStyles.height);
+    updateUI()
   }
-  for (let i of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
-    let cornerRect = document.createElement("div")
-    cornerRect.classList.add("cornerRect")
-    cornerRect.classList.add(i)
-    cornerRect.addEventListener('mousedown', (e) => {
-      let bbox = undefined;
-      let selection = {}
-      for (let item of context.selection) {
-        if (bbox==undefined) {
-          bbox = structuredClone(item.bbox())
-        } else {
-          growBoundingBox(bbox, item.bbox())
-        }
-        selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y}
-      }
-      if (bbox != undefined) {
-        context.dragDirection = i
-        context.activeTransform = {
-          initial: {
-            x: {min: bbox.x.min, max: bbox.x.max},
-            y: {min: bbox.y.min, max: bbox.y.max},
-            selection: selection
-          },
-          current: {
-            x: {min: bbox.x.min, max: bbox.x.max},
-            y: {min: bbox.y.min, max: bbox.y.max},
-            selection: structuredClone(selection)
-          }
-        }
-        context.activeObject.currentFrame.saveState()
-      }
-    })
-    cornerRect.addEventListener('mouseup', (e) => {
-      const newEvent = new MouseEvent(e.type, e);
-      stage.dispatchEvent(newEvent)
-    })
-    cornerRect.addEventListener('mousemove', (e) => {
-      const newEvent = new MouseEvent(e.type, e);
-      stage.dispatchEvent(newEvent)
-    })
-    selectionRect.appendChild(cornerRect)
-  }
+  const resizeObserver = new ResizeObserver(() => {
+    const currentTime = Date.now();
+
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateStageCanvasSize();
+    }
+  });
+  resizeObserver.observe(stage);
+  updateStageCanvasSize()
+
+  stage.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    const deltaX = event.deltaX * config.scrollSpeed;
+    const deltaY = event.deltaY * config.scrollSpeed;
+
+    stage.offsetX += deltaX
+    stage.offsetY += deltaY
+    const currentTime = Date.now();
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateUI();
+    }
+  })
+  // scroller.className = "scroll"
+  // stageWrapper.className = "stageWrapper"
+  // let selectionRect = document.createElement("div")
+  // selectionRect.className = "selectionRect"
+  // for (let i of ["nw", "ne", "se", "sw"]) {
+  //   let cornerRotateRect = document.createElement("div")
+  //   cornerRotateRect.classList.add("cornerRotateRect")
+  //   cornerRotateRect.classList.add(i)
+  //   cornerRotateRect.addEventListener('mouseup', (e) => {
+  //     const newEvent = new MouseEvent(e.type, e);
+  //     stage.dispatchEvent(newEvent)
+  //   })
+  //   cornerRotateRect.addEventListener('mousemove', (e) => {
+  //     const newEvent = new MouseEvent(e.type, e);
+  //     stage.dispatchEvent(newEvent)
+  //   })
+  //   selectionRect.appendChild(cornerRotateRect)
+  // }
+  // for (let i of ["nw", "n", "ne", "e", "se", "s", "sw", "w"]) {
+  //   let cornerRect = document.createElement("div")
+  //   cornerRect.classList.add("cornerRect")
+  //   cornerRect.classList.add(i)
+  //   cornerRect.addEventListener('mousedown', (e) => {
+  //     let bbox = undefined;
+  //     let selection = {}
+  //     for (let item of context.selection) {
+  //       if (bbox==undefined) {
+  //         bbox = structuredClone(item.bbox())
+  //       } else {
+  //         growBoundingBox(bbox, item.bbox())
+  //       }
+  //       selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y}
+  //     }
+  //     if (bbox != undefined) {
+  //       context.dragDirection = i
+  //       context.activeTransform = {
+  //         initial: {
+  //           x: {min: bbox.x.min, max: bbox.x.max},
+  //           y: {min: bbox.y.min, max: bbox.y.max},
+  //           selection: selection
+  //         },
+  //         current: {
+  //           x: {min: bbox.x.min, max: bbox.x.max},
+  //           y: {min: bbox.y.min, max: bbox.y.max},
+  //           selection: structuredClone(selection)
+  //         }
+  //       }
+  //       context.activeObject.currentFrame.saveState()
+  //     }
+  //   })
+  //   cornerRect.addEventListener('mouseup', (e) => {
+  //     const newEvent = new MouseEvent(e.type, e);
+  //     stage.dispatchEvent(newEvent)
+  //   })
+  //   cornerRect.addEventListener('mousemove', (e) => {
+  //     const newEvent = new MouseEvent(e.type, e);
+  //     stage.dispatchEvent(newEvent)
+  //   })
+  //   selectionRect.appendChild(cornerRect)
+  // }
 
   stage.addEventListener("drop", (e) => {
     e.preventDefault()
@@ -2951,9 +2976,9 @@ function stage() {
     e.preventDefault()
   })
   canvases.push(stage)
-  stageWrapper.appendChild(stage)
-  stageWrapper.appendChild(selectionRect)
-  scroller.appendChild(stageWrapper)
+  // stageWrapper.appendChild(stage)
+  // stageWrapper.appendChild(selectionRect)
+  // scroller.appendChild(stageWrapper)
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e)
     mouse = context.activeObject.transformMouse(mouse)
@@ -3391,7 +3416,7 @@ function stage() {
         break;
     }
   })
-  return scroller
+  return stage
 }
 
 function toolbar() {
@@ -3693,11 +3718,10 @@ function timeline() {
   });
   resizeObserver.observe(timeline_cvs);
 
-  let scrollSpeed = 1;
   timeline_cvs.addEventListener('wheel', (event) => {
     event.preventDefault();
-    const deltaX = event.deltaX * scrollSpeed;
-    const deltaY = event.deltaY * scrollSpeed;
+    const deltaX = event.deltaX * config.scrollSpeed;
+    const deltaY = event.deltaY * config.scrollSpeed;
 
     let maxScroll = context.activeObject.layers.length * layerHeight + gutterHeight - timeline_cvs.height
   
@@ -4066,14 +4090,15 @@ function updateLayout(element) {
 
 function updateUI() {
   for (let canvas of canvases) {
-    canvas.width = config.fileWidth * context.zoomLevel
-    canvas.height = config.fileHeight * context.zoomLevel
-    canvas.style.width = `${config.fileWidth * context.zoomLevel}px`
-    canvas.style.height = `${config.fileHeight * context.zoomLevel}px`
     let ctx = canvas.getContext("2d")
     ctx.resetTransform();
-    ctx.scale(context.zoomLevel, context.zoomLevel)
     ctx.beginPath()
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(0,0,canvas.width, canvas.height)
+
+    ctx.translate(-canvas.offsetX, -canvas.offsetY)
+    ctx.scale(context.zoomLevel, context.zoomLevel)
+
     ctx.fillStyle = "white"
     ctx.fillRect(0,0,config.fileWidth,config.fileHeight)
 
