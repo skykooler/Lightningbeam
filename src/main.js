@@ -2553,6 +2553,8 @@ async function _open(path) {
         }
         lastSaveIndex = undoStack.length;
         filePath = path
+        // Tauri thinks it is setting the title here, but it isn't getting updated
+        await getCurrentWindow().setTitle(await basename(filePath))
         addRecentFile(path)
         updateUI()
       } else {
