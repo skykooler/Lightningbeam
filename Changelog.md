@@ -1,3 +1,17 @@
+# 0.6.7-alpha:
+Changes:
+- Default configuration is saved between app launches
+
+New features:
+- Added "recent files" list on startup
+- Added keyboard shortcuts to menus
+- Panes can now be split in two
+
+Bugfixes:
+- Fixed layer visibility icons not rendering
+- New file dialog now closes when opening a file
+- Fixed resize cursor showing up between pane header and content
+
 # 0.6.6-alpha:
 Changes:
 - Rename "Active Object" to "Context"
