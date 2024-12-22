@@ -337,7 +337,8 @@ let actions = {
           fillStyle: c.fillStyle,
           sendToBack: c.sendToBack
         },
-        uuid: uuidv4()
+        uuid: uuidv4(),
+        frame: parent.currentFrame.idx
       }
       undoStack.push({name: "addShape", action: action})
       actions.addShape.execute(action)
@@ -345,6 +346,7 @@ let actions = {
     },
     execute: (action) => {
       let object = pointerList[action.parent]
+      let frame = action.frame ? pointerList[action.frame] : object.currentFrame
       let curvesList = action.curves
       let cxt = {
         ...context,
@@ -361,13 +363,14 @@ let actions = {
       }
       let shapes = shape.update()
       for (let newShape of shapes) {
-        object.addShape(newShape, cxt.sendToBack)
+        frame.addShape(newShape, cxt.sendToBack, frame)
       }
     },
     rollback: (action) => {
       let object = pointerList[action.parent]
+      let frame = action.frame ? pointerList[action.frame] : object.currentFrame
       let shape = pointerList[action.uuid]
-      object.removeShape(shape)
+      frame.removeShape(shape)
       delete pointerList[action.uuid]
     }
   },
@@ -484,7 +487,7 @@ let actions = {
       imageShape.update()
       imageShape.fillImage = img
       imageShape.filled = true
-      imageObject.addShape(imageShape)
+      imageObject.currentFrame.addShape(imageShape)
       let parent = pointerList[action.parent]
       parent.addObject(
         imageObject,
@@ -499,7 +502,7 @@ let actions = {
       let shape = pointerList[action.shapeUuid]
       let object = pointerList[action.objectUuid]
       let parent = pointerList[action.parent]
-      object.removeShape(shape)
+      object.getFrame(0).removeShape(shape)
       delete pointerList[action.shapeUuid]
       parent.removeChild(object)
       delete pointerList[action.objectUuid]
@@ -933,7 +936,8 @@ let actions = {
         shapes: serializableShapes,
         objects: serializableObjects,
         groupUuid: uuidv4(),
-        parent: context.activeObject.idx
+        parent: context.activeObject.idx,
+        frame: context.activeObject.currentFrame.idx
       }
       undoStack.push({name: 'group', action: action})
       actions.group.execute(action)
@@ -943,10 +947,11 @@ let actions = {
       // your code here
       let group = new GraphicsObject(action.groupUuid)
       let parent = pointerList[action.parent]
+      let frame = action.frame ? pointerList[action.frame] : parent.currentFrame
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx]
-        group.addShape(shape)
-        parent.removeShape(shape)
+        group.currentFrame.addShape(shape)
+        frame.removeShape(shape)
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx]
@@ -963,10 +968,11 @@ let actions = {
     rollback: (action) => {
       let group = pointerList[action.groupUuid]
       let parent = pointerList[action.parent]
+      let frame = action.frame ? pointerList[action.frame] : parent.currentFrame
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx]
-        parent.addShape(shape)
-        group.removeShape(shape)
+        frame.addShape(shape)
+        group.getFrame(0).removeShape(shape)
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx]
@@ -1337,6 +1343,19 @@ class Frame {
       newFrame.shapes.push(shape.copy(idx))
     }
     return newFrame
+  }
+  addShape(shape, sendToBack) {
+    if (sendToBack) {
+      this.shapes.unshift(shape)
+    } else {
+      this.shapes.push(shape)
+    }
+  }
+  removeShape(shape) {
+    let shapeIndex = this.shapes.indexOf(shape)
+    if (shapeIndex >= 0) {
+      this.shapes.splice(shapeIndex, 1)
+    }
   }
 }
 
@@ -2176,13 +2195,6 @@ class GraphicsObject {
     mouse.y -= this.y
     return mouse
   }
-  addShape(shape, sendToBack=false) {
-    if (sendToBack) {
-      this.currentFrame.shapes.unshift(shape)
-    } else {
-      this.currentFrame.shapes.push(shape)
-    }
-  }
   addObject(object, x=0, y=0) {
     this.children.push(object)
     object.parent = this
@@ -2194,16 +2206,6 @@ class GraphicsObject {
       scale_x: 1, 
       scale_y: 1,
       goToFrame: 1,
-    }
-  }
-  removeShape(shape) {
-    for (let layer of this.layers) {
-      for (let frame of layer.frames) {
-        let shapeIndex = frame.shapes.indexOf(shape)
-        if (shapeIndex >= 0) {
-          frame.shapes.splice(shapeIndex, 1)
-        }
-      }
     }
   }
   removeChild(childObject) {
