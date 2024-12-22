@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
@@ -2165,31 +2165,31 @@ class GraphicsObject {
           }
         }
         if (bbox != undefined) {
-          // ctx.save()
-          // ctx.strokeStyle = "#00ffff"
-          // ctx.lineWidth = 1;
-          // ctx.beginPath()
-          // let xdiff = bbox.x.max - bbox.x.min
-          // let ydiff =  bbox.y.max - bbox.y.min
-          // ctx.rect(
-          //   bbox.x.min, bbox.y.min,
-          //   xdiff,
-          //  ydiff
-          // )
-          // ctx.stroke()
-          // ctx.fillStyle = "#000000"
-          // let rectRadius = 5
-          // for (let i of [[0,0],[0.5,0],[1,0],[1,0.5],[1,1],[0.5,1],[0,1],[0,0.5]]) {
-          //   ctx.beginPath()
-          //   ctx.rect(
-          //     bbox.x.min + xdiff * i[0] - rectRadius,
-          //     bbox.y.min + ydiff * i[1] - rectRadius,
-          //     rectRadius*2, rectRadius*2
-          //   )
-          //   ctx.fill()
-          // }
+          ctx.save()
+          ctx.strokeStyle = "#00ffff"
+          ctx.lineWidth = 1;
+          ctx.beginPath()
+          let xdiff = bbox.x.max - bbox.x.min
+          let ydiff =  bbox.y.max - bbox.y.min
+          ctx.rect(
+            bbox.x.min, bbox.y.min,
+            xdiff,
+           ydiff
+          )
+          ctx.stroke()
+          ctx.fillStyle = "#000000"
+          let rectRadius = 5
+          for (let i of [[0,0],[0.5,0],[1,0],[1,0.5],[1,1],[0.5,1],[0,1],[0,0.5]]) {
+            ctx.beginPath()
+            ctx.rect(
+              bbox.x.min + xdiff * i[0] - rectRadius,
+              bbox.y.min + ydiff * i[1] - rectRadius,
+              rectRadius*2, rectRadius*2
+            )
+            ctx.fill()
+          }
 
-          // ctx.restore()
+          ctx.restore()
         }
       }
     }
@@ -2989,6 +2989,7 @@ function stage() {
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e)
     mouse = context.activeObject.transformMouse(mouse)
+    let selection;
     switch (mode) {
       case "rectangle":
       case "ellipse":
@@ -2999,7 +3000,7 @@ function stage() {
         break;
       case "select":
         if (context.activeObject.currentFrame.frameType != "keyframe") break;
-        let selection = selectVertex(context, mouse)
+        selection = selectVertex(context, mouse)
         if (selection) {
           context.dragging = true
           context.activeCurve = undefined
@@ -3067,6 +3068,42 @@ function stage() {
                 context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
               }
             }
+          }
+        }
+        break;
+      case "transform":
+        let bbox = undefined;
+        selection = {}
+        for (let item of context.selection) {
+          if (bbox==undefined) {
+            bbox = structuredClone(item.bbox())
+          } else {
+            growBoundingBox(bbox, item.bbox())
+          }
+          selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y}
+        }
+        let transformPoint = getPointNearBox(bbox, mouse, 10)
+        if (transformPoint) {
+          context.dragDirection = transformPoint
+          context.activeTransform = {
+            initial: {
+              x: {min: bbox.x.min, max: bbox.x.max},
+              y: {min: bbox.y.min, max: bbox.y.max},
+              selection: selection
+            },
+            current: {
+              x: {min: bbox.x.min, max: bbox.x.max},
+              y: {min: bbox.y.min, max: bbox.y.max},
+              selection: structuredClone(selection)
+            }
+          }
+          context.activeObject.currentFrame.saveState()
+        } else {
+          transformPoint = getPointNearBox(bbox, mouse, 30, false)
+          if (transformPoint) {
+            stage.style.cursor = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' fill='currentColor' class='bi bi-arrow-counterclockwise' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z'/%3E%3Cpath d='M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466'/%3E%3C/svg%3E") 12 12, auto`
+          } else {
+            stage.style.cursor = "default"
           }
         }
         break;
@@ -3217,6 +3254,7 @@ function stage() {
     }
     switch (mode) {
       case "draw":
+        stage.style.cursor = "default"
         context.activeCurve = undefined
         if (context.activeShape) {
           if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
@@ -3226,6 +3264,7 @@ function stage() {
         }
         break;
       case "rectangle":
+        stage.style.cursor = "default"
         context.activeCurve = undefined
         if (context.activeShape) {
           context.activeShape.clear()
@@ -3237,6 +3276,7 @@ function stage() {
         }
         break;
       case "ellipse":
+        stage.style.cursor = "default"
         context.activeCurve = undefined
         if (context.activeShape) {
           let midX = (mouse.x + context.activeShape.startx) / 2
@@ -3272,6 +3312,7 @@ function stage() {
         }
         break;
       case "select":
+        stage.style.cursor = "default"
         if (context.dragging) {
           if (context.activeVertex) {
             let vert = context.activeVertex
@@ -3353,6 +3394,26 @@ function stage() {
         context.lastMouse = mouse
         break;
       case "transform":
+        // stage.style.cursor = "nw-resize"
+        let bbox = undefined;
+        for (let item of context.selection) {
+          if (bbox==undefined) {
+            bbox = structuredClone(item.bbox())
+          } else {
+            growBoundingBox(bbox, item.bbox())
+          }
+        }
+        let point = getPointNearBox(bbox, mouse, 10)
+        if (point) {
+          stage.style.cursor = `${point}-resize`
+        } else {
+          point = getPointNearBox(bbox, mouse, 30, false)
+          if (point) {
+            stage.style.cursor = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' fill='currentColor' class='bi bi-arrow-counterclockwise' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z'/%3E%3Cpath d='M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466'/%3E%3C/svg%3E") 12 12, auto`
+          } else {
+            stage.style.cursor = "default"
+          }
+        }
         if (context.dragDirection) {
           let initial = context.activeTransform.initial
           let current = context.activeTransform.current
