@@ -622,6 +622,42 @@ function deepMerge(target, source) {
   return target;
 }
 
+function getPointNearBox(boundingBox, point, threshold = 5, checkCenters = true) {
+  const { x: { min: xMin, max: xMax }, y: { min: yMin, max: yMax } } = boundingBox;
+  const { x, y } = point;
+  
+  // List of points to check (corners and centers of sides) with their names
+  const pointsToCheck = [
+    { name: 'nw', x: xMin, y: yMin }, // top-left corner
+    { name: 'ne', x: xMax, y: yMin }, // top-right corner
+    { name: 'sw', x: xMin, y: yMax }, // bottom-left corner
+    { name: 'se', x: xMax, y: yMax }, // bottom-right corner
+  ];
+
+  // Optionally add the center points if checkCenters is true
+  if (checkCenters) {
+    pointsToCheck.push(
+      { name: 'n', x: (xMin + xMax) / 2, y: yMin }, // center of top side
+      { name: 's', x: (xMin + xMax) / 2, y: yMax }, // center of bottom side
+      { name: 'w', x: xMin, y: (yMin + yMax) / 2 }, // center of left side
+      { name: 'e', x: xMax, y: (yMin + yMax) / 2 }  // center of right side
+    );
+  }
+
+  // Check if the point is within the threshold distance of any of the points
+  for (let i = 0; i < pointsToCheck.length; i++) {
+    const pt = pointsToCheck[i];
+    const manhattanDistance = Math.abs(pt.x - x) + Math.abs(pt.y - y);
+
+    if (manhattanDistance <= threshold) {
+      return pt.name; // Return the name of the point that is close to the input point
+    }
+  }
+
+  return null; // Point is not within the threshold distance of any relevant point
+}
+
+
 export {
   titleCase,
   getMousePositionFraction,
@@ -643,5 +679,6 @@ export {
   drawBorderedRect,
   drawCenteredText,
   drawHorizontallyCenteredText,
-  deepMerge
+  deepMerge,
+  getPointNearBox
 };
