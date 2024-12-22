@@ -2500,7 +2500,8 @@ async function _save(path) {
     await writeTextFile(path, contents)
     filePath = path
     addRecentFile(path)
-    lastSaveIndex = undoStack.length - 1;
+    lastSaveIndex = undoStack.length;
+    updateMenu()
     console.log(`${path} saved successfully!`);
   } catch (error) {
     console.error("Error saving text file:", error);
@@ -2553,7 +2554,7 @@ async function _open(path) {
           await actions[action.name].execute(action.action)
           undoStack.push(action)
         }
-        lastSaveIndex = undoStack.length - 1;
+        lastSaveIndex = undoStack.length;
         filePath = path
         addRecentFile(path)
         updateUI()
@@ -2592,7 +2593,7 @@ async function open() {
 }
 
 function revert() {
-  for (let _=0; undoStack.length > lastSaveIndex+1; _++) {
+  for (let _=0; undoStack.length > lastSaveIndex; _++) {
     undo()
   }
 }
@@ -2650,7 +2651,7 @@ async function importFile() {
 }
 
 async function quit() {
-  if (undoStack.length) {
+  if (undoStack.length > lastSaveIndex) {
     if (await confirmDialog("Are you sure you want to quit?", {title: 'Really quit?', kind: "warning"})) {
       getCurrentWindow().close()
     }
