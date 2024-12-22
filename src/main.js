@@ -160,7 +160,7 @@ let tools = {
       },
       "simplifyMode": {
         type: "enum",
-        options: ["corners", "smooth"], // "auto"],
+        options: ["corners", "smooth", "verbatim"], // "auto"],
         label: "Line Mode"
       },
       "fillShape": {
@@ -1763,6 +1763,8 @@ class Shape extends BaseShape {
         points.push([curve.points[3].x, curve.points[3].y])
       }
       this.fromPoints(points, error)
+    } else if (mode=="verbatim") {
+      // Just keep existing shape
     }
     let epsilon = 0.01
     let newCurves = []
