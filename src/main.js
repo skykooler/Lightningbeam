@@ -2077,7 +2077,9 @@ class GraphicsObject {
     return this.getFrame(this.currentFrameNum)
   }
   get maxFrame() {
-    return Math.max(...this.layers.map((layer)=>{return layer.frames.length}))
+    return Math.max(...this.layers.map((layer) => {
+      return layer.frames.findLastIndex(frame => frame !== undefined) || -1;
+    })) + 1;
   }
   advanceFrame() {
     this.setFrameNum(this.currentFrameNum + 1)
