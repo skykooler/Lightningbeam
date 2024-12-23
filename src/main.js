@@ -846,6 +846,57 @@ let actions = {
       updateUI()
     }
   },
+  moveFrames: {
+    create: (offset) => {
+      redoStack.length = 0
+      const selectedFrames = structuredClone(context.selectedFrames)
+      for (let frame of selectedFrames) {
+        frame.replacementUuid = uuidv4()
+      }
+      // const fillFrames = []
+      // for (let i=0; i<context.activeObject.layers.length;i++) {
+      //   const fillLayer = []
+      //   for (let j=0; j<Math.abs(offset.frames); j++) {
+      //     fillLayer.push(uuidv4())
+      //   }
+      //   fillFrames.push(fillLayer)
+      // }
+      let action = {
+        selectedFrames: selectedFrames,
+        offset: offset,
+        object: context.activeObject.idx,
+        // fillFrames: fillFrames
+      }
+      undoStack.push({name: 'moveFrames', action: action})
+      actions.moveFrames.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      const object = pointerList[action.object]
+      const frameBuffer = []
+      for (let frameObj of action.selectedFrames) {
+        let layer = object.layers[frameObj.layer]
+        let frame = layer.frames[frameObj.frameNum]
+        frameBuffer.push({
+          frame: frame,
+          frameNum: frameObj.frameNum,
+          layer: frameObj.layer
+        })
+        layer.deleteFrame(frame.idx, undefined, frameObj.replacementUuid)
+      }
+      for (let frameObj of frameBuffer) {
+        const layer_idx = frameObj.layer + action.offset.layers
+        let layer = object.layers[layer_idx]
+        let frame = frameObj.frame
+        layer.addFrame(frameObj.frameNum + action.offset.frames, frame, [])//fillFrames[layer_idx])
+      }
+      updateLayers()
+      updateUI()
+    },
+    rollback: (action) => {
+      // your code here
+    }
+  },
   addMotionTween: {
     create: () => {
       redoStack.length = 0
@@ -1415,7 +1466,7 @@ class Layer {
         let prevFrame = this.frames[num].prev
         let nextFrame = this.frames[num].next
         const t = (num - this.frames[num].prevIndex) / (this.frames[num].nextIndex - this.frames[num].prevIndex);
-        for (let key in prevFrame.keys) {
+        for (let key in prevFrame?.keys) {
           frameKeys[key] = {}
           let prevKeyDict = prevFrame.keys[key]
           let nextKeyDict = nextFrame.keys[key]
@@ -1432,7 +1483,7 @@ class Layer {
         let nextFrame = this.frames[num].next
         const t = (num - this.frames[num].prevIndex) / (this.frames[num].nextIndex - this.frames[num].prevIndex);
         let shapes = []
-        for (let shape1 of prevFrame.shapes) {
+        for (let shape1 of prevFrame?.shapes) {
           if (shape1.curves.length == 0) continue;
           let shape2 = undefined
           for (let i of nextFrame.shapes) {
@@ -1485,7 +1536,7 @@ class Layer {
         return frame
       } else {
         for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
-          if (this.frames[i].frameType == "keyframe") {
+          if (this.frames[i]?.frameType == "keyframe") {
             let tempFrame = this.frames[i].copy("tempFrame")
             tempFrame.frameType = "normal"
             return tempFrame
@@ -1499,6 +1550,13 @@ class Layer {
         //   tempFrame.frameType = "normal"
           return tempFrame
         // }
+      }
+    }
+  }
+  getLatestFrame(num) {
+    for (let i=num; i>=0; i--) {
+      if (this.frames[i]?.exists) {
+        return this.getFrame(i)
       }
     }
   }
@@ -1523,9 +1581,11 @@ class Layer {
   }
   addFrame(num, frame, addedFrames) {
     let updateDest = undefined
-    if (num >= this.frames.length) {
+    if (!this.frames[num]) {
       for (const [index, idx] of Object.entries(addedFrames)) {
-        this.frames[index] = new Frame("normal", idx)
+        if (!this.frames[index]) {
+          this.frames[index] = new Frame("normal", idx)
+        }
       }
     } else {
       if (this.frames[num].frameType=="motion") {
@@ -1541,7 +1601,7 @@ class Layer {
     }
   }
   addOrChangeFrame(num, frameType, uuid, addedFrames) {
-    let latestFrame = this.getFrame(Math.max(num-1, 0))
+    let latestFrame = this.getLatestFrame(num)
     let newKeyframe = new Frame(frameType, uuid)
     for (let key in latestFrame.keys) {
       newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
@@ -1551,7 +1611,7 @@ class Layer {
     }
     this.addFrame(num, newKeyframe, addedFrames)
   }
-  deleteFrame(uuid, destinationType) {
+  deleteFrame(uuid, destinationType, replacementUuid) {
     let frame = pointerList[uuid]
     let i = this.frames.indexOf(frame)
     if (i != -1) {
@@ -1574,6 +1634,7 @@ class Layer {
       if (destinationType=="none") {
         delete this.frames[i]
       } else {
+        this.frames[i] = this.frames[i].copy(replacementUuid)
         this.frames[i].frameType = destinationType
         this.updateFrameNextAndPrev(i, destinationType)
       }
@@ -3909,6 +3970,14 @@ function timeline() {
   });
   resizeObserver.observe(timeline_cvs);
 
+  timeline_cvs.frameDragOffset = {
+    frames: 0,
+    layers: 0
+  }
+
+  timeline_cvs.addEventListener('dragstart', (event) => {
+    event.preventDefault();
+  });
   timeline_cvs.addEventListener('wheel', (event) => {
     event.preventDefault();
     const deltaX = event.deltaX * config.scrollSpeed;
@@ -3930,8 +3999,75 @@ function timeline() {
     mouse.y += timeline_cvs.offsetY
     if (mouse.x > layerWidth) {
       mouse.x += timeline_cvs.offsetX - layerWidth
+      mouse.y -= gutterHeight
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth)
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame)
+      const layerIdx = Math.floor(mouse.y / layerHeight)
+      if (layerIdx < context.activeObject.layers.length && layerIdx >= 0) {
+        const layer = context.activeObject.layers[context.activeObject.layers.length - layerIdx - 1]
+
+        const frame = layer.getFrame(timeline_cvs.clicked_frame)
+        if (frame.exists) {
+          if (!e.shiftKey) {
+
+            // Check if the clicked frame is already in the selection
+            const existingIndex = context.selectedFrames.findIndex(selected =>
+              selected.frameNum === timeline_cvs.clicked_frame && selected.layer === layerIdx);
+            
+            if (existingIndex !== -1) {
+              if (!e.ctrlKey) {
+                // Do nothing
+              } else {
+                // Remove the clicked frame from the selection
+                context.selectedFrames.splice(existingIndex, 1);
+              }
+            } else {
+              if (!e.ctrlKey) {
+                context.selectedFrames = [];  // Reset selection
+              }
+              // Add the clicked frame to the selection
+              context.selectedFrames.push({
+                  layer: layerIdx,
+                  frameNum: timeline_cvs.clicked_frame
+              });
+            }
+          } else {
+            const currentSelection = context.selectedFrames[context.selectedFrames.length - 1];
+
+            const startFrame = Math.min(currentSelection.frameNum, timeline_cvs.clicked_frame);
+            const endFrame = Math.max(currentSelection.frameNum, timeline_cvs.clicked_frame);
+
+            const startLayer = Math.min(currentSelection.layer, layerIdx);
+            const endLayer = Math.max(currentSelection.layer, layerIdx);
+
+            for (let l = startLayer; l <= endLayer; l++) {
+              const layerToAdd = context.activeObject.layers[context.activeObject.layers.length - l - 1];
+
+              for (let f = startFrame; f <= endFrame; f++) {
+                const frameToAdd = layerToAdd.getFrame(f);
+
+                if (frameToAdd.exists && !context.selectedFrames.some(selected =>
+                  selected.frameNum === f && selected.layer === l)) {
+                  context.selectedFrames.push({
+                    layer: l,
+                    frameNum: f
+                  });
+                }
+              }
+            }
+          }
+          timeline_cvs.draggingFrames = true
+          timeline_cvs.dragFrameStart = {frame: timeline_cvs.clicked_frame, layer: layerIdx}
+          timeline_cvs.frameDragOffset = {
+            frames: 0,
+            layers: 0
+          }
+        } else {
+          context.selectedFrames = []
+        }
+      } else {
+        context.selectedFrames = []
+      }
       updateUI()
     } else {
       mouse.y -= gutterHeight
@@ -3959,13 +4095,40 @@ function timeline() {
   timeline_cvs.addEventListener("mouseup", (e) => {
     let mouse = getMousePos(timeline_cvs, e)
     mouse.y += timeline_cvs.offsetY
-    if (mouse.x > layerWidth) {
+    if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
       mouse.x += timeline_cvs.offsetX - layerWidth
+      if (timeline_cvs.draggingFrames) {
+        if ((timeline_cvs.frameDragOffset.frames != 0) ||
+          (timeline_cvs.frameDragOffset.layers != 0)) {
+          actions.moveFrames.create(timeline_cvs.frameDragOffset)
+          context.selectedFrames = []
+        }
+      }
+      timeline_cvs.draggingFrames = false
     
       updateLayers()
       updateMenu()
     }
     console.log(mouse)
+  })
+  timeline_cvs.addEventListener("mousemove", (e) => {
+    let mouse = getMousePos(timeline_cvs, e)
+    mouse.y += timeline_cvs.offsetY
+    if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
+      mouse.x += timeline_cvs.offsetX - layerWidth
+      if (timeline_cvs.draggingFrames) {
+        const minFrameNum = -Math.min(...context.selectedFrames.map(selection => selection.frameNum));
+        const minLayer = -Math.min(...context.selectedFrames.map(selection => selection.layer));
+        const maxLayer = context.activeObject.layers.length - 1 -
+          Math.max(...context.selectedFrames.map(selection => selection.layer));
+        timeline_cvs.frameDragOffset = {
+          frames: Math.max(Math.floor(mouse.x / frameWidth) - timeline_cvs.dragFrameStart.frame, minFrameNum),
+          layers: Math.min(Math.max(Math.floor(mouse.y/layerHeight) - timeline_cvs.dragFrameStart.layer, minLayer), maxLayer)
+        }
+        updateLayers()
+      }
+
+    }
   })
 
   timeline_cvs.offsetX = 0;
@@ -4442,6 +4605,7 @@ function updateLayers() {
             }
             // Draw existing frames
             layer.frames.forEach((frame, j) => {
+              if (!frame) return;
               switch (frame.frameType) {
                 case "keyframe":
                   ctx.fillStyle = foregroundColor
@@ -4465,11 +4629,22 @@ function updateLayers() {
                   break;
               }
             })
-            // Draw highlighted frame
             // if (context.activeObject.currentFrameNum) 
           ctx.restore()
           i++;
         }
+      ctx.restore()
+      // Draw highlighted frame
+      ctx.save()
+      ctx.translate(layerWidth - offsetX, -offsetY)
+      ctx.translate(canvas.frameDragOffset.frames*frameWidth, canvas.frameDragOffset.layers*layerHeight)
+      ctx.globalCompositeOperation = 'difference';
+      for (let frame of context.selectedFrames) {
+        ctx.fillStyle = "grey"
+        console.log(frame.frameNum)
+        ctx.fillRect(frame.frameNum*frameWidth, frame.layer*layerHeight, frameWidth, layerHeight)
+      }
+      ctx.globalCompositeOperation = 'source-over';
       ctx.restore()
 
 
