@@ -858,13 +858,7 @@ let actions = {
       let layer = pointerList[action.layer]
       let frames = layer.frames
       if ((action.lastBefore != undefined) && (action.firstAfter != undefined)) {
-        for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
-          frames[i].frameType = "motion"
-          frames[i].prev = frames[action.lastBefore]
-          frames[i].next = frames[action.firstAfter]
-          frames[i].prevIndex = action.lastBefore
-          frames[i].nextIndex = action.firstAfter
-        }
+        layer.updateFrameNextAndPrev(action.frameNum, "motion", action.lastBefore, action.firstAfter)
       }
       updateLayers()
       updateUI()
@@ -872,8 +866,8 @@ let actions = {
     rollback: (action) => {
       let layer = pointerList[action.layer]
       let frames = layer.frames
-      for (let i=action.lastBefore + 1; i<action.firstAfter; i++) {
-        frames[i].frameType = "normal"
+      if ((action.lastBefore != undefined) && (action.firstAfter != undefined)) {
+        layer.updateFrameNextAndPrev(action.frameNum, "normal", action.lastBefore, action.firstAfter)
       }
       updateLayers()
       updateUI()
@@ -1501,21 +1495,67 @@ class Layer {
     for (let shape of latestFrame.shapes) {
       newKeyframe.shapes.push(shape.copy(uuid))
     }
+    let updateDest = undefined
     if (num >= this.frames.length) {
       for (const [index, idx] of Object.entries(addedFrames)) {
         this.frames[index] = new Frame("normal", idx)
       }
-    } else if (this.frames[num].frameType=="motion") {
-      for (let i=this.frames[num].prevIndex; i<num; i++) {
-        this.frames[i].nextIndex = num
-        this.frames[i].next = newKeyframe
-      }
-      for (let i=num+1; i<this.frames[num].nextIndex; i++) {
-        this.frames[i].prevIndex = num
-        this.frames[i].prev = newKeyframe
+    } else {
+      if (this.frames[num].frameType=="motion") {
+        updateDest = "motion"
+      } else if (this.frames[num].frameType=="shape") {
+        updateDest = "shape"
       }
     }
     this.frames[num] = newKeyframe
+    if (updateDest) {
+      this.updateFrameNextAndPrev(num-1, updateDest)
+      this.updateFrameNextAndPrev(num+1, updateDest)
+    }
+  }
+  deleteFrame(uuid, destinationType) {
+    let frame = pointerList[uuid]
+    let i = this.frames.indexOf(frame)
+    if (i != -1) {
+      if (destinationType==undefined) {
+        // Determine destination type from surrounding frames
+        const prevFrame = this.frames[i - 1];
+        const nextFrame = this.frames[i + 1];
+        const prevType = prevFrame ? prevFrame.frameType : null;
+        const nextType = nextFrame ? nextFrame.frameType : null;
+        if (prevType === "motion" || nextType === "motion") {
+            destinationType = "motion";
+        } else if (prevType === "shape" || nextType === "shape") {
+            destinationType = "shape";
+        } else if (prevType !== null && nextType !== null) {
+            destinationType = "normal";
+        } else {
+            destinationType = "none";
+        }
+      }
+      if (destinationType=="none") {
+        delete this.frames[i]
+      } else {
+        this.frames[i].frameType = frameType
+        this.updateFrameNextAndPrev(i, frameType)
+      }
+    }
+  }
+  updateFrameNextAndPrev(num, frameType, lastBefore, firstAfter) {
+    if (!this.frames[num] || this.frames[num].frameType=="keyframe") return;
+    if ((lastBefore==undefined) || (firstAfter==undefined)) {
+      let {lastKeyframeBefore, firstKeyframeAfter} = getKeyframesSurrounding(this.frames, num)
+      lastBefore = lastKeyframeBefore
+      firstAfter = firstKeyframeAfter
+      console.log(lastBefore, firstAfter)
+    }
+    for (let i=lastBefore + 1; i<firstAfter; i++) {
+      this.frames[i].frameType = frameType
+      this.frames[i].prev = this.frames[lastBefore]
+      this.frames[i].next = this.frames[firstAfter]
+      this.frames[i].prevIndex = lastBefore
+      this.frames[i].nextIndex = firstAfter
+    }
   }
   toggleVisibility() {
     this.visible = !this.visible
