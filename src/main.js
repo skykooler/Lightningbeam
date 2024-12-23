@@ -803,6 +803,7 @@ let actions = {
       let layer = pointerList[action.layer]
       layer.addOrChangeFrame(action.frameNum, "keyframe", action.uuid, action.addedFrames)
       updateLayers()
+      updateUI()
     },
     rollback: (action) => {
       let layer = pointerList[action.layer]
@@ -815,6 +816,7 @@ let actions = {
         layer.frames[action.frameNum].frameType = action.formerType
       }
       updateLayers()
+      updateUI()
     }
   },
   deleteFrame: {
@@ -829,11 +831,17 @@ let actions = {
       updateMenu()
     },
     execute: (action) => {
-      let frame = pointerList[action.frame]
       let layer = pointerList[action.layer]
+      layer.deleteFrame(action.frame)
+      updateLayers()
+      updateUI()
     },
     rollback: (action) => {
-      // your code here
+      let layer = pointerList[action.layer]
+      let frame = pointerList[action.frame]
+      layer.addFrame(action.frameNum, frame, {})
+      updateLayers()
+      updateUI()
     }
   },
   addMotionTween: {
@@ -1486,15 +1494,7 @@ class Layer {
     }
     return newLayer
   }
-  addOrChangeFrame(num, frameType, uuid, addedFrames) {
-    let latestFrame = this.getFrame(Math.max(num-1, 0))
-    let newKeyframe = new Frame(frameType, uuid)
-    for (let key in latestFrame.keys) {
-      newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
-    }
-    for (let shape of latestFrame.shapes) {
-      newKeyframe.shapes.push(shape.copy(uuid))
-    }
+  addFrame(num, frame, addedFrames) {
     let updateDest = undefined
     if (num >= this.frames.length) {
       for (const [index, idx] of Object.entries(addedFrames)) {
@@ -1507,11 +1507,22 @@ class Layer {
         updateDest = "shape"
       }
     }
-    this.frames[num] = newKeyframe
+    this.frames[num] = frame
     if (updateDest) {
       this.updateFrameNextAndPrev(num-1, updateDest)
       this.updateFrameNextAndPrev(num+1, updateDest)
     }
+  }
+  addOrChangeFrame(num, frameType, uuid, addedFrames) {
+    let latestFrame = this.getFrame(Math.max(num-1, 0))
+    let newKeyframe = new Frame(frameType, uuid)
+    for (let key in latestFrame.keys) {
+      newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
+    }
+    for (let shape of latestFrame.shapes) {
+      newKeyframe.shapes.push(shape.copy(uuid))
+    }
+    this.addFrame(num, newKeyframe, addedFrames)
   }
   deleteFrame(uuid, destinationType) {
     let frame = pointerList[uuid]
@@ -1536,8 +1547,8 @@ class Layer {
       if (destinationType=="none") {
         delete this.frames[i]
       } else {
-        this.frames[i].frameType = frameType
-        this.updateFrameNextAndPrev(i, frameType)
+        this.frames[i].frameType = destinationType
+        this.updateFrameNextAndPrev(i, destinationType)
       }
     }
   }
@@ -2782,6 +2793,13 @@ function addFrame() {
 
 function addKeyframe() {
   actions.addKeyframe.create()
+}
+function deleteFrame() {
+  let frame = context.activeObject.currentFrame
+  let layer = context.activeObject.activeLayer
+  if (frame) {
+    actions.deleteFrame.create(frame, layer)
+  }
 }
 async function about () {
   messageDialog(`Lightningbeam version ${await getVersion()}\nDeveloped by Skyler Lehmkuhl`,
@@ -4916,7 +4934,7 @@ async function updateMenu() {
   deleteFrameMenuItem = {
     text: "Delete Frame",
     enabled: activeFrame,
-    action: () => {}
+    action: deleteFrame
   }
 
   const timelineSubmenu = await Submenu.new({
