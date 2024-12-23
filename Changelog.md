@@ -1,3 +1,15 @@
+# 0.6.9-alpha:
+Changes:
+
+New features:
+- Delete frame is now functional
+- Very early support for moving frames. Do not use with motion or shape tweens yet!
+
+Bugfixes:
+- Fix motion tween being incorrect after adding a keyframe in the middle of it
+- Fix deleted frames still being visible
+- Fix timeline playing for too long after removing or moving frames
+
 # 0.6.8-alpha:
 Changes:
 - Improve stage rendering
