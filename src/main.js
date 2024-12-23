@@ -318,7 +318,9 @@ let startProps = {}
 let actions = {
   addShape: {
     create: (parent, shape, ctx) => {
+      if (!parent.currentFrame?.exists) return;
       if (shape.curves.length==0) return;
+      console.log(parent.currentFrame)
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = []
       for (let curve of shape.curves) {
@@ -1339,6 +1341,7 @@ class Frame {
     }
     pointerList[this.idx] = this
   }
+  get exists() { return true }
   saveState() {
     startProps[this.idx] = structuredClone(this.keys)
   }
@@ -1365,6 +1368,30 @@ class Frame {
     }
   }
 }
+
+class TempFrame {
+  constructor() {}
+  get exists() { return false }
+  get idx() {
+    return "tempFrame"
+  }
+  get keys() {
+    return {}
+  }
+  get shapes() {
+    return []
+  }
+  get frameType() {
+    return "temp"
+  }
+  copy() {
+    return this
+  }
+  addShape() {}
+  removeShape() {}
+}
+
+const tempFrame = new TempFrame()
 
 class Layer {
   constructor(uuid) {         
@@ -1467,11 +1494,11 @@ class Layer {
       }
     } else {
       for (let i=Math.min(num, this.frames.length-1); i>=0; i--) {
-        if (this.frames[i].frameType == "keyframe") {
-          let tempFrame = this.frames[i].copy("tempFrame")
-          tempFrame.frameType = "normal"
+        // if (this.frames[i].frameType == "keyframe") {
+        //   let tempFrame = this.frames[i].copy("tempFrame")
+        //   tempFrame.frameType = "normal"
           return tempFrame
-        }
+        // }
       }
     }
   }
@@ -3073,6 +3100,7 @@ function stage() {
     let mouse = getMousePos(stage, e)
     mouse = context.activeObject.transformMouse(mouse)
     let selection;
+    if (!context.activeObject.currentFrame?.exists) return;
     switch (mode) {
       case "rectangle":
       case "ellipse":
@@ -3269,6 +3297,7 @@ function stage() {
     context.dragging = false
     context.dragDirection = undefined
     context.selectionRect = undefined
+    if (!context.activeObject.currentFrame?.exists) return
     let mouse = getMousePos(stage, e)
     mouse = context.activeObject.transformMouse(mouse)
     switch (mode) {
@@ -3335,6 +3364,7 @@ function stage() {
         stage.mouseup(e)
         return
     }
+    if (!context.activeObject.currentFrame?.exists) return;
     switch (mode) {
       case "draw":
         stage.style.cursor = "default"
@@ -3486,6 +3516,7 @@ function stage() {
             growBoundingBox(bbox, item.bbox())
           }
         }
+        if (bbox==undefined) break;
         let point = getPointNearBox(bbox, mouse, 10)
         if (point) {
           stage.style.cursor = `${point}-resize`
