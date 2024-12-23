@@ -801,26 +801,7 @@ let actions = {
     execute: (action) => {
       let object = pointerList[action.object]
       let layer = pointerList[action.layer]
-      console.log(pointerList)
-      console.log(action.object)
-      console.log(object)
-      let latestFrame = object.getFrame(Math.max(action.frameNum-1, 0))
-      let newKeyframe = new Frame("keyframe", action.uuid)
-      for (let key in latestFrame.keys) {
-        newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
-      }
-      for (let shape of latestFrame.shapes) {
-        newKeyframe.shapes.push(shape.copy(action.uuid))
-      }
-      if (action.frameNum >= layer.frames.length) {
-        for (const [index, idx] of Object.entries(action.addedFrames)) {
-          layer.frames[index] = new Frame("normal", idx)
-        }
-      }
-      //   layer.frames.push(newKeyframe)
-      // } else if (layer.frames[action.frameNum].frameType != "keyframe") {
-        layer.frames[action.frameNum] = newKeyframe
-      // }
+      layer.addOrChangeFrame(action.frameNum, "keyframe", action.uuid, action.addedFrames)
       updateLayers()
     },
     rollback: (action) => {
@@ -834,6 +815,25 @@ let actions = {
         layer.frames[action.frameNum].frameType = action.formerType
       }
       updateLayers()
+    }
+  },
+  deleteFrame: {
+    create: (frame, layer) => {
+      redoStack.length = 0
+      let action = {
+        frame: frame.idx,
+        layer: layer.idx
+      }
+      undoStack.push({name: 'deleteFrame', action: action})
+      actions.deleteFrame.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      let frame = pointerList[action.frame]
+      let layer = pointerList[action.layer]
+    },
+    rollback: (action) => {
+      // your code here
     }
   },
   addMotionTween: {
@@ -1491,6 +1491,31 @@ class Layer {
       newLayer.frames.push(newFrame)
     }
     return newLayer
+  }
+  addOrChangeFrame(num, frameType, uuid, addedFrames) {
+    let latestFrame = this.getFrame(Math.max(num-1, 0))
+    let newKeyframe = new Frame(frameType, uuid)
+    for (let key in latestFrame.keys) {
+      newKeyframe.keys[key] = structuredClone(latestFrame.keys[key])
+    }
+    for (let shape of latestFrame.shapes) {
+      newKeyframe.shapes.push(shape.copy(uuid))
+    }
+    if (num >= this.frames.length) {
+      for (const [index, idx] of Object.entries(addedFrames)) {
+        this.frames[index] = new Frame("normal", idx)
+      }
+    } else if (this.frames[num].frameType=="motion") {
+      for (let i=this.frames[num].prevIndex; i<num; i++) {
+        this.frames[i].nextIndex = num
+        this.frames[i].next = newKeyframe
+      }
+      for (let i=num+1; i<this.frames[num].nextIndex; i++) {
+        this.frames[i].prevIndex = num
+        this.frames[i].prev = newKeyframe
+      }
+    }
+    this.frames[num] = newKeyframe
   }
   toggleVisibility() {
     this.visible = !this.visible
