@@ -28,10 +28,10 @@ function forwardConsole(fnName, logger) {
 }
 
 // forwardConsole('log', trace);
-forwardConsole('debug', debug);
-forwardConsole('info', info);
-forwardConsole('warn', warn);
-forwardConsole('error', error);
+// forwardConsole('debug', debug);
+// forwardConsole('info', info);
+// forwardConsole('warn', warn);
+// forwardConsole('error', error);
 
 // Debug flags
 const debugQuadtree = false
@@ -281,8 +281,9 @@ function getShortcut(shortcut) {
 // Load the configuration from the file system
 async function loadConfig() {
   try {
-    const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
-    const configData = await readTextFile(configPath);
+    // const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
+    // const configData = await readTextFile(configPath);
+    const configData = localStorage.getItem("lightningbeamConfig") || "{}"
     config = deepMerge({...config}, JSON.parse(configData));
     updateUI()
   } catch (error) {
@@ -293,8 +294,9 @@ async function loadConfig() {
 // Save the configuration to a file
 async function saveConfig() {
   try {
-    const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
-    await writeTextFile(configPath, JSON.stringify(config, null, 2));
+    // const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
+    // await writeTextFile(configPath, JSON.stringify(config, null, 2));
+    localStorage.setItem("lightningbeamConfig", JSON.stringify(config, null, 2))
   } catch (error) {
     console.error('Error saving config:', error);
   }
@@ -476,7 +478,6 @@ let actions = {
         });
       }
       let img = await loadImage(action.src)
-      console.log(img.crossOrigin)
       // img.onload = function() {
       let ct = {
         ...context,
