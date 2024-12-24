@@ -1189,10 +1189,14 @@ function vectorDist(a, b) {
   return Math.sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y))
 }
 
-function getMousePos(canvas, evt) {
+function getMousePos(canvas, evt, skipOffsets = false) {
   var rect = canvas.getBoundingClientRect();
-  const offsetX = canvas.offsetX || 0;
-  const offsetY = canvas.offsetY || 0;
+  let offsetX = canvas.offsetX || 0;
+  let offsetY = canvas.offsetY || 0;
+  if (skipOffsets) {
+    offsetX = 0
+    offsetY = 0
+  }
   return {
     x: (evt.clientX + offsetX - rect.left) / context.zoomLevel,
     y: (evt.clientY + offsetY - rect.top) / context.zoomLevel
@@ -3997,10 +4001,11 @@ function timeline() {
     }
   });
   timeline_cvs.addEventListener("mousedown", (e) => {
-    let mouse = getMousePos(timeline_cvs, e)
+    let mouse = getMousePos(timeline_cvs, e, true)
     mouse.y += timeline_cvs.offsetY
     if (mouse.x > layerWidth) {
-      mouse.x += timeline_cvs.offsetX - layerWidth
+      mouse.x -= layerWidth
+      mouse.x += timeline_cvs.offsetX
       mouse.y -= gutterHeight
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth)
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame)
