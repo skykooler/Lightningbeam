@@ -230,12 +230,19 @@ if (!window.__TAURI__) {
           menu = new Menu()
           for (let i in items) {
             let item = items[i]
-            menuItem = new MenuItem({
-              label: item.text,
-              enabled: item.enabled,
-              click: item.action,
-              accelerator: item.accelerator
-            })
+            if (item instanceof Menu) {
+              menuItem = new MenuItem({
+                label: item.text,
+                submenu: item
+              })
+            } else {
+              menuItem = new MenuItem({
+                label: item.text,
+                enabled: item.enabled,
+                click: item.action,
+                accelerator: item.accelerator
+              })
+            }
             menu.append(menuItem)
           }
           menu.text = params.text

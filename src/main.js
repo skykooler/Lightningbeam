@@ -2700,6 +2700,7 @@ async function saveAs() {
 }
 
 async function _open(path) {
+  closeDialog()
   try {
     const contents = await readTextFile(path)
     let file = JSON.parse(contents)
@@ -2746,7 +2747,6 @@ async function _open(path) {
 }
 
 async function open() {
-  closeDialog()
   const path = await openFileDialog({
     multiple: false,
     directory: false,
@@ -4957,6 +4957,15 @@ async function updateMenu() {
   let newFrameMenuItem;
   let newKeyframeMenuItem;
   let deleteFrameMenuItem;
+
+  let recentFilesList = []
+  config.recentFiles.forEach((file) => {
+    recentFilesList.push({
+      text: file,
+      enabled: true,
+      action: () => { _open(file) }
+    })
+  })
   
   activeKeyframe = false
   if (context.activeObject.activeLayer.frames[context.activeObject.currentFrameNum]) {
@@ -5008,6 +5017,10 @@ async function updateMenu() {
         action: saveAs,
         accelerator: getShortcut("saveAs")
       },
+      await Submenu.new({
+        text: "Open Recent",
+        items: recentFilesList
+      }),
       {
         text: 'Open File...',
         enabled: true,
