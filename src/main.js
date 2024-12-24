@@ -1178,6 +1178,86 @@ let actions = {
       updateInfopanel()
     }
   },
+  selectAll: {
+    create: () => {
+      redoStack.length = 0
+      let selection = []
+      let shapeselection = []
+      for (let child of context.activeObject.activeLayer.children) {
+        let idx = child.idx
+        if (idx in context.activeObject.currentFrame.keys) {
+          selection.push(child.idx)
+        }
+      }
+      for (let shape of context.activeObject.currentFrame.shapes) {
+        shapeselection.push(shape.idx)
+      }
+      let action = {
+        selection: selection,
+        shapeselection: shapeselection
+      }
+      undoStack.push({name: 'selectAll', action: action})
+      actions.selectAll.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      for (let item of action.selection) {
+        context.selection.push(pointerList[item])
+      }
+      for (let shape of action.shapeselection) {
+        context.shapeselection.push(pointerList[shape])
+      }
+      updateUI()
+      updateMenu()
+    },
+    rollback: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      updateUI()
+      updateMenu()
+    }
+  },
+  selectNone: {
+    create: () => {
+      redoStack.length = 0
+      let selection = []
+      let shapeselection = []
+      for (let item of context.selection) {
+        let idx = child.idx
+        selection.push(item.idx)
+      }
+      for (let shape of context.shapeselection) {
+        shapeselection.push(shape.idx)
+      }
+      let action = {
+        selection: selection,
+        shapeselection: shapeselection
+      }
+      undoStack.push({name: 'selectNone', action: action})
+      actions.selectNone.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      updateUI()
+      updateMenu()
+    },
+    rollback: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      for (let item of action.selection) {
+        context.selection.push(pointerList[item])
+      }
+      for (let shape of action.shapeselection) {
+        context.shapeselection.push(pointerList[shape])
+      }
+      updateUI()
+      updateMenu()
+    }
+  },
 }
 
 function uuidv4() {
@@ -2521,7 +2601,7 @@ window.addEventListener("keydown", (e) => {
       delete_action()
       break;
     case config.shortcuts.selectAll:
-      selectAll()
+      actions.selectAll.create()
       e.preventDefault()
       break;
     case config.shortcuts.group:
@@ -2862,21 +2942,6 @@ function delete_action() {
   if (context.selection.length || context.shapeselection.length) {
     actions.deleteObjects.create(context.selection, context.shapeselection)
     context.selection = []
-  }
-  updateUI()
-}
-
-function selectAll() {
-  context.selection = []
-  context.shapeselection = []
-  for (let child of context.activeObject.activeLayer.children) {
-    let idx = child.idx
-    if (idx in context.activeObject.currentFrame.keys) {
-      context.selection.push(child)
-    }
-  }
-  for (let shape of context.activeObject.currentFrame.shapes) {
-    context.shapeselection.push(shape)
   }
   updateUI()
 }
@@ -5099,8 +5164,14 @@ async function updateMenu() {
       {
         text: "Select All",
         enabled: true,
-        action: selectAll,
+        action: actions.selectAll.create,
         accelerator: getShortcut("selectAll")
+      },
+      {
+        text: "Select None",
+        enabled: true,
+        action: actions.selectNone.create,
+        accelerator: getShortcut("selectNone")
       },
     ]
   });
