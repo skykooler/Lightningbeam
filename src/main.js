@@ -2758,6 +2758,7 @@ async function open() {
     ],
     defaultPath: await documentDir(),
   });
+  console.log(path)
   if (path) {
     _open(path)
   }
