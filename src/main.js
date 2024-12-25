@@ -1601,6 +1601,7 @@ class Layer {
     this.name = "Layer"
     this.frames = [new Frame("keyframe", this.idx+"-F1")]
     this.visible = true
+    this.audible = true
     pointerList[this.idx] = this
   }
   getFrame(num) {
@@ -1827,6 +1828,7 @@ class AudioLayer {
     } else {
       this.name = name
     }
+    this.audible = true
   }
   copy(idx) {
     let newAudioLayer = new AudioLayer(idx.slice(0,8)+this.idx.slice(8), this.name)
@@ -2279,6 +2281,9 @@ class GraphicsObject {
   }
   get children() {
     return this.activeLayer.children
+  }
+  get allLayers() {
+    return [...this.audioLayers, ...this.layers]
   }
   get currentFrame() {
     return this.getFrame(this.currentFrameNum)
@@ -4083,6 +4088,8 @@ function timeline() {
 
   // Load icons for show/hide layer
   timeline_cvs.icons = {}
+  timeline_cvs.icons.volume_up_fill = new Icon('assets/volume-up-fill.svg');
+  timeline_cvs.icons.volume_mute = new Icon('assets/volume-mute.svg');
   timeline_cvs.icons.eye_fill = new Icon('assets/eye-fill.svg');
   timeline_cvs.icons.eye_slash = new Icon('assets/eye-slash.svg');
 
@@ -4215,8 +4222,8 @@ function timeline() {
     } else {
       mouse.y -= gutterHeight
       let l = Math.floor(mouse.y / layerHeight)
-      if (l < context.activeObject.layers.length) {
-        let i = context.activeObject.layers.length - (l+1)
+      if (l < context.activeObject.allLayers.length) {
+        let i = context.activeObject.allLayers.length - (l+1)
         mouse.y -= l*layerHeight
         if (
           mouse.x > layerWidth - iconSize - 5 &&
@@ -4224,7 +4231,16 @@ function timeline() {
           mouse.y > 0.5 * (layerHeight - iconSize) &&
           mouse.y < 0.5 * (layerHeight + iconSize)
         ) {
-          context.activeObject.layers[i].visible = !context.activeObject.layers[i].visible
+          context.activeObject.allLayers[i].visible = !context.activeObject.allLayers[i].visible
+          updateUI()
+          updateMenu()
+        } else if (
+          mouse.x > layerWidth - iconSize*2 - 10 &&
+          mouse.x < layerWidth - iconSize - 5 &&
+          mouse.y > 0.5 * (layerHeight - iconSize) &&
+          mouse.y < 0.5 * (layerHeight + iconSize)
+        ) {
+          context.activeObject.allLayers[i].audible = !context.activeObject.allLayers[i].audible
           updateUI()
           updateMenu()
         } else {
@@ -4722,8 +4738,8 @@ function updateLayers() {
         ctx.translate(0, -offsetY)
         // Draw layer headers
         let i=0;
-        for (let k = context.activeObject.layers.length - 1; k >= 0; k--) {
-          let layer = context.activeObject.layers[k];
+        for (let k = context.activeObject.allLayers.length - 1; k >= 0; k--) {
+          let layer = context.activeObject.allLayers[k];
           if (context.activeObject.activeLayer == layer) {
             ctx.fillStyle = darkMode ? "#444" : "#ccc"
           } else {
@@ -4733,8 +4749,10 @@ function updateLayers() {
           ctx.fillStyle = darkMode ? "white": "black"
           drawHorizontallyCenteredText(ctx, layer.name, 5, (i+0.5)*layerHeight, layerHeight*0.4)
           ctx.save()
-            const visibilityIcon = layer.visible ? canvas.icons.eye_fill : canvas.icons.eye_slash
-            visibilityIcon.render(ctx, layerWidth - iconSize - 5, (i+0.5)*layerHeight - iconSize*0.5, iconSize, iconSize, labelColor)
+          const visibilityIcon = layer.visible ? canvas.icons.eye_fill : canvas.icons.eye_slash
+          visibilityIcon.render(ctx, layerWidth - iconSize - 5, (i+0.5)*layerHeight - iconSize*0.5, iconSize, iconSize, labelColor)
+          const audibilityIcon = layer.audible ? canvas.icons.volume_up_fill : canvas.icons.volume_mute
+          audibilityIcon.render(ctx, layerWidth - iconSize*2 - 10, (i+0.5)*layerHeight - iconSize*0.5, iconSize, iconSize, labelColor)
           ctx.restore()
           ctx.save()
             ctx.beginPath()
@@ -4747,31 +4765,40 @@ function updateLayers() {
               drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, shadow, highlight, shadow, shadow)
             }
             // Draw existing frames
-            layer.frames.forEach((frame, j) => {
-              if (!frame) return;
-              switch (frame.frameType) {
-                case "keyframe":
-                  ctx.fillStyle = foregroundColor
-                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, shadow, shadow)
-                  ctx.fillStyle = "#111"
-                  ctx.beginPath()
-                  ctx.arc((j+0.5)*frameWidth, layerHeight*0.75, frameWidth*0.25, 0, 2*Math.PI)
-                  ctx.fill()
-                  break;
-                case "normal":
-                  ctx.fillStyle = foregroundColor
-                  drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, backgroundColor, backgroundColor)
-                  break;
-                case "motion":
-                  ctx.fillStyle = "#7a00b3"
-                  ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
-                  break;
-                case "shape":
-                  ctx.fillStyle = "#9bff9b"
-                  ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
-                  break;
+            if (layer instanceof Layer) {
+              layer.frames.forEach((frame, j) => {
+                if (!frame) return;
+                switch (frame.frameType) {
+                  case "keyframe":
+                    ctx.fillStyle = foregroundColor
+                    drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, shadow, shadow)
+                    ctx.fillStyle = "#111"
+                    ctx.beginPath()
+                    ctx.arc((j+0.5)*frameWidth, layerHeight*0.75, frameWidth*0.25, 0, 2*Math.PI)
+                    ctx.fill()
+                    break;
+                  case "normal":
+                    ctx.fillStyle = foregroundColor
+                    drawBorderedRect(ctx, j*frameWidth, 0, frameWidth, layerHeight, highlight, shadow, backgroundColor, backgroundColor)
+                    break;
+                  case "motion":
+                    ctx.fillStyle = "#7a00b3"
+                    ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
+                    break;
+                  case "shape":
+                    ctx.fillStyle = "#9bff9b"
+                    ctx.fillRect(j*frameWidth, 0, frameWidth, layerHeight)
+                    break;
+                }
+              })
+            } else if (layer instanceof AudioLayer) {
+              // TODO: split waveform into chunks
+              for (let i in layer.sounds) {
+                let sound = layer.sounds[i]
+                // layerTrack.appendChild(sound.img)
+                ctx.drawImage(sound.img, 0,0)
               }
-            })
+            }
             // if (context.activeObject.currentFrameNum) 
           ctx.restore()
           i++;
