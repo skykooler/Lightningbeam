@@ -73,6 +73,7 @@ let fileExportPath = undefined
 let state = "normal"
 
 let playing = false
+let lastFrameTime;
 
 let clipboard = []
 
@@ -2747,6 +2748,7 @@ function playPause() {
         }
       }
     }
+    lastFrameTime = performance.now()
     advanceFrame()
   } else {
     for (let audioLayer of context.activeObject.audioLayers) {
@@ -2762,11 +2764,21 @@ function playPause() {
 function advanceFrame() {
   context.activeObject.advanceFrame()
   updateLayers()
-  updateMenu()
   updateUI()
   if (playing) {
     if (context.activeObject.currentFrameNum < context.activeObject.maxFrame - 1) {
-      setTimeout(advanceFrame, 1000/config.framerate)
+      const now = performance.now()
+      const elapsedTime = now - lastFrameTime;
+      
+      // Calculate the time remaining for the next frame
+      const targetTimePerFrame = 1000 / config.framerate;
+      const timeToWait = Math.max(0, targetTimePerFrame - elapsedTime);  // Ensure no negative timeout
+      // const timeToWait = 1000 / config.framerate
+      console.log(timeToWait)
+
+      // Update lastFrameTime to the current time
+      lastFrameTime = now + timeToWait;
+      setTimeout(advanceFrame, timeToWait)
     } else {
       playing = false
       for (let audioLayer of context.activeObject.audioLayers) {
@@ -2776,6 +2788,8 @@ function advanceFrame() {
         }
       }
     }
+  } else {
+    updateMenu()
   }
 }
 
