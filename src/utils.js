@@ -657,6 +657,14 @@ function getPointNearBox(boundingBox, point, threshold = 5, checkCenters = true)
   return null; // Point is not within the threshold distance of any relevant point
 }
 
+function arraysAreEqual(arr1, arr2) {
+  if (arr1.length != arr2.length) return false;
+  if (arr1.every((value, index) => value === arr2[index])) {
+    return true;
+  } else {
+    return false;
+  }
+}
 
 export {
   titleCase,
@@ -680,5 +688,6 @@ export {
   drawCenteredText,
   drawHorizontallyCenteredText,
   deepMerge,
-  getPointNearBox
+  getPointNearBox,
+  arraysAreEqual
 };

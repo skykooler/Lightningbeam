@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
@@ -231,6 +231,8 @@ let context = {
   selectionRect: undefined,
   selection: [],
   shapeselection: [],
+  oldselection: [],
+  oldshapeselection: [],
   selectedFrames: [],
   dragDirection: undefined,
   zoomLevel: 1,
@@ -720,6 +722,7 @@ let actions = {
   editFrame: {
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
+      if (!(frame.idx in startProps)) return;
       let action = {    
         newState: structuredClone(frame.keys),
         oldState: startProps[frame.idx],
@@ -1252,6 +1255,64 @@ let actions = {
         context.selection.push(pointerList[item])
       }
       for (let shape of action.shapeselection) {
+        context.shapeselection.push(pointerList[shape])
+      }
+      updateUI()
+      updateMenu()
+    }
+  },
+  select: {
+    create: () => {
+      redoStack.length = 0
+      console.log(context.oldshapeselection)
+      console.log(context.shapeselection)
+      if (arraysAreEqual(context.oldselection, context.selection) &&
+        arraysAreEqual(context.oldshapeselection, context.shapeselection)) return;
+      let oldselection = []
+      let oldshapeselection = []
+      for (let item of context.oldselection) {
+        oldselection.push(item.idx)
+      }
+      for (let shape of context.oldshapeselection) {
+        oldshapeselection.push(shape.idx)
+      }
+      let selection = []
+      let shapeselection = []
+      for (let item of context.selection) {
+        selection.push(item.idx)
+      }
+      for (let shape of context.shapeselection) {
+        shapeselection.push(shape.idx)
+      }
+      let action = {
+        selection: selection,
+        shapeselection: shapeselection,
+        oldselection: oldselection,
+        oldshapeselection: oldshapeselection
+      }
+      undoStack.push({name: 'select', action: action})
+      actions.select.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      for (let item of action.selection) {
+        context.selection.push(pointerList[item])
+      }
+      for (let shape of action.shapeselection) {
+        context.shapeselection.push(pointerList[shape])
+      }
+      updateUI()
+      updateMenu()
+    },
+    rollback: (action) => {
+      context.selection = []
+      context.shapeselection = []
+      for (let item of action.oldselection) {
+        context.selection.push(pointerList[item])
+      }
+      for (let shape of action.oldshapeselection) {
         context.shapeselection.push(pointerList[shape])
       }
       updateUI()
@@ -3308,8 +3369,15 @@ function stage() {
                 }
               }
               if (!selected) {
+                context.oldselection = context.selection
+                context.oldshapeselection = context.selection
                 context.selection = []
                 context.shapeselection = []
+                if (context.oldselection.length || context.oldshapeselection.length) {
+                  actions.select.create()
+                }
+                context.oldselection = context.selection
+                context.oldshapeselection = context.selection
                 context.selectionRect = {x1: mouse.x, x2: mouse.x, y1: mouse.y, y2:mouse.y}
               }
             }
@@ -3472,8 +3540,11 @@ function stage() {
           }
           actions.editShape.create(context.activeCurve.shape, newCurves)
         } else if (context.selection.length) {
+          actions.select.create()
           actions.editFrame.create(context.activeObject.currentFrame)
-        } 
+        } else if (context.shapeselection.length) {
+          actions.select.create()
+        }
         break;
       case "transform":
         actions.editFrame.create(context.activeObject.currentFrame)
