@@ -2740,10 +2740,11 @@ function playPause() {
   playing = !playing
   if (playing) {
     for (let audioLayer of context.activeObject.audioLayers) {
-      console.log(1)
-      for (let i in audioLayer.sounds) {
-        let sound = audioLayer.sounds[i]
-        sound.player.start(0,context.activeObject.currentFrameNum / config.framerate)
+      if (audioLayer.audible) {
+        for (let i in audioLayer.sounds) {
+          let sound = audioLayer.sounds[i]
+          sound.player.start(0,context.activeObject.currentFrameNum / config.framerate)
+        }
       }
     }
     advanceFrame()
