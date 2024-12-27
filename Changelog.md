@@ -1,3 +1,14 @@
+# 0.6.10-alpha:
+Changes:
+- Selecting and deselecting are now undo-able
+
+New features:
+- Layers now have a mute button
+- A web version of lightningbeam is available
+
+Bugfixes:
+- Fix audio layers not showing up
+
 # 0.6.9-alpha:
 Changes:
 
