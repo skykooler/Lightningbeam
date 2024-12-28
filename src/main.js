@@ -1419,20 +1419,63 @@ function selectVertex(context, mouse) {
   }
 }
 
-function moldCurve(curve, mouse, oldmouse) {
-  let diff = {x: mouse.x - oldmouse.x, y: mouse.y - oldmouse.y}
-  let p = curve.project(mouse)
-  let min_influence = 0.1
-  const CP1 = {
-    x: curve.points[1].x + diff.x*(1-p.t)*2,
-    y: curve.points[1].y + diff.y*(1-p.t)*2
-  }
-  const CP2 = {
-    x: curve.points[2].x + diff.x*(p.t)*2,
-    y: curve.points[2].y + diff.y*(p.t)*2
-  }
-  return new Bezier(curve.points[0], CP1, CP2, curve.points[3])
-  // return curve
+// function moldCurve(curve, mouse, oldmouse) {
+//   let diff = {x: mouse.x - oldmouse.x, y: mouse.y - oldmouse.y}
+//   let p = curve.project(mouse)
+//   let min_influence = 0.1
+//   const CP1 = {
+//     x: curve.points[1].x + diff.x*(1-p.t)*2,
+//     y: curve.points[1].y + diff.y*(1-p.t)*2
+//   }
+//   const CP2 = {
+//     x: curve.points[2].x + diff.x*(p.t)*2,
+//     y: curve.points[2].y + diff.y*(p.t)*2
+//   }
+//   return new Bezier(curve.points[0], CP1, CP2, curve.points[3])
+//   // return curve
+// }
+
+function moldCurve(curve, mouse, oldMouse, epsilon = 0.01) {
+  // Step 1: Find the closest point on the curve to the old mouse position
+  const projection = curve.project(oldMouse);
+  let t = projection.t;
+  const P1 = curve.points[1];
+  const P2 = curve.points[2];
+  // Make copies of the control points to avoid editing the original curve
+  const newP1 = { ...P1 };
+  const newP2 = { ...P2 };
+
+  // Step 2: Create new Bezier curves with the control points slightly offset
+  const offsetP1 = { x: P1.x + epsilon, y: P1.y + epsilon };
+  const offsetP2 = { x: P2.x + epsilon, y: P2.y + epsilon };
+  const offsetCurveP1 = new Bezier(curve.points[0], offsetP1, curve.points[2], curve.points[3]);
+  const offsetCurveP2 = new Bezier(curve.points[0], curve.points[1], offsetP2, curve.points[3]);
+
+  // Step 3: See where the same point lands on the offset curves
+  const offset1 = offsetCurveP1.compute(t);
+  const offset2 = offsetCurveP2.compute(t);
+
+  // Step 4: Calculate derivatives with respect to control points
+  const derivativeP1 = { 
+    x: (offset1.x - projection.x) / epsilon, 
+    y: (offset1.y - projection.y) / epsilon 
+  };
+  const derivativeP2 = { 
+    x: (offset2.x - projection.x) / epsilon, 
+    y: (offset2.y - projection.y) / epsilon 
+  };
+
+  // Step 5: Use the derivatives to move the projected point to the mouse
+  const deltaX = mouse.x - projection.x;
+  const deltaY = mouse.y - projection.y;
+
+  newP1.x = newP1.x + (deltaX/derivativeP1.x)*(1-t*t)
+  newP1.y = newP1.y + (deltaY/derivativeP1.y)*(1-t*t)
+  newP2.x = newP2.x + (deltaX/derivativeP2.x)*t*t
+  newP2.y = newP2.y + (deltaY/derivativeP2.y)*t*t
+
+  // Return the updated Bezier curve
+  return new Bezier(curve.points[0], newP1, newP2, curve.points[3]);
 }
 
 
