@@ -3460,6 +3460,7 @@ function stage() {
     stage.width = parseInt(canvasStyles.width);
     stage.height = parseInt(canvasStyles.height);
     updateUI()
+    renderAll()
   }
   const resizeObserver = new ResizeObserver(() => {
     const currentTime = Date.now();
@@ -4406,6 +4407,7 @@ function timeline() {
     timeline_cvs.width = parseInt(canvasStyles.width);
     timeline_cvs.height = parseInt(canvasStyles.height);
     updateLayers()
+    renderAll()
   }
 
   // Set up ResizeObserver to watch for changes in the canvas size
