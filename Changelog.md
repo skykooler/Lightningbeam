@@ -1,4 +1,4 @@
-# 0.6.10-alpha:
+# 0.6.11-alpha:
 Changes:
 - Curve editing is now more predictable
 
