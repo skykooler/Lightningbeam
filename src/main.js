@@ -75,6 +75,12 @@ let state = "normal"
 let playing = false
 let lastFrameTime;
 
+let uiDirty = false
+let layersDirty = false
+let menuDirty = false
+let outlinerDirty = false
+let infopanelDirty = false
+
 let clipboard = []
 
 const CONFIG_FILE_PATH = 'config.json';
@@ -5001,6 +5007,10 @@ function updateLayout(element) {
 }
 
 function updateUI() {
+  uiDirty = true
+}
+
+function renderUI() {
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d")
     ctx.resetTransform();
@@ -5099,8 +5109,10 @@ function updateUI() {
 }
 
 function updateLayers() {
-  
+  layersDirty = true
+}
 
+function renderLayers() {
   for (let canvas of document.querySelectorAll(".timeline")) {
     const width = canvas.width
     const height = canvas.height
@@ -5348,6 +5360,10 @@ function updateLayers() {
 }
 
 function updateInfopanel() {
+  infopanelDirty = true;
+}
+
+function renderInfopanel() {
   for (let panel of document.querySelectorAll('.infopanel')) {
     panel.innerText = ""
     let input;
@@ -5519,6 +5535,10 @@ function updateInfopanel() {
 }
 
 function updateOutliner() {
+  outlinerDirty = true
+}
+
+function renderOutliner() {
   const padding = 20; // pixels
   for (let outliner of document.querySelectorAll('.outliner')) {
     const x = 0;
@@ -5580,7 +5600,11 @@ function updateOutliner() {
   }
 }
 
-async function updateMenu() {
+function updateMenu() {
+  menuDirty = true
+}
+
+async function renderMenu() {
   let activeFrame;
   let activeKeyframe;
   let newFrameMenuItem;
@@ -5971,3 +5995,28 @@ function startToneOnUserInteraction() {
 }
 startToneOnUserInteraction()
 
+function renderAll() {
+  if (uiDirty) {
+    renderUI()
+    uiDirty = false
+  }
+  if (layersDirty) {
+    renderLayers()
+    layersDirty = false
+  }
+  if (outlinerDirty) {
+    renderOutliner()
+    outlinerDirty = false
+  }
+  if (menuDirty) {
+    renderMenu()
+    menuDirty = false
+  }
+  if (infopanelDirty) {
+    renderInfopanel()
+    infopanelDirty = false
+  }
+  requestAnimationFrame(renderAll)
+}
+
+renderAll()
