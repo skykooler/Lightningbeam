@@ -3262,21 +3262,16 @@ async function importFile() {
       }
       function assignUUIDs(obj, existing) {
         const uuidCache = {};  // Cache to store UUIDs for existing values
-        
-        // Helper function to generate a UUID (or use a library like uuid for this)
-        function generateUUID() {
-          return 'uuid' + Math.floor(Math.random() * 10000);
-        }
       
         function deepAssign(obj) {
           for (const [key, value] of Object.entries(obj)) {
             if (typeof value === 'object' && value !== null) {
               // Recurse for nested objects
               deepAssign(value);
-            } else if (value in existing) {
+            } else if (value in existing && key != "name") {
               // If the value is in the "existing" list, assign a UUID
               if (!uuidCache[value]) {
-                uuidCache[value] = generateUUID();  // Store the generated UUID for the value
+                uuidCache[value] = uuidv4();  // Store the generated UUID for the value
               }
               obj[key] = uuidCache[value];  // Assign the UUID to the object property
             }
