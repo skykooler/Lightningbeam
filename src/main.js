@@ -4626,6 +4626,7 @@ function outliner(object=undefined) {
     outliner.width = parseInt(canvasStyles.width);
     outliner.height = parseInt(canvasStyles.height);
     updateOutliner()
+    renderAll()
   }
 
   // Set up ResizeObserver to watch for changes in the canvas size
