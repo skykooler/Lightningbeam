@@ -2884,51 +2884,8 @@ window.addEventListener("keydown", (e) => {
       console.log("Spacebar pressed")
       playPause()
       break;
-    case config.shortcuts.new:
-      newFile()
-      break;
-    case config.shortcuts.save:
-      save()
-      break;
-    case config.shortcuts.saveAs:
-      saveAs()
-      break;
-    case config.shortcuts.open:
-      open()
-      break;
-    case config.shortcuts.import:
-      importFile()
-      break;
-    case config.shortcuts.quit:
-      quit()
-      break;
-    case config.shortcuts.undo:
-      undo()
-      break;
-    case config.shortcuts.redo:
-      redo()
-      break;
-    case config.shortcuts.copy:
-      copy()
-      break;
-    case config.shortcuts.paste:
-      paste()
-      break;
-    case config.shortcuts.delete:
-      delete_action()
-      break;
     case config.shortcuts.selectAll:
-      actions.selectAll.create()
       e.preventDefault()
-      break;
-    case config.shortcuts.group:
-      actions.group.create()
-      break;
-    case config.shortcuts.zoomIn:
-      zoomIn()
-      break;
-    case config.shortcuts.zoomOut:
-      zoomOut()
       break;
     // TODO: put these in shortcuts
     case "<mod>ArrowRight":
