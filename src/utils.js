@@ -600,6 +600,23 @@ function drawHorizontallyCenteredText(ctx, text, x, y, height) {
   ctx.fillText(text, x, centerY);
 }
 
+function drawRegularPolygon(ctx, x, y, radius, sides, color, rotate = 0) {
+  ctx.beginPath();
+  
+  // First point, adding rotation to the angle
+  ctx.moveTo(x + radius * Math.cos(0 + rotate), y + radius * Math.sin(0 + rotate));
+
+  // Draw the rest of the sides, adding the rotation to each angle
+  for (let i = 1; i <= sides; i++) {
+    let angle = (i * 2 * Math.PI) / sides + rotate;  // Add rotation to the angle
+    ctx.lineTo(x + radius * Math.cos(angle), y + radius * Math.sin(angle));
+  }
+
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
 function deepMerge(target, source) {
   // If either target or source is not an object, return source (base case)
   if (typeof target !== 'object' || target === null) {
@@ -666,6 +683,102 @@ function arraysAreEqual(arr1, arr2) {
   }
 }
 
+function getFileExtension(filename) {
+  const dotIndex = filename.lastIndexOf('.'); // Find the last period in the filename
+  if (dotIndex === -1) return ''; // No extension found (no dot in filename)
+  return filename.substring(dotIndex + 1); // Extract the extension
+}
+
+function createModal(contentFunction, arg) {
+  // Create the modal overlay
+  const modalOverlay = document.createElement('div');
+  modalOverlay.style.position = 'fixed';
+  modalOverlay.style.top = 0;
+  modalOverlay.style.left = 0;
+  modalOverlay.style.width = '100%';
+  modalOverlay.style.height = '100%';
+  modalOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+  modalOverlay.style.zIndex = 1000;
+  modalOverlay.style.display = 'flex';
+  modalOverlay.style.alignItems = 'center';
+  modalOverlay.style.justifyContent = 'center';
+  
+  // Create the modal container
+  const modalContainer = document.createElement('div');
+  modalContainer.style.backgroundColor = 'white';
+  modalContainer.style.padding = '20px';
+  modalContainer.style.borderRadius = '8px';
+  modalContainer.style.maxWidth = '80%';
+  modalContainer.style.maxHeight = '80%';
+  modalContainer.style.overflowY = 'auto';
+
+  const modalContent = contentFunction(arg);
+  modalContainer.appendChild(modalContent);
+
+  // Create Ok and Cancel buttons
+  const buttonContainer = document.createElement('div');
+  buttonContainer.style.display = 'flex';
+  buttonContainer.style.justifyContent = 'space-between';
+  buttonContainer.style.marginTop = '20px';
+
+  const okButton = document.createElement('button');
+  okButton.innerText = 'Ok';
+  okButton.style.padding = '10px 20px';
+  okButton.style.fontSize = '16px';
+  okButton.style.cursor = 'pointer';
+  okButton.style.backgroundColor = '#4CAF50';
+  okButton.style.color = 'white';
+  okButton.style.border = 'none';
+  okButton.style.borderRadius = '4px';
+  
+  const cancelButton = document.createElement('button');
+  cancelButton.innerText = 'Cancel';
+  cancelButton.style.padding = '10px 20px';
+  cancelButton.style.fontSize = '16px';
+  cancelButton.style.cursor = 'pointer';
+  cancelButton.style.backgroundColor = '#f44336';
+  cancelButton.style.color = 'white';
+  cancelButton.style.border = 'none';
+  cancelButton.style.borderRadius = '4px';
+  
+  // Add button events
+  okButton.addEventListener('click', () => {
+    modalOverlay.remove();  // Close modal on Ok
+    console.log(modalContent.active)
+    // You can add additional action here if needed
+  });
+  
+  cancelButton.addEventListener('click', () => {
+    modalOverlay.remove();  // Close modal on Cancel
+  });
+  
+  // Append buttons to the container
+  buttonContainer.appendChild(okButton);
+  buttonContainer.appendChild(cancelButton);
+  
+  // Add button container to the modal
+  modalContainer.appendChild(buttonContainer);
+
+  // Add the modal container to the overlay
+  modalOverlay.appendChild(modalContainer);
+
+  // Append the modal overlay to the body
+  document.body.appendChild(modalOverlay);
+}
+
+function deeploop(obj, callback) {
+  // Loop through all the entries in the object
+  for (const [key, value] of Object.entries(obj)) {
+    // Call the callback with the key and value
+    callback(key, value);
+    
+    // If the value is an object, recursively call deeploop on it
+    if (typeof value === 'object' && value !== null) {
+      deeploop(value, callback);
+    }
+  }
+}
+
 export {
   titleCase,
   getMousePositionFraction,
@@ -687,7 +800,11 @@ export {
   drawBorderedRect,
   drawCenteredText,
   drawHorizontallyCenteredText,
+  drawRegularPolygon,
   deepMerge,
   getPointNearBox,
-  arraysAreEqual
+  arraysAreEqual,
+  getFileExtension,
+  createModal,
+  deeploop
 };

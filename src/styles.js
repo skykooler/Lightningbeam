@@ -12,6 +12,9 @@ const gutterHeight = 15
 const scrubberColor = "#cc2222"
 const labelColor = darkMode ? "white" : "black"
 
+
+const triangleSize = 5;
+
 export {
     darkMode,
     backgroundColor,
@@ -25,5 +28,6 @@ export {
     frameWidth,
     gutterHeight,
     scrubberColor,
-    labelColor
+    labelColor,
+    triangleSize
 }

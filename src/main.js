@@ -3,8 +3,8 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual } from './utils.js';
-import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual, drawRegularPolygon, getFileExtension, createModal, deeploop } from './utils.js';
+import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, triangleSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
 const {
@@ -266,7 +266,8 @@ let config = {
   fileHeight: 600,
   framerate: 24,
   recentFiles: [],
-  scrollSpeed: 1
+  scrollSpeed: 1,
+  debug: false
 }
 
 function getShortcut(shortcut) {
@@ -1419,22 +1420,6 @@ function selectVertex(context, mouse) {
   }
 }
 
-// function moldCurve(curve, mouse, oldmouse) {
-//   let diff = {x: mouse.x - oldmouse.x, y: mouse.y - oldmouse.y}
-//   let p = curve.project(mouse)
-//   let min_influence = 0.1
-//   const CP1 = {
-//     x: curve.points[1].x + diff.x*(1-p.t)*2,
-//     y: curve.points[1].y + diff.y*(1-p.t)*2
-//   }
-//   const CP2 = {
-//     x: curve.points[2].x + diff.x*(p.t)*2,
-//     y: curve.points[2].y + diff.y*(p.t)*2
-//   }
-//   return new Bezier(curve.points[0], CP1, CP2, curve.points[3])
-//   // return curve
-// }
-
 function moldCurve(curve, mouse, oldMouse, epsilon = 0.01) {
   // Step 1: Find the closest point on the curve to the old mouse position
   const projection = curve.project(oldMouse);
@@ -1462,7 +1447,7 @@ function moldCurve(curve, mouse, oldMouse, epsilon = 0.01) {
   };
   const derivativeP2 = { 
     x: (offset2.x - projection.x) / epsilon, 
-    y: (offset2.y - projection.y) / epsilon 
+    y: (offset2.y - projection.y) / epsilon
   };
 
   // Step 5: Use the derivatives to move the projected point to the mouse
@@ -1595,6 +1580,27 @@ class Frame {
     }
     return newFrame
   }
+  static fromJSON(json) {
+    const frame = new Frame(json.frameType, json.idx)
+    frame.keys = json.keys
+    for (let i in json.shapes) {
+      const shape = json.shapes[i]
+      frame.shapes.push(Shape.fromJSON(shape))
+    }
+
+    return frame
+  }
+  toJSON() {
+    const json = {}
+    json.frameType = this.frameType
+    json.idx = this.idx
+    json.keys = this.keys
+    json.shapes = []
+    for (let shape of this.shapes) {
+      json.shapes.push(shape.toJSON())
+    }
+    return json
+  }
   addShape(shape, sendToBack) {
     if (sendToBack) {
       this.shapes.unshift(shape)
@@ -1647,6 +1653,39 @@ class Layer {
     this.visible = true
     this.audible = true
     pointerList[this.idx] = this
+  }
+  static fromJSON(json) {
+    const layer = new Layer(json.idx)
+    for (let i in json.children) {
+      const child = json.children[i]
+      layer.children.push(GraphicsObject.fromJSON(child))
+    }
+    layer.name = json.name
+    layer.frames = []
+    for (let i in json.frames) {
+      const frame = json.frames[i]
+      layer.frames.push(Frame.fromJSON(frame))
+    }
+    layer.visible = json.visible
+    layer.audible = json.audible
+
+    return layer
+  }
+  toJSON() {
+    const json = {}
+    json.idx = this.idx
+    json.children = []
+    for (let child of this.children) {
+      json.children.push(child.toJSON())
+    }
+    json.name = this.name
+    json.frames = []
+    for (let frame of this.frames) {
+      json.frames.push(frame.toJSON())
+    }
+    json.visible = this.visible
+    json.audible = this.audible
+    return json
   }
   getFrame(num) {
     if (this.frames[num]) {
@@ -1858,10 +1897,10 @@ class Layer {
 class AudioLayer {
   constructor(uuid, name) {
     this.sounds = {}
-      this.track = new Tone.Part(((time, sound) => {
-        console.log(this.sounds[sound])
-        this.sounds[sound].player.start(time)
-      }))
+    this.track = new Tone.Part(((time, sound) => {
+      console.log(this.sounds[sound])
+      this.sounds[sound].player.start(time)
+    }))
     if (!uuid) {
       this.idx = uuidv4()
     } else {
@@ -1873,6 +1912,22 @@ class AudioLayer {
       this.name = name
     }
     this.audible = true
+  }
+  static fromJSON(json) {
+    const audioLayer = new AudioLayer(json.idx, json.name)
+    // TODO: load audiolayer from json
+    audioLayer.sounds = {}
+    audioLayer.audible = json.audible
+    return audioLayer
+  }
+  toJSON() {
+    const json = {}
+    // TODO: build json from audiolayer
+    json.sounds = {}
+    json.audible = this.audible
+    json.idx = this.idx
+    json.name = this.name
+    return json
   }
   copy(idx) {
     let newAudioLayer = new AudioLayer(idx.slice(0,8)+this.idx.slice(8), this.name)
@@ -2016,6 +2071,63 @@ class Shape extends BaseShape {
     pointerList[this.idx] = this
     this.regionIdx = 0;
     this.inProgress = true
+  }
+  static fromJSON(json) {
+    const shape = new Shape(json.startx, json.starty, {
+      fillStyle: json.fillStyle,
+      fillImage: json.fillImage,
+      strokeStyle: json.strokeStyle,
+      lineWidth: json.lineWidth,
+      fillShape: json.filled,
+      strokeShape: json.stroked
+    }, json.idx, json.shapeId)
+    for (let curve of json.curves) {
+      shape.addCurve(Bezier.fromJSON(curve))
+    }
+    for (let region of json.regions) {
+      const curves = []
+      for (let curve of region.curves) {
+        curves.push(Bezier.fromJSON(curve))
+      }
+      shape.regions.push({
+        idx: region.idx,
+        curves: curves,
+        fillStyle: region.fillStyle,
+        filled: region.filled
+      })
+    }
+    return shape
+  }
+  toJSON() {
+    const json = {}
+    json.startx = this.startx
+    json.starty = this.starty
+    json.fillStyle = this.fillStyle
+    json.fillImage = this.fillImage
+    json.strokeStyle = this.fillStyle
+    json.lineWidth = this.lineWidth
+    json.filled = this.filled
+    json.stroked = this.stroked
+    json.idx = this.idx
+    json.shapeId = this.shapeId
+    json.curves = []
+    for (let curve of this.curves) {
+      json.curves.push(curve.toJSON())
+    }
+    json.regions = []
+    for (let region of this.regions) {
+      const curves = []
+      for (let curve of region.curves) {
+        curves.push(curve.toJSON())
+      }
+      json.regions.push({
+        idx: region.idx,
+        curves: curves,
+        fillStyle: region.fillStyle,
+        filled: region.filled
+      })
+    }
+    return json
   }
   addCurve(curve) {
     if (curve.color == undefined) {
@@ -2319,6 +2431,46 @@ class GraphicsObject {
     // this.children = []
 
     this.shapes = []
+  }
+  static fromJSON(json) {
+    const graphicsObject = new GraphicsObject(json.idx)
+    graphicsObject.x = json.x
+    graphicsObject.y = json.y
+    graphicsObject.rotation = json.rotation
+    graphicsObject.scale_x = json.scale_x
+    graphicsObject.scale_y = json.scale_y
+    graphicsObject.name = json.name
+    graphicsObject.currentFrameNum = json.currentFrameNum
+    graphicsObject.currentLayer = json.currentLayer
+    graphicsObject.layers = []
+    for (let layer of json.layers) {
+      graphicsObject.layers.push(Layer.fromJSON(layer))
+    }
+    for (let audioLayer of json.audioLayers) {
+      graphicsObject.audioLayers.push(AudioLayer.fromJSON(audioLayer))
+    }
+    return graphicsObject
+  }
+  toJSON() {
+    const json = {}
+    json.x = this.x
+    json.y = this.y
+    json.rotation = this.rotation
+    json.scale_x = this.scale_x
+    json.scale_y = this.scale_y
+    json.idx = this.idx
+    json.name = this.name
+    json.currentFrameNum = this.currentFrameNum
+    json.currentLayer = this.currentLayer
+    json.layers = []
+    for (let layer of this.layers) {
+      json.layers.push(layer.toJSON())
+    }
+    json.audioLayers = []
+    for (let audioLayer of this.audioLayers) {
+      json.audioLayers.push(audioLayer.toJSON())
+    }
+    return json
   }
   get activeLayer() {
     return this.layers[this.currentLayer]
@@ -2815,11 +2967,7 @@ function advanceFrame() {
       
       // Calculate the time remaining for the next frame
       const targetTimePerFrame = 1000 / config.framerate;
-      const timeToWait = Math.max(0, targetTimePerFrame - elapsedTime);  // Ensure no negative timeout
-      // const timeToWait = 1000 / config.framerate
-      console.log(timeToWait)
-
-      // Update lastFrameTime to the current time
+      const timeToWait = Math.max(0, targetTimePerFrame - elapsedTime);
       lastFrameTime = now + timeToWait;
       setTimeout(advanceFrame, timeToWait)
     } else {
@@ -2843,7 +2991,7 @@ function decrementFrame() {
   updateUI()
 }
 
-function _newFile(width, height, fps) {
+function _newFile(width, height, fps, context=context) {
   root = new GraphicsObject("root");
   context.objectStack = [root]
   config.fileWidth = width
@@ -2866,15 +3014,28 @@ async function newFile() {
 
 async function _save(path) {
   try {
+    function replacer(key, value) {
+      if (key === 'parent') {
+        return undefined; // Avoid circular references
+      }
+      return value;
+    }
     const fileData = {
-      version: "1.4",
+      version: "1.5",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
-      actions: undoStack
+      actions: undoStack,
+      json: root.toJSON()
     }
-    const contents = JSON.stringify(fileData);
-    await writeTextFile(path, contents)
+    if (config.debug) {
+      // Pretty print file structure when debugging
+      const contents = JSON.stringify(fileData, null, 2);
+      await writeTextFile(path, contents)
+    } else {
+      const contents = JSON.stringify(fileData);
+      await writeTextFile(path, contents)
+    }
     filePath = path
     addRecentFile(path)
     lastSaveIndex = undoStack.length;
@@ -2907,7 +3068,7 @@ async function saveAs() {
   if (path != undefined) _save(path);
 }
 
-async function _open(path) {
+async function _open(path, returnJson=false) {
   closeDialog()
   try {
     const contents = await readTextFile(path)
@@ -2918,26 +3079,33 @@ async function _open(path) {
     }
     if (file.version >= minFileVersion) {
       if (file.version < maxFileVersion) {
-        _newFile(file.width, file.height, file.fps)
-        if (file.actions == undefined) {
-          await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
-          return
-        }
-        for (let action of file.actions) {
-          if (!(action.name in actions)) {
-            await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
+        if (returnJson) {
+          if (file.json==undefined) {
+            await messageDialog("Could not import from this file. Re-save it with a current version of Lightningbeam.")
+          }
+          return file.json
+        } else {
+          _newFile(file.width, file.height, file.fps)
+          if (file.actions == undefined) {
+            await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
             return
           }
-          console.log(action.name)
-          await actions[action.name].execute(action.action)
-          undoStack.push(action)
+          for (let action of file.actions) {
+            if (!(action.name in actions)) {
+              await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
+              return
+            }
+            console.log(action.name)
+            await actions[action.name].execute(action.action)
+            undoStack.push(action)
+          }
+          lastSaveIndex = undoStack.length;
+          filePath = path
+          // Tauri thinks it is setting the title here, but it isn't getting updated
+          await getCurrentWindow().setTitle(await basename(filePath))
+          addRecentFile(path)
+          updateUI()
         }
-        lastSaveIndex = undoStack.length;
-        filePath = path
-        // Tauri thinks it is setting the title here, but it isn't getting updated
-        await getCurrentWindow().setTitle(await basename(filePath))
-        addRecentFile(path)
-        updateUI()
       } else {
         await messageDialog(`File ${path} was created in a newer version of Lightningbeam and cannot be opened in this version.`, { title: 'File version mismatch', kind: 'error' });
       }
@@ -2948,8 +3116,10 @@ async function _open(path) {
     console.log(e )
     if (e instanceof SyntaxError) {
       await messageDialog(`Could not parse ${path}, ${e.message}`, { title: 'Error', kind: 'error' })
-    } else if (e.startsWith("failed to read file as text")) {
+    } else if (e instanceof String && e.startsWith("failed to read file as text")) {
       await messageDialog(`Could not parse ${path}, is it actually a Lightningbeam file?`, { title: 'Error', kind: 'error' })
+    } else {
+      console.error(e)
     }
   }
 }
@@ -2991,6 +3161,10 @@ async function importFile() {
         name: 'Audio files',
         extensions: ['mp3'],
       },
+      {
+        name: 'Lightningbeam files',
+        extensions: ['beam'],
+      },
     ],
     defaultPath: await documentDir(),
     title: "Import File"
@@ -3020,11 +3194,28 @@ async function importFile() {
   ];
   if (path) {
     const filename = await basename(path)
-    const {dataURL, mimeType} = await convertToDataURL(path, imageMimeTypes.concat(audioMimeTypes));
-    if (imageMimeTypes.indexOf(mimeType) != -1) {
-      actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject)
+    if (getFileExtension(filename)=="beam") {
+      function reassignIdxs(json) {
+        deeploop(json, (key, item) => {
+          if (item.idx in pointerList) {
+            item.idx = uuidv4()
+          }
+        })
+      }
+      
+      
+      const json = await _open(path, true)
+      if (json==undefined) return;
+      reassignIdxs(json)
+      createModal(outliner, json)
+      updateOutliner()
     } else {
-      actions.addAudio.create(dataURL, context.activeObject, filename)
+      const {dataURL, mimeType} = await convertToDataURL(path, imageMimeTypes.concat(audioMimeTypes));
+      if (imageMimeTypes.indexOf(mimeType) != -1) {
+        actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject)
+      } else {
+        actions.addAudio.create(dataURL, context.activeObject, filename)
+      }
     }
   }
   
@@ -4361,6 +4552,108 @@ function infopanel() {
   return panel
 }
 
+function outliner(object=undefined) {
+  let outliner = document.createElement("canvas")
+  outliner.className = "outliner"
+  if (object==undefined) {
+    outliner.object = root
+  } else {
+    outliner.object = object
+  }
+
+  let lastResizeTime = 0;
+  const throttleIntervalMs = 20;
+
+  function updateTimelineCanvasSize() {
+    const canvasStyles = window.getComputedStyle(outliner);
+
+    outliner.width = parseInt(canvasStyles.width);
+    outliner.height = parseInt(canvasStyles.height);
+    updateOutliner()
+  }
+
+  // Set up ResizeObserver to watch for changes in the canvas size
+  const resizeObserver = new ResizeObserver(() => {
+    const currentTime = Date.now();
+
+    // Only call updateTimelineCanvasSize if enough time has passed since the last call
+    // This prevents error messages about a ResizeObserver loop
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateTimelineCanvasSize();
+    }
+  });
+  resizeObserver.observe(outliner);
+
+  outliner.collapsed = {}
+  outliner.offsetX = 0
+  outliner.offsetY = 0
+
+  outliner.addEventListener('click', function (e) {
+    const mouse = getMousePos(outliner, e)
+    const mouseY = mouse.y; // Get the Y position of the click
+    const mouseX = mouse.x; // Get the X position (not used here, but can be used to check clicked area)
+    
+    // Iterate again to check which object was clicked
+    let currentY = 20; // Starting y position
+    const stack = [{ object: outliner.object, indent: 0 }];
+    
+    while (stack.length > 0) {
+      const { object, indent } = stack.pop();
+
+
+      // Check if the click was on this object
+      if (mouseY >= currentY - 20 && mouseY <= currentY) {
+          if (mouseX >= 0 && mouseX <= indent + 2*triangleSize) {
+            // Toggle the collapsed state of the object
+            outliner.collapsed[object.idx] = !outliner.collapsed[object.idx];
+          } else {
+            outliner.active = object
+          }
+          updateOutliner(); // Re-render the outliner
+          return;
+      }
+
+      // Update the Y position for the next object
+      currentY += 20;
+
+
+      // If the object is collapsed, skip it
+      if (outliner.collapsed[object.idx]) {
+        continue;
+      }
+
+      // If the object has layers, add them to the stack
+      if (object.layers) {
+        for (let i = object.layers.length - 1; i >= 0; i--) {
+          const layer = object.layers[i];
+          stack.push({ object: layer, indent: indent + 20 });
+        }
+      } else if (object.children) {
+        for (let i = object.children.length - 1; i >= 0; i--) {
+          const child = object.children[i];
+          stack.push({ object: child, indent: indent + 40 });
+        }
+      }
+    }
+  });
+
+  outliner.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const deltaY = event.deltaY * config.scrollSpeed;
+
+    outliner.offsetY = Math.max(0, outliner.offsetY + deltaY);
+    
+    const currentTime = Date.now();
+    if (currentTime - lastResizeTime > throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updateOutliner();
+    }
+  });
+
+  return outliner
+}
+
 async function startup() {
   await loadConfig()
   createNewFileDialog(_newFile, _open, config);
@@ -5177,12 +5470,77 @@ function updateInfopanel() {
   }
 }
 
+function updateOutliner() {
+  const padding = 20; // pixels
+  for (let outliner of document.querySelectorAll('.outliner')) {
+    const x = 0;
+    let y = padding
+    const ctx = outliner.getContext("2d")
+    ctx.fillStyle = "white"
+    ctx.fillRect(0,0,outliner.width, outliner.height)
+    const stack = [{ object: outliner.object, indent: 0 }];
+
+    ctx.save()
+    ctx.translate(0, -outliner.offsetY)
+
+    // Iterate as long as there are items in the stack
+    while (stack.length > 0) {
+      const { object, indent } = stack.pop();
+
+      // Determine if the object is collapsed and draw the corresponding triangle
+      const triangleX = x + indent + triangleSize; // X position for the triangle
+      const triangleY = y - padding / 2; // Y position for the triangle (centered vertically)
+      
+      if (outliner.active === object) {
+        ctx.fillStyle = "red"
+        ctx.fillRect(0, y - padding, outliner.width, padding)
+      }
+
+      if (outliner.collapsed[object.idx]) {
+        drawRegularPolygon(ctx, triangleX, triangleY, triangleSize, 3, "black")
+      } else {
+        drawRegularPolygon(ctx, triangleX, triangleY, triangleSize, 3, "black", Math.PI/2)
+      }
+
+      // Draw the current object (GraphicsObject or Layer)
+      const label = `(${object.constructor.name}) ${object.name}`
+      ctx.fillStyle = "black";
+      // ctx.fillText(label, x + indent + 2*triangleSize, y);
+      drawHorizontallyCenteredText(ctx, label, x+indent+2*triangleSize, y-padding/2, padding*.75)
+
+      // Update the Y position for the next line
+      y += padding; // Space between lines (adjust as necessary)
+
+      if (outliner.collapsed[object.idx]) {
+        continue;
+      }
+
+      // If the object has layers, add them to the stack
+      if (object.layers) {
+        for (let i = object.layers.length - 1; i >= 0; i--) {
+          const layer = object.layers[i];
+          stack.push({ object: layer, indent: indent + padding });
+        }
+      } else if (object.children) {
+        for (let i = object.children.length - 1; i >= 0; i--) {
+          const child = object.children[i];
+          stack.push({ object: child, indent: indent + 2*padding });
+        }
+      }
+    }
+    ctx.restore()
+  }
+}
+
 async function updateMenu() {
   let activeFrame;
   let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
   let deleteFrameMenuItem;
+
+  // Move this
+  updateOutliner()
 
   let recentFilesList = []
   config.recentFiles.forEach((file) => {
@@ -5483,6 +5841,10 @@ const panes = {
     name: "infopanel",
     func: infopanel
   },
+  outlineer: {
+    name: "outliner",
+    func: outliner
+  }
 }
 
 function _arrayBufferToBase64( buffer ) {
