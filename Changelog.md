@@ -1,5 +1,16 @@
 # 0.6.10-alpha:
 Changes:
+- Curve editing is now more predictable
+
+New features:
+- "Outliner" pane shows all objects
+- Objects can now be imported from .beam files
+
+Bugfixes:
+- Fix stuttering during playback
+
+# 0.6.10-alpha:
+Changes:
 - Selecting and deselecting are now undo-able
 
 New features:
