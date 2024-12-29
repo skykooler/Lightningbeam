@@ -721,6 +721,47 @@ let actions = {
       updateLayers()
     }
   },
+  importObject: {
+    create: (object) => {
+      redoStack.length = 0
+      let action = {
+        object: object,
+        activeObject: context.activeObject.idx
+      }
+      undoStack.push({name: 'importObject', action: action})
+      actions.importObject.execute(action)
+      updateMenu()
+    },
+    execute: (action) => {
+      console.log(action.object)
+      const activeObject = pointerList[action.activeObject]
+      switch (action.object.type) {
+        case "GraphicsObject":
+          let object = GraphicsObject.fromJSON(action.object)
+          activeObject.addObject(object)
+          break;
+        case "Layer":
+          let layer = Layer.fromJSON(action.object)
+          activeObject.addLayer(layer)
+      }
+      updateUI()
+      updateLayers()
+    },
+    rollback: (action) => {
+      const activeObject = pointerList[action.activeObject]
+      switch(action.object.type) {
+        case "GraphicsObject":
+          let object = pointerList[action.object.idx]
+          activeObject.removeChild(object)
+          break;
+        case "Layer":
+          let layer = pointerList[action.object.idx]
+          activeObject.removeLayer(layer)
+      }
+      updateUI()
+      updateLayers()
+    }
+  },
   editFrame: {
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
@@ -1592,6 +1633,7 @@ class Frame {
   }
   toJSON() {
     const json = {}
+    json.type = "Frame"
     json.frameType = this.frameType
     json.idx = this.idx
     json.keys = this.keys
@@ -1666,6 +1708,9 @@ class Layer {
       const frame = json.frames[i]
       layer.frames.push(Frame.fromJSON(frame))
     }
+    for (let frame in layer.frames) {
+      layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType)
+    }
     layer.visible = json.visible
     layer.audible = json.audible
 
@@ -1673,6 +1718,7 @@ class Layer {
   }
   toJSON() {
     const json = {}
+    json.type = "Layer"
     json.idx = this.idx
     json.children = []
     for (let child of this.children) {
@@ -1922,6 +1968,7 @@ class AudioLayer {
   }
   toJSON() {
     const json = {}
+    json.type = "AudioLayer"
     // TODO: build json from audiolayer
     json.sounds = {}
     json.audible = this.audible
@@ -2100,6 +2147,7 @@ class Shape extends BaseShape {
   }
   toJSON() {
     const json = {}
+    json.type = "Shape"
     json.startx = this.startx
     json.starty = this.starty
     json.fillStyle = this.fillStyle
@@ -2453,6 +2501,7 @@ class GraphicsObject {
   }
   toJSON() {
     const json = {}
+    json.type = "GraphicsObject"
     json.x = this.x
     json.y = this.y
     json.rotation = this.rotation
@@ -2737,6 +2786,12 @@ class GraphicsObject {
     }
     this.children.splice(this.children.indexOf(childObject), 1)
   }
+  addLayer(layer) {
+    this.layers.push(layer)
+  }
+  removeLayer(layer) {
+    this.layers.splice(this.layers.indexOf(layer),1)
+  }
   saveState() {
     startProps[this.idx] = {
       x: this.x,
@@ -2991,7 +3046,7 @@ function decrementFrame() {
   updateUI()
 }
 
-function _newFile(width, height, fps, context=context) {
+function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.objectStack = [root]
   config.fileWidth = width
@@ -3196,18 +3251,52 @@ async function importFile() {
     const filename = await basename(path)
     if (getFileExtension(filename)=="beam") {
       function reassignIdxs(json) {
+        if (json.idx in pointerList) {
+          json.idx = uuidv4()
+        }
         deeploop(json, (key, item) => {
           if (item.idx in pointerList) {
             item.idx = uuidv4()
           }
         })
       }
+      function assignUUIDs(obj, existing) {
+        const uuidCache = {};  // Cache to store UUIDs for existing values
+        
+        // Helper function to generate a UUID (or use a library like uuid for this)
+        function generateUUID() {
+          return 'uuid' + Math.floor(Math.random() * 10000);
+        }
+      
+        function deepAssign(obj) {
+          for (const [key, value] of Object.entries(obj)) {
+            if (typeof value === 'object' && value !== null) {
+              // Recurse for nested objects
+              deepAssign(value);
+            } else if (value in existing) {
+              // If the value is in the "existing" list, assign a UUID
+              if (!uuidCache[value]) {
+                uuidCache[value] = generateUUID();  // Store the generated UUID for the value
+              }
+              obj[key] = uuidCache[value];  // Assign the UUID to the object property
+            }
+          }
+        }
+      
+        // Start the recursion with the provided object
+        deepAssign(obj);
+      
+        return obj;  // Return the updated object
+      }
       
       
       const json = await _open(path, true)
       if (json==undefined) return;
-      reassignIdxs(json)
-      createModal(outliner, json)
+      assignUUIDs(json, pointerList)
+      console.log(json)
+      createModal(outliner, json, (object) => {
+        actions.importObject.create(object)
+      })
       updateOutliner()
     } else {
       const {dataURL, mimeType} = await convertToDataURL(path, imageMimeTypes.concat(audioMimeTypes));

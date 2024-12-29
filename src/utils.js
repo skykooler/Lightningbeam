@@ -689,7 +689,7 @@ function getFileExtension(filename) {
   return filename.substring(dotIndex + 1); // Extract the extension
 }
 
-function createModal(contentFunction, arg) {
+function createModal(contentFunction, arg, callback) {
   // Create the modal overlay
   const modalOverlay = document.createElement('div');
   modalOverlay.style.position = 'fixed';
@@ -744,7 +744,7 @@ function createModal(contentFunction, arg) {
   // Add button events
   okButton.addEventListener('click', () => {
     modalOverlay.remove();  // Close modal on Ok
-    console.log(modalContent.active)
+    callback(modalContent.active)
     // You can add additional action here if needed
   });
   
@@ -753,8 +753,8 @@ function createModal(contentFunction, arg) {
   });
   
   // Append buttons to the container
-  buttonContainer.appendChild(okButton);
   buttonContainer.appendChild(cancelButton);
+  buttonContainer.appendChild(okButton);
   
   // Add button container to the modal
   modalContainer.appendChild(buttonContainer);
