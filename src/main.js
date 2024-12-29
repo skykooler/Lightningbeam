@@ -3274,6 +3274,12 @@ async function importFile() {
                 uuidCache[value] = uuidv4();  // Store the generated UUID for the value
               }
               obj[key] = uuidCache[value];  // Assign the UUID to the object property
+            } else if (key in existing) {
+              // If the value is in the "existing" list, assign a UUID
+              if (!uuidCache[key]) {
+                uuidCache[key] = uuidv4();  // Store the generated UUID for the value
+              }
+              obj[key] = uuidCache[key];  // Assign the UUID to the object property
             }
           }
         }
@@ -4644,6 +4650,7 @@ function outliner(object=undefined) {
   } else {
     outliner.object = object
   }
+  outliner.style.cursor = "pointer"
 
   let lastResizeTime = 0;
   const throttleIntervalMs = 20;
