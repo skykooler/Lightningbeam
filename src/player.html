@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script>
+const _file = "${file}"
+function _render() {
+
+    requestAnimationFrame(_render)
+}
+function __setup__() {
+    const cvs = document.getElementById("cvs")
+    cvs.width = _file.fileWidth
+    cvs.height = _file.fileHeight
+    cvs.style.width = `${_file.fileWidth}px`
+    cvs.style.height = `${_file.fileHeight}px`
+
+    _render()
+}
+</script>
+</head>
+<body>
+    <canvas id="cvs"></canvas>
+    <script>__setup__()</script>
+</body>
+</html>

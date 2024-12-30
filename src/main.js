@@ -3345,6 +3345,10 @@ async function render() {
         name: 'APNG files (.png)',
         extensions: ['png'],
       },
+      {
+        name: 'Packed HTML player (.html)',
+        extensions: ['html'],
+      }
     ],
     defaultPath: await join(await documentDir(), "untitled.png")
   });
@@ -3359,48 +3363,77 @@ async function render() {
     // fileExportPath = path
     // console.log("wrote SVG")
 
+    const ext = path.split('.').pop().toLowerCase();
+    
+    switch (ext) {
+      case 'html':
+        fetch('/player.html')
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Network response was not ok');
+          }
+          return response.text(); // Read the response body as a string
+        })
+        .then(data => {
+          // TODO: strip out the stuff tauri injects
+          let json = JSON.stringify({
+            fileWidth: config.fileWidth,
+            fileHeight: config.fileHeight,
+            root: root.toJSON()
+          })
+          data = data.replace('"${file}"', json)
+          console.log(data); // The content of the file as a string
+        })
+        .catch(error => {
+          // TODO: alert
+          console.error('There was a problem with the fetch operation:', error);
+        });
 
-    const frames = [];
-    const canvas = document.createElement('canvas');
-    canvas.width = config.fileWidth;  // Set desired width
-    canvas.height = config.fileHeight; // Set desired height
-    let exportContext = {
-      ...context,
-      ctx: canvas.getContext('2d'),
-      selectionRect: undefined,
-      selection: [],
-      shapeselection: []
-    }
+        break;
+      case 'png':
+        const frames = [];
+        const canvas = document.createElement('canvas');
+        canvas.width = config.fileWidth;  // Set desired width
+        canvas.height = config.fileHeight; // Set desired height
+        let exportContext = {
+          ...context,
+          ctx: canvas.getContext('2d'),
+          selectionRect: undefined,
+          selection: [],
+          shapeselection: []
+        }
 
-  
-    for (let i = 0; i < root.maxFrame; i++) {
       
-      root.currentFrameNum = i
-      exportContext.ctx.fillStyle = "white"
-      exportContext.ctx.rect(0,0,config.fileWidth, config.fileHeight)
-      exportContext.ctx.fill()
-      await root.draw(exportContext)
+        for (let i = 0; i < root.maxFrame; i++) {
+          
+          root.currentFrameNum = i
+          exportContext.ctx.fillStyle = "white"
+          exportContext.ctx.rect(0,0,config.fileWidth, config.fileHeight)
+          exportContext.ctx.fill()
+          await root.draw(exportContext)
 
-      // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
-      const imageData = exportContext.ctx.getImageData(0, 0, canvas.width, canvas.height);
+          // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
+          const imageData = exportContext.ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    // Step 2: Create a frame buffer (Uint8Array) from the image data
-      const frameBuffer = new Uint8Array(imageData.data.buffer);
+        // Step 2: Create a frame buffer (Uint8Array) from the image data
+          const frameBuffer = new Uint8Array(imageData.data.buffer);
+          
+          frames.push(frameBuffer); // Add the frame buffer to the frames array
+        }
       
-      frames.push(frameBuffer); // Add the frame buffer to the frames array
+        // Step 3: Use UPNG.js to create the animated PNG
+        const apng = UPNG.encode(frames, canvas.width, canvas.height, 0, parseInt(100/config.framerate));
+      
+        // Step 4: Save the APNG file (in Tauri, use writeFile or in the browser, download it)
+        const apngBlob = new Blob([apng], { type: 'image/png' });
+      
+        // If you're using Tauri:
+        await writeFile(
+          path, // The destination file path for saving
+          new Uint8Array(await apngBlob.arrayBuffer())
+        );
+        break;
     }
-  
-    // Step 3: Use UPNG.js to create the animated PNG
-    const apng = UPNG.encode(frames, canvas.width, canvas.height, 0, parseInt(100/config.framerate));
-  
-    // Step 4: Save the APNG file (in Tauri, use writeFile or in the browser, download it)
-    const apngBlob = new Blob([apng], { type: 'image/png' });
-  
-    // If you're using Tauri:
-    await writeFile(
-      path, // The destination file path for saving
-      new Uint8Array(await apngBlob.arrayBuffer())
-    );
   }
   document.querySelector("body").style.cursor = "default"
 }
