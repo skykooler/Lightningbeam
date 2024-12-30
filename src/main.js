@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual, drawRegularPolygon, getFileExtension, createModal, deeploop } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual, drawRegularPolygon, getFileExtension, createModal, deeploop, signedAngleBetweenVectors } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, triangleSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
@@ -3735,7 +3735,7 @@ function stage() {
           } else {
             growBoundingBox(bbox, item.bbox())
           }
-          selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y}
+          selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y, rotation: item.rotation}
         }
         let transformPoint = getPointNearBox(bbox, mouse, 10)
         if (transformPoint) {
@@ -3744,11 +3744,13 @@ function stage() {
             initial: {
               x: {min: bbox.x.min, max: bbox.x.max},
               y: {min: bbox.y.min, max: bbox.y.max},
+              rotation: 0,
               selection: selection
             },
             current: {
               x: {min: bbox.x.min, max: bbox.x.max},
               y: {min: bbox.y.min, max: bbox.y.max},
+              rotation: 0,
               selection: structuredClone(selection)
             }
           }
@@ -3757,6 +3759,23 @@ function stage() {
           transformPoint = getPointNearBox(bbox, mouse, 30, false)
           if (transformPoint) {
             stage.style.cursor = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' fill='currentColor' class='bi bi-arrow-counterclockwise' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z'/%3E%3Cpath d='M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466'/%3E%3C/svg%3E") 12 12, auto`
+            context.dragDirection = 'r'
+            context.activeTransform = {
+              initial: {
+                x: {min: bbox.x.min, max: bbox.x.max},
+                y: {min: bbox.y.min, max: bbox.y.max},
+                rotation: 0,
+                mouse: {x: mouse.x, y: mouse.y},
+                selection: selection
+              },
+              current: {
+                x: {min: bbox.x.min, max: bbox.x.max},
+                y: {min: bbox.y.min, max: bbox.y.max},
+                rotation: 0,
+                mouse: {x: mouse.x, y: mouse.y},
+                selection: structuredClone(selection)
+              }
+            }
           } else {
             stage.style.cursor = "default"
           }
@@ -4089,9 +4108,19 @@ function stage() {
           } else if (context.dragDirection.indexOf('e') != -1) {
             current.x.max = mouse.x
           }
+          if (context.dragDirection == 'r') {
+            let pivot = {
+              x: (initial.x.min+initial.x.max)/2,
+              y: (initial.y.min+initial.y.max)/2,
+            }
+            current.rotation = signedAngleBetweenVectors(pivot, initial.mouse, mouse)
+          }
             // Calculate the translation difference between current and initial values
           const delta_x = current.x.min - initial.x.min;
           const delta_y = current.y.min - initial.y.min;
+
+          // This is probably unnecessary since initial rotation is 0
+          const delta_rot = current.rotation - initial.rotation
 
           // Calculate the scaling factor based on the difference between current and initial values
           const scale_x_ratio = (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
@@ -4105,6 +4134,7 @@ function stage() {
             item.y = initial.y.min + delta_y + yoffset * scale_y_ratio    
             item.scale_x = initialSelection[idx].scale_x * scale_x_ratio
             item.scale_y = initialSelection[idx].scale_y * scale_y_ratio
+            item.rotation = initialSelection[idx].rotation + delta_rot
           }
         }
         break;

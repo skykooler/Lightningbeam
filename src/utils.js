@@ -547,6 +547,40 @@ function clamp(n) {
   return Math.min(Math.max(n,0),1)
 }
 
+function signedAngleBetweenVectors(a, b, c) {
+  // Vector AB = (bx - ax, by - ay)
+  const ABx = b.x - a.x;
+  const ABy = b.y - a.y;
+
+  // Vector AC = (cx - ax, cy - ay)
+  const ACx = c.x - a.x;
+  const ACy = c.y - a.y;
+
+  // Dot product of AB and AC
+  const dotProduct = ABx * ACx + ABy * ACy;
+
+  // Magnitudes of AB and AC
+  const magnitudeAB = Math.sqrt(ABx * ABx + ABy * ABy);
+  const magnitudeAC = Math.sqrt(ACx * ACx + ACy * ACy);
+
+  // Cosine of the angle between AB and AC
+  const cosTheta = dotProduct / (magnitudeAB * magnitudeAC);
+
+  // Clamp the value to avoid floating point errors
+  const clampedCosTheta = Math.max(-1, Math.min(1, cosTheta));
+
+  // Angle in radians
+  const angleRadians = Math.acos(clampedCosTheta);
+
+  // Cross product to determine the sign of the angle
+  const crossProduct = ABx * ACy - ABy * ACx;
+
+  // If the cross product is positive, the angle is counterclockwise, otherwise it's clockwise
+  const signedAngle = crossProduct > 0 ? angleRadians : -angleRadians;
+
+  return signedAngle;
+}
+
 function drawBorderedRect(ctx, x, y, width, height, top, bottom, left, right) {
   ctx.fillRect(x, y, width, height)
   if (top) {
@@ -797,6 +831,7 @@ export {
   rgbToHex,
   drawCheckerboardBackground,
   clamp,
+  signedAngleBetweenVectors,
   drawBorderedRect,
   drawCenteredText,
   drawHorizontallyCenteredText,
