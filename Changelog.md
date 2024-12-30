@@ -1,3 +1,11 @@
+# 0.6.12-alpha:
+Changes:
+- Rendering the canvas is better optimized
+
+Bugfixes:
+- Prevent double-triggering the keyboard shortcuts on macOS
+- Fix line widths not getting saved
+
 # 0.6.11-alpha:
 Changes:
 - Curve editing is now more predictable
