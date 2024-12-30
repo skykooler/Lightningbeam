@@ -351,7 +351,8 @@ let actions = {
           fillShape: c.fillShape,
           strokeShape: c.strokeShape,
           fillStyle: c.fillStyle,
-          sendToBack: c.sendToBack
+          sendToBack: c.sendToBack,
+          lineWidth: c.lineWidth
         },
         uuid: uuidv4(),
         frame: parent.currentFrame.idx
