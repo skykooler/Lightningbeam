@@ -3,7 +3,7 @@ import * as fitCurve from '/fit-curve.js';
 import { Bezier } from "/bezier.js";
 import { Quadtree } from './quadtree.js';
 import { createNewFileDialog, showNewFileDialog, closeDialog } from './newfile.js';
-import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual, drawRegularPolygon, getFileExtension, createModal, deeploop, signedAngleBetweenVectors } from './utils.js';
+import { titleCase, getMousePositionFraction, getKeyframesSurrounding, invertPixels, lerpColor, lerp, camelToWords, generateWaveform, floodFillRegion, getShapeAtPoint, hslToRgb, drawCheckerboardBackground, hexToHsl, hsvToRgb, hexToHsv, rgbToHex, clamp, drawBorderedRect, drawCenteredText, drawHorizontallyCenteredText, deepMerge, getPointNearBox, arraysAreEqual, drawRegularPolygon, getFileExtension, createModal, deeploop, signedAngleBetweenVectors, rotateAroundPoint, getRotatedBoundingBox, rotateAroundPointIncremental } from './utils.js';
 import { backgroundColor, darkMode, foregroundColor, frameWidth, gutterHeight, highlight, iconSize, triangleSize, labelColor, layerHeight, layerWidth, scrubberColor, shade, shadow } from './styles.js';
 import { Icon } from './icon.js';
 const { writeTextFile: writeTextFile, readTextFile: readTextFile, writeFile: writeFile, readFile: readFile }=  window.__TAURI__.fs;
@@ -772,6 +772,7 @@ let actions = {
   editFrame: {
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
+      console.log(frame.idx in startProps)
       if (!(frame.idx in startProps)) return;
       let action = {    
         newState: structuredClone(frame.keys),
@@ -1036,11 +1037,23 @@ let actions = {
       redoStack.length = 0
       let serializableShapes = []
       let serializableObjects = []
+      let bbox;
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx)
+        if (bbox==undefined) {
+          bbox = shape.bbox()
+        } else {
+          growBoundingBox(bbox, shape.bbox())
+        }
       }
       for (let object of context.selection) {
         serializableObjects.push(object.idx)
+        // TODO: rotated bbox
+        if (bbox==undefined) {
+          bbox = object.bbox()
+        } else {
+          growBoundingBox(bbox, object.bbox())
+        }
       }
       context.shapeselection = []
       context.selection = []
@@ -1049,7 +1062,8 @@ let actions = {
         objects: serializableObjects,
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
-        frame: context.activeObject.currentFrame.idx
+        frame: context.activeObject.currentFrame.idx,
+        position: {x: (bbox.x.min+bbox.x.max)/2, y: (bbox.y.min+bbox.y.max)/2}
       }
       undoStack.push({name: 'group', action: action})
       actions.group.execute(action)
@@ -1062,15 +1076,16 @@ let actions = {
       let frame = action.frame ? pointerList[action.frame] : parent.currentFrame
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx]
+        shape.translate(-action.position.x, -action.position.y)
         group.currentFrame.addShape(shape)
         frame.removeShape(shape)
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx]
-        group.addObject(object, object.x, object.y)
+        group.addObject(object, object.x - position.x, object.y - position.y)
         parent.removeChild(object)
       }
-      parent.addObject(group)
+      parent.addObject(group, action.position.x, action.position.y)
       if (context.activeObject==parent && context.selection.length==0 && context.shapeselection.length==0) {
         context.selection.push(group)
       }
@@ -2011,7 +2026,11 @@ class BaseShape {
     }
   }
   recalculateBoundingBox() {
+    this.boundingBox = undefined
     for (let curve of this.curves) {
+      if (!this.boundingBox) {
+        this.boundingBox = curve.bbox();
+      }
       growBoundingBox(this.boundingBox, curve.bbox())
     }
   }
@@ -2364,6 +2383,15 @@ class Shape extends BaseShape {
     // Sort your points by angle
     const pointsSorted = angles.sort((a, b) => a.angle - b.angle);
     return pointsSorted
+  }
+  translate(x, y) {
+    for (let curve of this.curves) {
+      for (let i in curve.points) {
+        const point = curve.points[i]
+        curve.points[i] = {x: point.x + x, y: point.y + y}
+      }
+    }
+    this.update()
   }
   updateVertices() {
     this.vertices = []
@@ -2728,9 +2756,9 @@ class GraphicsObject {
         let bbox = undefined;
         for (let item of context.selection) {
           if (bbox==undefined) {
-            bbox = structuredClone(item.bbox())
+            bbox = getRotatedBoundingBox(item, debugPoints)
           } else {
-            growBoundingBox(bbox, item.bbox())
+            growBoundingBox(bbox, getRotatedBoundingBox(item, debugPoints))
           }
         }
         if (bbox != undefined) {
@@ -3039,8 +3067,11 @@ async function _save(path) {
       }
       return value;
     }
+    for (let action of undoStack) {
+      console.log(action.name)
+    }
     const fileData = {
-      version: "1.5",
+      version: "1.6",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -3109,15 +3140,55 @@ async function _open(path, returnJson=false) {
             await messageDialog("File has no content!", {title: "Parse error", kind: 'error'})
             return
           }
+          
+          const objectOffsets = {}
           for (let action of file.actions) {
             if (!(action.name in actions)) {
               await messageDialog(`Invalid action ${action.name}. File may be corrupt.`, { title: "Error", kind: 'error'})
               return
             }
+
             console.log(action.name)
+            // Data fixes
+            if (file.version <= "1.5") {
+              // Fix coordinates of objects
+              if (action.name=="group") {
+                let bbox;
+                for (let i of action.action.shapes) {
+                  const shape = pointerList[i]
+                  if (bbox==undefined) {
+                    bbox = shape.bbox()
+                  } else {
+                    growBoundingBox(bbox, shape.bbox())
+                  }
+                }
+                for (let i of action.action.objects) {
+                  const object = pointerList[i]// TODO: rotated bbox
+                  if (bbox==undefined) {
+                    bbox = object.bbox()
+                  } else {
+                    growBoundingBox(bbox, object.bbox())
+                  }
+                }
+                const position = {x: (bbox.x.min+bbox.x.max)/2, y: (bbox.y.min+bbox.y.max)/2}
+                action.action.position = position
+                objectOffsets[action.action.groupUuid] = position
+              } else if (action.name=="editFrame") {
+                for (let key in action.action.newState) {
+                  if (key in objectOffsets) {
+                    action.action.newState[key].x += objectOffsets[key].x
+                    action.action.newState[key].y += objectOffsets[key].y
+                    action.action.oldState[key].x += objectOffsets[key].x
+                    action.action.oldState[key].y += objectOffsets[key].y
+                  }
+                }
+              }
+            }
+
             await actions[action.name].execute(action.action)
             undoStack.push(action)
           }
+
           lastSaveIndex = undoStack.length;
           filePath = path
           // Tauri thinks it is setting the title here, but it isn't getting updated
@@ -3776,6 +3847,7 @@ function stage() {
                 selection: structuredClone(selection)
               }
             }
+            context.activeObject.currentFrame.saveState()
           } else {
             stage.style.cursor = "default"
           }
@@ -4077,9 +4149,9 @@ function stage() {
         let bbox = undefined;
         for (let item of context.selection) {
           if (bbox==undefined) {
-            bbox = structuredClone(item.bbox())
+            bbox = getRotatedBoundingBox(item)
           } else {
-            growBoundingBox(bbox, item.bbox())
+            growBoundingBox(bbox, getRotatedBoundingBox(item))
           }
         }
         if (bbox==undefined) break;
@@ -4108,16 +4180,21 @@ function stage() {
           } else if (context.dragDirection.indexOf('e') != -1) {
             current.x.max = mouse.x
           }
+            // Calculate the translation difference between current and initial values
+          let delta_x = current.x.min - initial.x.min;
+          let delta_y = current.y.min - initial.y.min;
+
           if (context.dragDirection == 'r') {
             let pivot = {
               x: (initial.x.min+initial.x.max)/2,
               y: (initial.y.min+initial.y.max)/2,
             }
             current.rotation = signedAngleBetweenVectors(pivot, initial.mouse, mouse)
+            const {dx, dy} = rotateAroundPointIncremental(current.x.min, current.y.min, pivot, current.rotation)
+            // delta_x -= dx
+            // delta_y -= dy
+            // console.log(dx, dy)
           }
-            // Calculate the translation difference between current and initial values
-          const delta_x = current.x.min - initial.x.min;
-          const delta_y = current.y.min - initial.y.min;
 
           // This is probably unnecessary since initial rotation is 0
           const delta_rot = current.rotation - initial.rotation

@@ -581,6 +581,67 @@ function signedAngleBetweenVectors(a, b, c) {
   return signedAngle;
 }
 
+function rotateAroundPointIncremental(x, y, point, angle) {
+  const { x: newX, y: newY } = rotateAroundPoint(x, y, point, angle)
+  const dx = newX - x
+  const dy = newY - y
+  return { dx, dy }
+}
+
+function rotateAroundPoint(x, y, point, angle) {
+  const dx = x - point.x;
+  const dy = y - point.y;
+  const cosAngle = Math.cos(angle);
+  const sinAngle = Math.sin(angle);
+  
+  const rotatedX = point.x + (dx * cosAngle - dy * sinAngle);
+  const rotatedY = point.y + (dx * sinAngle + dy * cosAngle);
+  
+  return { x: rotatedX, y: rotatedY };
+}
+
+function getRotatedBoundingBox(object, debugPoints=[]) {
+  const bbox = object.bbox();  // Get the bounding box of the object without transformation
+  
+  const { x: { min: xMin, max: xMax }, y: { min: yMin, max: yMax } } = bbox;
+  
+  // Calculate the four corners of the bounding box
+  const corners = [
+    { x: xMin, y: yMin },  // Bottom-left
+    { x: xMax, y: yMin },  // Bottom-right
+    { x: xMin, y: yMax },  // Top-left
+    { x: xMax, y: yMax }   // Top-right
+  ];
+
+  const center = {
+    x: (xMin + xMax) / 2,
+    y: (yMin + yMax) / 2
+  }
+
+  // Rotate each corner and track the min/max x and y values
+  let rotatedCorners = corners.map(corner => {
+    return rotateAroundPoint(corner.x, corner.y, center, object.rotation);
+  });
+
+  debugPoints.length = 0
+  for (let corner of rotatedCorners) {
+    debugPoints.push(corner)
+  }
+  
+  // Find the new bounding box after rotation
+  let rotatedXMin = Math.min(...rotatedCorners.map(corner => corner.x));
+  let rotatedXMax = Math.max(...rotatedCorners.map(corner => corner.x));
+  let rotatedYMin = Math.min(...rotatedCorners.map(corner => corner.y));
+  let rotatedYMax = Math.max(...rotatedCorners.map(corner => corner.y));
+  
+  // Return the new bounding box with min/max x and y values
+  return {
+    x: { min: rotatedXMin, max: rotatedXMax },
+    y: { min: rotatedYMin, max: rotatedYMax }
+  };
+}
+
+
 function drawBorderedRect(ctx, x, y, width, height, top, bottom, left, right) {
   ctx.fillRect(x, y, width, height)
   if (top) {
@@ -832,6 +893,9 @@ export {
   drawCheckerboardBackground,
   clamp,
   signedAngleBetweenVectors,
+  rotateAroundPoint,
+  rotateAroundPointIncremental,
+  getRotatedBoundingBox,
   drawBorderedRect,
   drawCenteredText,
   drawHorizontallyCenteredText,
