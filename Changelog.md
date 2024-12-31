@@ -1,3 +1,11 @@
+# 0.6.13-alpha:
+New features:
+- Rotate functionality of transform tool is now working
+
+Bugfixes:
+- Fix grouped objects always having a position of 0,0
+
+
 # 0.6.12-alpha:
 Changes:
 - Rendering the canvas is better optimized
