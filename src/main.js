@@ -2733,7 +2733,7 @@ class GraphicsObject {
             ctx.strokeStyle = "#00ffff"
             ctx.lineWidth = 1;
             ctx.beginPath()
-            let bbox = item.bbox()
+            let bbox = getRotatedBoundingBox(item)
             ctx.rect(bbox.x.min, bbox.y.min, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min)
             ctx.stroke()
             ctx.restore()
@@ -2756,9 +2756,9 @@ class GraphicsObject {
         let bbox = undefined;
         for (let item of context.selection) {
           if (bbox==undefined) {
-            bbox = getRotatedBoundingBox(item, debugPoints)
+            bbox = getRotatedBoundingBox(item)
           } else {
-            growBoundingBox(bbox, getRotatedBoundingBox(item, debugPoints))
+            growBoundingBox(bbox, getRotatedBoundingBox(item))
           }
         }
         if (bbox != undefined) {
@@ -3802,9 +3802,9 @@ function stage() {
         selection = {}
         for (let item of context.selection) {
           if (bbox==undefined) {
-            bbox = structuredClone(item.bbox())
+            bbox = getRotatedBoundingBox(item)
           } else {
-            growBoundingBox(bbox, item.bbox())
+            growBoundingBox(bbox, getRotatedBoundingBox(item))
           }
           selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y, rotation: item.rotation}
         }

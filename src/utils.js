@@ -600,7 +600,7 @@ function rotateAroundPoint(x, y, point, angle) {
   return { x: rotatedX, y: rotatedY };
 }
 
-function getRotatedBoundingBox(object, debugPoints=[]) {
+function getRotatedBoundingBox(object) {
   const bbox = object.bbox();  // Get the bounding box of the object without transformation
   
   const { x: { min: xMin, max: xMax }, y: { min: yMin, max: yMax } } = bbox;
@@ -622,11 +622,6 @@ function getRotatedBoundingBox(object, debugPoints=[]) {
   let rotatedCorners = corners.map(corner => {
     return rotateAroundPoint(corner.x, corner.y, center, object.rotation);
   });
-
-  debugPoints.length = 0
-  for (let corner of rotatedCorners) {
-    debugPoints.push(corner)
-  }
   
   // Find the new bounding box after rotation
   let rotatedXMin = Math.min(...rotatedCorners.map(corner => corner.x));
