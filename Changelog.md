@@ -1,3 +1,11 @@
+# 0.6.14-alpha:
+Changes:
+- Make vertex handles semitransparent and always the same visual size
+
+Bugfixes:
+- Fix grouped objects losing position on save/load
+- Fix copy-pasted objects not being editable
+
 # 0.6.13-alpha:
 New features:
 - Rotate functionality of transform tool is now working
