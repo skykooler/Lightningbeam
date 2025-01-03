@@ -505,6 +505,9 @@ let actions = {
         );
       }
       shape.update();
+      console.log(context.activeObject.currentFrame.shapes);
+      console.log(shape);
+      updateUI();
     },
     rollback: (action) => {
       let shape = pointerList[action.shape];
@@ -659,10 +662,12 @@ let actions = {
     },
   },
   duplicateObject: {
-    create: (object) => {
+    create: (items) => {
       redoStack.length = 0;
       let action = {
-        object: object.idx,
+        items: items,
+        object: context.activeObject.idx,
+        frame: context.activeObject.currentFrame.idx,
         uuid: uuidv4(),
       };
       undoStack.push({ name: "duplicateObject", action: action });
@@ -670,16 +675,33 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      // your code here
-      let object = pointerList[action.object];
-      let newObj = object.copy(action.uuid);
+      console.log(action);
+      const object = pointerList[action.object];
+      const frame = pointerList[action.frame];
+      for (let item of action.items) {
+        if (item.type == "shape") {
+          frame.addShape(Shape.fromJSON(item));
+        } else if (item.type == "GraphicsObject") {
+          const newObj = GraphicsObject.fromJSON(item);
+          object.addObject(newObj);
+          console.log(newObj.idx);
+          console.log(frame.keys);
+        }
+      }
       // newObj.idx = action.uuid
-      context.activeObject.addObject(newObj);
+      // context.activeObject.addObject(newObj);
       updateUI();
     },
     rollback: (action) => {
-      let object = pointerList[action.uuid];
-      context.activeObject.removeChild(object);
+      const object = pointerList[action.object];
+      const frame = pointerList[action.frame];
+      for (let item of action.items) {
+        if (item.type == "shape") {
+          frame.removeShape(pointerList[item.idx]);
+        } else if (item.type == "GraphicsObject") {
+          object.removeChild(pointerList[item.idx]);
+        }
+      }
       updateUI();
     },
   },
@@ -1074,8 +1096,6 @@ let actions = {
     execute: (action) => {
       let frame = pointerList[action.frame];
       frame.keys = structuredClone(action.newState);
-      console.log(structuredClone(frame.keys));
-      console.log(frame.keys);
       updateUI();
     },
     rollback: (action) => {
@@ -2014,15 +2034,19 @@ class Frame {
 
     return frame;
   }
-  toJSON() {
+  toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "Frame";
     json.frameType = this.frameType;
-    json.idx = this.idx;
+    if (randomizeUuid) {
+      json.idx = uuidv4();
+    } else {
+      json.idx = this.idx;
+    }
     json.keys = this.keys;
     json.shapes = [];
     for (let shape of this.shapes) {
-      json.shapes.push(shape.toJSON());
+      json.shapes.push(shape.toJSON(randomizeUuid));
     }
     return json;
   }
@@ -2101,18 +2125,23 @@ class Layer {
 
     return layer;
   }
-  toJSON() {
+  toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "Layer";
-    json.idx = this.idx;
+    if (randomizeUuid) {
+      json.idx = uuidv4();
+      json.name = this.name + " copy";
+    } else {
+      json.idx = this.idx;
+      json.name = this.name;
+    }
     json.children = [];
     for (let child of this.children) {
-      json.children.push(child.toJSON());
+      json.children.push(child.toJSON(randomizeUuid));
     }
-    json.name = this.name;
     json.frames = [];
     for (let frame of this.frames) {
-      json.frames.push(frame.toJSON());
+      json.frames.push(frame.toJSON(randomizeUuid));
     }
     json.visible = this.visible;
     json.audible = this.audible;
@@ -2401,14 +2430,19 @@ class AudioLayer {
     audioLayer.audible = json.audible;
     return audioLayer;
   }
-  toJSON() {
+  toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "AudioLayer";
     // TODO: build json from audiolayer
     json.sounds = {};
     json.audible = this.audible;
-    json.idx = this.idx;
-    json.name = this.name;
+    if (randomizeUuid) {
+      json.idx = uuidv4();
+      json.name = this.name + " copy";
+    } else {
+      json.idx = this.idx;
+      json.name = this.name;
+    }
     return json;
   }
   copy(idx) {
@@ -2614,7 +2648,7 @@ class Shape extends BaseShape {
     }
     return shape;
   }
-  toJSON() {
+  toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "Shape";
     json.startx = this.startx;
@@ -2625,17 +2659,21 @@ class Shape extends BaseShape {
     json.lineWidth = this.lineWidth;
     json.filled = this.filled;
     json.stroked = this.stroked;
-    json.idx = this.idx;
+    if (randomizeUuid) {
+      json.idx = uuidv4();
+    } else {
+      json.idx = this.idx;
+    }
     json.shapeId = this.shapeId;
     json.curves = [];
     for (let curve of this.curves) {
-      json.curves.push(curve.toJSON());
+      json.curves.push(curve.toJSON(randomizeUuid));
     }
     json.regions = [];
     for (let region of this.regions) {
       const curves = [];
       for (let curve of region.curves) {
-        curves.push(curve.toJSON());
+        curves.push(curve.toJSON(randomizeUuid));
       }
       json.regions.push({
         idx: region.idx,
@@ -3021,7 +3059,7 @@ class GraphicsObject {
     }
     return graphicsObject;
   }
-  toJSON() {
+  toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "GraphicsObject";
     json.x = this.x;
@@ -3029,17 +3067,22 @@ class GraphicsObject {
     json.rotation = this.rotation;
     json.scale_x = this.scale_x;
     json.scale_y = this.scale_y;
-    json.idx = this.idx;
-    json.name = this.name;
+    if (randomizeUuid) {
+      json.idx = uuidv4();
+      json.name = this.name + " copy";
+    } else {
+      json.idx = this.idx;
+      json.name = this.name;
+    }
     json.currentFrameNum = this.currentFrameNum;
     json.currentLayer = this.currentLayer;
     json.layers = [];
     for (let layer of this.layers) {
-      json.layers.push(layer.toJSON());
+      json.layers.push(layer.toJSON(randomizeUuid));
     }
     json.audioLayers = [];
     for (let audioLayer of this.audioLayers) {
-      json.audioLayers.push(audioLayer.toJSON());
+      json.audioLayers.push(audioLayer.toJSON(randomizeUuid));
     }
     return json;
   }
@@ -3629,7 +3672,7 @@ async function _save(path) {
       console.log(action.name);
     }
     const fileData = {
-      version: "1.6",
+      version: "1.7",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -3754,6 +3797,19 @@ async function _open(path, returnJson = false) {
                     action.action.oldState[key].y += objectOffsets[key].y;
                   }
                 }
+              }
+            }
+            if (file.version <= "1.6") {
+              // Fix copy-paste
+              if (action.name == "duplicateObject") {
+                const obj = pointerList[action.action.object];
+                const objJson = obj.toJSON(true);
+                objJson.idx =
+                  action.action.uuid.slice(0, 8) +
+                  action.action.object.slice(8);
+                action.action.items = [objJson];
+                action.action.object = "root";
+                action.action.frame = root.currentFrame.idx;
               }
             }
 
@@ -3952,22 +4008,23 @@ async function quit() {
 function copy() {
   clipboard = [];
   for (let object of context.selection) {
-    clipboard.push(object);
+    clipboard.push(object.toJSON(true));
   }
   for (let shape of context.shapeselection) {
-    clipboard.push(shape);
+    clipboard.push(shape.toJSON(true));
   }
   console.log(clipboard);
 }
 
 function paste() {
-  for (let item of clipboard) {
-    if (item instanceof GraphicsObject) {
-      console.log(item);
-      // context.activeObject.addObject(item.copy())
-      actions.duplicateObject.create(item);
-    }
-  }
+  // for (let item of clipboard) {
+  //   if (item instanceof GraphicsObject) {
+  //     console.log(item);
+  //     // context.activeObject.addObject(item.copy())
+  //     actions.duplicateObject.create(item);
+  //   }
+  // }
+  actions.duplicateObject.create(clipboard);
   updateUI();
 }
 
@@ -5401,6 +5458,7 @@ function timeline() {
       mouse.y -= gutterHeight;
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth);
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame);
+      console.log(context.activeObject.currentFrame.shapes[0].idx);
       const layerIdx = Math.floor(mouse.y / layerHeight);
       if (layerIdx < context.activeObject.layers.length && layerIdx >= 0) {
         const layer =
@@ -5523,7 +5581,6 @@ function timeline() {
       }
     }
     updateLayers();
-    console.log(mouse);
   });
   timeline_cvs.addEventListener("mouseup", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
@@ -5544,7 +5601,6 @@ function timeline() {
       updateLayers();
       updateMenu();
     }
-    console.log(mouse);
   });
   timeline_cvs.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
@@ -5818,7 +5874,6 @@ function splitPane(div, percent, horiz, newPane = undefined) {
   }
   div.setAttribute("lb-percent", percent); // TODO: better attribute name
   div.addEventListener("mousedown", function (event) {
-    console.log("click");
     // Check if the clicked element is the parent itself and not a child element
     if (event.target === event.currentTarget) {
       if (event.button === 0) {
@@ -5972,7 +6027,6 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     }
   });
   div.addEventListener("mouseup", (event) => {
-    console.log("mouseup");
     event.currentTarget.setAttribute("dragging", false);
     // event.currentTarget.style.userSelect = 'auto';
   });
@@ -6320,7 +6374,6 @@ function renderLayers() {
     ctx.globalCompositeOperation = "difference";
     for (let frame of context.selectedFrames) {
       ctx.fillStyle = "grey";
-      console.log(frame.frameNum);
       ctx.fillRect(
         frame.frameNum * frameWidth,
         frame.layer * layerHeight,
