@@ -395,7 +395,6 @@ let actions = {
     create: (parent, shape, ctx) => {
       if (!parent.currentFrame?.exists) return;
       if (shape.curves.length == 0) return;
-      console.log(parent.currentFrame);
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = [];
       for (let curve of shape.curves) {
@@ -505,8 +504,6 @@ let actions = {
         );
       }
       shape.update();
-      console.log(context.activeObject.currentFrame.shapes);
-      console.log(shape);
       updateUI();
     },
     rollback: (action) => {
@@ -675,7 +672,6 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      console.log(action);
       const object = pointerList[action.object];
       const frame = pointerList[action.frame];
       for (let item of action.items) {
@@ -849,7 +845,6 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      console.log(action.object);
       const activeObject = pointerList[action.activeObject];
       switch (action.object.type) {
         case "GraphicsObject":
@@ -935,7 +930,6 @@ let actions = {
     update: (action, mouse) => {
       const initial = action.transform.initial;
       const current = action.transform.current;
-      console.log(action.direction);
       if (action.direction.indexOf("n") != -1) {
         current.y.min = mouse.y;
       } else if (action.direction.indexOf("s") != -1) {
@@ -984,7 +978,6 @@ let actions = {
         -(current.x.max + current.x.min) / 2,
         -(current.y.max - current.y.min) / 2,
       );
-      console.log(action.selection);
       const cxt = {
         ctx: ctx,
         selection: [],
@@ -1043,7 +1036,6 @@ let actions = {
       const delta_y = current.y.min - initial.y.min;
       const delta_rot = current.rotation - initial.rotation;
       // frame.keys = structuredClone(action.newState)
-      console.log(action);
       for (let idx in action.selection) {
         const item = frame.keys[idx];
         const xoffset = action.selection[idx].x - initial.x.min;
@@ -1369,9 +1361,6 @@ let actions = {
       let serializableShapes = [];
       let serializableObjects = [];
       let bbox;
-      console.log("&&&&&&&");
-      console.log(context.shapeselection);
-      console.log(context.selection);
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
         if (bbox == undefined) {
@@ -1407,8 +1396,6 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      // your code here
-      console.log(action);
       let group = new GraphicsObject(action.groupUuid);
       let parent = pointerList[action.parent];
       let frame = action.frame
@@ -1422,7 +1409,6 @@ let actions = {
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
-        console.log(object.name, object.x, action.position.x);
         group.addObject(
           object,
           frame.keys[objectIdx].x - action.position.x,
@@ -2385,7 +2371,6 @@ class Layer {
       );
       lastBefore = lastKeyframeBefore;
       firstAfter = firstKeyframeAfter;
-      console.log(lastBefore, firstAfter);
     }
     for (let i = lastBefore + 1; i < firstAfter; i++) {
       this.frames[i].frameType = frameType;
@@ -3372,7 +3357,6 @@ class GraphicsObject {
     return mouse;
   }
   addObject(object, x = 0, y = 0, frame = undefined) {
-    console.log(x, y);
     if (frame == undefined) {
       frame = this.currentFrame;
     }
@@ -3416,8 +3400,6 @@ class GraphicsObject {
   }
   copy(idx) {
     let newGO = new GraphicsObject(idx.slice(0, 8) + this.idx.slice(8));
-    console.log(pointerList);
-    console.log(newGO.idx);
     newGO.x = this.x;
     newGO.y = this.y;
     newGO.rotation = this.rotation;
@@ -3507,7 +3489,7 @@ window.addEventListener("keydown", (e) => {
   ) {
     return; // Do nothing if the event target is an input field, textarea, or contenteditable element
   }
-  console.log(e);
+  // console.log(e);
   let mod = macOS ? e.metaKey : e.ctrlKey;
   let key = (mod ? "<mod>" : "") + e.key;
   switch (key) {
@@ -3978,7 +3960,6 @@ async function importFile() {
       const json = await _open(path, true);
       if (json == undefined) return;
       assignUUIDs(json, pointerList);
-      console.log(json);
       createModal(outliner, json, (object) => {
         actions.importObject.create(object);
       });
@@ -4020,7 +4001,6 @@ function copy() {
   for (let shape of context.shapeselection) {
     clipboard.push(shape.toJSON(true));
   }
-  console.log(clipboard);
 }
 
 function paste() {
@@ -4422,7 +4402,6 @@ function stage() {
             shape: selection.shape,
             startmouse: { x: mouse.x, y: mouse.y },
           };
-          console.log("gonna move this");
         } else {
           selection = selectCurve(context, mouse);
           if (selection) {
@@ -4436,7 +4415,6 @@ function stage() {
               shape: selection.shape,
               startmouse: { x: mouse.x, y: mouse.y },
             };
-            console.log("gonna move this");
           } else {
             let selected = false;
             let child;
@@ -4595,7 +4573,6 @@ function stage() {
         );
         const endTime = performance.now();
 
-        console.log(pointShape);
         console.log(
           `getShapeAtPoint took ${endTime - startTime} milliseconds.`,
         );
@@ -4620,7 +4597,6 @@ function stage() {
           updateUI();
           throw e;
         }
-        console.log(regionPoints.length);
         if (regionPoints.length > 0 && regionPoints.length < 10) {
           // probably a very small area, rerun with minimum epsilon
           regionPoints = floodFillRegion(
@@ -5086,7 +5062,7 @@ function toolbar() {
       mode = tool;
       updateInfopanel();
       updateUI();
-      console.log(tool);
+      console.log(`Switched tool to ${tool}`);
     });
   }
   let tools_break = document.createElement("div");
@@ -5330,7 +5306,6 @@ function toolbar() {
         colorCvs.currentColor = `${colorCvs.currentColor.slice(0, 7)}${alpha}`;
         colorCvs.draw();
       }
-      console.log(colorCvs.currentColor);
       colorCvs.colorEl.setColor(colorCvs.currentColor);
     });
     // Get mouse coordinates relative to the viewport
@@ -6017,7 +5992,6 @@ function splitPane(div, percent, horiz, newPane = undefined) {
           { id: "ctx_option4", text: horiz ? "Join Right" : "Join Down" },
         ],
       });
-      console.log(event);
       menu.popup({ x: event.clientX, y: event.clientY });
     }
 
@@ -6514,7 +6488,6 @@ function renderLayers() {
       layerTrack.className = "layer-track";
       layerTrack.classList.add("audio");
       framescontainer.appendChild(layerTrack);
-      console.log(audioLayer);
       for (let i in audioLayer.sounds) {
         let sound = audioLayer.sounds[i];
         layerTrack.appendChild(sound.img);
