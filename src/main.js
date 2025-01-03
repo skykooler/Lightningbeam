@@ -769,10 +769,167 @@ let actions = {
       updateLayers()
     }
   },
+  transformObjects: {
+    initialize: (frame, _selection, direction, mouse, transform=undefined) => {
+      let bbox = undefined
+      const selection = {}
+      for (let item of _selection) {
+        if (bbox==undefined) {
+          bbox = getRotatedBoundingBox(item)
+        } else {
+          growBoundingBox(bbox, getRotatedBoundingBox(item))
+        }
+        selection[item.idx] = {x: item.x, y: item.y, scale_x: item.scale_x, scale_y: item.scale_y, rotation: item.rotation}
+      }
+      let action = {
+        type: "transformObjects",
+        oldState: structuredClone(frame.keys),
+        frame: frame.idx,
+        transform: {
+          initial: {
+            x: {min: bbox.x.min, max: bbox.x.max},
+            y: {min: bbox.y.min, max: bbox.y.max},
+            rotation: 0,
+            mouse: {x: mouse.x, y: mouse.y},
+            selection: selection
+          },
+          current: {
+            x: {min: bbox.x.min, max: bbox.x.max},
+            y: {min: bbox.y.min, max: bbox.y.max},
+            scale_x: 1,
+            scale_y: 1,
+            rotation: 0,
+            mouse: {x: mouse.x, y: mouse.y},
+            selection: structuredClone(selection)
+          }
+        },
+        selection: selection,
+        direction: direction
+      }
+      if (transform) {
+        action.transform = transform
+      }
+      return action
+    },
+    update: (action, mouse) => {
+      const initial = action.transform.initial
+      const current = action.transform.current
+      console.log(action.direction)
+      if (action.direction.indexOf('n') != -1) {
+        current.y.min = mouse.y
+      } else if (action.direction.indexOf('s') != -1) {
+        current.y.max = mouse.y
+      }
+      if (action.direction.indexOf('w') != -1) {
+        current.x.min = mouse.x
+      } else if (action.direction.indexOf('e') != -1) {
+        current.x.max = mouse.x
+      }
+      if (context.dragDirection == 'r') {
+        const pivot = {
+          x: (initial.x.min+initial.x.max)/2,
+          y: (initial.y.min+initial.y.max)/2,
+        }
+        current.rotation = signedAngleBetweenVectors(pivot, initial.mouse, mouse)
+        const {dx, dy} = rotateAroundPointIncremental(current.x.min, current.y.min, pivot, current.rotation)
+      }
+
+      // Calculate the scaling factor based on the difference between current and initial values
+      action.transform.current.scale_x = (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
+      action.transform.current.scale_y = (current.y.max - current.y.min) / (initial.y.max - initial.y.min);
+      return action
+    },
+    render: (action, ctx) => {
+      const initial = action.transform.initial
+      const current = action.transform.current
+      ctx.save()
+      ctx.translate((current.x.max+current.x.min)/2, (current.y.max - current.y.min)/2)
+      ctx.rotate(current.rotation)
+      ctx.translate(-(current.x.max+current.x.min)/2, -(current.y.max - current.y.min)/2)
+      console.log(action.selection)
+      const cxt = {
+        ctx: ctx,
+        selection: [],
+        shapeselection: []
+      }
+      for (let obj in action.selection) {
+        const object = pointerList[obj]
+        object.draw(cxt)
+      }
+      ctx.strokeStyle = '#00ffff'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.rect(current.x.min, current.y.min, current.x.max-current.x.min, current.y.max-current.y.min)
+      ctx.stroke()
+      ctx.fillStyle = "#000000"
+      const rectRadius = 5
+      const xdiff = current.x.max - current.x.min
+      const ydiff =  current.y.max - current.y.min
+      for (let i of [[0,0],[0.5,0],[1,0],[1,0.5],[1,1],[0.5,1],[0,1],[0,0.5]]) {
+        ctx.beginPath()
+        ctx.rect(
+          current.x.min + xdiff * i[0] - rectRadius,
+          current.y.min + ydiff * i[1] - rectRadius,
+          rectRadius*2, rectRadius*2
+        )
+        ctx.fill()
+      }
+      ctx.restore()
+    },
+    finalize: (action) => {
+      undoStack.push({name: "transformObjects", action: action})
+      actions.transformObjects.execute(action)
+      context.activeAction = undefined
+      updateMenu()
+    },
+    execute: (action) => {
+      const frame = pointerList[action.frame]
+      const initial = action.transform.initial
+      const current = action.transform.current
+      const delta_x = current.x.min - initial.x.min;
+      const delta_y = current.y.min - initial.y.min;
+      const delta_rot = current.rotation - initial.rotation
+      // frame.keys = structuredClone(action.newState)
+      console.log(action)
+      for (let idx in action.selection) {
+        const item = frame.keys[idx]
+        const xoffset = action.selection[idx].x - initial.x.min
+        const yoffset = action.selection[idx].y - initial.y.min
+        item.x = initial.x.min + delta_x + xoffset * current.scale_x
+        item.y = initial.y.min + delta_y + yoffset * current.scale_y    
+        item.scale_x = action.selection[idx].scale_x * current.scale_x
+        item.scale_y = action.selection[idx].scale_y * current.scale_y
+        item.rotation = action.selection[idx].rotation + delta_rot
+      }
+      updateUI()
+    },
+    rollback: (action) => {
+      let frame = pointerList[action.frame]
+      frame.keys = structuredClone(action.oldState)
+      updateUI()
+    }
+  },
   editFrame: {
+    initialize: (frame) => {
+      let action = {
+        type: "editFrame",
+        oldState: structuredClone(frame.keys),
+        frame: frame.idx
+      }
+      return action
+    },
+    finalize: (action, frame) => {
+      action.newState = structuredClone(frame.keys)
+      undoStack.push({name: "editFrame", action: action})
+      actions.editFrame.execute(action)
+      context.activeAction = undefined
+      updateMenu()
+    },
+    render: (action, ctx) => {
+
+    },
     create: (frame) => {
       redoStack.length = 0; // Clear redo stack
-      console.log(frame.idx in startProps)
       if (!(frame.idx in startProps)) return;
       let action = {    
         newState: structuredClone(frame.keys),
@@ -2652,12 +2809,14 @@ class GraphicsObject {
   }
   draw(context) {
     let ctx = context.ctx;
+    ctx.save()
     ctx.translate(this.x, this.y)
     ctx.rotate(this.rotation)
     ctx.scale(this.scale_x, this.scale_y)
     // if (this.currentFrameNum>=this.maxFrame) {
     //   this.currentFrameNum = 0;
     // }
+    if (context.activeAction && this.idx in context.activeAction.selection) return;
     for (let layer of this.layers) {
       if (context.activeObject==this && !layer.visible) continue;
       let frame = layer.getFrame(this.currentFrameNum)
@@ -2790,6 +2949,7 @@ class GraphicsObject {
         }
       }
     }
+    ctx.restore()
   }
   transformMouse(mouse) {
     if (this.parent) {
@@ -3754,7 +3914,7 @@ function stage() {
                 if (hitTest(mouse, child)) {
                   context.dragging = true
                   context.lastMouse = mouse
-                  context.activeObject.currentFrame.saveState()
+                  context.activeAction = actions.editFrame.initialize(context.activeObject.currentFrame)
                   break
                 }
               }
@@ -3777,7 +3937,7 @@ function stage() {
                     }
                     context.dragging = true
                     selected = true
-                    context.activeObject.currentFrame.saveState()
+                    context.activeAction = actions.editFrame.initialize(context.activeObject.currentFrame)
                     break
                 }
               }
@@ -3825,7 +3985,12 @@ function stage() {
               selection: structuredClone(selection)
             }
           }
-          context.activeObject.currentFrame.saveState()
+          context.activeAction = actions.transformObjects.initialize(
+            context.activeObject.currentFrame,
+            context.selection,
+            transformPoint,
+            mouse
+          )
         } else {
           transformPoint = getPointNearBox(bbox, mouse, 30, false)
           if (transformPoint) {
@@ -3847,7 +4012,12 @@ function stage() {
                 selection: structuredClone(selection)
               }
             }
-            context.activeObject.currentFrame.saveState()
+            context.activeAction = actions.transformObjects.initialize(
+              context.activeObject.currentFrame,
+              context.selection,
+              'r',
+              mouse
+            )
           } else {
             stage.style.cursor = "default"
           }
@@ -3950,7 +4120,9 @@ function stage() {
         context.activeShape = undefined
         break;
       case "select":
-        if (context.activeVertex) {
+        if (context.activeAction) {
+          actions[context.activeAction.type].finalize(context.activeAction, context.activeObject.currentFrame)
+        } else if (context.activeVertex) {
           let newCurves = []
           for (let i in context.activeVertex.shape.curves) {
             if (i in context.activeVertex.current.startCurves) {
@@ -3974,13 +4146,16 @@ function stage() {
           actions.editShape.create(context.activeCurve.shape, newCurves)
         } else if (context.selection.length) {
           actions.select.create()
-          actions.editFrame.create(context.activeObject.currentFrame)
+          // actions.editFrame.create(context.activeObject.currentFrame)
         } else if (context.shapeselection.length) {
           actions.select.create()
         }
         break;
       case "transform":
-        actions.editFrame.create(context.activeObject.currentFrame)
+        if (context.activeAction) {
+          actions[context.activeAction.type].finalize(context.activeAction, context.activeObject.currentFrame)
+        }
+        // actions.editFrame.create(context.activeObject.currentFrame)
         break;
       default:
         break;
@@ -4166,53 +4341,56 @@ function stage() {
             stage.style.cursor = "default"
           }
         }
-        if (context.dragDirection) {
-          let initial = context.activeTransform.initial
-          let current = context.activeTransform.current
-          let initialSelection = context.activeTransform.initial.selection
-          if (context.dragDirection.indexOf('n') != -1) {
-            current.y.min = mouse.y
-          } else if (context.dragDirection.indexOf('s') != -1) {
-            current.y.max = mouse.y
-          }
-          if (context.dragDirection.indexOf('w') != -1) {
-            current.x.min = mouse.x
-          } else if (context.dragDirection.indexOf('e') != -1) {
-            current.x.max = mouse.x
-          }
-            // Calculate the translation difference between current and initial values
-          let delta_x = current.x.min - initial.x.min;
-          let delta_y = current.y.min - initial.y.min;
+        // if (context.dragDirection) {
+        //   let initial = context.activeTransform.initial
+        //   let current = context.activeTransform.current
+        //   let initialSelection = context.activeTransform.initial.selection
+        //   if (context.dragDirection.indexOf('n') != -1) {
+        //     current.y.min = mouse.y
+        //   } else if (context.dragDirection.indexOf('s') != -1) {
+        //     current.y.max = mouse.y
+        //   }
+        //   if (context.dragDirection.indexOf('w') != -1) {
+        //     current.x.min = mouse.x
+        //   } else if (context.dragDirection.indexOf('e') != -1) {
+        //     current.x.max = mouse.x
+        //   }
+        //     // Calculate the translation difference between current and initial values
+        //   let delta_x = current.x.min - initial.x.min;
+        //   let delta_y = current.y.min - initial.y.min;
 
-          if (context.dragDirection == 'r') {
-            let pivot = {
-              x: (initial.x.min+initial.x.max)/2,
-              y: (initial.y.min+initial.y.max)/2,
-            }
-            current.rotation = signedAngleBetweenVectors(pivot, initial.mouse, mouse)
-            const {dx, dy} = rotateAroundPointIncremental(current.x.min, current.y.min, pivot, current.rotation)
-            // delta_x -= dx
-            // delta_y -= dy
-            // console.log(dx, dy)
-          }
+        //   if (context.dragDirection == 'r') {
+        //     let pivot = {
+        //       x: (initial.x.min+initial.x.max)/2,
+        //       y: (initial.y.min+initial.y.max)/2,
+        //     }
+        //     current.rotation = signedAngleBetweenVectors(pivot, initial.mouse, mouse)
+        //     const {dx, dy} = rotateAroundPointIncremental(current.x.min, current.y.min, pivot, current.rotation)
+        //     // delta_x -= dx
+        //     // delta_y -= dy
+        //     // console.log(dx, dy)
+        //   }
 
-          // This is probably unnecessary since initial rotation is 0
-          const delta_rot = current.rotation - initial.rotation
+        //   // This is probably unnecessary since initial rotation is 0
+        //   const delta_rot = current.rotation - initial.rotation
 
-          // Calculate the scaling factor based on the difference between current and initial values
-          const scale_x_ratio = (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
-          const scale_y_ratio = (current.y.max - current.y.min) / (initial.y.max - initial.y.min);
+        //   // Calculate the scaling factor based on the difference between current and initial values
+        //   const scale_x_ratio = (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
+        //   const scale_y_ratio = (current.y.max - current.y.min) / (initial.y.max - initial.y.min);
 
-          for (let idx in initialSelection) {
-            let item = context.activeObject.currentFrame.keys[idx]
-            let xoffset = initialSelection[idx].x - initial.x.min
-            let yoffset = initialSelection[idx].y - initial.y.min
-            item.x = initial.x.min + delta_x + xoffset * scale_x_ratio
-            item.y = initial.y.min + delta_y + yoffset * scale_y_ratio    
-            item.scale_x = initialSelection[idx].scale_x * scale_x_ratio
-            item.scale_y = initialSelection[idx].scale_y * scale_y_ratio
-            item.rotation = initialSelection[idx].rotation + delta_rot
-          }
+        //   for (let idx in initialSelection) {
+        //     let item = context.activeObject.currentFrame.keys[idx]
+        //     let xoffset = initialSelection[idx].x - initial.x.min
+        //     let yoffset = initialSelection[idx].y - initial.y.min
+        //     item.x = initial.x.min + delta_x + xoffset * scale_x_ratio
+        //     item.y = initial.y.min + delta_y + yoffset * scale_y_ratio    
+        //     item.scale_x = initialSelection[idx].scale_x * scale_x_ratio
+        //     item.scale_y = initialSelection[idx].scale_y * scale_y_ratio
+        //     item.rotation = initialSelection[idx].rotation + delta_rot
+        //   }
+        // }
+        if (context.activeAction) {
+          actions[context.activeAction.type].update(context.activeAction, mouse)
         }
         break;
       default:
@@ -5223,6 +5401,9 @@ function renderUI() {
       i %= 255
       ctx.arc(point.x, point.y, 3, 0, 2*Math.PI)
       ctx.fill()
+    }
+    if (context.activeAction) {
+      actions[context.activeAction.type].render(context.activeAction, ctx)
     }
 
   }
