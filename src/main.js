@@ -684,8 +684,6 @@ let actions = {
         } else if (item.type == "GraphicsObject") {
           const newObj = GraphicsObject.fromJSON(item);
           object.addObject(newObj);
-          console.log(newObj.idx);
-          console.log(frame.keys);
         }
       }
       // newObj.idx = action.uuid
@@ -1371,6 +1369,9 @@ let actions = {
       let serializableShapes = [];
       let serializableObjects = [];
       let bbox;
+      console.log("&&&&&&&");
+      console.log(context.shapeselection);
+      console.log(context.selection);
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
         if (bbox == undefined) {
@@ -1407,6 +1408,7 @@ let actions = {
     },
     execute: (action) => {
       // your code here
+      console.log(action);
       let group = new GraphicsObject(action.groupUuid);
       let parent = pointerList[action.parent];
       let frame = action.frame
@@ -1420,17 +1422,16 @@ let actions = {
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
-        group.addObject(object, object.x - position.x, object.y - position.y);
+        console.log(object.name, object.x, action.position.x);
+        group.addObject(
+          object,
+          frame.keys[objectIdx].x - action.position.x,
+          frame.keys[objectIdx].y - action.position.y,
+        );
         parent.removeChild(object);
       }
-      parent.addObject(group, action.position.x, action.position.y);
-      if (
-        context.activeObject == parent &&
-        context.selection.length == 0 &&
-        context.shapeselection.length == 0
-      ) {
-        context.selection.push(group);
-      }
+      parent.addObject(group, action.position.x, action.position.y, frame);
+      context.selection = [group];
       updateUI();
       updateInfopanel();
     },
@@ -1677,8 +1678,6 @@ let actions = {
   select: {
     create: () => {
       redoStack.length = 0;
-      console.log(context.oldshapeselection);
-      console.log(context.shapeselection);
       if (
         arraysAreEqual(context.oldselection, context.selection) &&
         arraysAreEqual(context.oldshapeselection, context.shapeselection)
@@ -3372,11 +3371,17 @@ class GraphicsObject {
     mouse.y -= this.y;
     return mouse;
   }
-  addObject(object, x = 0, y = 0) {
+  addObject(object, x = 0, y = 0, frame = undefined) {
+    console.log(x, y);
+    if (frame == undefined) {
+      frame = this.currentFrame;
+    }
     this.children.push(object);
     object.parent = this;
+    object.x = x;
+    object.y = y;
     let idx = object.idx;
-    this.currentFrame.keys[idx] = {
+    frame.keys[idx] = {
       x: x,
       y: y,
       rotation: 0,
@@ -3637,6 +3642,8 @@ function decrementFrame() {
 function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.objectStack = [root];
+  context.selection = [];
+  context.shapeselection = [];
   config.fileWidth = width;
   config.fileHeight = height;
   config.framerate = fps;
@@ -5458,7 +5465,6 @@ function timeline() {
       mouse.y -= gutterHeight;
       timeline_cvs.clicked_frame = Math.floor(mouse.x / frameWidth);
       context.activeObject.setFrameNum(timeline_cvs.clicked_frame);
-      console.log(context.activeObject.currentFrame.shapes[0].idx);
       const layerIdx = Math.floor(mouse.y / layerHeight);
       if (layerIdx < context.activeObject.layers.length && layerIdx >= 0) {
         const layer =
