@@ -1085,6 +1085,7 @@ let actions = {
     },
     execute: (action) => {
       let frame = pointerList[action.frame];
+      if (frame == undefined) return;
       frame.keys = structuredClone(action.newState);
       updateUI();
     },
@@ -1189,6 +1190,7 @@ let actions = {
       let action = {
         frame: frame.idx,
         layer: layer.idx,
+        replacementUuid: uuidv4(),
       };
       undoStack.push({ name: "deleteFrame", action: action });
       actions.deleteFrame.execute(action);
@@ -1196,7 +1198,11 @@ let actions = {
     },
     execute: (action) => {
       let layer = pointerList[action.layer];
-      layer.deleteFrame(action.frame);
+      layer.deleteFrame(
+        action.frame,
+        undefined,
+        action.replacementUuid ? action.replacementUuid : uuidv4(),
+      );
       updateLayers();
       updateUI();
     },
@@ -2334,6 +2340,7 @@ class Layer {
     this.addFrame(num, newKeyframe, addedFrames);
   }
   deleteFrame(uuid, destinationType, replacementUuid) {
+    console.log(replacementUuid);
     let frame = pointerList[uuid];
     let i = this.frames.indexOf(frame);
     if (i != -1) {
@@ -3782,6 +3789,10 @@ async function _open(path, returnJson = false) {
                   if (key in objectOffsets) {
                     action.action.newState[key].x += objectOffsets[key].x;
                     action.action.newState[key].y += objectOffsets[key].y;
+                  }
+                }
+                for (let key in action.action.oldState) {
+                  if (key in objectOffsets) {
                     action.action.oldState[key].x += objectOffsets[key].x;
                     action.action.oldState[key].y += objectOffsets[key].y;
                   }
@@ -5012,6 +5023,7 @@ function stage() {
     context.dragDirection = undefined;
     context.selectionRect = undefined;
     let mouse = getMousePos(stage, e);
+    mouse = context.activeObject.transformMouse(mouse);
     modeswitcher: switch (mode) {
       case "select":
         for (let i = context.activeObject.children.length - 1; i >= 0; i--) {
