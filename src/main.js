@@ -1740,7 +1740,7 @@ function vectorDist(a, b) {
   return Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 }
 
-function getMousePos(canvas, evt, skipOffsets = false) {
+function getMousePos(canvas, evt, skipOffsets = false, skipZoom = false) {
   var rect = canvas.getBoundingClientRect();
   let offsetX = canvas.offsetX || 0;
   let offsetY = canvas.offsetY || 0;
@@ -1749,8 +1749,8 @@ function getMousePos(canvas, evt, skipOffsets = false) {
     offsetY = 0;
   }
   return {
-    x: (evt.clientX + offsetX - rect.left) / context.zoomLevel,
-    y: (evt.clientY + offsetY - rect.top) / context.zoomLevel,
+    x: (evt.clientX + offsetX - rect.left) / (skipZoom ? 1 : context.zoomLevel),
+    y: (evt.clientY + offsetY - rect.top) / (skipZoom ? 1 : context.zoomLevel),
   };
 }
 
@@ -2340,7 +2340,6 @@ class Layer {
     this.addFrame(num, newKeyframe, addedFrames);
   }
   deleteFrame(uuid, destinationType, replacementUuid) {
-    console.log(replacementUuid);
     let frame = pointerList[uuid];
     let i = this.frames.indexOf(frame);
     if (i != -1) {
@@ -5444,7 +5443,7 @@ function timeline() {
     }
   });
   timeline_cvs.addEventListener("mousedown", (e) => {
-    let mouse = getMousePos(timeline_cvs, e, true);
+    let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth) {
       mouse.x -= layerWidth;
