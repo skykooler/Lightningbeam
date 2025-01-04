@@ -7204,27 +7204,32 @@ function startToneOnUserInteraction() {
 startToneOnUserInteraction();
 
 function renderAll() {
-  if (uiDirty) {
-    renderUI();
-    uiDirty = false;
+  try {
+    if (uiDirty) {
+      renderUI();
+      uiDirty = false;
+    }
+    if (layersDirty) {
+      renderLayers();
+      layersDirty = false;
+    }
+    if (outlinerDirty) {
+      renderOutliner();
+      outlinerDirty = false;
+    }
+    if (menuDirty) {
+      renderMenu();
+      menuDirty = false;
+    }
+    if (infopanelDirty) {
+      renderInfopanel();
+      infopanelDirty = false;
+    }
+  } catch (error) {
+    console.error("Error during rendering:", error);
+  } finally {
+    requestAnimationFrame(renderAll);
   }
-  if (layersDirty) {
-    renderLayers();
-    layersDirty = false;
-  }
-  if (outlinerDirty) {
-    renderOutliner();
-    outlinerDirty = false;
-  }
-  if (menuDirty) {
-    renderMenu();
-    menuDirty = false;
-  }
-  if (infopanelDirty) {
-    renderInfopanel();
-    infopanelDirty = false;
-  }
-  requestAnimationFrame(renderAll);
 }
 
 renderAll();
