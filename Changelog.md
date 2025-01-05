@@ -1,5 +1,14 @@
 # 0.6.14-alpha:
 Changes:
+- Lightningbeam can now open/save files in the Desktop and Downloads folders as well as Documents
+
+Bugfixes:
+- Fix old files not importing animations correctly
+- Fix app freezing when encountering errors
+- Fix clicking on timeline selecting incorrect frame when zoomed
+
+# 0.6.14-alpha:
+Changes:
 - Make vertex handles semitransparent and always the same visual size
 
 Bugfixes:
