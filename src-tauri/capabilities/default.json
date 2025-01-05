@@ -15,7 +15,16 @@
       "identifier": "fs:allow-exists",
       "allow": [
         {
+          "path": "$HOME/*"
+        },
+        {
           "path": "$DOCUMENT/*"
+        },
+        {
+          "path": "$DOWNLOAD/*"
+        },
+        {
+          "path": "$DESKTOP/*"
         }
       ]
     },
@@ -23,7 +32,16 @@
       "identifier": "fs:allow-app-write-recursive",
       "allow": [
         {
+          "path": "$HOME/*"
+        },
+        {
           "path": "$DOCUMENT/*"
+        },
+        {
+          "path": "$DOWNLOAD/*"
+        },
+        {
+          "path": "$DESKTOP/*"
         }
       ]
     },
@@ -31,7 +49,16 @@
       "identifier": "fs:allow-app-read-recursive",
       "allow": [
         {
+          "path": "$HOME/*"
+        },
+        {
           "path": "$DOCUMENT/*"
+        },
+        {
+          "path": "$DOWNLOAD/*"
+        },
+        {
+          "path": "$DESKTOP/*"
         }
       ]
     },
