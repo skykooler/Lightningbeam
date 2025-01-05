@@ -104,14 +104,22 @@ jobs:
         # If you don't have `beforeBuildCommand` configured you may want to build your frontend here too.
         run: pnpm install # change this to npm or pnpm depending on which one you use.
 
+      - name: Extract release notes from Changelog.md
+        id: changelog
+        uses: peter-evans/extract-markdown-section@v1
+        with:
+          file: Changelog.md
+          pattern: "# ${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
+
       - name: Create Release with Tauri Action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES: ${{ env.RELEASE_NOTES }}
         with:
           tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
           releaseName: "Lightningbeam v${{ env.VERSION }}"
-          releaseBody: 'See the assets to download this version and install.'
+          releaseBody: "${{ steps.changelog.outputs.markdown }}"
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
           args: ${{ matrix.args }}
