@@ -3746,6 +3746,7 @@ async function _open(path, returnJson = false) {
           }
 
           const objectOffsets = {};
+          const frameIDs = []
           for (let action of file.actions) {
             if (!(action.name in actions)) {
               await messageDialog(
@@ -3783,6 +3784,9 @@ async function _open(path, returnJson = false) {
                 };
                 action.action.position = position;
                 objectOffsets[action.action.groupUuid] = position;
+                for (let shape of action.action.shapes) {
+                  objectOffsets[shape] = position
+                }
               } else if (action.name == "editFrame") {
                 for (let key in action.action.newState) {
                   if (key in objectOffsets) {
@@ -3794,6 +3798,26 @@ async function _open(path, returnJson = false) {
                   if (key in objectOffsets) {
                     action.action.oldState[key].x += objectOffsets[key].x;
                     action.action.oldState[key].y += objectOffsets[key].y;
+                  }
+                }
+              } else if (action.name == "addKeyframe") {
+                for (let id in objectOffsets) {
+                  objectOffsets[action.action.uuid.slice(0,8) + id.slice(8)] = objectOffsets[id]
+                }
+              } else if (action.name == "editShape") {
+                if (action.action.shape in objectOffsets) {
+                  console.log("editing shape")
+                  for (let curve of action.action.newCurves) {
+                    for (let point of curve.points) {
+                      point.x -= objectOffsets[action.action.shape].x
+                      point.y -= objectOffsets[action.action.shape].y
+                    }
+                  }
+                  for (let curve of action.action.oldCurves) {
+                    for (let point of curve.points) {
+                      point.x -= objectOffsets[action.action.shape].x
+                      point.y -= objectOffsets[action.action.shape].y
+                    }
                   }
                 }
               }
