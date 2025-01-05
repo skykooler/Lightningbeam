@@ -5118,18 +5118,27 @@ function toolbar() {
   let strokeColor = document.createElement("div");
   fillColor.className = "color-field";
   strokeColor.className = "color-field";
-  fillColor.setColor = (color) => {
+  fillColor.setColor = (hsv, alpha) => {
+    const rgb = hsvToRgb(...hsv)
+    console.log(alpha)
+    const color = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
     fillColor.style.setProperty("--color", color);
     fillColor.color = color;
+    fillColor.hsv = hsv
+    fillColor.alpha = alpha
     context.fillStyle = color;
   };
-  strokeColor.setColor = (color) => {
+  strokeColor.setColor = (hsv, alpha) => {
+    const rgb = hsvToRgb(...hsv)
+    const color = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
     strokeColor.style.setProperty("--color", color);
     strokeColor.color = color;
+    strokeColor.hsv = hsv
+    strokeColor.alpha = alpha
     context.strokeStyle = color;
   };
-  fillColor.setColor("#ff0000");
-  strokeColor.setColor("#000000");
+  fillColor.setColor([0, 1, 1], 'ff');
+  strokeColor.setColor([0,0,0], 'ff');
   fillColor.style.setProperty("--label-text", `"Fill color:"`);
   strokeColor.style.setProperty("--label-text", `"Stroke color:"`);
   fillColor.type = "color";
@@ -5157,6 +5166,8 @@ function toolbar() {
       colorCvs.style.boxShadow = "0 2px 2px rgba(0,0,0,0.2)";
       colorCvs.style.cursor = "crosshair";
       colorCvs.currentColor = "#00ffba88";
+      colorCvs.currentHSV = [0,0,0]
+      colorCvs.currentAlpha = 1
       colorCvs.draw = function () {
         const darkMode =
           window.matchMedia &&
@@ -5185,7 +5196,8 @@ function toolbar() {
         // Draw main gradient
         let mainGradient = ctx.createImageData(mainSize, mainSize);
         let data = mainGradient.data;
-        let { h, s, v } = hexToHsv(colorCvs.currentColor);
+        // let { h, s, v } = hexToHsv(colorCvs.currentColor);
+        let [h, s, v] = colorCvs.currentHSV
         for (let i = 0; i < data.length; i += 4) {
           let x = ((i / 4) % mainSize) / mainSize;
           let y = Math.floor(i / 4 / mainSize) / mainSize;
@@ -5273,7 +5285,8 @@ function toolbar() {
         colorCvs.clickedHueGradient = false;
         colorCvs.clickedAlphaGradient = false;
         let mouse = getMousePos(colorCvs, e);
-        let { h, s, v } = hexToHsv(colorCvs.currentColor);
+        // let { h, s, v } = hexToHsv(colorCvs.currentColor);
+        let [h, s, v] = colorCvs.currentHSV
         if (
           mouse.x > padding &&
           mouse.x < padding + mainSize &&
@@ -5286,6 +5299,8 @@ function toolbar() {
           let rgb = hsvToRgb(h, x, 1 - y);
           let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
           colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
+          colorCvs.currentHSV = [h, x, 1 - y]
+          colorCvs.currentAlpha = alpha
           colorCvs.clickedMainGradient = true;
         } else if (
           mouse.x > padding &&
@@ -5298,6 +5313,8 @@ function toolbar() {
           let rgb = hsvToRgb(x, s, v);
           let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
           colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
+          colorCvs.currentHSV = [x, s, v]
+          colorCvs.currentAlpha = alpha
           colorCvs.clickedHueGradient = true;
         } else if (
           mouse.x > colorCvs.width - (padding + gradwidth) &&
@@ -5309,9 +5326,10 @@ function toolbar() {
           let y = 1 - (mouse.y - (2 * padding + 50)) / mainSize;
           let alpha = Math.round(y * 255).toString(16);
           colorCvs.currentColor = `${colorCvs.currentColor.slice(0, 7)}${alpha}`;
+          colorCvs.currentAlpha = alpha
           colorCvs.clickedAlphaGradient = true;
         }
-        colorCvs.colorEl.setColor(colorCvs.currentColor);
+        colorCvs.colorEl.setColor(colorCvs.currentHSV, colorCvs.currentAlpha);
         colorCvs.draw();
       });
 
@@ -5337,12 +5355,16 @@ function toolbar() {
         let rgb = hsvToRgb(h, x, 1 - y);
         let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
         colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
+        colorCvs.currentHSV = [h, x, 1-y]
+        colorCvs.currentAlpha = alpha
         colorCvs.draw();
       } else if (colorCvs.clickedHueGradient) {
         let x = clamp((mouse.x - padding) / mainSize);
         let rgb = hsvToRgb(x, s, v);
         let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
         colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
+        colorCvs.currentHSV = [x, s, v]
+        colorCvs.currentAlpha = alpha
         colorCvs.draw();
       } else if (colorCvs.clickedAlphaGradient) {
         let y = clamp(1 - (mouse.y - (2 * padding + 50)) / mainSize);
@@ -5350,9 +5372,10 @@ function toolbar() {
           .toString(16)
           .padStart(2, "0");
         colorCvs.currentColor = `${colorCvs.currentColor.slice(0, 7)}${alpha}`;
+        colorCvs.currentAlpha = alpha
         colorCvs.draw();
       }
-      colorCvs.colorEl.setColor(colorCvs.currentColor);
+      colorCvs.colorEl.setColor(colorCvs.currentHSV, colorCvs.currentAlpha);
     });
     // Get mouse coordinates relative to the viewport
     const mouseX = e.clientX + window.scrollX;
@@ -5391,6 +5414,8 @@ function toolbar() {
     colorCvs.style.top = `${top}px`;
     colorCvs.colorEl = e.target;
     colorCvs.currentColor = e.target.color;
+    colorCvs.currentHSV = e.target.hsv;
+    colorCvs.currentAlpha = e.target.alpha
     colorCvs.draw();
     e.preventDefault();
   };
