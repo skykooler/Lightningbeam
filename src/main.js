@@ -2016,6 +2016,9 @@ class Frame {
     return newFrame;
   }
   static fromJSON(json) {
+    if (!json) {
+      return undefined
+    }
     const frame = new Frame(json.frameType, json.idx);
     frame.keys = json.keys;
     for (let i in json.shapes) {
@@ -2109,7 +2112,11 @@ class Layer {
       layer.frames.push(Frame.fromJSON(frame));
     }
     for (let frame in layer.frames) {
-      layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+      if (layer.frames[frame]) {
+        if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
+          layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+        }
+      }
     }
     layer.visible = json.visible;
     layer.audible = json.audible;
@@ -2132,7 +2139,11 @@ class Layer {
     }
     json.frames = [];
     for (let frame of this.frames) {
-      json.frames.push(frame.toJSON(randomizeUuid));
+      if (frame) {
+        json.frames.push(frame.toJSON(randomizeUuid));
+      } else {
+        json.frames.push(undefined)
+      }
     }
     json.visible = this.visible;
     json.audible = this.audible;
