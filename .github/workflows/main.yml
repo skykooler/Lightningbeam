@@ -106,7 +106,7 @@ jobs:
 
       - name: Extract release notes from Changelog.md
         id: changelog
-        uses: sean0x42/markdown-extract@v4
+        uses: sean0x42/markdown-extract@v2.1.0
         with:
           file: Changelog.md
           pattern: "# ${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
