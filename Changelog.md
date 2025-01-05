@@ -1,3 +1,7 @@
+# 0.6.16-alpha:
+Bugfixes:
+- Fix importing animations not functioning
+
 # 0.6.15-alpha:
 Changes:
 - Lightningbeam can now open/save files in the Desktop and Downloads folders as well as Documents
