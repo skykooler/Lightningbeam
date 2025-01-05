@@ -1,4 +1,4 @@
-# 0.6.14-alpha:
+# 0.6.15-alpha:
 Changes:
 - Lightningbeam can now open/save files in the Desktop and Downloads folders as well as Documents
 
