@@ -5151,7 +5151,6 @@ function toolbar() {
     console.log(hsv)
     const rgb = hsvToRgb(...hsv)
     const color = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
-    console.log(color)
     fillColor.style.setProperty("--color", color);
     fillColor.color = color;
     fillColor.hsv = hsv
