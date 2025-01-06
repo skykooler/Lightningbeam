@@ -41,56 +41,6 @@ function getKeyframesSurrounding(frames, index) {
     return { lastKeyframeBefore, firstKeyframeAfter };
 }
 
-function invertPixels(ctx, width, height) {
-    // Create an off-screen canvas for the pattern
-    const patternCanvas = document.createElement('canvas');
-    const patternContext = patternCanvas.getContext('2d');
-
-    // Define the size of the repeating pattern (2x2 pixels)
-    const patternSize = 2;
-    patternCanvas.width = patternSize;
-    patternCanvas.height = patternSize;
-
-    // Create the alternating pattern (regular and inverted pixels)
-    function createInvertedPattern() {
-      const patternData = patternContext.createImageData(patternSize, patternSize);
-      const data = patternData.data;
-
-      // Fill the pattern with alternating colors (inverted every other pixel)
-      for (let i = 0; i < patternSize; i++) {
-        for (let j = 0; j < patternSize; j++) {
-          const index = (i * patternSize + j) * 4;
-          // Determine if we should invert the color
-          if ((i + j) % 2 === 0 || j%2===0) {
-            data[index] = 0; // Red
-            data[index + 1] = 0; // Green
-            data[index + 2] = 0; // Blue
-            data[index + 3] = 255; // Alpha
-          } else {
-            data[index] = 255; // Red (inverted)
-            data[index + 1] = 255; // Green (inverted)
-            data[index + 2] = 255; // Blue (inverted)
-            data[index + 3] = 255; // Alpha
-          }
-        }
-      }
-
-      // Set the pattern on the off-screen canvas
-      patternContext.putImageData(patternData, 0, 0);
-      return patternCanvas;
-    }
-
-    // Create the pattern using the function
-    const pattern = ctx.createPattern(createInvertedPattern(), 'repeat');
-
-    // Draw a rectangle with the pattern
-    ctx.globalCompositeOperation = "difference"
-    ctx.fillStyle = pattern;
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.globalCompositeOperation = "source-over"
-}
-
 function lerp(a, b, t) {
   return a + (b - a) * t;
 }
@@ -918,7 +868,6 @@ export {
   titleCase,
   getMousePositionFraction,
   getKeyframesSurrounding,
-  invertPixels,
   lerp,
   lerpColor,
   camelToWords,

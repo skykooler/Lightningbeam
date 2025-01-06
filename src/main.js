@@ -11,7 +11,6 @@ import {
   titleCase,
   getMousePositionFraction,
   getKeyframesSurrounding,
-  invertPixels,
   lerpColor,
   lerp,
   camelToWords,
@@ -2501,6 +2500,23 @@ class BaseShape {
     let ctx = context.ctx;
     ctx.lineWidth = this.lineWidth;
     ctx.lineCap = "round";
+
+    // Create a repeating pattern for indicating selected shapes
+    let patternCanvas = document.createElement('canvas');
+    patternCanvas.width = 2;
+    patternCanvas.height = 2;
+    let patternCtx = patternCanvas.getContext('2d');
+    // Draw the pattern:
+    // black,       transparent,
+    // transparent, white
+    patternCtx.fillStyle = 'black';
+    patternCtx.fillRect(0, 0, 1, 1);
+    patternCtx.clearRect(1, 0, 1, 1);
+    patternCtx.clearRect(0, 1, 1, 1);
+    patternCtx.fillStyle = 'white';
+    patternCtx.fillRect(1, 1, 1, 1);
+    let pattern = ctx.createPattern(patternCanvas, 'repeat'); // repeat the pattern across the canvas
+
     // for (let region of this.regions) {
     //   // if (region.filled) continue;
     //   if ((region.fillStyle || region.fillImage) && region.filled) {
@@ -2546,6 +2562,10 @@ class BaseShape {
         }
       }
       ctx.fill();
+      if (context.selected) {
+        ctx.fillStyle = pattern
+        ctx.fill()
+      }
     }
     if (this.stroked && !context.debugColor) {
       for (let curve of this.curves) {
@@ -2561,6 +2581,10 @@ class BaseShape {
           curve.points[3].y,
         );
         ctx.stroke();
+        if (context.selected) {
+          ctx.strokeStyle = pattern
+          ctx.stroke()
+        }
 
         // // Debug, show curve control points
         // ctx.beginPath()
@@ -3230,13 +3254,11 @@ class GraphicsObject {
       if (context.activeObject == this && !layer.visible) continue;
       let frame = layer.getFrame(this.currentFrameNum);
       for (let shape of frame.shapes) {
+        let cxt = {...context}
         if (context.shapeselection.indexOf(shape) >= 0) {
-          invertPixels(ctx, config.fileWidth, config.fileHeight);
+          cxt.selected = true
         }
-        shape.draw(context);
-        if (context.shapeselection.indexOf(shape) >= 0) {
-          invertPixels(ctx, config.fileWidth, config.fileHeight);
-        }
+        shape.draw(cxt);
       }
       for (let child of layer.children) {
         if (child == context.activeObject) continue;
