@@ -58,6 +58,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient } from "./widgets.js";
 const {
   writeTextFile: writeTextFile,
   readTextFile: readTextFile,
@@ -5148,7 +5149,6 @@ function toolbar() {
   fillColor.classList.add("fill")
   strokeColor.classList.add("stroke")
   fillColor.setColor = (hsv, alpha) => {
-    console.log(hsv)
     const rgb = hsvToRgb(...hsv)
     const color = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
     fillColor.style.setProperty("--color", color);
@@ -5197,167 +5197,20 @@ function toolbar() {
       colorCvs.currentColor = "#00ffba88";
       colorCvs.currentHSV = [0,0,0]
       colorCvs.currentAlpha = 1
+
+      colorCvs.colorSelectorWidget = new ColorSelectorWidget(0, 0, colorCvs)
+
       colorCvs.draw = function () {
-        const darkMode =
-          window.matchMedia &&
-          window.matchMedia("(prefers-color-scheme: dark)").matches;
         let ctx = colorCvs.getContext("2d");
-        ctx.lineWidth = 2;
-        if (darkMode) {
-          ctx.fillStyle = "#333";
-        } else {
-          ctx.fillStyle = "#ccc"; //TODO
-        }
-        ctx.fillRect(0, 0, colorCvs.width, colorCvs.height);
+        colorCvs.colorSelectorWidget.draw(ctx)
 
-        // draw current color
-        drawCheckerboardBackground(
-          ctx,
-          padding,
-          padding,
-          colorCvs.width - 2 * padding,
-          50,
-          10,
-        );
-        ctx.fillStyle = colorCvs.currentColor;
-        ctx.fillRect(padding, padding, colorCvs.width - 2 * padding, 50);
-
-        // Draw main gradient
-        let mainGradient = ctx.createImageData(mainSize, mainSize);
-        let data = mainGradient.data;
-        // let { h, s, v } = hexToHsv(colorCvs.currentColor);
-        let [h, s, v] = colorCvs.currentHSV
-        for (let i = 0; i < data.length; i += 4) {
-          let x = ((i / 4) % mainSize) / mainSize;
-          let y = Math.floor(i / 4 / mainSize) / mainSize;
-          let hue = h;
-          let rgb = hsvToRgb(hue, x, 1 - y);
-          data[i + 0] = rgb.r;
-          data[i + 1] = rgb.g;
-          data[i + 2] = rgb.b;
-          data[i + 3] = 255;
-        }
-        ctx.putImageData(mainGradient, padding, 2 * padding + 50);
-        // draw pointer
-        ctx.beginPath();
-        ctx.arc(
-          s * mainSize + padding,
-          (1 - v) * mainSize + 2 * padding + 50,
-          3,
-          0,
-          2 * Math.PI,
-        );
-        ctx.strokeStyle = "white";
-        ctx.stroke();
-
-        let hueGradient = ctx.createImageData(mainSize, gradwidth);
-        data = hueGradient.data;
-        for (let i = 0; i < data.length; i += 4) {
-          let x = ((i / 4) % mainSize) / mainSize;
-          let y = Math.floor(i / 4 / gradwidth);
-          let rgb = hslToRgb(x, 1, 0.5);
-          data[i + 0] = rgb.r;
-          data[i + 1] = rgb.g;
-          data[i + 2] = rgb.b;
-          data[i + 3] = 255;
-        }
-        ctx.putImageData(hueGradient, padding, 3 * padding + 50 + mainSize);
-        // draw pointer
-        ctx.beginPath();
-        ctx.rect(
-          h * mainSize + padding - 2,
-          3 * padding + 50 + mainSize,
-          4,
-          gradwidth,
-        );
-        ctx.strokeStyle = "white";
-        ctx.stroke();
-
-        drawCheckerboardBackground(
-          ctx,
-          colorCvs.width - (padding + gradwidth),
-          2 * padding + 50,
-          gradwidth,
-          mainSize,
-          10,
-        );
-        const gradient = ctx.createLinearGradient(
-          0,
-          2 * padding + 50,
-          0,
-          2 * padding + 50 + mainSize,
-        ); // Vertical gradient
-        gradient.addColorStop(0, `${colorCvs.currentColor.slice(0, 7)}ff`); // Full color at the top
-        gradient.addColorStop(1, `${colorCvs.currentColor.slice(0, 7)}00`);
-        ctx.fillStyle = gradient;
-        ctx.fillRect(
-          colorCvs.width - (padding + gradwidth),
-          2 * padding + 50,
-          gradwidth,
-          mainSize,
-        );
-        let alpha =
-          parseInt(colorCvs.currentColor.slice(7, 9) || "ff", 16) / 255;
-        // draw pointer
-        ctx.beginPath();
-        ctx.rect(
-          colorCvs.width - (padding + gradwidth),
-          2 * padding + 50 + (1 - alpha) * mainSize - 2,
-          gradwidth,
-          4,
-        );
-        ctx.strokeStyle = "white";
-        ctx.stroke();
       };
       colorCvs.addEventListener("mousedown", (e) => {
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
         colorCvs.clickedAlphaGradient = false;
         let mouse = getMousePos(colorCvs, e);
-        // let { h, s, v } = hexToHsv(colorCvs.currentColor);
-        let [h, s, v] = colorCvs.currentHSV
-        if (
-          mouse.x > padding &&
-          mouse.x < padding + mainSize &&
-          mouse.y > 2 * padding + 50 &&
-          mouse.y < 2 * padding + 50 + mainSize
-        ) {
-          // we clicked in the main gradient
-          let x = (mouse.x - padding) / mainSize;
-          let y = (mouse.y - (2 * padding + 50)) / mainSize;
-          let rgb = hsvToRgb(h, x, 1 - y);
-          let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
-          colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
-          colorCvs.currentHSV = [h, x, 1 - y]
-          colorCvs.currentAlpha = alpha
-          colorCvs.clickedMainGradient = true;
-        } else if (
-          mouse.x > padding &&
-          mouse.x < padding + mainSize &&
-          mouse.y > 3 * padding + 50 + mainSize &&
-          mouse.y < 3 * padding + 50 + mainSize + gradwidth
-        ) {
-          // we clicked in the hue gradient
-          let x = (mouse.x - padding) / mainSize;
-          let rgb = hsvToRgb(x, s, v);
-          let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
-          colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
-          colorCvs.currentHSV = [x, s, v]
-          colorCvs.currentAlpha = alpha
-          colorCvs.clickedHueGradient = true;
-        } else if (
-          mouse.x > colorCvs.width - (padding + gradwidth) &&
-          mouse.x < colorCvs.width - padding &&
-          mouse.y > 2 * padding + 50 &&
-          mouse.y < 2 * padding + 50 + mainSize
-        ) {
-          // we clicked in the alpha gradient
-          let y = 1 - (mouse.y - (2 * padding + 50)) / mainSize;
-          let alpha = Math.round(y * 255).toString(16);
-          colorCvs.currentColor = `${colorCvs.currentColor.slice(0, 7)}${alpha}`;
-          colorCvs.currentAlpha = alpha
-          colorCvs.clickedAlphaGradient = true;
-        }
+        colorCvs.colorSelectorWidget.handleMouseEvent("mousedown", mouse.x, mouse.y)
         colorCvs.colorEl.setColor(colorCvs.currentHSV, colorCvs.currentAlpha);
         colorCvs.draw();
       });
@@ -5367,6 +5220,8 @@ function toolbar() {
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
         colorCvs.clickedAlphaGradient = false;
+
+        colorCvs.colorSelectorWidget.handleMouseEvent("mouseup", mouse.x, mouse.y)
         if (e.target != colorCvs) {
           colorCvs.style.display = "none";
           window.removeEventListener("mousemove", evtListener);
@@ -5377,33 +5232,8 @@ function toolbar() {
     }
     evtListener = window.addEventListener("mousemove", (e) => {
       let mouse = getMousePos(colorCvs, e);
-      let { h, s, v } = hexToHsv(colorCvs.currentColor);
-      if (colorCvs.clickedMainGradient) {
-        let x = clamp((mouse.x - padding) / mainSize);
-        let y = clamp((mouse.y - (2 * padding + 50)) / mainSize);
-        let rgb = hsvToRgb(h, x, 1 - y);
-        let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
-        colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
-        colorCvs.currentHSV = [h, x, 1-y]
-        colorCvs.currentAlpha = alpha
-        colorCvs.draw();
-      } else if (colorCvs.clickedHueGradient) {
-        let x = clamp((mouse.x - padding) / mainSize);
-        let rgb = hsvToRgb(x, s, v);
-        let alpha = colorCvs.currentColor.slice(7, 9) || "ff";
-        colorCvs.currentColor = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha;
-        colorCvs.currentHSV = [x, s, v]
-        colorCvs.currentAlpha = alpha
-        colorCvs.draw();
-      } else if (colorCvs.clickedAlphaGradient) {
-        let y = clamp(1 - (mouse.y - (2 * padding + 50)) / mainSize);
-        let alpha = Math.round(y * 255)
-          .toString(16)
-          .padStart(2, "0");
-        colorCvs.currentColor = `${colorCvs.currentColor.slice(0, 7)}${alpha}`;
-        colorCvs.currentAlpha = alpha
-        colorCvs.draw();
-      }
+      colorCvs.colorSelectorWidget.handleMouseEvent("mousemove", mouse.x, mouse.y)
+      colorCvs.draw()
       colorCvs.colorEl.setColor(colorCvs.currentHSV, colorCvs.currentAlpha);
     });
     // Get mouse coordinates relative to the viewport
