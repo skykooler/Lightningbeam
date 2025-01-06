@@ -39,6 +39,7 @@ import {
   rotateAroundPoint,
   getRotatedBoundingBox,
   rotateAroundPointIncremental,
+  rgbToHsv,
 } from "./utils.js";
 import {
   backgroundColor,
@@ -272,6 +273,16 @@ let tools = {
       },
     },
   },
+  eyedropper: {
+    icon: "/assets/eyedropper.svg",
+    properties: {
+      dropperColor: {
+        type: "enum",
+        options: ["Fill color", "Stroke color"],
+        label: "Color"
+      }
+    }
+  }
 };
 
 let mouseEvent;
@@ -294,6 +305,7 @@ let context = {
   fillShape: false,
   strokeShape: true,
   fillGaps: 5,
+  dropperColor: "Fill color",
   dragging: false,
   selectionRect: undefined,
   selection: [],
@@ -4687,6 +4699,21 @@ function stage() {
           // }
         }
         break;
+      case "eyedropper":
+        const ctx = stage.getContext("2d")
+        const imageData = ctx.getImageData(mouse.x, mouse.y, 1, 1); // Get pixel at (x, y)
+        const data = imageData.data; // The pixel data is in the `data` array
+        const hsv = rgbToHsv(...data)
+        if (context.dropperColor == "Fill color") {
+          for (let el of document.querySelectorAll(".color-field.fill")) {
+            el.setColor(hsv, 'ff')
+          }
+        } else {
+          for (let el of document.querySelectorAll(".color-field.stroke")) {
+            el.setColor(hsv, 'ff')
+          }
+        }
+        break;
       default:
         break;
     }
@@ -5118,10 +5145,13 @@ function toolbar() {
   let strokeColor = document.createElement("div");
   fillColor.className = "color-field";
   strokeColor.className = "color-field";
+  fillColor.classList.add("fill")
+  strokeColor.classList.add("stroke")
   fillColor.setColor = (hsv, alpha) => {
+    console.log(hsv)
     const rgb = hsvToRgb(...hsv)
-    console.log(alpha)
     const color = rgbToHex(rgb.r, rgb.g, rgb.b) + alpha
+    console.log(color)
     fillColor.style.setProperty("--color", color);
     fillColor.color = color;
     fillColor.hsv = hsv

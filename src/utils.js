@@ -542,6 +542,42 @@ const rgbToHex = (r, g, b) => {
   return `#${(1 << 24 | (r << 16) | (g << 8) | b).toString(16).slice(1).toUpperCase()}`;
 };
 
+function rgbToHsv(r, g, b) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  let h = 0;
+  let s = 0;
+  let v = max;
+
+  if (delta !== 0) {
+    s = delta / max;
+
+    if (r === max) {
+      h = (g - b) / delta;
+    } else if (g === max) {
+      h = 2 + (b - r) / delta;
+    } else {
+      h = 4 + (r - g) / delta;
+    }
+
+    h *= 60;
+
+    if (h < 0) {
+      h += 360;
+    }
+  }
+
+  // Normalize hue to be between 0 and 1
+  h /= 360;
+
+  return [h, s, v]; // Return as array [h, s, v]
+}
+
 function clamp(n) {
   // Clamps a value between 0 and 1
   return Math.min(Math.max(n,0),1)
@@ -885,6 +921,7 @@ export {
   hexToHsl,
   hexToHsv,
   rgbToHex,
+  rgbToHsv,
   drawCheckerboardBackground,
   clamp,
   signedAngleBetweenVectors,
