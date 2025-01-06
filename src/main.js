@@ -4518,7 +4518,7 @@ function stage() {
               }
               if (!selected) {
                 context.oldselection = context.selection;
-                context.oldshapeselection = context.selection;
+                context.oldshapeselection = context.shapeselection;
                 context.selection = [];
                 context.shapeselection = [];
                 if (
@@ -5792,6 +5792,24 @@ function outliner(object = undefined) {
           outliner.collapsed[object.idx] = !outliner.collapsed[object.idx];
         } else {
           outliner.active = object;
+          context.objectStack = []
+          let parent = object;
+          while (true) {
+            if (parent.parent) {
+              parent = parent.parent
+              context.objectStack.unshift(parent)
+            } else {
+              break
+            }
+          }
+          if (context.objectStack.length==0) {
+            context.objectStack.push(root)
+          }
+          context.oldselection = context.selection
+          context.oldshapeselection = context.shapeselection
+          context.selection = [object]
+          context.shapeselection = []
+          actions.select.create()
         }
         updateOutliner(); // Re-render the outliner
         return;
