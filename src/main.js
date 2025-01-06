@@ -177,6 +177,7 @@ let tools = {
           get: () => {
             if (context.selection.length != 1) return undefined;
             const selectedObject = context.selection[0];
+            if (! (selectedObject.idx in context.activeObject.currentFrame.keys)) return undefined;
             return context.activeObject.currentFrame.keys[selectedObject.idx]
               .goToFrame;
           },
