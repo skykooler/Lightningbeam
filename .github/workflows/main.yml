@@ -109,8 +109,8 @@ jobs:
         uses: sean0x42/markdown-extract@v2.1.0
         if: matrix.platform == 'ubuntu-22.04'
         with:
-          file: Changelog.md
           pattern: "# ${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
+          file: "Changelog.md"
 
       - name: Create Release with Tauri Action
         uses: tauri-apps/tauri-action@v0
