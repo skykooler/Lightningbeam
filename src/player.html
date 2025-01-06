@@ -3,6 +3,194 @@
 <head>
 <script>
 const _file = "${file}"
+class Frame {
+    constructor(frameType) {
+        this.keys = {}
+        this.shapes = []
+        this.frameType = frameType
+    }
+    static fromJSON(json) {
+        const frame = new Frame(json.frameType)
+        frame.keys = json.keys
+        for (let i in json.shapes) {
+            const shape = json.shapes[i]
+            frame.shapes.push(Shape.fromJSON(shape))
+        }
+        return frame
+    }
+    render(ctx) {
+        for (let shape of this.shapes) {
+            shape.render(ctx)
+        }
+    }
+}
+class Layer {
+    constructor() {
+        this.children = []
+        this.frames = []
+    }
+    static fromJSON(json) {
+        const layer = new Layer(json.idx)
+        for (let i in json.children) {
+            const child = json.children[i]
+            layer.children.push(GraphicsObject.fromJSON(child))
+        }
+        layer.frames = []
+        for (let frame of json.frames) {
+            const newFrame = Frame.fromJSON(frame)
+            newFrame.parent = this
+            layer.frames.push(newFrame)
+        }
+        for (let frame in layer.frames) {
+            layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType)
+        }
+        return layer
+    }
+    render(ctx, frameNum) {
+        const frame = this.frames[frameNum]
+        if (frame) {
+            frame.render(ctx)
+            for (let child of this.children) {
+                if (child.idx in frame.keys) {
+                    for (let prop in frame.keys[child.idx]) {
+                        frameKeys[key][prop] = frame.keys[child.idx][prop]
+                    }
+                    child.render(ctx)
+                }
+            }
+        }
+    }
+}
+class Shape {
+    constructor(startx, starty, context, uuid, shapeId) {
+        this.startx = startx
+        this.starty = starty
+        this.curves = []
+        this.regions = [];
+        this.boundingBox = {
+          x: {min: startx, max: starty},
+          y: {min: starty, max: starty}
+        }
+        this.vertices = [];
+        this.triangles = [];
+        this.fillStyle = context.fillStyle;
+        this.fillImage = context.fillImage;
+        this.strokeStyle = context.strokeStyle;
+        this.lineWidth = context.lineWidth
+        this.filled = context.fillShape;
+        this.stroked = context.strokeShape;
+        this.idx = uuid
+        this.shapeId = shapeId
+    }
+    static fromJSON(json) {
+        const shape = new Shape(json.startx, json.starty, {
+            fillStyle: json.fillStyle,
+            fillImage: json.fillImage,
+            strokeStyle: json.strokeStyle,
+            lineWidth: json.lineWidth,
+            fillShape: json.filled,
+            strokeShape: json.stroked
+        }, json.idx, json.shapeId)
+        for (let curve of json.curves) {
+            shape.addCurve(Bezier.fromJSON(curve))
+        }
+        for (let region of json.regions) {
+            const curves = []
+            for (let curve of region.curves) {
+                curves.push(Bezier.fromJSON(curve))
+            }
+            shape.regions.push({
+                idx: region.idx,
+                curves: curves,
+                fillStyle: region.fillStyle,
+                filled: region.filled
+            })
+        }
+        return shape
+    }
+    render(ctx) {
+        ctx.lineWidth = this.lineWidth
+        ctx.lineCap = "round"
+        if (this.filled) {
+          ctx.beginPath()
+          if (this.fillImage) {
+            let pat = ctx.createPattern(this.fillImage, "no-repeat")
+            ctx.fillStyle = pat
+          } else {
+            ctx.fillStyle = this.fillStyle
+          }
+          if (context.debugColor) {
+            ctx.fillStyle = context.debugColor
+          }
+          if (this.curves.length > 0) {
+            ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y)
+            for (let curve of this.curves) {
+              ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                                curve.points[2].x, curve.points[2].y,
+                                curve.points[3].x, curve.points[3].y)
+            }
+          }
+          ctx.fill()
+        }
+        if (this.stroked) {
+          for (let curve of this.curves) {
+            ctx.strokeStyle = curve.color
+            ctx.beginPath()
+            ctx.moveTo(curve.points[0].x, curve.points[0].y)
+            ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
+                              curve.points[2].x, curve.points[2].y,
+                              curve.points[3].x, curve.points[3].y)
+            ctx.stroke()
+          }
+        }
+    }
+}
+class GraphicsObject {
+    constructor(uuid) {
+        this.x = 0;
+        this.y = 0;
+        this.rotation = 0; // in radians
+        this.scale_x = 1;
+        this.scale_y = 1;
+        this.idx = uuid
+        this.name = this.idx
+
+        this.currentFrameNum = 0;
+        this.currentLayer = 0;
+        this.layers = []
+        this.audioLayers = []
+    }
+    static fromJSON(json) {
+        const graphicsObject = new GraphicsObject(json.idx)
+        graphicsObject.x = json.x
+        graphicsObject.y = json.y
+        graphicsObject.rotation = json.rotation
+        graphicsObject.scale_x = json.scale_x
+        graphicsObject.scale_y = json.scale_y
+        graphicsObject.name = json.name
+        graphicsObject.currentFrameNum = json.currentFrameNum
+        graphicsObject.currentLayer = json.currentLayer
+        graphicsObject.layers = []
+        for (let layer of json.layers) {
+          graphicsObject.layers.push(Layer.fromJSON(layer))
+        }
+        for (let audioLayer of json.audioLayers) {
+          graphicsObject.audioLayers.push(AudioLayer.fromJSON(audioLayer))
+        }
+        return graphicsObject
+    }
+    render(ctx, frameNum) {
+        ctx.save()
+        ctx.translate(this.x, this.y)
+        ctx.rotate(this.rotation)
+        ctx.scale(this.scale_x, this.scale_y)
+        for (let layer of this.layers) {
+            layer.render(ctx, frameNum)
+        }
+        ctx.restore()
+
+    }
+}
 function _render() {
 
     requestAnimationFrame(_render)
