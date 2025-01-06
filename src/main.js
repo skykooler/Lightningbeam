@@ -3332,6 +3332,7 @@ class GraphicsObject {
       }
       if (mode == "select") {
         for (let item of context.selection) {
+          if (!item) continue;
           if (item.idx in this.currentFrame.keys) {
             ctx.save();
             ctx.strokeStyle = "#00ffff";
@@ -5663,24 +5664,27 @@ function outliner(object = undefined) {
           outliner.collapsed[object.idx] = !outliner.collapsed[object.idx];
         } else {
           outliner.active = object;
-          context.objectStack = []
-          let parent = object;
-          while (true) {
-            if (parent.parent) {
-              parent = parent.parent
-              context.objectStack.unshift(parent)
-            } else {
-              break
+          // Only do selection when this is pointing at the actual file
+          if (outliner.object==root) {
+            context.objectStack = []
+            let parent = object;
+            while (true) {
+              if (parent.parent) {
+                parent = parent.parent
+                context.objectStack.unshift(parent)
+              } else {
+                break
+              }
             }
+            if (context.objectStack.length==0) {
+              context.objectStack.push(root)
+            }
+            context.oldselection = context.selection
+            context.oldshapeselection = context.shapeselection
+            context.selection = [object]
+            context.shapeselection = []
+            actions.select.create()
           }
-          if (context.objectStack.length==0) {
-            context.objectStack.push(root)
-          }
-          context.oldselection = context.selection
-          context.oldshapeselection = context.shapeselection
-          context.selection = [object]
-          context.shapeselection = []
-          actions.select.create()
         }
         updateOutliner(); // Re-render the outliner
         return;
