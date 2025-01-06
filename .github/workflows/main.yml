@@ -111,7 +111,7 @@ jobs:
         with:
           pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
           file: Changelog.md
-          no-ptint-matched-heading: true
+          no-print-matched-heading: true
 
       - name: Create Release with Tauri Action
         uses: tauri-apps/tauri-action@v0
