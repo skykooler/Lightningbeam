@@ -1647,7 +1647,6 @@ let actions = {
       let selection = [];
       let shapeselection = [];
       for (let item of context.selection) {
-        let idx = child.idx;
         selection.push(item.idx);
       }
       for (let shape of context.shapeselection) {
@@ -2917,11 +2916,15 @@ class Shape extends BaseShape {
     return pointsSorted;
   }
   translate(x, y) {
+    this.quadtree.clear()
+    let j=0;
     for (let curve of this.curves) {
       for (let i in curve.points) {
         const point = curve.points[i];
         curve.points[i] = { x: point.x + x, y: point.y + y };
       }
+      this.quadtree.insert(curve, j)
+      j++;
     }
     this.update();
   }
@@ -3204,12 +3207,16 @@ class GraphicsObject {
     bbox.y.max += this.y;
     return bbox;
   }
-  draw(context) {
+  draw(context, calculateTransform=false) {
     let ctx = context.ctx;
     ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.rotation);
-    ctx.scale(this.scale_x, this.scale_y);
+    if (calculateTransform) {
+      this.transformCanvas(ctx)
+    } else {
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.rotation);
+      ctx.scale(this.scale_x, this.scale_y);
+    }
     // if (this.currentFrameNum>=this.maxFrame) {
     //   this.currentFrameNum = 0;
     // }
@@ -3377,6 +3384,14 @@ class GraphicsObject {
       }
     }
     ctx.restore();
+  }
+  transformCanvas(ctx) {
+    if (this.parent) {
+      this.parent.transformCanvas(ctx)
+    }
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+    ctx.scale(this.scale_x, this.scale_y);
   }
   transformMouse(mouse) {
     if (this.parent) {
@@ -4641,10 +4656,12 @@ function stage() {
         }
 
         // We didn't find an existing region to paintbucket, see if we can make one
+        const offset = context.activeObject.transformMouse({x:0, y:0})
         try {
           regionPoints = floodFillRegion(
             mouse,
             epsilon,
+            offset,
             config.fileWidth,
             config.fileHeight,
             context,
@@ -4660,6 +4677,7 @@ function stage() {
           regionPoints = floodFillRegion(
             mouse,
             1,
+            offset,
             config.fileWidth,
             config.fileHeight,
             context,
@@ -6019,12 +6037,14 @@ function renderUI() {
     if (context.activeObject != root) {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
       ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
-      context.activeObject.draw(context);
+      context.activeObject.draw(context, true);
     }
     if (context.activeShape) {
       context.activeShape.draw(context);
     }
 
+    ctx.save()
+    context.activeObject.transformCanvas(ctx)
     // Debug rendering
     if (debugQuadtree) {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
@@ -6040,6 +6060,7 @@ function renderUI() {
           debugCurves.push(shape.curves[i]);
         }
       }
+
     }
     // let i=4;
     for (let curve of debugCurves) {
@@ -6077,6 +6098,7 @@ function renderUI() {
       ctx.arc(point.x, point.y, 3, 0, 2 * Math.PI);
       ctx.fill();
     }
+    ctx.restore()
     if (context.activeAction) {
       actions[context.activeAction.type].render(context.activeAction, ctx);
     }
