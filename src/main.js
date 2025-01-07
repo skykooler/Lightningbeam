@@ -2049,7 +2049,7 @@ class Frame {
     } else {
       json.idx = this.idx;
     }
-    json.keys = this.keys;
+    json.keys = structuredClone(this.keys);
     json.shapes = [];
     for (let shape of this.shapes) {
       json.shapes.push(shape.toJSON(randomizeUuid));
@@ -2146,13 +2146,23 @@ class Layer {
       json.name = this.name;
     }
     json.children = [];
+    let idMap = {}
     for (let child of this.children) {
-      json.children.push(child.toJSON(randomizeUuid));
+      let childJson = child.toJSON(randomizeUuid)
+      idMap[child.idx] = childJson.idx
+      json.children.push(childJson);
     }
     json.frames = [];
     for (let frame of this.frames) {
       if (frame) {
-        json.frames.push(frame.toJSON(randomizeUuid));
+        let frameJson = frame.toJSON(randomizeUuid)
+        for (let key in frameJson.keys) {
+          if (key in idMap) {
+            frameJson.keys[idMap[key]] = frameJson.keys[key]
+            delete frameJson.keys[key]
+          }
+        }
+        json.frames.push(frameJson);
       } else {
         json.frames.push(undefined)
       }
