@@ -1,3 +1,16 @@
+# 0.6.17-alpha:
+New features:
+- Clicking on an object in the outliner will select it
+
+Bugfixes:
+- Fix color picker being unresponsive when color is black
+- Fix paintbucket not working in transformed shapes
+- Fixed selecting shapes rendering incorrectly
+- Fix errors in goToDrame
+- Fix being unable to select imported objects
+- Fix being unable to open files in some directories
+- Fix grouped groups not being copy-pastable
+
 # 0.6.16-alpha:
 Bugfixes:
 - Fix importing animations not functioning
