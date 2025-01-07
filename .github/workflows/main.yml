@@ -7,7 +7,19 @@ on:
       - release
 
 jobs:
+  extract-changelog:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract release notes from Changelog.md
+        id: changelog
+        uses: sean0x42/markdown-extract@v2.1.0
+        with:
+          pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
+          file: Changelog.md
+          
   publish-tauri:
+    needs: extract-changelog
     permissions:
       contents: write
     strategy:
@@ -104,24 +116,15 @@ jobs:
         # If you don't have `beforeBuildCommand` configured you may want to build your frontend here too.
         run: pnpm install # change this to npm or pnpm depending on which one you use.
 
-      - name: Extract release notes from Changelog.md
-        id: changelog
-        uses: sean0x42/markdown-extract@v2.1.0
-        if: matrix.platform == 'ubuntu-22.04'
-        with:
-          pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
-          file: Changelog.md
-          no-print-matched-heading: true
-
       - name: Create Release with Tauri Action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_NOTES: ${{ env.RELEASE_NOTES }}
+          RELEASE_NOTES: ${{ needs.extract-changelog.outputs.markdown }}
         with:
           tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
           releaseName: "Lightningbeam v${{ env.VERSION }}"
-          releaseBody: "${{ steps.changelog.outputs.markdown }}"
+          releaseBody: "${{ needs.extract-changelog.outputs.markdown }}"
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
           args: ${{ matrix.args }}
