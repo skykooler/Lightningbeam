@@ -1778,13 +1778,14 @@ function getMousePos(canvas, evt, skipOffsets = false, skipZoom = false) {
   var rect = canvas.getBoundingClientRect();
   let offsetX = canvas.offsetX || 0;
   let offsetY = canvas.offsetY || 0;
+  let zoomLevel = canvas.zoomLevel || 1;
   if (skipOffsets) {
     offsetX = 0;
     offsetY = 0;
   }
   return {
-    x: (evt.clientX + offsetX - rect.left) / (skipZoom ? 1 : context.zoomLevel),
-    y: (evt.clientY + offsetY - rect.top) / (skipZoom ? 1 : context.zoomLevel),
+    x: (evt.clientX + offsetX - rect.left) / (skipZoom ? 1 : zoomLevel),
+    y: (evt.clientY + offsetY - rect.top) / (skipZoom ? 1 : zoomLevel),
   };
 }
 
@@ -4297,6 +4298,7 @@ function updateScrollPosition(zoomFactor) {
         (canvas.offsetX + context.mousePos.x) * zoomFactor - context.mousePos.x;
       canvas.offsetY =
         (canvas.offsetY + context.mousePos.y) * zoomFactor - context.mousePos.y;
+      canvas.zoomLevel = context.zoomLevel
     }
   }
 }
@@ -4337,6 +4339,7 @@ function stage() {
   // stage.height = config.fileHeight
   stage.offsetX = 0;
   stage.offsetY = 0;
+  stage.zoomLevel = context.zoomLevel
 
   let lastResizeTime = 0;
   const throttleIntervalMs = 20;
