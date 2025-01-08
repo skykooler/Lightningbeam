@@ -85,9 +85,11 @@ window.addEventListener('unhandledrejection', (event) => {
 
 function forwardConsole(fnName, dest) {
   const original = console[fnName];
-  console[fnName] = (message) => {
+  console[fnName] = (...args) => {
     const error = new Error();
     const stackLines = error.stack.split("\n");
+
+    let message = args.join(" ");  // Join all arguments into a single string
 
     if (fnName === "error") {
       // Send the full stack trace for errors
@@ -98,7 +100,7 @@ function forwardConsole(fnName, dest) {
       invoke(dest, { msg: `${location ? location[0] : 'unknown'}: ${message}` });
     }
 
-    original(message);
+    original(...args);  // Pass all arguments to the original console method
   };
 }
 
@@ -159,6 +161,8 @@ let layersDirty = false;
 let menuDirty = false;
 let outlinerDirty = false;
 let infopanelDirty = false;
+let lastErrorMessage = null;  // To keep track of the last error
+let repeatCount = 0;
 
 let clipboard = [];
 
@@ -7247,7 +7251,18 @@ function renderAll() {
       infopanelDirty = false;
     }
   } catch (error) {
-    console.error("Error during rendering:", error);
+    const errorMessage = error.message || error.toString();  // Use error message or string representation of the error
+
+    if (errorMessage !== lastErrorMessage) {
+      // A new error, log it and reset repeat count
+      console.error("Error during rendering:", errorMessage);
+      lastErrorMessage = errorMessage;
+      repeatCount = 1;
+    } else if (repeatCount === 1) {
+      // The error repeats for the second time, log "[Repeats]"
+      console.warn("[Repeats]");
+      repeatCount = 2;
+    }
   } finally {
     requestAnimationFrame(renderAll);
   }
