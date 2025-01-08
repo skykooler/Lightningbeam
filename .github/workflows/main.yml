@@ -11,6 +11,15 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Set version for changelog extraction
+        shell: bash
+        run: |
+          # Read the version from src-tauri/tauri.conf.json
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          # Set the version in the environment variable
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
       - name: Extract release notes from Changelog.md
         id: changelog
         uses: sean0x42/markdown-extract@v2.1.0
