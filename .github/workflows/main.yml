@@ -27,10 +27,12 @@ jobs:
           pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
           file: Changelog.md
 
-      # Set the markdown output using environment files
       - name: Set markdown output
+        id: set-markdown-output
         run: |
-          echo "markdown=${{ steps.changelog.outputs.markdown }}" >> $GITHUB_ENV
+          echo 'RELEASE_NOTES<<EOF' >> $GITHUB_OUTPUT
+          echo "${{ steps.changelog.outputs.markdown }}" >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
           
   publish-tauri:
     needs: extract-changelog
@@ -55,7 +57,7 @@ jobs:
 
       - name: Debug the extracted release notes
         run: |
-          echo "Extracted Release Notes: ${{ env.markdown }}"
+          echo "Extracted Release Notes: ${{ needs.extract-changelog.outputs.RELEASE_NOTES }}"
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
@@ -138,11 +140,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_NOTES: ${{ needs.extract-changelog.outputs.markdown }}
+          RELEASE_NOTES: ${{ needs.extract-changelog.outputs.RELEASE_NOTES }}
         with:
           tagName: "app-v${{ env.VERSION }}"  # Use the original version tag for the release
           releaseName: "Lightningbeam v${{ env.VERSION }}"
-          releaseBody: "${{ env.markdown }}"
+          releaseBody: "${{ needs.extract-changelog.outputs.RELEASE_NOTES }}"
           releaseDraft: true  # Set to true if you want the release to be a draft
           prerelease: true
           args: ${{ matrix.args }}
