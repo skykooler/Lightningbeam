@@ -39,6 +39,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug the extracted release notes
+        run: |
+          echo "Extracted Release Notes: ${{ steps.changelog.outputs.markdown }}"
+          echo "All outputs: ${{ steps.changelog.outputs }}"
+
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
         run: |
