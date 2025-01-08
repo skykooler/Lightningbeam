@@ -1,3 +1,10 @@
+# 0.6.18-alpha:
+New features:
+- Errors and debug messages are now logged to a file
+
+Bugfixes:
+- Fix mouse clicks going to wrong locations in color picker and outliner when zoomed
+
 # 0.6.17-alpha:
 New features:
 - Clicking on an object in the outliner will select it
