@@ -27,10 +27,9 @@ jobs:
           pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
           file: Changelog.md
 
-      - name: Debug the extracted release notes
-        run: |
-          echo "Extracted Release Notes: ${{ steps.changelog.outputs.markdown }}"
-          echo "All outputs: ${{ steps.changelog.outputs }}"
+      # Set the markdown output of the job
+      - name: Set markdown output
+        run: echo "::set-output name=markdown::$(echo '${{ steps.changelog.outputs.markdown }}')"
           
   publish-tauri:
     needs: extract-changelog
@@ -55,8 +54,7 @@ jobs:
 
       - name: Debug the extracted release notes
         run: |
-          echo "Extracted Release Notes: ${{ steps.changelog.outputs.markdown }}"
-          echo "All outputs: ${{ steps.changelog.outputs }}"
+          echo "Extracted Release Notes: ${{ needs.extract-changelog.outputs.markdown }}"
 
       - name: install dependencies (ubuntu only)
         if: matrix.platform == 'ubuntu-22.04' # This must match the platform value defined above.
