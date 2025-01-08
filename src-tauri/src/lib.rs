@@ -49,6 +49,10 @@ pub fn run() {
                   })
                 .targets([
                     Target::new(TargetKind::Stdout),
+                    // LogDir locations:
+                    // Linux: /home/user/.local/share/org.lightningbeam.app/logs
+                    // macOS: /Users/user/Library/Logs/org.lightningbeam.app/logs
+                    // Windows: C:\Users\user\AppData\Local\org.lightningbeam.app\logs
                     Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
                     Target::new(TargetKind::Webview),
                 ])
