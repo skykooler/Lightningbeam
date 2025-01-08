@@ -26,6 +26,11 @@ jobs:
         with:
           pattern: "${{ env.VERSION }}:"  # Look for the version header (e.g., # 0.6.15-alpha:)
           file: Changelog.md
+
+      - name: Debug the extracted release notes
+        run: |
+          echo "Extracted Release Notes: ${{ steps.changelog.outputs.markdown }}"
+          echo "All outputs: ${{ steps.changelog.outputs }}"
           
   publish-tauri:
     needs: extract-changelog
