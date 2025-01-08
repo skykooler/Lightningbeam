@@ -18,8 +18,8 @@ importers:
         specifier: ~2
         version: 2.0.2
       '@tauri-apps/plugin-log':
-        specifier: ~2
-        version: 2.0.1
+        specifier: ^2.2.0
+        version: 2.2.0
       ffmpeg:
         specifier: ^0.0.4
         version: 0.0.4
@@ -115,8 +115,8 @@ packages:
   '@tauri-apps/plugin-fs@2.0.2':
     resolution: {integrity: sha512-4YZaX2j7ta81M5/DL8aN10kTnpUkEpkPo1FTYPT8Dd0ImHe3azM8i8MrtjrDGoyBYLPO3zFv7df/mSCYF8oA0Q==}
 
-  '@tauri-apps/plugin-log@2.0.1':
-    resolution: {integrity: sha512-zFT3S/Q5liMKIjPPdUZL8aNbjvhHvyfkhuqct3/MQ6/7rk4ODstcUPu320KJBjZrNNH/UM+kaQBGrioIwtmP/Q==}
+  '@tauri-apps/plugin-log@2.2.0':
+    resolution: {integrity: sha512-g6CsQAR1lsm5ABSZZxpM/iCn86GrMDTTlhj7GPkZkYBRSm3+WczfOAl7SV7HDn77tOKCzhZffwI5uHfRoHutrw==}
 
   ffmpeg.js@4.2.9003:
     resolution: {integrity: sha512-l1JBr8HwnnJEaSwg5p8K3Ifbom8O2IDHsZp7UVyr6MzQ7gc32tt/2apoOuQAr/j76c+uDOjla799VSsBnRvSTg==}
@@ -188,7 +188,7 @@ snapshots:
     dependencies:
       '@tauri-apps/api': 2.1.1
 
-  '@tauri-apps/plugin-log@2.0.1':
+  '@tauri-apps/plugin-log@2.2.0':
     dependencies:
       '@tauri-apps/api': 2.1.1
 

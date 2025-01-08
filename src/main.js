@@ -74,21 +74,42 @@ const { documentDir, join, basename, appLocalDataDir } = window.__TAURI__.path;
 const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
-const { warn, debug, trace, info, error } = window.__TAURI__.log;
 
-function forwardConsole(fnName, logger) {
+window.onerror = (message, source, lineno, colno, error) => {
+  invoke("error", { msg: `${message} at ${source}:${lineno}:${colno}\n${error?.stack || ''}` });
+};
+
+window.addEventListener('unhandledrejection', (event) => {
+  invoke("error", { msg: `Unhandled Promise Rejection: ${event.reason?.stack || event.reason}` });
+});
+
+function forwardConsole(fnName, dest) {
   const original = console[fnName];
   console[fnName] = (message) => {
+    const error = new Error();
+    const stackLines = error.stack.split("\n");
+
+    if (fnName === "error") {
+      // Send the full stack trace for errors
+      invoke(dest, { msg: `${message}\nStack trace:\n${stackLines.slice(1).join("\n")}` });
+    } else {
+      // For other log levels, just extract the file and line number
+      const location = stackLines[stackLines.length - 1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
+      invoke(dest, { msg: `${location ? location[0] : 'unknown'}: ${message}` });
+    }
+
     original(message);
-    logger(message);
   };
 }
 
-// forwardConsole('log', trace);
-// forwardConsole('debug', debug);
-// forwardConsole('info', info);
-// forwardConsole('warn', warn);
-// forwardConsole('error', error);
+forwardConsole('trace', "trace");
+forwardConsole('log', "trace");
+forwardConsole('debug', "debug");
+forwardConsole('info', "info");
+forwardConsole('warn', "warn");
+forwardConsole('error', "error");
+
+console.log("*** Starting Lightningbeam ***")
 
 // Debug flags
 const debugQuadtree = false;
@@ -200,6 +221,7 @@ let tools = {
           get: () => {
             if (context.selection.length != 1) return undefined;
             const selectedObject = context.selection[0];
+            if (!(selectedObject.idx in context.activeObject.currentFrame.keys)) return;
             return context.activeObject.currentFrame.keys[selectedObject.idx]
               .playFromFrame;
           },
