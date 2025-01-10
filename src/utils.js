@@ -178,13 +178,7 @@ function floodFillRegion(
   context,
   debugPoints,
   debugPaintbucket) {
-  // Helper function to check if the point is at the boundary of the region
-  function isBoundaryPoint(point) {
-    return point.x <= 0 || point.x >= fileWidth ||
-           point.y <= 0 || point.y >= fileHeight;
-    return point.x <= offset.x || point.x >= offset.x + fileWidth ||
-          point.y <= offset.y || point.y >= offset.y + fileHeight;
-  }
+  
   let halfEpsilon = epsilon/2
 
   // Helper function to check if a point is near any curve in the shape
@@ -212,6 +206,24 @@ function floodFillRegion(
   const visited = new Set();
   const stack = [startPoint];
   const regionPoints = [];
+  let bbox;
+  if (shapes.length>0) {
+    bbox = shapes[0].boundingBox
+  } else {
+    throw new Error("No shapes in layer")
+  }
+  for (const shape of shapes) {
+    growBoundingBox(bbox, shape.boundingBox)
+  }
+  console.log(bbox)
+  console.log(startPoint)
+  // Helper function to check if the point is at the boundary of the region
+  function isBoundaryPoint(point) {
+    return point.x <= bbox.x.min - 100 || point.x >= bbox.x.max + 100 ||
+           point.y <= bbox.y.min - 100 || point.y >= bbox.y.max + 100;
+    return point.x <= offset.x || point.x >= offset.x + fileWidth ||
+          point.y <= offset.y || point.y >= offset.y + fileHeight;
+  }
 
   // Begin the flood fill process
   while (stack.length > 0) {
@@ -898,6 +910,7 @@ export {
   lerpColor,
   camelToWords,
   generateWaveform,
+  growBoundingBox,
   floodFillRegion,
   multiplyMatrices,
   getShapeAtPoint,
