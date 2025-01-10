@@ -163,6 +163,13 @@ function multiplyMatrices(a, b) {
   return result;
 }
 
+function growBoundingBox(bboxa, bboxb) {
+  bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
+  bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min);
+  bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max);
+  bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max);
+}
+
 function floodFillRegion(
   startPoint,
   epsilon,
