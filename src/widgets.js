@@ -5,12 +5,26 @@ class Widget {
         this._globalEvents = new Set()
         this.x = x
         this.y = y
+        this.rotation = 0
         this.children = []
     }
     handleMouseEvent(eventType, x, y) {
         for (let child of this.children) {
-            if (child.hitTest(x, y) || child._globalEvents.has(eventType)) {
-                child.handleMouseEvent(eventType, x-child.x, y-child.y)
+            // Adjust for translation
+            const dx = x - child.x;
+            const dy = y - child.y;
+    
+            // Apply inverse rotation
+            const cosTheta = Math.cos(child.rotation);
+            const sinTheta = Math.sin(child.rotation);
+    
+            // Rotate coordinates to child's local space
+            const rotatedX = dx * cosTheta + dy * sinTheta;
+            const rotatedY = -dx * sinTheta + dy * cosTheta;
+    
+            // First, perform hit test using original (global) coordinates
+            if (child.hitTest(rotatedX, rotatedY) || child._globalEvents.has(eventType)) {
+                child.handleMouseEvent(eventType, rotatedX, rotatedY);
             }
         }
         const eventTypes = [
@@ -26,8 +40,9 @@ class Widget {
         }
     }
     hitTest(x, y) {
-        if ((x >= this.x) && (x <= this.x+this.width) &&
-            (y >= this.y) && (y <= this.y+this.height)) {
+        // if ((x >= this.x) && (x <= this.x+this.width) &&
+        //     (y >= this.y) && (y <= this.y+this.height)) {
+        if ((x>=0) && (x <= this.width) && (y >= 0) && (y <= this.height)) {
             return true
         }
         return false
@@ -36,6 +51,7 @@ class Widget {
         for (let child of this.children) {
             const transform = ctx.getTransform()
             ctx.translate(child.x, child.y)
+            ctx.rotate(child.rotation)
             child.draw(ctx)
             ctx.setTransform(transform)
         }

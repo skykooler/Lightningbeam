@@ -145,10 +145,27 @@ function generateWaveform(img, buffer, imgHeight, frameWidth, framesPerSecond) {
   img.src = dataUrl;
 }
 
+function multiplyMatrices(a, b) {
+  let result = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0]
+  ];
+
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      for (let k = 0; k < 3; k++) {
+        result[i][j] += a[i][k] * b[k][j];
+      }
+    }
+  }
+
+  return result;
+}
+
 function floodFillRegion(
   startPoint,
   epsilon,
-  offset, // TODO: this needs to be a generalized transform
   fileWidth,
   fileHeight,
   context,
@@ -156,8 +173,10 @@ function floodFillRegion(
   debugPaintbucket) {
   // Helper function to check if the point is at the boundary of the region
   function isBoundaryPoint(point) {
+    return point.x <= 0 || point.x >= fileWidth ||
+           point.y <= 0 || point.y >= fileHeight;
     return point.x <= offset.x || point.x >= offset.x + fileWidth ||
-           point.y <= offset.y || point.y >= offset.y + fileHeight;
+          point.y <= offset.y || point.y >= offset.y + fileHeight;
   }
   let halfEpsilon = epsilon/2
 
@@ -873,6 +892,7 @@ export {
   camelToWords,
   generateWaveform,
   floodFillRegion,
+  multiplyMatrices,
   getShapeAtPoint,
   hslToRgb,
   hsvToRgb,
