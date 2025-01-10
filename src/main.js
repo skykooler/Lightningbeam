@@ -40,6 +40,7 @@ import {
   rotateAroundPointIncremental,
   rgbToHsv,
   multiplyMatrices,
+  growBoundingBox,
 } from "./utils.js";
 import {
   backgroundColor,
@@ -1976,13 +1977,6 @@ function deriveControlPoints(S, A, E, e1, e2, t) {
   return { v1, v2, C1, C2 };
 }
 
-function growBoundingBox(bboxa, bboxb) {
-  bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
-  bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min);
-  bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max);
-  bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max);
-}
-
 function regionToBbox(region) {
   return {
     x: {
@@ -2633,176 +2627,182 @@ class Layer extends Widget {
   }
   mousedown(x, y) {
     const mouse = {x: x, y: y}
-    switch(mode) {
-      case "rectangle":
-      case "ellipse":
-      case "draw":
-        this.clicked = true
-        this.activeShape = new Shape(x, y, context, uuidv4())
-        this.lastMouse = mouse;
-        break;
-      case "select":
-      case "transform":
-        break;
-      case "paint_bucket":
-        debugCurves = [];
-        debugPoints = [];
-        let epsilon = context.fillGaps;
-        let regionPoints;
-
-        // First, see if there's an existing shape to change the color of
-        // TODO: get this from self
-        let pointShape = getShapeAtPoint(
-          mouse,
-          context.activeObject.currentFrame.shapes,
-        );
-
-        if (pointShape) {
-          actions.colorShape.create(pointShape, context.fillStyle);
+    if (this==context.activeLayer) {
+      switch(mode) {
+        case "rectangle":
+        case "ellipse":
+        case "draw":
+          this.clicked = true
+          this.activeShape = new Shape(x, y, context, uuidv4())
+          this.lastMouse = mouse;
           break;
-        }
+        case "select":
+        case "transform":
+          break;
+        case "paint_bucket":
+          debugCurves = [];
+          debugPoints = [];
+          let epsilon = context.fillGaps;
+          let regionPoints;
 
-        // We didn't find an existing region to paintbucket, see if we can make one
-        try {
-          regionPoints = floodFillRegion(
+          // First, see if there's an existing shape to change the color of
+          // TODO: get this from self
+          let pointShape = getShapeAtPoint(
             mouse,
-            epsilon,
-            config.fileWidth,
-            config.fileHeight,
-            context,
-            debugPoints,
-            debugPaintbucket,
+            context.activeObject.currentFrame.shapes,
           );
-        } catch (e) {
-          updateUI();
-          throw e;
-        }
-        if (regionPoints.length > 0 && regionPoints.length < 10) {
-          // probably a very small area, rerun with minimum epsilon
-          regionPoints = floodFillRegion(
-            mouse,
-            1,
-            config.fileWidth,
-            config.fileHeight,
-            context,
-            debugPoints,
-          );
-        }
-        let points = [];
-        for (let point of regionPoints) {
-          points.push([point.x, point.y]);
-        }
-        let cxt = {
-          ...context,
-          fillShape: true,
-          strokeShape: false,
-          sendToBack: true,
-        };
-        let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
-        shape.fromPoints(points, 1);
-        actions.addShape.create(context.activeObject, shape, cxt);
-        break;
+
+          if (pointShape) {
+            actions.colorShape.create(pointShape, context.fillStyle);
+            break;
+          }
+
+          // We didn't find an existing region to paintbucket, see if we can make one
+          try {
+            regionPoints = floodFillRegion(
+              mouse,
+              epsilon,
+              config.fileWidth,
+              config.fileHeight,
+              context,
+              debugPoints,
+              debugPaintbucket,
+            );
+          } catch (e) {
+            updateUI();
+            throw e;
+          }
+          if (regionPoints.length > 0 && regionPoints.length < 10) {
+            // probably a very small area, rerun with minimum epsilon
+            regionPoints = floodFillRegion(
+              mouse,
+              1,
+              config.fileWidth,
+              config.fileHeight,
+              context,
+              debugPoints,
+            );
+          }
+          let points = [];
+          for (let point of regionPoints) {
+            points.push([point.x, point.y]);
+          }
+          let cxt = {
+            ...context,
+            fillShape: true,
+            strokeShape: false,
+            sendToBack: true,
+          };
+          let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
+          shape.fromPoints(points, 1);
+          actions.addShape.create(context.activeObject, shape, cxt);
+          break;
+      }
     }
   }
   mousemove(x, y) {
     const mouse = {x: x, y: y}
-    switch (mode) {
-      case "draw":
-        if (this.activeShape) {
-          if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
-            this.activeShape.addLine(x, y);
-            this.lastMouse = mouse;
+    if (this==context.activeLayer) {
+      switch (mode) {
+        case "draw":
+          if (this.activeShape) {
+            if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
+              this.activeShape.addLine(x, y);
+              this.lastMouse = mouse;
+            }
           }
-        }
-        break;
-      case "rectangle":
-        if (this.activeShape) {
-          this.activeShape.clear();
-          this.activeShape.addLine(x, this.activeShape.starty);
-          this.activeShape.addLine(x, y);
-          this.activeShape.addLine(this.activeShape.startx, y);
-          this.activeShape.addLine(
-            this.activeShape.startx,
-            this.activeShape.starty,
-          );
-          this.activeShape.update();
-        }
-        break;
-      case "ellipse":
-        if (this.activeShape) {
-          let midX = (mouse.x + this.activeShape.startx) / 2;
-          let midY = (mouse.y + this.activeShape.starty) / 2;
-          let xDiff = (mouse.x - this.activeShape.startx) / 2;
-          let yDiff = (mouse.y - this.activeShape.starty) / 2;
-          let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
-          this.activeShape.clear();
-          this.activeShape.addCurve(
-            new Bezier(
-              midX,
-              this.activeShape.starty,
-              midX + ellipseConst * xDiff,
-              this.activeShape.starty,
-              mouse.x,
-              midY - ellipseConst * yDiff,
-              mouse.x,
-              midY,
-            ),
-          );
-          this.activeShape.addCurve(
-            new Bezier(
-              mouse.x,
-              midY,
-              mouse.x,
-              midY + ellipseConst * yDiff,
-              midX + ellipseConst * xDiff,
-              mouse.y,
-              midX,
-              mouse.y,
-            ),
-          );
-          this.activeShape.addCurve(
-            new Bezier(
-              midX,
-              mouse.y,
-              midX - ellipseConst * xDiff,
-              mouse.y,
+          break;
+        case "rectangle":
+          if (this.activeShape) {
+            this.activeShape.clear();
+            this.activeShape.addLine(x, this.activeShape.starty);
+            this.activeShape.addLine(x, y);
+            this.activeShape.addLine(this.activeShape.startx, y);
+            this.activeShape.addLine(
               this.activeShape.startx,
-              midY + ellipseConst * yDiff,
-              this.activeShape.startx,
-              midY,
-            ),
-          );
-          this.activeShape.addCurve(
-            new Bezier(
-              this.activeShape.startx,
-              midY,
-              this.activeShape.startx,
-              midY - ellipseConst * yDiff,
-              midX - ellipseConst * xDiff,
               this.activeShape.starty,
-              midX,
-              this.activeShape.starty,
-            ),
-          );
-        }
-        break;
+            );
+            this.activeShape.update();
+          }
+          break;
+        case "ellipse":
+          if (this.activeShape) {
+            let midX = (mouse.x + this.activeShape.startx) / 2;
+            let midY = (mouse.y + this.activeShape.starty) / 2;
+            let xDiff = (mouse.x - this.activeShape.startx) / 2;
+            let yDiff = (mouse.y - this.activeShape.starty) / 2;
+            let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
+            this.activeShape.clear();
+            this.activeShape.addCurve(
+              new Bezier(
+                midX,
+                this.activeShape.starty,
+                midX + ellipseConst * xDiff,
+                this.activeShape.starty,
+                mouse.x,
+                midY - ellipseConst * yDiff,
+                mouse.x,
+                midY,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                mouse.x,
+                midY,
+                mouse.x,
+                midY + ellipseConst * yDiff,
+                midX + ellipseConst * xDiff,
+                mouse.y,
+                midX,
+                mouse.y,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                midX,
+                mouse.y,
+                midX - ellipseConst * xDiff,
+                mouse.y,
+                this.activeShape.startx,
+                midY + ellipseConst * yDiff,
+                this.activeShape.startx,
+                midY,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                this.activeShape.startx,
+                midY,
+                this.activeShape.startx,
+                midY - ellipseConst * yDiff,
+                midX - ellipseConst * xDiff,
+                this.activeShape.starty,
+                midX,
+                this.activeShape.starty,
+              ),
+            );
+          }
+          break;
+      }
     }
   }
   mouseup(x, y) {
     this.clicked = false
-    switch (mode) {
-      case "draw":
-        if (this.activeShape) {
-          this.activeShape.addLine(x, y);
-          this.activeShape.simplify(context.simplifyMode);
-        }
-      case "rectangle":
-      case "ellipse":
-        if (this.activeShape) {
-          actions.addShape.create(context.activeObject, this.activeShape);
-          this.activeShape = undefined;
-        }
-        break;
+    if (this==context.activeLayer) {
+      switch (mode) {
+        case "draw":
+          if (this.activeShape) {
+            this.activeShape.addLine(x, y);
+            this.activeShape.simplify(context.simplifyMode);
+          }
+        case "rectangle":
+        case "ellipse":
+          if (this.activeShape) {
+            actions.addShape.create(context.activeObject, this.activeShape);
+            this.activeShape = undefined;
+          }
+          break;
+      }
     }
   }
 }
@@ -3579,6 +3579,10 @@ class GraphicsObject extends Widget {
     // this.children = []
 
     this.shapes = [];
+
+    this._globalEvents.add("mousedown")
+    this._globalEvents.add("mousemove")
+    this._globalEvents.add("mouseup")
   }
   static fromJSON(json) {
     const graphicsObject = new GraphicsObject(json.idx);
@@ -4059,6 +4063,11 @@ Object.defineProperty(context, "activeObject", {
     return this.objectStack.at(-1);
   },
 });
+Object.defineProperty(context, "activeLayer", {
+  get: function () {
+    return this.objectStack.at(-1).activeLayer
+  }
+})
 context.objectStack = [root];
 
 async function greet() {
@@ -6875,6 +6884,22 @@ function renderLayers() {
               2 * Math.PI,
             );
             ctx.fill();
+            if (frameInfo.valueAtN.keyTypes.has("motion")) {
+              ctx.strokeStyle = "#7a00b3";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.25)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
+              ctx.stroke()
+            }
+            if (frameInfo.valueAtN.keyTypes.has("shape")) {
+              ctx.strokeStyle = "#9bff9b";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.35)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
+              ctx.stroke()
+            }
           } else if (frameInfo.prev && frameInfo.next) {
             ctx.fillStyle = foregroundColor;
             drawBorderedRect(
