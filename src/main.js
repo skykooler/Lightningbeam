@@ -91,17 +91,17 @@ function forwardConsole(fnName, dest) {
     const stackLines = error.stack.split("\n");
 
     let message = args.join(" ");  // Join all arguments into a single string
+    const location = stackLines[1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
 
     if (fnName === "error") {
       // Send the full stack trace for errors
       invoke(dest, { msg: `${message}\nStack trace:\n${stackLines.slice(1).join("\n")}` });
     } else {
       // For other log levels, just extract the file and line number
-      const location = stackLines[stackLines.length - 1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
       invoke(dest, { msg: `${location ? location[0] : 'unknown'}: ${message}` });
     }
 
-    original(...args);  // Pass all arguments to the original console method
+    original(location ? location[0] : 'unknown', ...args);  // Pass all arguments to the original console method
   };
 }
 
