@@ -1437,6 +1437,7 @@ let actions = {
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
         frame: context.activeObject.currentFrame.idx,
+        layer: context.activeObject.activeLayer.idx,
         position: {
           x: (bbox.x.min + bbox.x.max) / 2,
           y: (bbox.y.min + bbox.y.max) / 2,
@@ -1452,6 +1453,21 @@ let actions = {
       let frame = action.frame
         ? pointerList[action.frame]
         : parent.currentFrame;
+      let layer;
+      if (action.layer) {
+        layer = pointerList[action.layer]
+      } else {
+        for (let _layer of parent.layers) {
+          for (let _frame of _layer.frames) {
+            if (_frame.idx == frame.idx) {
+              layer = _layer
+            }
+          }
+        }
+        if (layer==undefined) {
+          layer = parent.activeLayer
+        }
+      }
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
         shape.translate(-action.position.x, -action.position.y);
@@ -2485,7 +2501,7 @@ class Layer extends Widget {
   }
 
   draw(ctx) {
-    super.draw(ctx)
+    // super.draw(ctx)
     let frameInfo = this.getFrameValue(this.frameNum);
     let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
 
@@ -2531,6 +2547,21 @@ class Layer extends Widget {
         }
       }
     }
+    for (let child of this.children) {
+      const transform = ctx.getTransform()
+      ctx.translate(child.x, child.y)
+      ctx.rotate(child.rotation)
+      child.draw(ctx)
+      if (context.selection.includes(child)) {
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#00ffff";
+        ctx.beginPath();
+        let bbox = child.bbox()
+        ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
+        ctx.stroke()
+      }
+      ctx.setTransform(transform)
+    }
     if (this.activeShape) {
       this.activeShape.draw(cxt)
     }
@@ -2540,6 +2571,19 @@ class Layer extends Widget {
 
       }
     }
+  }
+  bbox() {
+    let bbox = super.bbox()
+    const frameInfo = this.getFrameValue(this.frameNum);
+    const frame = frameInfo.valueAtN
+    if (!frame) return bbox;
+    if (frame.shapes.length > 0 && bbox == undefined) {
+      bbox = structuredClone(frame.shapes[0].boundingBox);
+    }
+    for (let shape of frame.shapes) {
+      growBoundingBox(bbox, shape.boundingBox);
+    }
+    return bbox
   }
   mousedown(x, y) {
     const mouse = {x: x, y: y}
@@ -2970,19 +3014,20 @@ class BaseShape {
     let curves = [];
     let start = current.shift();
     let { x, y } = start;
+    let bezier;
     for (let curve of current) {
-      curves.push(
-        new Bezier(
-          x,
-          y,
-          curve.x1,
-          curve.y1,
-          curve.x2,
-          curve.y2,
-          curve.x,
-          curve.y,
-        ),
-      );
+      bezier = new Bezier(
+        x,
+        y,
+        curve.x1,
+        curve.y1,
+        curve.x2,
+        curve.y2,
+        curve.x,
+        curve.y,
+      )
+      bezier.color = lerpColor(this.strokeStyle, shape2.strokeStyle)
+      curves.push(bezier);
       x = curve.x;
       y = curve.y;
     }
@@ -3615,15 +3660,15 @@ class GraphicsObject extends Widget {
   }
   bbox() {
     let bbox;
-    for (let layer of this.layers) {
-      let frame = layer.getFrame(this.currentFrameNum);
-      if (frame.shapes.length > 0 && bbox == undefined) {
-        bbox = structuredClone(frame.shapes[0].boundingBox);
-      }
-      for (let shape of frame.shapes) {
-        growBoundingBox(bbox, shape.boundingBox);
-      }
-    }
+    // for (let layer of this.layers) {
+    //   let frame = layer.getFrame(this.currentFrameNum);
+    //   if (frame.shapes.length > 0 && bbox == undefined) {
+    //     bbox = structuredClone(frame.shapes[0].boundingBox);
+    //   }
+    //   for (let shape of frame.shapes) {
+    //     growBoundingBox(bbox, shape.boundingBox);
+    //   }
+    // }
     if (this.children.length > 0) {
       if (!bbox) {
         bbox = structuredClone(this.children[0].bbox());
@@ -3891,11 +3936,15 @@ class GraphicsObject extends Widget {
     }
     super.handleMouseEvent(eventType, x, y)
   }
-  addObject(object, x = 0, y = 0, frame = undefined) {
+  addObject(object, x = 0, y = 0, frame = undefined, layer=undefined) {
     if (frame == undefined) {
       frame = this.currentFrame;
     }
+    if (layer==undefined) {
+      layer = this.activeLayer
+    }
     // this.children.push(object);
+    layer.children.push(object)
     object.parent = this;
     object.x = x;
     object.y = y;
@@ -4999,11 +5048,11 @@ function stage() {
             if (!context.dragging) {
               // Have to iterate in reverse order to grab the frontmost object when two overlap
               for (
-                let i = context.activeObject.children.length - 1;
+                let i = context.activeObject.activeLayer.children.length - 1;
                 i >= 0;
                 i--
               ) {
-                child = context.activeObject.children[i];
+                child = context.activeObject.activeLayer.children[i];
                 if (!(child.idx in context.activeObject.currentFrame.keys))
                   continue;
                 // let bbox = child.bbox()
@@ -5464,7 +5513,7 @@ function stage() {
           context.selectionRect.y2 = mouse.y;
           context.selection = [];
           context.shapeselection = [];
-          for (let child of context.activeObject.children) {
+          for (let child of context.activeObject.activeLayer.children) {
             if (hitTest(regionToBbox(context.selectionRect), child)) {
               context.selection.push(child);
             }
@@ -5601,8 +5650,8 @@ function stage() {
     mouse = context.activeObject.transformMouse(mouse);
     modeswitcher: switch (mode) {
       case "select":
-        for (let i = context.activeObject.children.length - 1; i >= 0; i--) {
-          let child = context.activeObject.children[i];
+        for (let i = context.activeObject.activeLayer.children.length - 1; i >= 0; i--) {
+          let child = context.activeObject.activeLayer.children[i];
           if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
           if (hitTest(mouse, child)) {
             context.objectStack.push(child);

@@ -1,10 +1,19 @@
 import { clamp, drawCheckerboardBackground, hslToRgb, hsvToRgb, rgbToHex } from "./utils.js"
 
+function growBoundingBox(bboxa, bboxb) {
+    bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
+    bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min);
+    bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max);
+    bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max);
+  }
+
 class Widget {
     constructor(x, y) {
         this._globalEvents = new Set()
         this.x = x
         this.y = y
+        this.scale_x = 1
+        this.scale_y = 1
         this.rotation = 0
         this.children = []
     }
@@ -47,6 +56,27 @@ class Widget {
         }
         return false
     }
+    bbox() {
+        let bbox;
+        if (this.children.length > 0) {
+          if (!bbox) {
+            bbox = structuredClone(this.children[0].bbox());
+          }
+          for (let child of this.children) {
+            growBoundingBox(bbox, child.bbox());
+          }
+        }
+        if (bbox == undefined) {
+          bbox = { x: { min: 0, max: 0 }, y: { min: 0, max: 0 } };
+        }
+        bbox.x.max *= this.scale_x;
+        bbox.y.max *= this.scale_y;
+        bbox.x.min += this.x;
+        bbox.x.max += this.x;
+        bbox.y.min += this.y;
+        bbox.y.max += this.y;
+        return bbox;
+    }
     draw(ctx) {
         for (let child of this.children) {
             const transform = ctx.getTransform()
@@ -57,7 +87,6 @@ class Widget {
         }
     }
 }
-
 class HueSelectionBar extends Widget {
     constructor(width, height, x, y, colorCvs) {
         super(x, y)
