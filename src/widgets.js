@@ -81,6 +81,7 @@ class Widget {
         for (let child of this.children) {
             const transform = ctx.getTransform()
             ctx.translate(child.x, child.y)
+            ctx.scale(child.scale_x, child.scale_y)
             ctx.rotate(child.rotation)
             child.draw(ctx)
             ctx.setTransform(transform)

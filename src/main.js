@@ -1025,7 +1025,12 @@ let actions = {
       };
       for (let obj in action.selection) {
         const object = pointerList[obj];
-        object.draw(cxt);
+        const transform = ctx.getTransform()
+        ctx.translate(object.x, object.y)
+        ctx.scale(object.scale_x, object.scale_y)
+        ctx.rotate(object.rotation)
+        object.draw(ctx)
+        ctx.setTransform(transform)
       }
       ctx.strokeStyle = "#00ffff";
       ctx.lineWidth = 1;
@@ -2082,6 +2087,7 @@ class Frame {
       return undefined
     }
     const frame = new Frame(json.frameType, json.idx);
+    frame.keyTypes = new Set(json.keyTypes)
     frame.keys = json.keys;
     for (let i in json.shapes) {
       const shape = json.shapes[i];
@@ -2094,6 +2100,7 @@ class Frame {
     const json = {};
     json.type = "Frame";
     json.frameType = this.frameType;
+    json.keyTypes = Array.from(this.keyTypes)
     if (randomizeUuid) {
       json.idx = uuidv4();
     } else {
@@ -2172,15 +2179,26 @@ class Layer extends Widget {
     layer.frames = [];
     for (let i in json.frames) {
       const frame = json.frames[i];
-      layer.frames.push(Frame.fromJSON(frame));
-    }
-    for (let frame in layer.frames) {
-      if (layer.frames[frame]) {
-        if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
-          layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+      if (frame.frameType=="keyframe") {
+        layer.frames.push(Frame.fromJSON(frame));
+      } else {
+        if (layer.frames[layer.frames.length-1]) {
+          if (frame.frameType == "motion") {
+            layer.frames[layer.frames.length-1].keyTypes.add("motion")
+          } else if (frame.frameType == "shape") {
+            layer.frames[layer.frames.length-1].keyTypes.add("shape")
+          }
         }
+        layer.frames.push(undefined)
       }
     }
+    // for (let frame in layer.frames) {
+    //   if (layer.frames[frame]) {
+    //     if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
+    //       layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+    //     }
+    //   }
+    // }
     layer.visible = json.visible;
     layer.audible = json.audible;
 
@@ -2504,6 +2522,7 @@ class Layer extends Widget {
     // super.draw(ctx)
     let frameInfo = this.getFrameValue(this.frameNum);
     let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
+    const keyframe = frameInfo.valueAtN ? true : false
 
     // let frame = this.getFrame(this.currentFrameNum);
     let cxt = {...context}
@@ -2548,8 +2567,35 @@ class Layer extends Widget {
       }
     }
     for (let child of this.children) {
+      if (!context.objectStack.includes(child)) {
+        if (keyframe) {
+          if (child.goToFrame != undefined) {
+            child.setFrameNum(child.goToFrame - 1)
+            if (child.playFromFrame) {
+              child.playing = true
+            } else {
+              child.playing = false
+            }
+            child.playing = true
+          }
+        }
+        if (child.playing) {
+          let lastFrame = 0;
+          for (let i = this.frameNum; i >= 0; i--) {
+            if (
+              this.frames[i] &&
+              this.frames[i].keys[child.idx].playFromFrame
+            ) {
+              lastFrame = i;
+              break;
+            }
+          }
+          child.setFrameNum(this.frameNum - lastFrame);
+        }
+      }
       const transform = ctx.getTransform()
       ctx.translate(child.x, child.y)
+      ctx.scale(child.scale_x, child.scale_y)
       ctx.rotate(child.rotation)
       child.draw(ctx)
       if (context.selection.includes(child)) {
@@ -3544,7 +3590,7 @@ class GraphicsObject extends Widget {
     graphicsObject.name = json.name;
     graphicsObject.currentFrameNum = json.currentFrameNum;
     graphicsObject.currentLayer = json.currentLayer;
-    graphicsObject.layers = [];
+    graphicsObject.children = [];
     for (let layer of json.layers) {
       graphicsObject.layers.push(Layer.fromJSON(layer));
     }
@@ -3787,6 +3833,10 @@ class GraphicsObject extends Widget {
         ctx.fill();
         ctx.restore();
       }
+  */
+  draw(ctx) {
+    super.draw(ctx)
+    if (this==context.activeObject) {
       if (mode == "select") {
         for (let item of context.selection) {
           if (!item) continue;
@@ -3864,15 +3914,14 @@ class GraphicsObject extends Widget {
         }
       }
     }
-    ctx.restore();
-  }*/
+  }
   transformCanvas(ctx) {
     if (this.parent) {
       this.parent.transformCanvas(ctx)
     }
     ctx.translate(this.x, this.y);
-    ctx.rotate(this.rotation);
     ctx.scale(this.scale_x, this.scale_y);
+    ctx.rotate(this.rotation);
   }
   transformMouse(mouse) {
     // Apply the transformation matrix to the mouse position
@@ -5667,7 +5716,7 @@ function stage() {
         // we didn't click on a child, go up a level
         if (context.activeObject.parent) {
           context.selection = [context.activeObject];
-          context.activeObject.currentFrameNum = 0;
+          context.activeObject.setFrameNum(0);
           context.shapeselection = [];
           context.objectStack.pop();
           updateUI();
@@ -6585,7 +6634,10 @@ function renderUI() {
     if (context.activeObject != root) {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
       ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
-      context.activeObject.draw(context, true);
+      const transform = ctx.getTransform()
+      context.activeObject.transformCanvas(ctx)
+      context.activeObject.draw(ctx);
+      ctx.setTransform(transform)
     }
     if (context.activeShape) {
       context.activeShape.draw(context);
@@ -7795,7 +7847,7 @@ function renderAll() {
 
     if (errorMessage !== lastErrorMessage) {
       // A new error, log it and reset repeat count
-      console.error("Error during rendering:", errorMessage);
+      console.error(error);
       lastErrorMessage = errorMessage;
       repeatCount = 1;
     } else if (repeatCount === 1) {
