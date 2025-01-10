@@ -215,8 +215,6 @@ function floodFillRegion(
   for (const shape of shapes) {
     growBoundingBox(bbox, shape.boundingBox)
   }
-  console.log(bbox)
-  console.log(startPoint)
   // Helper function to check if the point is at the boundary of the region
   function isBoundaryPoint(point) {
     return point.x <= bbox.x.min - 100 || point.x >= bbox.x.max + 100 ||
