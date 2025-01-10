@@ -4118,6 +4118,15 @@ window.addEventListener("click", function (event) {
   }
 });
 
+window.addEventListener("contextmenu", async (e) => {
+  e.preventDefault()
+  // const menu = await Menu.new({
+  //   items: [
+  //   ],
+  // });
+  // menu.popup({ x: event.clientX, y: event.clientY });
+})
+
 window.addEventListener("keydown", (e) => {
   // let shortcuts = {}
   // for (let shortcut of config.shortcuts) {
