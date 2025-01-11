@@ -365,6 +365,8 @@ let config = {
     selectAll: "<mod>a",
     group: "<mod>g",
     addLayer: "<mod>l",
+    addKeyframe: "F5",
+    addBlankKeyframe: "F6",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
     resetZoom: "<mod>0",
@@ -7661,14 +7663,14 @@ async function renderMenu() {
   newKeyframeMenuItem = {
     text: "New Keyframe",
     enabled: !activeKeyframe,
-    accelerator: "F5",
+    accelerator: getShortcut("addKeyframe"),
     action: addKeyframe,
   };
   newBlankKeyframeMenuItem = {
     text: "New Blank Keyframe",
     // enabled: !activeKeyframe,
     enabled: false,
-    accelerator: "F6",
+    accelerator: getShortcut("addBlankKeyframe"),
     action: addKeyframe,
   };
   duplicateKeyframeMenuItem = {
