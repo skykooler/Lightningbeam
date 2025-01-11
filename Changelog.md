@@ -1,3 +1,18 @@
+# 0.7.0-alpha:
+New features:
+- Keyframes can now have both motion and shape tweens on the same frame
+
+Changes:
+- Tweens are now indicated with colored lines
+- Tweens are now attached to keyframes rather than the frames in between them
+
+Bugfixes:
+- Fix paint bucket coordinates being incorrect inside of movie clips
+- Fix paint bucket not working for large shapes and shapes whose internal coordinates crossed 0,0
+- Fixed dragging frames breaking tweens
+- Fixed logs being inaccessible on macOS
+- Fixed right-click causing a menu with "Reload" to appear which would reset the application
+
 # 0.6.18-alpha:
 New features:
 - Errors and debug messages are now logged to a file
