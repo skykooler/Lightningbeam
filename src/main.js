@@ -39,6 +39,8 @@ import {
   getRotatedBoundingBox,
   rotateAroundPointIncremental,
   rgbToHsv,
+  multiplyMatrices,
+  growBoundingBox,
 } from "./utils.js";
 import {
   backgroundColor,
@@ -57,7 +59,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
-import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient } from "./widgets.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, Widget } from "./widgets.js";
 const {
   writeTextFile: writeTextFile,
   readTextFile: readTextFile,
@@ -90,17 +92,17 @@ function forwardConsole(fnName, dest) {
     const stackLines = error.stack.split("\n");
 
     let message = args.join(" ");  // Join all arguments into a single string
+    const location = stackLines[1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
 
     if (fnName === "error") {
       // Send the full stack trace for errors
       invoke(dest, { msg: `${message}\nStack trace:\n${stackLines.slice(1).join("\n")}` });
     } else {
       // For other log levels, just extract the file and line number
-      const location = stackLines[stackLines.length - 1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
       invoke(dest, { msg: `${location ? location[0] : 'unknown'}: ${message}` });
     }
 
-    original(...args);  // Pass all arguments to the original console method
+    original(location ? location[0] : 'unknown', ...args);  // Pass all arguments to the original console method
   };
 }
 
@@ -1024,7 +1026,12 @@ let actions = {
       };
       for (let obj in action.selection) {
         const object = pointerList[obj];
-        object.draw(cxt);
+        const transform = ctx.getTransform()
+        ctx.translate(object.x, object.y)
+        ctx.scale(object.scale_x, object.scale_y)
+        ctx.rotate(object.rotation)
+        object.draw(ctx)
+        ctx.setTransform(transform)
       }
       ctx.strokeStyle = "#00ffff";
       ctx.lineWidth = 1;
@@ -1176,9 +1183,11 @@ let actions = {
       let addedFrames = {};
       if (frameNum >= layer.frames.length) {
         formerType = "none";
-        for (let i = layer.frames.length; i <= frameNum; i++) {
-          addedFrames[i] = uuidv4();
-        }
+        // for (let i = layer.frames.length; i <= frameNum; i++) {
+        //   addedFrames[i] = uuidv4();
+        // }
+      } else if (!layer.frames[frameNum]) {
+        formerType = undefined
       } else if (layer.frames[frameNum].frameType != "keyframe") {
         formerType = layer.frames[frameNum].frameType;
       } else {
@@ -1217,7 +1226,11 @@ let actions = {
         }
       } else {
         let layer = pointerList[action.layer];
-        layer.frames[action.frameNum].frameType = action.formerType;
+        if (action.formerType) {
+          layer.frames[action.frameNum].frameType = action.formerType;
+        } else {
+          layer.frames[action.frameNum = undefined]
+        }
       }
       updateLayers();
       updateUI();
@@ -1309,11 +1322,17 @@ let actions = {
       redoStack.length = 0;
       let frameNum = context.activeObject.currentFrameNum;
       let layer = context.activeObject.activeLayer;
-      let frames = layer.frames;
-      let { lastKeyframeBefore, firstKeyframeAfter } = getKeyframesSurrounding(
-        frames,
-        frameNum,
-      );
+
+      const frameInfo = layer.getFrameValue(frameNum)
+      let lastKeyframeBefore, firstKeyframeAfter
+      if (frameInfo.valueAtN) {
+        lastKeyframeBefore = frameNum
+      } else if (frameInfo.prev) {
+        lastKeyframeBefore = frameInfo.prevIndex
+      } else {
+        return
+      }
+      firstKeyframeAfter = frameInfo.nextIndex
 
       let action = {
         frameNum: frameNum,
@@ -1328,13 +1347,9 @@ let actions = {
     execute: (action) => {
       let layer = pointerList[action.layer];
       let frames = layer.frames;
-      if (action.lastBefore != undefined && action.firstAfter != undefined) {
-        layer.updateFrameNextAndPrev(
-          action.frameNum,
-          "motion",
-          action.lastBefore,
-          action.firstAfter,
-        );
+      if (action.lastBefore != undefined) {
+        console.log("adding motion")
+        frames[action.lastBefore].keyTypes.add("motion")
       }
       updateLayers();
       updateUI();
@@ -1342,13 +1357,8 @@ let actions = {
     rollback: (action) => {
       let layer = pointerList[action.layer];
       let frames = layer.frames;
-      if (action.lastBefore != undefined && action.firstAfter != undefined) {
-        layer.updateFrameNextAndPrev(
-          action.frameNum,
-          "normal",
-          action.lastBefore,
-          action.firstAfter,
-        );
+      if (action.lastBefore != undefined) {
+        frames[action.lastBefore].keyTypes.delete("motion")
       }
       updateLayers();
       updateUI();
@@ -1359,11 +1369,18 @@ let actions = {
       redoStack.length = 0;
       let frameNum = context.activeObject.currentFrameNum;
       let layer = context.activeObject.activeLayer;
-      let frames = layer.frames;
-      let { lastKeyframeBefore, firstKeyframeAfter } = getKeyframesSurrounding(
-        frames,
-        frameNum,
-      );
+      
+      const frameInfo = layer.getFrameValue(frameNum)
+      let lastKeyframeBefore, firstKeyframeAfter
+      if (frameInfo.valueAtN) {
+        lastKeyframeBefore = frameNum
+      } else if (frameInfo.prev) {
+        lastKeyframeBefore = frameInfo.prevIndex
+      } else {
+        return
+      }
+      firstKeyframeAfter = frameInfo.nextIndex
+
 
       let action = {
         frameNum: frameNum,
@@ -1371,6 +1388,7 @@ let actions = {
         lastBefore: lastKeyframeBefore,
         firstAfter: firstKeyframeAfter,
       };
+      console.log(action)
       undoStack.push({ name: "addShapeTween", action: action });
       actions.addShapeTween.execute(action);
       updateMenu();
@@ -1378,14 +1396,8 @@ let actions = {
     execute: (action) => {
       let layer = pointerList[action.layer];
       let frames = layer.frames;
-      if (action.lastBefore != undefined && action.firstAfter != undefined) {
-        for (let i = action.lastBefore + 1; i < action.firstAfter; i++) {
-          frames[i].frameType = "shape";
-          frames[i].prev = frames[action.lastBefore];
-          frames[i].next = frames[action.firstAfter];
-          frames[i].prevIndex = action.lastBefore;
-          frames[i].nextIndex = action.firstAfter;
-        }
+      if (action.lastBefore != undefined) {
+        frames[action.lastBefore].keyTypes.add("shape")
       }
       updateLayers();
       updateUI();
@@ -1393,8 +1405,8 @@ let actions = {
     rollback: (action) => {
       let layer = pointerList[action.layer];
       let frames = layer.frames;
-      for (let i = action.lastBefore + 1; i < action.firstAfter; i++) {
-        frames[i].frameType = "normal";
+      if (action.lastBefore != undefined) {
+        frames[action.lastBefore].keyTypes.delete("shape")
       }
       updateLayers();
       updateUI();
@@ -1431,6 +1443,7 @@ let actions = {
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
         frame: context.activeObject.currentFrame.idx,
+        layer: context.activeObject.activeLayer.idx,
         position: {
           x: (bbox.x.min + bbox.x.max) / 2,
           y: (bbox.y.min + bbox.y.max) / 2,
@@ -1446,6 +1459,21 @@ let actions = {
       let frame = action.frame
         ? pointerList[action.frame]
         : parent.currentFrame;
+      let layer;
+      if (action.layer) {
+        layer = pointerList[action.layer]
+      } else {
+        for (let _layer of parent.layers) {
+          for (let _frame of _layer.frames) {
+            if (_frame.idx == frame.idx) {
+              layer = _layer
+            }
+          }
+        }
+        if (layer==undefined) {
+          layer = parent.activeLayer
+        }
+      }
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
         shape.translate(-action.position.x, -action.position.y);
@@ -1949,13 +1977,6 @@ function deriveControlPoints(S, A, E, e1, e2, t) {
   return { v1, v2, C1, C2 };
 }
 
-function growBoundingBox(bboxa, bboxb) {
-  bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
-  bboxa.y.min = Math.min(bboxa.y.min, bboxb.y.min);
-  bboxa.x.max = Math.max(bboxa.x.max, bboxb.x.max);
-  bboxa.y.max = Math.max(bboxa.y.max, bboxb.y.max);
-}
-
 function regionToBbox(region) {
   return {
     x: {
@@ -2029,6 +2050,7 @@ class Frame {
     this.keys = {};
     this.shapes = [];
     this.frameType = frameType;
+    this.keyTypes = new Set()
     if (!uuid) {
       this.idx = uuidv4();
     } else {
@@ -2059,6 +2081,7 @@ class Frame {
       return undefined
     }
     const frame = new Frame(json.frameType, json.idx);
+    frame.keyTypes = new Set(json.keyTypes)
     frame.keys = json.keys;
     for (let i in json.shapes) {
       const shape = json.shapes[i];
@@ -2071,6 +2094,7 @@ class Frame {
     const json = {};
     json.type = "Frame";
     json.frameType = this.frameType;
+    json.keyTypes = Array.from(this.keyTypes)
     if (randomizeUuid) {
       json.idx = uuidv4();
     } else {
@@ -2124,9 +2148,9 @@ class TempFrame {
 
 const tempFrame = new TempFrame();
 
-class Layer {
+class Layer extends Widget {
   constructor(uuid) {
-    this.children = [];
+    super(0,0)
     if (!uuid) {
       this.idx = uuidv4();
     } else {
@@ -2134,6 +2158,7 @@ class Layer {
     }
     this.name = "Layer";
     this.frames = [new Frame("keyframe", this.idx + "-F1")];
+    this.frameNum = 0;
     this.visible = true;
     this.audible = true;
     pointerList[this.idx] = this;
@@ -2148,15 +2173,26 @@ class Layer {
     layer.frames = [];
     for (let i in json.frames) {
       const frame = json.frames[i];
-      layer.frames.push(Frame.fromJSON(frame));
-    }
-    for (let frame in layer.frames) {
-      if (layer.frames[frame]) {
-        if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
-          layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+      if (frame.frameType=="keyframe") {
+        layer.frames.push(Frame.fromJSON(frame));
+      } else {
+        if (layer.frames[layer.frames.length-1]) {
+          if (frame.frameType == "motion") {
+            layer.frames[layer.frames.length-1].keyTypes.add("motion")
+          } else if (frame.frameType == "shape") {
+            layer.frames[layer.frames.length-1].keyTypes.add("shape")
+          }
         }
+        layer.frames.push(undefined)
       }
     }
+    // for (let frame in layer.frames) {
+    //   if (layer.frames[frame]) {
+    //     if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
+    //       layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
+    //     }
+    //   }
+    // }
     layer.visible = json.visible;
     layer.audible = json.audible;
 
@@ -2368,25 +2404,25 @@ class Layer {
     return newLayer;
   }
   addFrame(num, frame, addedFrames) {
-    let updateDest = undefined;
-    if (!this.frames[num]) {
-      for (const [index, idx] of Object.entries(addedFrames)) {
-        if (!this.frames[index]) {
-          this.frames[index] = new Frame("normal", idx);
-        }
-      }
-    } else {
-      if (this.frames[num].frameType == "motion") {
-        updateDest = "motion";
-      } else if (this.frames[num].frameType == "shape") {
-        updateDest = "shape";
-      }
-    }
+    // let updateDest = undefined;
+    // if (!this.frames[num]) {
+    //   for (const [index, idx] of Object.entries(addedFrames)) {
+    //     if (!this.frames[index]) {
+    //       this.frames[index] = new Frame("normal", idx);
+    //     }
+    //   }
+    // } else {
+    //   if (this.frames[num].frameType == "motion") {
+    //     updateDest = "motion";
+    //   } else if (this.frames[num].frameType == "shape") {
+    //     updateDest = "shape";
+    //   }
+    // }
     this.frames[num] = frame;
-    if (updateDest) {
-      this.updateFrameNextAndPrev(num - 1, updateDest);
-      this.updateFrameNextAndPrev(num + 1, updateDest);
-    }
+    // if (updateDest) {
+    //   this.updateFrameNextAndPrev(num - 1, updateDest);
+    //   this.updateFrameNextAndPrev(num + 1, updateDest);
+    // }
   }
   addOrChangeFrame(num, frameType, uuid, addedFrames) {
     let latestFrame = this.getLatestFrame(num);
@@ -2451,6 +2487,324 @@ class Layer {
     updateUI();
     updateMenu();
     updateLayers();
+  }
+  getFrameValue(n) {
+    const valueAtN = this.frames[n];
+    if (valueAtN !== undefined) {
+        return { valueAtN, prev: null, next: null, prevIndex: null, nextIndex: null };
+    }
+    let prev = n - 1;
+    let next = n + 1;
+
+    while (prev >= 0 && this.frames[prev] === undefined) {
+        prev--;
+    }
+    while (next < this.frames.length && this.frames[next] === undefined) {
+        next++;
+    }
+
+    return {
+        valueAtN: undefined,
+        prev: prev >= 0 ? this.frames[prev] : null,
+        next: next < this.frames.length ? this.frames[next] : null,
+        prevIndex: prev >= 0 ? prev : null,
+        nextIndex: next < this.frames.length ? next : null
+    };
+  }
+
+  draw(ctx) {
+    // super.draw(ctx)
+    let frameInfo = this.getFrameValue(this.frameNum);
+    let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
+    const keyframe = frameInfo.valueAtN ? true : false
+
+    // let frame = this.getFrame(this.currentFrameNum);
+    let cxt = {...context}
+    cxt.ctx = ctx
+    let t = null;
+    if (frameInfo.prev && frameInfo.next) {
+      t = (this.frameNum - frameInfo.prevIndex) / (frameInfo.nextIndex - frameInfo.prevIndex);
+    }
+
+    if (frame) {
+      // Update shapes and children
+      for (let shape of frame.shapes) {
+        // If prev.frameType is "shape", look for a matching shape in next
+        if (frameInfo.prev && frameInfo.prev.keyTypes.has("shape")) {
+          const shape2 = frameInfo.next.shapes.find(s => s.shapeId === shape.shapeId);
+          
+          if (shape2) {
+            // If matching shape is found, interpolate and draw
+            shape.lerpShape(shape2, t).draw(cxt);
+            continue; // Skip to next shape
+          }
+        }
+
+        // Otherwise, just draw the shape as usual
+        cxt.selected = context.shapeselection.includes(shape);
+        shape.draw(cxt);
+      }
+
+      for (let child of this.children) {
+        if (child.idx in frame.keys) {
+          for (let key in frame.keys[child.idx]) {
+            // If both prev and next exist and prev.frameType is "motion", interpolate child keys
+            if (frameInfo.prev && frameInfo.next && frameInfo.prev.keyTypes.has("motion")) {
+              // Interpolate between prev and next for this key
+              child[key] = lerp(frameInfo.prev.keys[child.idx][key], frameInfo.next.keys[child.idx][key], t);
+            } else {
+              // Otherwise, use the value from the current frame
+              child[key] = frame.keys[child.idx][key];
+            }
+          }
+        }
+      }
+    }
+    for (let child of this.children) {
+      if (!context.objectStack.includes(child)) {
+        if (keyframe) {
+          if (child.goToFrame != undefined) {
+            child.setFrameNum(child.goToFrame - 1)
+            if (child.playFromFrame) {
+              child.playing = true
+            } else {
+              child.playing = false
+            }
+            child.playing = true
+          }
+        }
+        if (child.playing) {
+          let lastFrame = 0;
+          for (let i = this.frameNum; i >= 0; i--) {
+            if (
+              this.frames[i] &&
+              this.frames[i].keys[child.idx].playFromFrame
+            ) {
+              lastFrame = i;
+              break;
+            }
+          }
+          child.setFrameNum(this.frameNum - lastFrame);
+        }
+      }
+      const transform = ctx.getTransform()
+      ctx.translate(child.x, child.y)
+      ctx.scale(child.scale_x, child.scale_y)
+      ctx.rotate(child.rotation)
+      child.draw(ctx)
+      if (context.selection.includes(child)) {
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "#00ffff";
+        ctx.beginPath();
+        let bbox = child.bbox()
+        ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
+        ctx.stroke()
+      }
+      ctx.setTransform(transform)
+    }
+    if (this.activeShape) {
+      this.activeShape.draw(cxt)
+    }
+    if (context.activeCurve) {
+      if (frame.shapes.indexOf(context.activeCurve.shape) != -1) {
+        cxt.selected = true
+
+      }
+    }
+  }
+  bbox() {
+    let bbox = super.bbox()
+    const frameInfo = this.getFrameValue(this.frameNum);
+    // TODO: if there are multiple layers we should only be counting valid frames
+    const frame = frameInfo.valueAtN ? frameInfo.valueAtN : frameInfo.prev
+    if (!frame) return bbox;
+    if (frame.shapes.length > 0 && bbox == undefined) {
+      bbox = structuredClone(frame.shapes[0].boundingBox);
+    }
+    for (let shape of frame.shapes) {
+      growBoundingBox(bbox, shape.boundingBox);
+    }
+    return bbox
+  }
+  mousedown(x, y) {
+    const mouse = {x: x, y: y}
+    if (this==context.activeLayer) {
+      switch(mode) {
+        case "rectangle":
+        case "ellipse":
+        case "draw":
+          this.clicked = true
+          this.activeShape = new Shape(x, y, context, uuidv4())
+          this.lastMouse = mouse;
+          break;
+        case "select":
+        case "transform":
+          break;
+        case "paint_bucket":
+          debugCurves = [];
+          debugPoints = [];
+          let epsilon = context.fillGaps;
+          let regionPoints;
+
+          // First, see if there's an existing shape to change the color of
+          // TODO: get this from self
+          let pointShape = getShapeAtPoint(
+            mouse,
+            context.activeObject.currentFrame.shapes,
+          );
+
+          if (pointShape) {
+            actions.colorShape.create(pointShape, context.fillStyle);
+            break;
+          }
+
+          // We didn't find an existing region to paintbucket, see if we can make one
+          try {
+            regionPoints = floodFillRegion(
+              mouse,
+              epsilon,
+              config.fileWidth,
+              config.fileHeight,
+              context,
+              debugPoints,
+              debugPaintbucket,
+            );
+          } catch (e) {
+            updateUI();
+            throw e;
+          }
+          if (regionPoints.length > 0 && regionPoints.length < 10) {
+            // probably a very small area, rerun with minimum epsilon
+            regionPoints = floodFillRegion(
+              mouse,
+              1,
+              config.fileWidth,
+              config.fileHeight,
+              context,
+              debugPoints,
+            );
+          }
+          let points = [];
+          for (let point of regionPoints) {
+            points.push([point.x, point.y]);
+          }
+          let cxt = {
+            ...context,
+            fillShape: true,
+            strokeShape: false,
+            sendToBack: true,
+          };
+          let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
+          shape.fromPoints(points, 1);
+          actions.addShape.create(context.activeObject, shape, cxt);
+          break;
+      }
+    }
+  }
+  mousemove(x, y) {
+    const mouse = {x: x, y: y}
+    if (this==context.activeLayer) {
+      switch (mode) {
+        case "draw":
+          if (this.activeShape) {
+            if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
+              this.activeShape.addLine(x, y);
+              this.lastMouse = mouse;
+            }
+          }
+          break;
+        case "rectangle":
+          if (this.activeShape) {
+            this.activeShape.clear();
+            this.activeShape.addLine(x, this.activeShape.starty);
+            this.activeShape.addLine(x, y);
+            this.activeShape.addLine(this.activeShape.startx, y);
+            this.activeShape.addLine(
+              this.activeShape.startx,
+              this.activeShape.starty,
+            );
+            this.activeShape.update();
+          }
+          break;
+        case "ellipse":
+          if (this.activeShape) {
+            let midX = (mouse.x + this.activeShape.startx) / 2;
+            let midY = (mouse.y + this.activeShape.starty) / 2;
+            let xDiff = (mouse.x - this.activeShape.startx) / 2;
+            let yDiff = (mouse.y - this.activeShape.starty) / 2;
+            let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
+            this.activeShape.clear();
+            this.activeShape.addCurve(
+              new Bezier(
+                midX,
+                this.activeShape.starty,
+                midX + ellipseConst * xDiff,
+                this.activeShape.starty,
+                mouse.x,
+                midY - ellipseConst * yDiff,
+                mouse.x,
+                midY,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                mouse.x,
+                midY,
+                mouse.x,
+                midY + ellipseConst * yDiff,
+                midX + ellipseConst * xDiff,
+                mouse.y,
+                midX,
+                mouse.y,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                midX,
+                mouse.y,
+                midX - ellipseConst * xDiff,
+                mouse.y,
+                this.activeShape.startx,
+                midY + ellipseConst * yDiff,
+                this.activeShape.startx,
+                midY,
+              ),
+            );
+            this.activeShape.addCurve(
+              new Bezier(
+                this.activeShape.startx,
+                midY,
+                this.activeShape.startx,
+                midY - ellipseConst * yDiff,
+                midX - ellipseConst * xDiff,
+                this.activeShape.starty,
+                midX,
+                this.activeShape.starty,
+              ),
+            );
+          }
+          break;
+      }
+    }
+  }
+  mouseup(x, y) {
+    this.clicked = false
+    if (this==context.activeLayer) {
+      switch (mode) {
+        case "draw":
+          if (this.activeShape) {
+            this.activeShape.addLine(x, y);
+            this.activeShape.simplify(context.simplifyMode);
+          }
+        case "rectangle":
+        case "ellipse":
+          if (this.activeShape) {
+            actions.addShape.create(context.activeObject, this.activeShape);
+            this.activeShape = undefined;
+          }
+          break;
+      }
+    }
   }
 }
 
@@ -2605,24 +2959,27 @@ class BaseShape {
         ctx.fill()
       }
     }
+    function drawCurve(curve, selected) {
+      ctx.strokeStyle = curve.color;
+      ctx.beginPath();
+      ctx.moveTo(curve.points[0].x, curve.points[0].y);
+      ctx.bezierCurveTo(
+        curve.points[1].x,
+        curve.points[1].y,
+        curve.points[2].x,
+        curve.points[2].y,
+        curve.points[3].x,
+        curve.points[3].y,
+      );
+      ctx.stroke();
+      if (selected) {
+        ctx.strokeStyle = pattern
+        ctx.stroke()
+      }
+    }
     if (this.stroked && !context.debugColor) {
       for (let curve of this.curves) {
-        ctx.strokeStyle = curve.color;
-        ctx.beginPath();
-        ctx.moveTo(curve.points[0].x, curve.points[0].y);
-        ctx.bezierCurveTo(
-          curve.points[1].x,
-          curve.points[1].y,
-          curve.points[2].x,
-          curve.points[2].y,
-          curve.points[3].x,
-          curve.points[3].y,
-        );
-        ctx.stroke();
-        if (context.selected) {
-          ctx.strokeStyle = pattern
-          ctx.stroke()
-        }
+        drawCurve(curve, context.selected)
 
         // // Debug, show curve control points
         // ctx.beginPath()
@@ -2632,10 +2989,115 @@ class BaseShape {
         // ctx.fill()
       }
     }
+    if (context.activeCurve && this==context.activeCurve.shape) {
+      drawCurve(context.activeCurve.current, true)
+    }
+    if (context.activeVertex && this==context.activeVertex.shape) {
+      const curves = {
+        ...context.activeVertex.current.startCurves,
+        ...context.activeVertex.current.endCurves
+      }
+      for (let i in curves) {
+        let curve = curves[i]
+        drawCurve(curve, true)
+      }
+      ctx.fillStyle = "#000000aa";
+        ctx.beginPath();
+        let vertexSize = 15 / context.zoomLevel;
+        ctx.rect(
+          context.activeVertex.current.point.x - vertexSize / 2,
+          context.activeVertex.current.point.y - vertexSize / 2,
+          vertexSize,
+          vertexSize,
+        );
+        ctx.fill();
+    }
     // Debug, show quadtree
     if (debugQuadtree && this.quadtree && !context.debugColor) {
       this.quadtree.draw(ctx);
     }
+  }
+  lerpShape(shape2, t) {
+    if (this.curves.length == 0) return this;
+    let path1 = [
+      {
+        type: "M",
+        x: this.curves[0].points[0].x,
+        y: this.curves[0].points[0].y,
+      },
+    ];
+    for (let curve of this.curves) {
+      path1.push({
+        type: "C",
+        x1: curve.points[1].x,
+        y1: curve.points[1].y,
+        x2: curve.points[2].x,
+        y2: curve.points[2].y,
+        x: curve.points[3].x,
+        y: curve.points[3].y,
+      });
+    }
+    let path2 = [];
+    if (shape2.curves.length > 0) {
+      path2.push({
+        type: "M",
+        x: shape2.curves[0].points[0].x,
+        y: shape2.curves[0].points[0].y,
+      });
+      for (let curve of shape2.curves) {
+        path2.push({
+          type: "C",
+          x1: curve.points[1].x,
+          y1: curve.points[1].y,
+          x2: curve.points[2].x,
+          y2: curve.points[2].y,
+          x: curve.points[3].x,
+          y: curve.points[3].y,
+        });
+      }
+    }
+    const interpolator = d3.interpolatePathCommands(path1, path2);
+    let current = interpolator(t);
+    let curves = [];
+    let start = current.shift();
+    let { x, y } = start;
+    let bezier;
+    for (let curve of current) {
+      bezier = new Bezier(
+        x,
+        y,
+        curve.x1,
+        curve.y1,
+        curve.x2,
+        curve.y2,
+        curve.x,
+        curve.y,
+      )
+      bezier.color = lerpColor(this.strokeStyle, shape2.strokeStyle)
+      curves.push(bezier);
+      x = curve.x;
+      y = curve.y;
+    }
+    let lineWidth = lerp(this.lineWidth, shape2.lineWidth, t);
+    let strokeStyle = lerpColor(
+      this.strokeStyle,
+      shape2.strokeStyle,
+      t,
+    );
+    let fillStyle;
+    if (!this.fillImage) {
+      fillStyle = lerpColor(this.fillStyle, shape2.fillStyle, t);
+    }
+    return new TempShape(
+      start.x,
+      start.y,
+      curves,
+      lineWidth,
+      this.stroked,
+      this.filled,
+      strokeStyle,
+      fillStyle,
+    )
   }
 }
 
@@ -3096,10 +3558,9 @@ class Shape extends BaseShape {
   }
 }
 
-class GraphicsObject {
+class GraphicsObject extends Widget {
   constructor(uuid) {
-    this.x = 0;
-    this.y = 0;
+    super(0, 0)
     this.rotation = 0; // in radians
     this.scale_x = 1;
     this.scale_y = 1;
@@ -3113,11 +3574,16 @@ class GraphicsObject {
 
     this.currentFrameNum = 0;
     this.currentLayer = 0;
-    this.layers = [new Layer(uuid + "-L1")];
+    this.children = [new Layer(uuid + "-L1")];
+    // this.layers = [new Layer(uuid + "-L1")];
     this.audioLayers = [];
     // this.children = []
 
     this.shapes = [];
+
+    this._globalEvents.add("mousedown")
+    this._globalEvents.add("mousemove")
+    this._globalEvents.add("mouseup")
   }
   static fromJSON(json) {
     const graphicsObject = new GraphicsObject(json.idx);
@@ -3129,7 +3595,7 @@ class GraphicsObject {
     graphicsObject.name = json.name;
     graphicsObject.currentFrameNum = json.currentFrameNum;
     graphicsObject.currentLayer = json.currentLayer;
-    graphicsObject.layers = [];
+    graphicsObject.children = [];
     for (let layer of json.layers) {
       graphicsObject.layers.push(Layer.fromJSON(layer));
     }
@@ -3168,8 +3634,11 @@ class GraphicsObject {
   get activeLayer() {
     return this.layers[this.currentLayer];
   }
-  get children() {
-    return this.activeLayer.children;
+  // get children() {
+  //   return this.activeLayer.children;
+  // }
+  get layers() {
+    return this.children
   }
   get allLayers() {
     return [...this.audioLayers, ...this.layers];
@@ -3201,6 +3670,7 @@ class GraphicsObject {
     num = Math.max(0, num);
     for (let layer of this.layers) {
       this.currentFrameNum = num;
+      layer.frameNum = num
       let frame = layer.getFrame(num);
       for (let child of this.children) {
         let idx = child.idx;
@@ -3241,15 +3711,15 @@ class GraphicsObject {
   }
   bbox() {
     let bbox;
-    for (let layer of this.layers) {
-      let frame = layer.getFrame(this.currentFrameNum);
-      if (frame.shapes.length > 0 && bbox == undefined) {
-        bbox = structuredClone(frame.shapes[0].boundingBox);
-      }
-      for (let shape of frame.shapes) {
-        growBoundingBox(bbox, shape.boundingBox);
-      }
-    }
+    // for (let layer of this.layers) {
+    //   let frame = layer.getFrame(this.currentFrameNum);
+    //   if (frame.shapes.length > 0 && bbox == undefined) {
+    //     bbox = structuredClone(frame.shapes[0].boundingBox);
+    //   }
+    //   for (let shape of frame.shapes) {
+    //     growBoundingBox(bbox, shape.boundingBox);
+    //   }
+    // }
     if (this.children.length > 0) {
       if (!bbox) {
         bbox = structuredClone(this.children[0].bbox());
@@ -3269,6 +3739,7 @@ class GraphicsObject {
     bbox.y.max += this.y;
     return bbox;
   }
+  /*
   draw(context, calculateTransform=false) {
     let ctx = context.ctx;
     ctx.save();
@@ -3367,6 +3838,10 @@ class GraphicsObject {
         ctx.fill();
         ctx.restore();
       }
+  */
+  draw(ctx) {
+    super.draw(ctx)
+    if (this==context.activeObject) {
       if (mode == "select") {
         for (let item of context.selection) {
           if (!item) continue;
@@ -3444,29 +3919,86 @@ class GraphicsObject {
         }
       }
     }
-    ctx.restore();
   }
   transformCanvas(ctx) {
     if (this.parent) {
       this.parent.transformCanvas(ctx)
     }
     ctx.translate(this.x, this.y);
-    ctx.rotate(this.rotation);
     ctx.scale(this.scale_x, this.scale_y);
+    ctx.rotate(this.rotation);
   }
   transformMouse(mouse) {
-    if (this.parent) {
-      mouse = this.parent.transformMouse(mouse);
-    }
-    mouse.x -= this.x;
-    mouse.y -= this.y;
-    return mouse;
+    // Apply the transformation matrix to the mouse position
+    let matrix = this.generateTransformMatrix();
+    let { x, y } = mouse;
+  
+    return {
+      x: matrix[0][0] * x + matrix[0][1] * y + matrix[0][2],
+      y: matrix[1][0] * x + matrix[1][1] * y + matrix[1][2]
+    };
   }
-  addObject(object, x = 0, y = 0, frame = undefined) {
+  generateTransformMatrix() {
+    // Start with the parent's transform matrix if it exists
+    let parentMatrix = this.parent ? this.parent.generateTransformMatrix() : [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  
+    // Calculate the rotation matrix components
+    const cos = Math.cos(this.rotation);
+    const sin = Math.sin(this.rotation);
+  
+    // Scaling matrix
+    const scaleMatrix = [
+      [1/this.scale_x, 0, 0],
+      [0, 1/this.scale_y, 0],
+      [0, 0, 1]
+    ];
+  
+    // Rotation matrix (inverse rotation for transforming back)
+    const rotationMatrix = [
+      [cos, -sin, 0],
+      [sin, cos, 0],
+      [0, 0, 1]
+    ];
+  
+    // Translation matrix (inverse translation to adjust for object's position)
+    const translationMatrix = [
+      [1, 0, -this.x],
+      [0, 1, -this.y],
+      [0, 0, 1]
+    ];
+  
+    // Multiply translation * rotation * scaling to get the current object's final transformation matrix
+    let tempMatrix = multiplyMatrices(translationMatrix, rotationMatrix);
+    let objectMatrix = multiplyMatrices(tempMatrix, scaleMatrix);
+  
+    // Now combine with the parent's matrix (parent * object)
+    let finalMatrix = multiplyMatrices(parentMatrix, objectMatrix);
+  
+    return finalMatrix;
+  }
+  handleMouseEvent(eventType, x, y) {
+    for (let i in this.layers) {
+      if (i==this.currentLayer) {
+        this.layers[i]._globalEvents.add("mousedown")
+        this.layers[i]._globalEvents.add("mousemove")
+        this.layers[i]._globalEvents.add("mouseup")
+      } else {
+        this.layers[i]._globalEvents.delete("mousedown")
+        this.layers[i]._globalEvents.delete("mousemove")
+        this.layers[i]._globalEvents.delete("mouseup")
+      }
+    }
+    super.handleMouseEvent(eventType, x, y)
+  }
+  addObject(object, x = 0, y = 0, frame = undefined, layer=undefined) {
     if (frame == undefined) {
       frame = this.currentFrame;
     }
-    this.children.push(object);
+    if (layer==undefined) {
+      layer = this.activeLayer
+    }
+    // this.children.push(object);
+    layer.children.push(object)
     object.parent = this;
     object.x = x;
     object.y = y;
@@ -3487,13 +4019,13 @@ class GraphicsObject {
         delete frame[idx];
       }
     }
-    this.children.splice(this.children.indexOf(childObject), 1);
+    // this.children.splice(this.children.indexOf(childObject), 1);
   }
   addLayer(layer) {
-    this.layers.push(layer);
+    this.children.push(layer);
   }
   removeLayer(layer) {
-    this.layers.splice(this.layers.indexOf(layer), 1);
+    this.children.splice(this.children.indexOf(layer), 1);
   }
   saveState() {
     startProps[this.idx] = {
@@ -3532,6 +4064,11 @@ Object.defineProperty(context, "activeObject", {
     return this.objectStack.at(-1);
   },
 });
+Object.defineProperty(context, "activeLayer", {
+  get: function () {
+    return this.objectStack.at(-1).activeLayer
+  }
+})
 context.objectStack = [root];
 
 async function greet() {
@@ -3581,6 +4118,15 @@ window.addEventListener("click", function (event) {
     popupMenu.remove(); // Remove the menu from the DOM
   }
 });
+
+window.addEventListener("contextmenu", async (e) => {
+  e.preventDefault()
+  // const menu = await Menu.new({
+  //   items: [
+  //   ],
+  // });
+  // menu.popup({ x: event.clientX, y: event.clientY });
+})
 
 window.addEventListener("keydown", (e) => {
   // let shortcuts = {}
@@ -4508,6 +5054,7 @@ function stage() {
   // scroller.appendChild(stageWrapper)
   stage.addEventListener("mousedown", (e) => {
     let mouse = getMousePos(stage, e);
+    root.handleMouseEvent("mousedown", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
     let selection;
     if (!context.activeObject.currentFrame?.exists) return;
@@ -4515,9 +5062,9 @@ function stage() {
       case "rectangle":
       case "ellipse":
       case "draw":
-        context.mouseDown = true;
-        context.activeShape = new Shape(mouse.x, mouse.y, context, uuidv4());
-        context.lastMouse = mouse;
+        // context.mouseDown = true;
+        // context.activeShape = new Shape(mouse.x, mouse.y, context, uuidv4());
+        // context.lastMouse = mouse;
         break;
       case "select":
         if (context.activeObject.currentFrame.frameType != "keyframe") break;
@@ -4569,11 +5116,11 @@ function stage() {
             if (!context.dragging) {
               // Have to iterate in reverse order to grab the frontmost object when two overlap
               for (
-                let i = context.activeObject.children.length - 1;
+                let i = context.activeObject.activeLayer.children.length - 1;
                 i >= 0;
                 i--
               ) {
-                child = context.activeObject.children[i];
+                child = context.activeObject.activeLayer.children[i];
                 if (!(child.idx in context.activeObject.currentFrame.keys))
                   continue;
                 // let bbox = child.bbox()
@@ -4693,73 +5240,73 @@ function stage() {
         break;
       case "paint_bucket":
         let line = { p1: mouse, p2: { x: mouse.x + 3000, y: mouse.y } };
-        debugCurves = [];
-        debugPoints = [];
-        let epsilon = context.fillGaps;
-        let min_x = Infinity;
-        let curveB = undefined;
-        let point = undefined;
-        let regionPoints;
+        // debugCurves = [];
+        // debugPoints = [];
+        // let epsilon = context.fillGaps;
+        // let min_x = Infinity;
+        // let curveB = undefined;
+        // let point = undefined;
+        // let regionPoints;
 
-        // First, see if there's an existing shape to change the color of
-        const startTime = performance.now();
-        let pointShape = getShapeAtPoint(
-          mouse,
-          context.activeObject.currentFrame.shapes,
-        );
-        const endTime = performance.now();
+        // // First, see if there's an existing shape to change the color of
+        // const startTime = performance.now();
+        // let pointShape = getShapeAtPoint(
+        //   mouse,
+        //   context.activeObject.currentFrame.shapes,
+        // );
+        // const endTime = performance.now();
 
-        console.log(
-          `getShapeAtPoint took ${endTime - startTime} milliseconds.`,
-        );
+        // console.log(
+        //   `getShapeAtPoint took ${endTime - startTime} milliseconds.`,
+        // );
 
-        if (pointShape) {
-          actions.colorShape.create(pointShape, context.fillStyle);
-          break;
-        }
+        // if (pointShape) {
+        //   actions.colorShape.create(pointShape, context.fillStyle);
+        //   break;
+        // }
 
-        // We didn't find an existing region to paintbucket, see if we can make one
-        const offset = context.activeObject.transformMouse({x:0, y:0})
-        try {
-          regionPoints = floodFillRegion(
-            mouse,
-            epsilon,
-            offset,
-            config.fileWidth,
-            config.fileHeight,
-            context,
-            debugPoints,
-            debugPaintbucket,
-          );
-        } catch (e) {
-          updateUI();
-          throw e;
-        }
-        if (regionPoints.length > 0 && regionPoints.length < 10) {
-          // probably a very small area, rerun with minimum epsilon
-          regionPoints = floodFillRegion(
-            mouse,
-            1,
-            offset,
-            config.fileWidth,
-            config.fileHeight,
-            context,
-            debugPoints,
-          );
-        }
-        let points = [];
-        for (let point of regionPoints) {
-          points.push([point.x, point.y]);
-        }
-        let cxt = {
-          ...context,
-          fillShape: true,
-          strokeShape: false,
-          sendToBack: true,
-        };
-        let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
-        shape.fromPoints(points, 1);
-        actions.addShape.create(context.activeObject, shape, cxt);
+        // // We didn't find an existing region to paintbucket, see if we can make one
+        // const offset = context.activeObject.transformMouse({x:0, y:0})
+        // try {
+        //   regionPoints = floodFillRegion(
+        //     mouse,
+        //     epsilon,
+        //     offset,
+        //     config.fileWidth,
+        //     config.fileHeight,
+        //     context,
+        //     debugPoints,
+        //     debugPaintbucket,
+        //   );
+        // } catch (e) {
+        //   updateUI();
+        //   throw e;
+        // }
+        // if (regionPoints.length > 0 && regionPoints.length < 10) {
+        //   // probably a very small area, rerun with minimum epsilon
+        //   regionPoints = floodFillRegion(
+        //     mouse,
+        //     1,
+        //     offset,
+        //     config.fileWidth,
+        //     config.fileHeight,
+        //     context,
+        //     debugPoints,
+        //   );
+        // }
+        // let points = [];
+        // for (let point of regionPoints) {
+        //   points.push([point.x, point.y]);
+        // }
+        // let cxt = {
+        //   ...context,
+        //   fillShape: true,
+        //   strokeShape: false,
+        //   sendToBack: true,
+        // };
+        // let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
+        // shape.fromPoints(points, 1);
+        // actions.addShape.create(context.activeObject, shape, cxt);
         break;
         // Loop labels in JS!
         // Iterate in reverse so we paintbucket the frontmost shape
@@ -4810,20 +5357,21 @@ function stage() {
     context.selectionRect = undefined;
     if (!context.activeObject.currentFrame?.exists) return;
     let mouse = getMousePos(stage, e);
+    root.handleMouseEvent("mouseup", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
     switch (mode) {
       case "draw":
-        if (context.activeShape) {
-          context.activeShape.addLine(mouse.x, mouse.y);
-          context.activeShape.simplify(context.simplifyMode);
-          actions.addShape.create(context.activeObject, context.activeShape);
-          context.activeShape = undefined;
-        }
+        // if (context.activeShape) {
+        //   context.activeShape.addLine(mouse.x, mouse.y);
+        //   context.activeShape.simplify(context.simplifyMode);
+        //   actions.addShape.create(context.activeObject, context.activeShape);
+        //   context.activeShape = undefined;
+        // }
         break;
       case "rectangle":
       case "ellipse":
-        actions.addShape.create(context.activeObject, context.activeShape);
-        context.activeShape = undefined;
+        // actions.addShape.create(context.activeObject, context.activeShape);
+        // context.activeShape = undefined;
         break;
       case "select":
         if (context.activeAction) {
@@ -4881,6 +5429,7 @@ function stage() {
   stage.addEventListener("mouseup", stage.mouseup);
   stage.addEventListener("mousemove", (e) => {
     let mouse = getMousePos(stage, e);
+    root.handleMouseEvent("mousemove", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
     context.mousePos = mouse;
     // if mouse is released, even if it happened outside the stage
@@ -4909,78 +5458,78 @@ function stage() {
       case "rectangle":
         stage.style.cursor = "default";
         context.activeCurve = undefined;
-        if (context.activeShape) {
-          context.activeShape.clear();
-          context.activeShape.addLine(mouse.x, context.activeShape.starty);
-          context.activeShape.addLine(mouse.x, mouse.y);
-          context.activeShape.addLine(context.activeShape.startx, mouse.y);
-          context.activeShape.addLine(
-            context.activeShape.startx,
-            context.activeShape.starty,
-          );
-          context.activeShape.update();
-        }
-        break;
+      //   if (context.activeShape) {
+      //     context.activeShape.clear();
+      //     context.activeShape.addLine(mouse.x, context.activeShape.starty);
+      //     context.activeShape.addLine(mouse.x, mouse.y);
+      //     context.activeShape.addLine(context.activeShape.startx, mouse.y);
+      //     context.activeShape.addLine(
+      //       context.activeShape.startx,
+      //       context.activeShape.starty,
+      //     );
+      //     context.activeShape.update();
+      //   }
+      //   break;
       case "ellipse":
         stage.style.cursor = "default";
         context.activeCurve = undefined;
-        if (context.activeShape) {
-          let midX = (mouse.x + context.activeShape.startx) / 2;
-          let midY = (mouse.y + context.activeShape.starty) / 2;
-          let xDiff = (mouse.x - context.activeShape.startx) / 2;
-          let yDiff = (mouse.y - context.activeShape.starty) / 2;
-          let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
-          context.activeShape.clear();
-          context.activeShape.addCurve(
-            new Bezier(
-              midX,
-              context.activeShape.starty,
-              midX + ellipseConst * xDiff,
-              context.activeShape.starty,
-              mouse.x,
-              midY - ellipseConst * yDiff,
-              mouse.x,
-              midY,
-            ),
-          );
-          context.activeShape.addCurve(
-            new Bezier(
-              mouse.x,
-              midY,
-              mouse.x,
-              midY + ellipseConst * yDiff,
-              midX + ellipseConst * xDiff,
-              mouse.y,
-              midX,
-              mouse.y,
-            ),
-          );
-          context.activeShape.addCurve(
-            new Bezier(
-              midX,
-              mouse.y,
-              midX - ellipseConst * xDiff,
-              mouse.y,
-              context.activeShape.startx,
-              midY + ellipseConst * yDiff,
-              context.activeShape.startx,
-              midY,
-            ),
-          );
-          context.activeShape.addCurve(
-            new Bezier(
-              context.activeShape.startx,
-              midY,
-              context.activeShape.startx,
-              midY - ellipseConst * yDiff,
-              midX - ellipseConst * xDiff,
-              context.activeShape.starty,
-              midX,
-              context.activeShape.starty,
-            ),
-          );
-        }
-        break;
+      //   if (context.activeShape) {
+      //     let midX = (mouse.x + context.activeShape.startx) / 2;
+      //     let midY = (mouse.y + context.activeShape.starty) / 2;
+      //     let xDiff = (mouse.x - context.activeShape.startx) / 2;
+      //     let yDiff = (mouse.y - context.activeShape.starty) / 2;
+      //     let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
+      //     context.activeShape.clear();
+      //     context.activeShape.addCurve(
+      //       new Bezier(
+      //         midX,
+      //         context.activeShape.starty,
+      //         midX + ellipseConst * xDiff,
+      //         context.activeShape.starty,
+      //         mouse.x,
+      //         midY - ellipseConst * yDiff,
+      //         mouse.x,
+      //         midY,
+      //       ),
+      //     );
+      //     context.activeShape.addCurve(
+      //       new Bezier(
+      //         mouse.x,
+      //         midY,
+      //         mouse.x,
+      //         midY + ellipseConst * yDiff,
+      //         midX + ellipseConst * xDiff,
+      //         mouse.y,
+      //         midX,
+      //         mouse.y,
+      //       ),
+      //     );
+      //     context.activeShape.addCurve(
+      //       new Bezier(
+      //         midX,
+      //         mouse.y,
+      //         midX - ellipseConst * xDiff,
+      //         mouse.y,
+      //         context.activeShape.startx,
+      //         midY + ellipseConst * yDiff,
+      //         context.activeShape.startx,
+      //         midY,
+      //       ),
+      //     );
+      //     context.activeShape.addCurve(
+      //       new Bezier(
+      //         context.activeShape.startx,
+      //         midY,
+      //         context.activeShape.startx,
+      //         midY - ellipseConst * yDiff,
+      //         midX - ellipseConst * xDiff,
+      //         context.activeShape.starty,
+      //         midX,
+      //         context.activeShape.starty,
+      //       ),
+      //     );
+      //   }
+      //   break;
       case "select":
         stage.style.cursor = "default";
         if (context.dragging) {
@@ -5032,7 +5581,7 @@ function stage() {
           context.selectionRect.y2 = mouse.y;
           context.selection = [];
           context.shapeselection = [];
-          for (let child of context.activeObject.children) {
+          for (let child of context.activeObject.activeLayer.children) {
             if (hitTest(regionToBbox(context.selectionRect), child)) {
               context.selection.push(child);
             }
@@ -5169,8 +5718,8 @@ function stage() {
     mouse = context.activeObject.transformMouse(mouse);
     modeswitcher: switch (mode) {
       case "select":
-        for (let i = context.activeObject.children.length - 1; i >= 0; i--) {
-          let child = context.activeObject.children[i];
+        for (let i = context.activeObject.activeLayer.children.length - 1; i >= 0; i--) {
+          let child = context.activeObject.activeLayer.children[i];
           if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
           if (hitTest(mouse, child)) {
             context.objectStack.push(child);
@@ -5186,7 +5735,7 @@ function stage() {
         // we didn't click on a child, go up a level
         if (context.activeObject.parent) {
           context.selection = [context.activeObject];
-          context.activeObject.currentFrameNum = 0;
+          context.activeObject.setFrameNum(0);
           context.shapeselection = [];
           context.objectStack.pop();
           updateUI();
@@ -6099,11 +6648,15 @@ function renderUI() {
     ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
 
     context.ctx = ctx;
-    root.draw(context);
+    // root.draw(context);
+    root.draw(ctx)
     if (context.activeObject != root) {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
       ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
-      context.activeObject.draw(context, true);
+      const transform = ctx.getTransform()
+      context.activeObject.transformCanvas(ctx)
+      context.activeObject.draw(ctx);
+      ctx.setTransform(transform)
     }
     if (context.activeShape) {
       context.activeShape.draw(context);
@@ -6316,57 +6869,129 @@ function renderLayers() {
       }
       // Draw existing frames
       if (layer instanceof Layer) {
-        layer.frames.forEach((frame, j) => {
-          if (!frame) return;
-          switch (frame.frameType) {
-            case "keyframe":
-              ctx.fillStyle = foregroundColor;
-              drawBorderedRect(
-                ctx,
-                j * frameWidth,
-                0,
-                frameWidth,
-                layerHeight,
-                highlight,
-                shadow,
-                shadow,
-                shadow,
-              );
-              ctx.fillStyle = "#111";
-              ctx.beginPath();
-              ctx.arc(
-                (j + 0.5) * frameWidth,
-                layerHeight * 0.75,
-                frameWidth * 0.25,
-                0,
-                2 * Math.PI,
-              );
-              ctx.fill();
-              break;
-            case "normal":
-              ctx.fillStyle = foregroundColor;
-              drawBorderedRect(
-                ctx,
-                j * frameWidth,
-                0,
-                frameWidth,
-                layerHeight,
-                highlight,
-                shadow,
-                backgroundColor,
-                backgroundColor,
-              );
-              break;
-            case "motion":
-              ctx.fillStyle = "#7a00b3";
-              ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
-              break;
-            case "shape":
-              ctx.fillStyle = "#9bff9b";
-              ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
-              break;
+        for (let j=0; j<layer.frames.length; j++) {
+          const frameInfo = layer.getFrameValue(j)
+          if (frameInfo.valueAtN) {
+            ctx.fillStyle = foregroundColor;
+            drawBorderedRect(
+              ctx,
+              j * frameWidth,
+              0,
+              frameWidth,
+              layerHeight,
+              highlight,
+              shadow,
+              shadow,
+              shadow,
+            );
+            ctx.fillStyle = "#111";
+            ctx.beginPath();
+            ctx.arc(
+              (j + 0.5) * frameWidth,
+              layerHeight * 0.75,
+              frameWidth * 0.25,
+              0,
+              2 * Math.PI,
+            );
+            ctx.fill();
+            if (frameInfo.valueAtN.keyTypes.has("motion")) {
+              ctx.strokeStyle = "#7a00b3";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.25)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
+              ctx.stroke()
+            }
+            if (frameInfo.valueAtN.keyTypes.has("shape")) {
+              ctx.strokeStyle = "#9bff9b";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.35)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
+              ctx.stroke()
+            }
+          } else if (frameInfo.prev && frameInfo.next) {
+            ctx.fillStyle = foregroundColor;
+            drawBorderedRect(
+              ctx,
+              j * frameWidth,
+              0,
+              frameWidth,
+              layerHeight,
+              highlight,
+              shadow,
+              backgroundColor,
+              backgroundColor,
+            );
+            if (frameInfo.prev.keyTypes.has("motion")) {
+              ctx.strokeStyle = "#7a00b3";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.25)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
+              ctx.stroke()
+            }
+            if (frameInfo.prev.keyTypes.has("shape")) {
+              ctx.strokeStyle = "#9bff9b";
+              ctx.lineWidth = 2;
+              ctx.beginPath()
+              ctx.moveTo(j*frameWidth, layerHeight*0.35)
+              ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
+              ctx.stroke()
+            }
           }
-        });
+        }
+        // layer.frames.forEach((frame, j) => {
+        //   if (!frame) return;
+        //   switch (frame.frameType) {
+        //     case "keyframe":
+        //       ctx.fillStyle = foregroundColor;
+        //       drawBorderedRect(
+        //         ctx,
+        //         j * frameWidth,
+        //         0,
+        //         frameWidth,
+        //         layerHeight,
+        //         highlight,
+        //         shadow,
+        //         shadow,
+        //         shadow,
+        //       );
+        //       ctx.fillStyle = "#111";
+        //       ctx.beginPath();
+        //       ctx.arc(
+        //         (j + 0.5) * frameWidth,
+        //         layerHeight * 0.75,
+        //         frameWidth * 0.25,
+        //         0,
+        //         2 * Math.PI,
+        //       );
+        //       ctx.fill();
+        //       break;
+        //     case "normal":
+        //       ctx.fillStyle = foregroundColor;
+        //       drawBorderedRect(
+        //         ctx,
+        //         j * frameWidth,
+        //         0,
+        //         frameWidth,
+        //         layerHeight,
+        //         highlight,
+        //         shadow,
+        //         backgroundColor,
+        //         backgroundColor,
+        //       );
+        //       break;
+        //     case "motion":
+        //       ctx.fillStyle = "#7a00b3";
+        //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
+        //       break;
+        //     case "shape":
+        //       ctx.fillStyle = "#9bff9b";
+        //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
+        //       break;
+        //   }
+        // });
       } else if (layer instanceof AudioLayer) {
         // TODO: split waveform into chunks
         for (let i in layer.sounds) {
@@ -7054,12 +7679,14 @@ async function renderMenu() {
       deleteFrameMenuItem,
       {
         text: "Add Motion Tween",
-        enabled: activeFrame && !activeKeyframe,
+        enabled: true,
+        // enabled: activeFrame && !activeKeyframe,
         action: actions.addMotionTween.create,
       },
       {
         text: "Add Shape Tween",
-        enabled: activeFrame && !activeKeyframe,
+        enabled: true,
+        // enabled: activeFrame && !activeKeyframe,
         action: actions.addShapeTween.create,
       },
       {
@@ -7255,7 +7882,7 @@ function renderAll() {
 
     if (errorMessage !== lastErrorMessage) {
       // A new error, log it and reset repeat count
-      console.error("Error during rendering:", errorMessage);
+      console.error(error);
       lastErrorMessage = errorMessage;
       repeatCount = 1;
     } else if (repeatCount === 1) {

@@ -2,6 +2,7 @@ use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
+use tauri::Manager;
 
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -50,9 +51,9 @@ pub fn run() {
                 .targets([
                     Target::new(TargetKind::Stdout),
                     // LogDir locations:
-                    // Linux: /home/user/.local/share/org.lightningbeam.app/logs
-                    // macOS: /Users/user/Library/Logs/org.lightningbeam.app/logs
-                    // Windows: C:\Users\user\AppData\Local\org.lightningbeam.app\logs
+                    // Linux: /home/user/.local/share/org.lightningbeam.core/logs
+                    // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
+                    // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
                     Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
                     Target::new(TargetKind::Webview),
                 ])
@@ -62,6 +63,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error])
+        .setup(|app| {
+          #[cfg(debug_assertions)] // only include this code on debug builds
+          {
+            let window = app.get_webview_window("main").unwrap();
+            window.open_devtools();
+            window.close_devtools();
+          }
+          Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
     tracing_subscriber::fmt().with_env_filter(EnvFilter::new(format!("{}=trace", pkg_name))).init();
