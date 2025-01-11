@@ -7431,6 +7431,7 @@ async function renderMenu() {
   let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
+  let duplicateKeyframeMenuItem;
   let deleteFrameMenuItem;
 
   // Move this
@@ -7665,6 +7666,14 @@ async function renderMenu() {
     enabled: !activeKeyframe,
     action: addKeyframe,
   };
+  duplicateKeyframeMenuItem = {
+    text: "Duplicate Keyframe",
+    enabled: activeKeyframe,
+    action: () => {
+      context.activeObject.setFrameNum(context.activeObject.currentFrameNum+1)
+      addKeyframe()
+    },
+  };
   deleteFrameMenuItem = {
     text: "Delete Frame",
     enabled: activeFrame,
@@ -7677,6 +7686,7 @@ async function renderMenu() {
       newFrameMenuItem,
       newKeyframeMenuItem,
       deleteFrameMenuItem,
+      duplicateKeyframeMenuItem,
       {
         text: "Add Motion Tween",
         enabled: true,
