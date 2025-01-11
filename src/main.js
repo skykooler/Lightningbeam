@@ -2516,6 +2516,7 @@ class Layer extends Widget {
 
   draw(ctx) {
     // super.draw(ctx)
+    if (!this.visible) return;
     let frameInfo = this.getFrameValue(this.frameNum);
     let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
     const keyframe = frameInfo.valueAtN ? true : false
