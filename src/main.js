@@ -2615,7 +2615,8 @@ class Layer extends Widget {
   bbox() {
     let bbox = super.bbox()
     const frameInfo = this.getFrameValue(this.frameNum);
-    const frame = frameInfo.valueAtN
+    // TODO: if there are multiple layers we should only be counting valid frames
+    const frame = frameInfo.valueAtN ? frameInfo.valueAtN : frameInfo.prev
     if (!frame) return bbox;
     if (frame.shapes.length > 0 && bbox == undefined) {
       bbox = structuredClone(frame.shapes[0].boundingBox);
