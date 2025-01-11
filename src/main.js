@@ -7448,22 +7448,18 @@ async function renderMenu() {
     });
   });
 
-  activeKeyframe = false;
-  if (
-    context.activeObject.activeLayer.frames[
-      context.activeObject.currentFrameNum
-    ]
-  ) {
+  const frameInfo = context.activeObject.activeLayer.getFrameValue(
+    context.activeObject.currentFrameNum
+  )
+  if (frameInfo.valueAtN) {
     activeFrame = true;
-    if (
-      context.activeObject.activeLayer.frames[
-        context.activeObject.currentFrameNum
-      ].frameType == "keyframe"
-    ) {
-      activeKeyframe = true;
-    }
+    activeKeyframe = true;
+  } else if (frameInfo.prev && frameInfo.next) {
+    activeFrame = true;
+    activeKeyframe = false;
   } else {
     activeFrame = false;
+    activeKeyframe = false;
   }
   const appSubmenu = await Submenu.new({
     text: "Lightningbeam",
@@ -7683,20 +7679,18 @@ async function renderMenu() {
   const timelineSubmenu = await Submenu.new({
     text: "Timeline",
     items: [
-      newFrameMenuItem,
+      // newFrameMenuItem,
       newKeyframeMenuItem,
       deleteFrameMenuItem,
       duplicateKeyframeMenuItem,
       {
         text: "Add Motion Tween",
-        enabled: true,
-        // enabled: activeFrame && !activeKeyframe,
+        enabled: activeFrame,
         action: actions.addMotionTween.create,
       },
       {
         text: "Add Shape Tween",
-        enabled: true,
-        // enabled: activeFrame && !activeKeyframe,
+        enabled: activeFrame,
         action: actions.addShapeTween.create,
       },
       {
