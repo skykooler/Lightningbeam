@@ -2173,7 +2173,7 @@ class Layer extends Widget {
     layer.frames = [];
     for (let i in json.frames) {
       const frame = json.frames[i];
-      if (frame.frameType=="keyframe") {
+      if (frame && frame.frameType=="keyframe") {
         layer.frames.push(Frame.fromJSON(frame));
       } else {
         if (layer.frames[layer.frames.length-1]) {
@@ -7431,6 +7431,7 @@ async function renderMenu() {
   let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
+  let duplicateKeyframeMenuItem;
   let deleteFrameMenuItem;
 
   // Move this
@@ -7665,6 +7666,14 @@ async function renderMenu() {
     enabled: !activeKeyframe,
     action: addKeyframe,
   };
+  duplicateKeyframeMenuItem = {
+    text: "Duplicate Keyframe",
+    enabled: activeKeyframe,
+    action: () => {
+      context.activeObject.setFrameNum(context.activeObject.currentFrameNum+1)
+      addKeyframe()
+    },
+  };
   deleteFrameMenuItem = {
     text: "Delete Frame",
     enabled: activeFrame,
@@ -7677,6 +7686,7 @@ async function renderMenu() {
       newFrameMenuItem,
       newKeyframeMenuItem,
       deleteFrameMenuItem,
+      duplicateKeyframeMenuItem,
       {
         text: "Add Motion Tween",
         enabled: true,

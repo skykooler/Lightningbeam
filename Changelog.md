@@ -1,3 +1,10 @@
+# 0.7.1-alpha:
+New features:
+- Added "Duplicate keyframe" menu option
+
+Bugfixes:
+- Fix importing from file
+
 # 0.7.0-alpha:
 New features:
 - Keyframes can now have both motion and shape tweens on the same frame
