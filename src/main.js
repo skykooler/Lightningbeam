@@ -7431,6 +7431,7 @@ async function renderMenu() {
   let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
+  let newBlankKeyframeMenuItem;
   let duplicateKeyframeMenuItem;
   let deleteFrameMenuItem;
 
@@ -7660,6 +7661,14 @@ async function renderMenu() {
   newKeyframeMenuItem = {
     text: "New Keyframe",
     enabled: !activeKeyframe,
+    accelerator: "F5",
+    action: addKeyframe,
+  };
+  newBlankKeyframeMenuItem = {
+    text: "New Blank Keyframe",
+    // enabled: !activeKeyframe,
+    enabled: false,
+    accelerator: "F6",
     action: addKeyframe,
   };
   duplicateKeyframeMenuItem = {
@@ -7681,6 +7690,7 @@ async function renderMenu() {
     items: [
       // newFrameMenuItem,
       newKeyframeMenuItem,
+      newBlankKeyframeMenuItem,
       deleteFrameMenuItem,
       duplicateKeyframeMenuItem,
       {
