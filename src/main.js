@@ -5244,6 +5244,10 @@ function zoomOut() {
 }
 function resetZoom() {
   context.zoomLevel = 1;
+  recenter()
+}
+
+function recenter() {
   for (let canvas of canvases) {
     canvas.offsetX = canvas.offsetY = 0;
   }
@@ -8107,6 +8111,12 @@ async function renderMenu() {
         enabled: context.zoomLevel != 1,
         action: resetZoom,
         accelerator: getShortcut("resetZoom"),
+      },
+      {
+        text: "Recenter View",
+        enabled: true,
+        action: recenter,
+        // accelerator: getShortcut("recenter"),
       },
     ],
   });
