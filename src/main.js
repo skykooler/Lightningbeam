@@ -2175,7 +2175,10 @@ class Layer extends Widget {
     layer.frames = [];
     for (let i in json.frames) {
       const frame = json.frames[i];
-      if (!frame) continue;
+      if (!frame) {
+        layer.frames.push(undefined)
+        continue;
+      }
       if (frame.frameType=="keyframe") {
         layer.frames.push(Frame.fromJSON(frame));
       } else {
