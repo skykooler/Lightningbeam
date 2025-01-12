@@ -1,3 +1,7 @@
+# 0.7.3-alpha:
+Bugfixes:
+- Fix some files not importing properly
+
 # 0.7.2-alpha:
 New features:
 - mp4 export (unreliable)
