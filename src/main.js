@@ -1467,7 +1467,7 @@ let actions = {
       } else {
         for (let _layer of parent.layers) {
           for (let _frame of _layer.frames) {
-            if (_frame.idx == frame.idx) {
+            if (_frame && (_frame.idx == frame.idx)) {
               layer = _layer
             }
           }
@@ -2581,6 +2581,7 @@ class Layer extends Widget {
           for (let i = this.frameNum; i >= 0; i--) {
             if (
               this.frames[i] &&
+              this.frames[i].keys[child.idx] &&
               this.frames[i].keys[child.idx].playFromFrame
             ) {
               lastFrame = i;
