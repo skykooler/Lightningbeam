@@ -1,3 +1,7 @@
+# 0.7.4-alpha:
+Bugfixes:
+- Fix timeline collapse on imported objects
+
 # 0.7.3-alpha:
 Bugfixes:
 - Fix some files not importing properly
