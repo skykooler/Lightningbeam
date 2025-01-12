@@ -1,3 +1,12 @@
+# 0.7.2-alpha:
+New features:
+- mp4 export (unreliable)
+- Added "Recenter View" menu option
+
+Bugfixes:
+- Fix layer visibility toggle not functioning
+- Fix some files not opening properly
+
 # 0.7.1-alpha:
 New features:
 - Added "Duplicate keyframe" menu option

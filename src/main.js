@@ -365,6 +365,8 @@ let config = {
     selectAll: "<mod>a",
     group: "<mod>g",
     addLayer: "<mod>l",
+    addKeyframe: "F6",
+    addBlankKeyframe: "F7",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
     resetZoom: "<mod>0",
@@ -1465,7 +1467,7 @@ let actions = {
       } else {
         for (let _layer of parent.layers) {
           for (let _frame of _layer.frames) {
-            if (_frame.idx == frame.idx) {
+            if (_frame && (_frame.idx == frame.idx)) {
               layer = _layer
             }
           }
@@ -2514,6 +2516,7 @@ class Layer extends Widget {
 
   draw(ctx) {
     // super.draw(ctx)
+    if (!this.visible) return;
     let frameInfo = this.getFrameValue(this.frameNum);
     let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
     const keyframe = frameInfo.valueAtN ? true : false
@@ -2578,6 +2581,7 @@ class Layer extends Widget {
           for (let i = this.frameNum; i >= 0; i--) {
             if (
               this.frames[i] &&
+              this.frames[i].keys[child.idx] &&
               this.frames[i].keys[child.idx].playFromFrame
             ) {
               lastFrame = i;
@@ -4729,7 +4733,374 @@ async function about() {
   );
 }
 
+// Export stuff that's all crammed in here and needs refactored
+function createProgressModal() {
+  // Check if the modal already exists
+  const existingModal = document.getElementById('progressModal');
+  if (existingModal) {
+    existingModal.style.display = 'flex';
+    return; // If the modal already exists, do nothing
+  }
+
+  // Create modal container with a unique ID
+  const modal = document.createElement('div');
+  modal.id = 'progressModal';  // Give the modal a unique ID
+  modal.style.position = 'fixed';
+  modal.style.top = '0';
+  modal.style.left = '0';
+  modal.style.width = '100%';
+  modal.style.height = '100%';
+  modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+  modal.style.display = 'flex';
+  modal.style.justifyContent = 'center';
+  modal.style.alignItems = 'center';
+  modal.style.zIndex = '9999';
+  
+  // Create inner modal box
+  const modalContent = document.createElement('div');
+  modalContent.style.backgroundColor = backgroundColor;
+  modalContent.style.padding = '20px';
+  modalContent.style.borderRadius = '8px';
+  modalContent.style.textAlign = 'center';
+  modalContent.style.minWidth = '300px';
+  
+  // Create progress bar
+  const progressBar = document.createElement('progress');
+  progressBar.id = 'progressBar';
+  progressBar.value = 0;
+  progressBar.max = 100;
+  progressBar.style.width = '100%';
+
+  // Create text to show the current frame info
+  const progressText = document.createElement('p');
+  progressText.id = 'progressText';
+  progressText.innerText = 'Rendering frame 0 of 0';
+
+  // Append elements to modalContent
+  modalContent.appendChild(progressBar);
+  modalContent.appendChild(progressText);
+  
+  // Append modalContent to modal
+  modal.appendChild(modalContent);
+
+  // Append modal to body
+  document.body.appendChild(modal);
+}
+
+
+// https://semisignal.com/tag/ffmpeg-js/
+function convertDataURIToBinary(dataURI) {
+  const base64 = dataURI.replace(/^data[^,]+,/,'');
+  const raw = window.atob(base64);
+  const rawLength = raw.length;
+
+  const array = new Uint8Array(new ArrayBuffer(rawLength));
+  for (let i = 0; i < rawLength; i++) {
+      array[i] = raw.charCodeAt(i);
+  }
+  return array;
+};
+
+//**blob to dataURL**
+function blobToDataURL(blob, callback) {
+  const a = new FileReader();
+  a.onload = function(e) {callback(e.target.result);}
+  a.readAsDataURL(blob);
+}
+
+function pad(n, width, z) {
+  z = z || '0';
+  n = n + '';
+  return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function downloadObjectURL(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function done(output) {
+  const url = URL.createObjectURL(output);
+  downloadObjectURL(url, "test.mp4")
+  const modal = document.getElementById('progressModal');
+  modal.style.display = 'none';
+}
+
+async function exportMp4() {
+  const worker = new Worker("/ffmpeg-worker-mp4.js")
+  // const worker = new Worker("/ffmpeg-worker-webm.js")
+
+  const canvas = document.createElement("canvas");
+  canvas.width = config.fileWidth; // Set desired width
+  canvas.height = config.fileHeight; // Set desired height
+  const ctx = canvas.getContext("2d")
+
+  const images = []
+  const videoChunks = []
+  // const chunkSize = 10;
+  const chunkSize = root.maxFrame+1;
+  let currentFrame = 0;
+
+  createProgressModal();
+
+  function processChunk(worker, chunkStart, chunkEnd) {
+
+    const chunkFrames = [];
+  
+    // Prepare the frames for the current chunk
+    // for (let i = chunkStart; i < chunkEnd; i++) {
+    function processFrame(i) {
+
+      // Update progress bar
+      const progressText = document.getElementById('progressText');
+      progressText.innerText = `Rendering frame ${i + 1} of ${root.maxFrame}`;
+      const progressBar = document.getElementById('progressBar');
+      const progress = Math.round(((i + 1) / root.maxFrame) * 100);
+      progressBar.value = progress;
+
+      ctx.resetTransform();
+      ctx.beginPath();
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
+      root.setFrameNum(i);
+      root.draw(ctx);
+      const img = new Image()
+      const mimeType = 'image/jpeg'
+      const imgString = canvas.toDataURL(mimeType,1)
+      const data = convertDataURIToBinary( imgString )
+      chunkFrames.push({
+        name: `img${ pad( chunkFrames.length, 3 ) }.jpeg`,
+        data
+      })
+      img.src = imgString
+      if (i+1 < chunkEnd) {
+        setTimeout(() => processFrame(i+1), 4)
+      } else {
+        // Post the chunk to the worker
+        setTimeout(() => worker.postMessage({
+          type: 'run',
+          // TOTAL_MEMORY: 268435456,
+          TOTAL_MEMORY: 1073741824,
+          arguments: [
+            '-r', config.framerate.toString(), 
+            '-i', 'img%03d.jpeg', 
+            '-c:v', 'libx264', 
+            '-crf', '23', 
+            '-vf', `scale=${parseInt(config.fileWidth/8)*2}:${parseInt(config.fileHeight/8)*2}`, 
+            // '-vf', `scale=${config.fileWidth}:${config.fileHeight}`, 
+            '-pix_fmt', 'yuv420p', 
+            '-vb', '20M',
+            'out.mp4'
+          ],
+          // arguments: [
+          //   '-r', '20', 
+          //   '-i', 'img%03d.jpeg',
+          //   'out.webm'
+          // ],
+          MEMFS: chunkFrames  // Supply the chunk frames
+        }), 1000);
+
+        currentFrame += chunkSize
+      }
+    }
+
+    processFrame(chunkStart)
+    
+
+
+    worker.onmessage = function(e) {
+      const msg = e.data;
+  
+      if (msg.type === 'done') {
+        // Add chunk to the videoChunks array
+        videoChunks.push(msg.data.MEMFS[0].data)
+        
+        // Check if we need to process the next chunk or finalize
+        if (currentFrame < root.maxFrame) {
+          const nextChunkStart = currentFrame;
+          const nextChunkEnd = Math.min(currentFrame + chunkSize, root.maxFrame);
+  
+          // Process next chunk after the current one finishes
+          processChunk(worker, nextChunkStart, nextChunkEnd);  // Recurse with updated chunk indices
+        } else {
+          // If all chunks are processed, call finalization
+          const progressText = document.getElementById('progressText');
+          progressText.innerText = 'Finalizing...';
+          const progressBar = document.getElementById('progressBar');
+          progressBar.value = 100;
+          setTimeout(() => concatenateChunks(videoChunks), 1000);  // Finalize once all chunks are processed
+        }
+      } else if (msg.type === "stdout") {
+        console.error(msg.data);
+      } else if (msg.type === "stderr") {
+        console.log(msg.data);
+      }
+    };
+  }
+
+  // worker.onmessage = function(e) {
+  //   const msg = e.data;
+    
+  //   switch (msg.type) {
+  //     // Handle stdout and stderr from FFmpeg
+  //     case "stdout":
+  //       console.error(msg.data);
+  //       break;
+  //     case "stderr":
+  //       console.log(msg.data);
+  //       break;
+  //     case "exit":
+  //       console.log("Process exited with code " + msg.data);
+  //       break;
+  
+  //     // Handle completion of each chunk
+  //     case 'done':
+  //       // Save the chunk's video data as a blob
+  //       const chunkBlob = new Blob([msg.data.MEMFS[0].data], {
+  //         type: "video/mp4"
+  //       });
+  //       videoChunks.push(chunkBlob);  // Add chunk to the videoChunks array
+  
+  //       // If we've processed all chunks, concatenate them
+  //       if (currentFrame >= root.maxFrame) {
+  //         concatenateChunks(videoChunks);
+  //       }
+  //       break;
+  //   }
+  // };
+
+  // Concatenate all video chunks into one MP4 file
+  async function concatenateChunks(chunks) {
+    if (chunks.length==1) {
+      // No need to concatenate, send directly to done
+      const finalBlob = new Blob([chunks[0]], {
+        type: "video/mp4"
+      });
+      // Trigger the done callback with the final video blob
+      done(finalBlob);
+      return;
+    }
+
+    const chunkNames = chunks.map((_, index) => `chunk${index + 1}.mp4`);
+    
+    // Create a file list in MEMFS
+    const memfsChunks = chunks.map((chunk, index) => ({
+      name: chunkNames[index],
+      data: chunk
+    }));
+
+    const concatList = chunkNames.map((chunkName) => `file '${chunkName}'`).join('\n');
+  // Create a file in MEMFS for the concat list
+    const concatListFile = {
+      name: 'concat_list.txt',
+      data: new TextEncoder().encode(concatList)
+    };
+
+    // Add the concat list to the MEMFS files
+    memfsChunks.push(concatListFile);
+
+    console.log(chunkNames)
+    console.log(concatList)
+    // Prepare FFmpeg command to concatenate video chunks
+    worker.postMessage({
+      type: 'run',
+      TOTAL_MEMORY: 268435456,
+      arguments: [
+        '-f', 'concat',
+        '-safe', '0',  // Allow using file paths
+        '-i', 'concat_list.txt',  // Use the concat list file
+        // '-c:v', 'copy',
+        '-c:v', 'libx264',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        'final_video.mp4'
+      ],
+      // arguments: [
+      //   '-f', 'concat',
+      //   '-safe', '0',  // Allow using file paths
+      //   '-i', 'concat_list.txt', 
+      //   'final_video.webm'
+      // ],
+      MEMFS: memfsChunks  // Provide the chunks and concat list as input to FFmpeg
+    });
+
+    // Listen for the final output
+    worker.onmessage = function(e) {
+      const msg = e.data;
+
+      switch (msg.type) {
+        case 'done':
+          console.log('done')
+          // Combine the blobs into the final video file
+          const finalBlob = new Blob([msg.data.MEMFS[0].data], {
+            type: "video/mp4"
+          });
+          // Trigger the done callback with the final video blob
+          done(finalBlob);
+          break;
+        case 'stderr':
+          console.log(msg.data);
+          break;
+        case 'stdout':
+          console.error(msg.data);
+          break;
+        case 'exit':
+          console.log('FFmpeg worker exit code:', msg.data);
+          break;
+      }
+    };
+  }
+
+  processChunk(worker, 0, Math.min(chunkSize, root.maxFrame))
+
+  function finalize() {
+
+    worker.onmessage = function(e) {
+      var msg = e.data;
+      switch (msg.type) {
+        // Ffmpeg seems to have stdout and stderr swapped
+        case "stdout":
+          console.error(msg.data);
+          break;
+        case "stderr":
+          console.log(msg.data);
+          break;
+        case "exit":
+          console.log("Process exited with code " + msg.data);
+          break;
+
+        case 'done':
+          const blob = new Blob([msg.data.MEMFS[0].data], {
+            type: "video/mp4"
+          });
+          done( blob )
+
+        break;
+      }
+    };
+
+    worker.postMessage({
+      type: 'run',
+      TOTAL_MEMORY: 268435456,
+      arguments: ["-r", "20", "-i", "img%03d.jpeg", "-c:v", "libx264", "-crf", "1", "-vf", `scale=1000:1000`, "-pix_fmt", "yuv420p", "-vb", "20M", "out.mp4"],
+      MEMFS: images
+    });
+  }
+}
+// exportMp4()
+
 async function render() {
+  exportMp4()
+  return
   document.querySelector("body").style.cursor = "wait";
   const path = await saveFileDialog({
     filters: [
@@ -4873,6 +5244,10 @@ function zoomOut() {
 }
 function resetZoom() {
   context.zoomLevel = 1;
+  recenter()
+}
+
+function recenter() {
   for (let canvas of canvases) {
     canvas.offsetX = canvas.offsetY = 0;
   }
@@ -7431,6 +7806,7 @@ async function renderMenu() {
   let activeKeyframe;
   let newFrameMenuItem;
   let newKeyframeMenuItem;
+  let newBlankKeyframeMenuItem;
   let duplicateKeyframeMenuItem;
   let deleteFrameMenuItem;
 
@@ -7448,22 +7824,18 @@ async function renderMenu() {
     });
   });
 
-  activeKeyframe = false;
-  if (
-    context.activeObject.activeLayer.frames[
-      context.activeObject.currentFrameNum
-    ]
-  ) {
+  const frameInfo = context.activeObject.activeLayer.getFrameValue(
+    context.activeObject.currentFrameNum
+  )
+  if (frameInfo.valueAtN) {
     activeFrame = true;
-    if (
-      context.activeObject.activeLayer.frames[
-        context.activeObject.currentFrameNum
-      ].frameType == "keyframe"
-    ) {
-      activeKeyframe = true;
-    }
+    activeKeyframe = true;
+  } else if (frameInfo.prev && frameInfo.next) {
+    activeFrame = true;
+    activeKeyframe = false;
   } else {
     activeFrame = false;
+    activeKeyframe = false;
   }
   const appSubmenu = await Submenu.new({
     text: "Lightningbeam",
@@ -7664,6 +8036,14 @@ async function renderMenu() {
   newKeyframeMenuItem = {
     text: "New Keyframe",
     enabled: !activeKeyframe,
+    accelerator: getShortcut("addKeyframe"),
+    action: addKeyframe,
+  };
+  newBlankKeyframeMenuItem = {
+    text: "New Blank Keyframe",
+    // enabled: !activeKeyframe,
+    enabled: false,
+    accelerator: getShortcut("addBlankKeyframe"),
     action: addKeyframe,
   };
   duplicateKeyframeMenuItem = {
@@ -7683,20 +8063,19 @@ async function renderMenu() {
   const timelineSubmenu = await Submenu.new({
     text: "Timeline",
     items: [
-      newFrameMenuItem,
+      // newFrameMenuItem,
       newKeyframeMenuItem,
+      newBlankKeyframeMenuItem,
       deleteFrameMenuItem,
       duplicateKeyframeMenuItem,
       {
         text: "Add Motion Tween",
-        enabled: true,
-        // enabled: activeFrame && !activeKeyframe,
+        enabled: activeFrame,
         action: actions.addMotionTween.create,
       },
       {
         text: "Add Shape Tween",
-        enabled: true,
-        // enabled: activeFrame && !activeKeyframe,
+        enabled: activeFrame,
         action: actions.addShapeTween.create,
       },
       {
@@ -7732,6 +8111,12 @@ async function renderMenu() {
         enabled: context.zoomLevel != 1,
         action: resetZoom,
         accelerator: getShortcut("resetZoom"),
+      },
+      {
+        text: "Recenter View",
+        enabled: true,
+        action: recenter,
+        // accelerator: getShortcut("recenter"),
       },
     ],
   });
