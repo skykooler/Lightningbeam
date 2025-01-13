@@ -1,3 +1,8 @@
+# 0.7.6-alpha:
+Bugfixes:
+- Fix errors when images are not present in a saved file
+- Save images properly
+
 # 0.7.5-alpha:
 Bugfixes:
 - Fix errors when files refer to now nonexistant frames
