@@ -461,6 +461,32 @@ function drawCheckerboardBackground(ctx, x, y, width, height, squareSize) {
     ctx.fillRect(x, y, width, height);
 }
 
+const missingTexturePatternCache = new Map();
+
+function createMissingTexturePattern(ctx) {
+  // Return cached pattern if it exists
+  if (missingTexturePatternCache.has(ctx)) return missingTexturePatternCache.get(ctx);
+
+  // Create an offscreen canvas for the checkerboard pattern
+  const size = 16;
+  const patternCanvas = document.createElement('canvas');
+  patternCanvas.width = patternCanvas.height = size * 2;
+  const patternCtx = patternCanvas.getContext('2d');
+
+  // Draw the magenta and black checkerboard pattern
+  for (let y = 0; y < 2; y++) {
+    for (let x = 0; x < 2; x++) {
+      patternCtx.fillStyle = (x + y) % 2 === 0 ? 'magenta' : 'black';
+      patternCtx.fillRect(x * size, y * size, size, size);
+    }
+  }
+
+  // Cache and return the pattern
+  const pattern = ctx.createPattern(patternCanvas, 'repeat');
+  missingTexturePatternCache.set(ctx, pattern);
+  return pattern;
+}
+
 function hexToHsl(hex) {
   // Step 1: Convert hex to RGB
   let r = parseInt(hex.substring(1, 3), 16) / 255;
@@ -919,6 +945,7 @@ export {
   rgbToHex,
   rgbToHsv,
   drawCheckerboardBackground,
+  createMissingTexturePattern,
   clamp,
   signedAngleBetweenVectors,
   rotateAroundPoint,
