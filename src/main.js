@@ -41,6 +41,7 @@ import {
   rgbToHsv,
   multiplyMatrices,
   growBoundingBox,
+  createMissingTexturePattern,
 } from "./utils.js";
 import {
   backgroundColor,
@@ -2940,7 +2941,13 @@ class BaseShape {
     if (this.filled) {
       ctx.beginPath();
       if (this.fillImage) {
-        let pat = ctx.createPattern(this.fillImage, "no-repeat");
+        let pat;
+        if (this.fillImage instanceof Element ||
+          Object.keys(this.fillImage).length !== 0) {
+          pat = ctx.createPattern(this.fillImage, "no-repeat");
+        } else {
+          pat = createMissingTexturePattern(ctx)
+        }
         ctx.fillStyle = pat;
       } else {
         ctx.fillStyle = this.fillStyle;
@@ -3162,12 +3169,20 @@ class Shape extends BaseShape {
     this.inProgress = true;
   }
   static fromJSON(json) {
+    let fillImage = undefined;
+    if (json.fillImage && Object.keys(json.fillImage).length !== 0) {
+      let img = new Image();
+      img.src = json.fillImage.src
+      fillImage = img
+    } else {
+      fillImage = {}
+    }
     const shape = new Shape(
       json.startx,
       json.starty,
       {
         fillStyle: json.fillStyle,
-        fillImage: json.fillImage,
+        fillImage: fillImage,
         strokeStyle: json.strokeStyle,
         lineWidth: json.lineWidth,
         fillShape: json.filled,
@@ -3199,7 +3214,11 @@ class Shape extends BaseShape {
     json.startx = this.startx;
     json.starty = this.starty;
     json.fillStyle = this.fillStyle;
-    json.fillImage = this.fillImage;
+    if (this.fillImage instanceof Element) {
+      json.fillImage = {
+        src: this.fillImage.src
+      }
+    }
     json.strokeStyle = this.fillStyle;
     json.lineWidth = this.lineWidth;
     json.filled = this.filled;
