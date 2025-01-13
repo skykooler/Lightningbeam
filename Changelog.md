@@ -1,3 +1,7 @@
+# 0.7.5-alpha:
+Bugfixes:
+- Fix errors when files refer to now nonexistant frames
+
 # 0.7.4-alpha:
 Bugfixes:
 - Fix timeline collapse on imported objects
