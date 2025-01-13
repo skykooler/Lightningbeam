@@ -4549,6 +4549,10 @@ async function _open(path, returnJson = false) {
       );
     } else {
       console.error(e);
+      await messageDialog(
+        `Error replaying file: ${e}`,
+        { title: "Error", kind: "error" },
+      );
     }
   }
 }
