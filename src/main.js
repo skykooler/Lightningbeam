@@ -5220,6 +5220,7 @@ async function render() {
         const oldContext = context;
         context = exportContext;
 
+        const oldRootFrame = root.currentFrameNum
         let currentFrame = 0;
         const bitrate = 1e6
         const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
@@ -5302,6 +5303,7 @@ async function render() {
           } else {
             // Once all frames are processed, reset context and export
             context = oldContext;
+            root.setFrameNum(oldRootFrame)
             finishEncoding()
           }
         };
