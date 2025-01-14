@@ -5159,12 +5159,15 @@ async function exportMp4(path) {
     });
   }
 }
-// exportMp4()
 
 async function render() {
   document.querySelector("body").style.cursor = "wait";
   const path = await saveFileDialog({
     filters: [
+      {
+        name: "WebM files (.webm)",
+        extensions: ["webm"],
+      },
       {
         name: "MP4 files (.mp4)",
         extensions: ["mp4"],
@@ -5178,7 +5181,7 @@ async function render() {
         extensions: ["html"],
       },
     ],
-    defaultPath: await join(await documentDir(), "untitled.mp4"),
+    defaultPath: await join(await documentDir(), "untitled.webm"),
   });
   if (path != undefined) {
     // SVG balks on images
@@ -5192,11 +5195,122 @@ async function render() {
 
     const ext = path.split(".").pop().toLowerCase();
 
+    const canvas = document.createElement("canvas");
+    canvas.width = config.fileWidth; // Set desired width
+    canvas.height = config.fileHeight; // Set desired height
+    let exportContext = {
+      ...context,
+      ctx: canvas.getContext("2d"),
+      selectionRect: undefined,
+      selection: [],
+      shapeselection: [],
+    };
+
+
     switch (ext) {
       case "mp4":
         exportMp4(path)
         return
         break
+      case "webm":
+        
+        createProgressModal();
+
+        // Store the original context
+        const oldContext = context;
+        context = exportContext;
+
+        let currentFrame = 0;
+        const bitrate = 1e6
+        const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
+
+        await LibAVWebCodecs.load()
+        console.log("Codecs loaded")
+        const target = new WebMMuxer.ArrayBufferTarget()
+        const muxer = new WebMMuxer.Muxer({
+          target: target,
+          video: {
+            codec: 'V_VP9',
+            width: config.fileWidth,
+            height: config.fileHeight,
+            frameRate: config.framerate,
+          },
+          firstTimestampBehavior: 'offset',
+        })
+        let videoEncoder = new VideoEncoder({
+          output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),//, currentFrame * frameTimeMicroseconds),
+          error: (e) => console.error(e),
+        })
+    
+        videoEncoder.configure({
+          codec: 'vp09.00.10.08',
+          width: config.fileWidth,
+          height: config.fileHeight,
+          bitrate,
+          bitrateMode: "constant"
+        })
+    
+        async function finishEncoding() {
+          const progressText = document.getElementById('progressText');
+          progressText.innerText = 'Finalizing...';
+          const progressBar = document.getElementById('progressBar');
+          progressBar.value = 100;
+          await videoEncoder.flush()
+          muxer.finalize()
+          await writeFile(
+            path,
+            new Uint8Array(target.buffer),
+          );
+          const modal = document.getElementById('progressModal');
+          modal.style.display = 'none';
+          document.querySelector("body").style.cursor = "default";
+        }
+
+        const processFrame = async () => {
+          if (currentFrame < root.maxFrame) {
+            // Update progress bar
+            const progressText = document.getElementById('progressText');
+            progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
+            const progressBar = document.getElementById('progressBar');
+            const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
+            progressBar.value = progress;
+
+            root.setFrameNum(currentFrame)
+            exportContext.ctx.fillStyle = "white";
+            exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
+            exportContext.ctx.fill();
+            root.draw(exportContext.ctx);
+            const frame = new VideoFrame(
+              await LibAVWebCodecs.createImageBitmap(canvas),
+              { timestamp: currentFrame * frameTimeMicroseconds }
+            );
+
+            async function encodeFrame(frame) {
+              // const keyFrame = true
+              const keyFrame = currentFrame % 60 === 0
+              videoEncoder.encode(frame, { keyFrame })
+              frame.close()
+            }
+
+            await encodeFrame(frame)
+
+            frame.close()
+
+
+            currentFrame++;
+            setTimeout(processFrame, 4);
+          } else {
+            // Once all frames are processed, reset context and export
+            context = oldContext;
+            finishEncoding()
+          }
+        };
+
+        processFrame();
+        return
+
+
+        break;
       case "html":
         fetch("/player.html")
           .then((response) => {
@@ -5226,23 +5340,17 @@ async function render() {
         break;
       case "png":
         const frames = [];
-        const canvas = document.createElement("canvas");
+        canvas = document.createElement("canvas");
         canvas.width = config.fileWidth; // Set desired width
         canvas.height = config.fileHeight; // Set desired height
-        let exportContext = {
-          ...context,
-          ctx: canvas.getContext("2d"),
-          selectionRect: undefined,
-          selection: [],
-          shapeselection: [],
-        };
+        
 
         for (let i = 0; i < root.maxFrame; i++) {
           root.currentFrameNum = i;
           exportContext.ctx.fillStyle = "white";
           exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
           exportContext.ctx.fill();
-          await root.draw(exportContext);
+          root.draw(exportContext);
 
           // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
           const imageData = exportContext.ctx.getImageData(
