@@ -705,8 +705,32 @@ let actions = {
   duplicateObject: {
     create: (items) => {
       redoStack.length = 0;
+      function deepCopyWithIdxMapping(obj, dictionary = {}) {
+        if (Array.isArray(obj)) {
+          return obj.map(item => deepCopyWithIdxMapping(item, dictionary));
+        }
+        if (obj === null || typeof obj !== 'object') {
+          return obj;
+        }
+      
+        const newObj = {};
+        for (const key in obj) {
+          let value = obj[key];
+          
+          if (key === 'idx' && !(value in dictionary)) {
+            dictionary[value] = uuidv4();
+          }
+          
+          newObj[key] = value in dictionary ? dictionary[value] : value;
+          if (typeof newObj[key] === 'object' && newObj[key] !== null) {
+            newObj[key] = deepCopyWithIdxMapping(newObj[key], dictionary);
+          }
+        }
+
+        return newObj;
+      }
       let action = {
-        items: items,
+        items: deepCopyWithIdxMapping(items),
         object: context.activeObject.idx,
         frame: context.activeObject.currentFrame.idx,
         uuid: uuidv4(),
@@ -3315,7 +3339,11 @@ class Shape extends BaseShape {
     // }
     newShape.updateVertices();
     newShape.fillStyle = this.fillStyle;
-    newShape.fillImage = this.fillImage;
+    if (this.fillImage instanceof Element) {
+      newShape.fillImage = this.fillImage.cloneNode(true)
+    } else {
+      newShape.fillImage = this.fillImage;
+    }
     newShape.strokeStyle = this.strokeStyle;
     newShape.lineWidth = this.lineWidth;
     newShape.filled = this.filled;
