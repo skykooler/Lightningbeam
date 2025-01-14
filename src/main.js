@@ -4883,14 +4883,19 @@ function downloadObjectURL(url, filename) {
   URL.revokeObjectURL(url);
 }
 
-function done(output) {
-  const url = URL.createObjectURL(output);
-  downloadObjectURL(url, "test.mp4")
+async function done(output, path) {
+  await writeFile(
+    path, // The destination file path for saving
+    new Uint8Array(await output.arrayBuffer()),
+  );
+  // const url = URL.createObjectURL(output);
+  // downloadObjectURL(url, "test.mp4")
   const modal = document.getElementById('progressModal');
   modal.style.display = 'none';
+  document.querySelector("body").style.cursor = "default";
 }
 
-async function exportMp4() {
+async function exportMp4(path) {
   const worker = new Worker("/ffmpeg-worker-mp4.js")
   // const worker = new Worker("/ffmpeg-worker-webm.js")
 
@@ -5041,7 +5046,7 @@ async function exportMp4() {
         type: "video/mp4"
       });
       // Trigger the done callback with the final video blob
-      done(finalBlob);
+      done(finalBlob, path);
       return;
     }
 
@@ -5100,7 +5105,7 @@ async function exportMp4() {
             type: "video/mp4"
           });
           // Trigger the done callback with the final video blob
-          done(finalBlob);
+          done(finalBlob, path);
           break;
         case 'stderr':
           console.log(msg.data);
@@ -5154,11 +5159,13 @@ async function exportMp4() {
 // exportMp4()
 
 async function render() {
-  exportMp4()
-  return
   document.querySelector("body").style.cursor = "wait";
   const path = await saveFileDialog({
     filters: [
+      {
+        name: "MP4 files (.mp4)",
+        extensions: ["mp4"],
+      },
       {
         name: "APNG files (.png)",
         extensions: ["png"],
@@ -5168,7 +5175,7 @@ async function render() {
         extensions: ["html"],
       },
     ],
-    defaultPath: await join(await documentDir(), "untitled.png"),
+    defaultPath: await join(await documentDir(), "untitled.mp4"),
   });
   if (path != undefined) {
     // SVG balks on images
@@ -5183,6 +5190,10 @@ async function render() {
     const ext = path.split(".").pop().toLowerCase();
 
     switch (ext) {
+      case "mp4":
+        exportMp4(path)
+        return
+        break
       case "html":
         fetch("/player.html")
           .then((response) => {
