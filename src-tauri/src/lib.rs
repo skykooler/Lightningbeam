@@ -1,9 +1,16 @@
+use std::sync::{Arc, Mutex};
+
 use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
-use tauri::Manager;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+
+#[derive(Default)]
+struct AppState {
+  counter: u32,
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -30,6 +37,23 @@ fn warn(msg: String) {
 #[tauri::command]
 fn error(msg: String) {
   error!("{}",msg);
+}
+
+#[tauri::command]
+async fn create_window(app: tauri::AppHandle) {
+    let state = app.state::<Mutex<AppState>>();
+
+    // Lock the mutex to get mutable access:
+    let mut state = state.lock().unwrap();
+    
+    // Increment the counter and generate a unique window label
+    let window_label = format!("window{}", state.counter);
+    state.counter += 1;
+    
+    // Build the new window with the unique label
+    let _webview_window = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App("index.html".into()))
+        .build()
+        .unwrap();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -62,13 +86,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error])
+        .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error, create_window])
+        // .manage(window_counter)
         .setup(|app| {
           #[cfg(debug_assertions)] // only include this code on debug builds
           {
             let window = app.get_webview_window("main").unwrap();
             window.open_devtools();
             window.close_devtools();
+          }
+          {
+            app.manage(Mutex::new(AppState::default()));
           }
           Ok(())
         })
