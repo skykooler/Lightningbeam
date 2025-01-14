@@ -1,3 +1,8 @@
+# 0.7.8-alpha:
+Bugfixes:
+- Fix mp4 export on macOS
+- Fix animations in imported clips not playing grouped object movements correctly
+
 # 0.7.7-alpha:
 Bugfixes:
 - Fix pasting multiple times
