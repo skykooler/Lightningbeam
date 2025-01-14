@@ -1,3 +1,8 @@
+# 0.7.7-alpha:
+Bugfixes:
+- Fix pasting multiple times
+- Hack around broken files
+
 # 0.7.6-alpha:
 Bugfixes:
 - Fix errors when images are not present in a saved file
