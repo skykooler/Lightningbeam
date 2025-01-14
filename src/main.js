@@ -2242,6 +2242,7 @@ class Layer extends Widget {
     json.children = [];
     let idMap = {}
     for (let child of this.children) {
+      // TODO: we may not need the randomizeUuid parameter anymore
       let childJson = child.toJSON(randomizeUuid)
       idMap[child.idx] = childJson.idx
       json.children.push(childJson);
@@ -2253,7 +2254,7 @@ class Layer extends Widget {
         for (let key in frameJson.keys) {
           if (key in idMap) {
             frameJson.keys[idMap[key]] = frameJson.keys[key]
-            delete frameJson.keys[key]
+            // delete frameJson.keys[key]
           }
         }
         json.frames.push(frameJson);
@@ -4364,9 +4365,9 @@ async function _save(path) {
       }
       return value;
     }
-    for (let action of undoStack) {
-      console.log(action.name);
-    }
+    // for (let action of undoStack) {
+    //   console.log(action.name);
+    // }
     const fileData = {
       version: "1.7",
       width: config.fileWidth,
@@ -4686,6 +4687,8 @@ async function importFile() {
                 uuidCache[key] = uuidv4(); // Store the generated UUID for the value
               }
               obj[key] = uuidCache[key]; // Assign the UUID to the object property
+            } else if (value in uuidCache) {
+              obj[key] = value
             }
           }
         }
