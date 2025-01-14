@@ -2964,7 +2964,7 @@ class BaseShape {
     // }
     if (this.filled) {
       ctx.beginPath();
-      if (this.fillImage) {
+      if (this.fillImage && this.fillImage instanceof Element) {
         let pat;
         if (this.fillImage instanceof Element ||
           Object.keys(this.fillImage).length !== 0) {
