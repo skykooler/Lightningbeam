@@ -623,7 +623,8 @@
                 ["libvorbis", "vorbis"],
                 ["libaom-av1", "av01"],
                 ["libvpx-vp9", "vp09"],
-                ["libvpx", "vp8"]
+                ["libvpx", "vp8"],
+                ["libopenh264", "avc"]
             ]) {
                 if (encoders) {
                     if (yield libav.avcodec_find_encoder_by_name(avname))
@@ -802,6 +803,14 @@
                 case "vp8":
                     video = true;
                     outCodec = "libvpx";
+                    if (config.latencyMode === "realtime") {
+                        options.quality = "realtime";
+                        options["cpu-used"] = "8";
+                    }
+                    break;
+                case "h264":
+                    video = true;
+                    outCodec = "libopenh264";
                     if (config.latencyMode === "realtime") {
                         options.quality = "realtime";
                         options["cpu-used"] = "8";

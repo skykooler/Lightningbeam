@@ -5205,30 +5205,120 @@ async function render() {
       selection: [],
       shapeselection: [],
     };
+    const oldContext = context;
+    context = exportContext;
+
+    const oldRootFrame = root.currentFrameNum
+    let currentFrame = 0;
+    const bitrate = 1e6
+    const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
+    let target;
+    let muxer;
+    let videoEncoder;
 
 
     switch (ext) {
       case "mp4":
-        exportMp4(path)
+        // exportMp4(path)
+        createProgressModal();
+
+        // Store the original context
+
+        await LibAVWebCodecs.load()
+        console.log("Codecs loaded")
+        target = new Mp4Muxer.ArrayBufferTarget()
+        muxer = new Mp4Muxer.Muxer({
+          target: target,
+          video: {
+            codec: 'avc',
+            width: config.fileWidth,
+            height: config.fileHeight,
+            frameRate: config.framerate,
+          },
+          fastStart: 'in-memory',
+          firstTimestampBehavior: 'offset',
+        })
+        videoEncoder = new VideoEncoder({
+          output: (chunk, meta) => muxer.addVideoChunk(chunk, meta, undefined, undefined, frameTimeMicroseconds),//, currentFrame * frameTimeMicroseconds),
+          error: (e) => console.error(e),
+        })
+    
+        videoEncoder.configure({
+          codec: 'avc1.42001f',
+          width: 1280,
+          height: 720,
+          bitrate: 1e6
+        });
+    
+        async function finishMp4Encoding() {
+          const progressText = document.getElementById('progressText');
+          progressText.innerText = 'Finalizing...';
+          const progressBar = document.getElementById('progressBar');
+          progressBar.value = 100;
+          await videoEncoder.flush()
+          muxer.finalize()
+          await writeFile(
+            path,
+            new Uint8Array(target.buffer),
+          );
+          const modal = document.getElementById('progressModal');
+          modal.style.display = 'none';
+          document.querySelector("body").style.cursor = "default";
+        }
+
+        const processMp4Frame = async () => {
+          if (currentFrame < root.maxFrame) {
+            // Update progress bar
+            const progressText = document.getElementById('progressText');
+            progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
+            const progressBar = document.getElementById('progressBar');
+            const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
+            progressBar.value = progress;
+
+            root.setFrameNum(currentFrame)
+            exportContext.ctx.fillStyle = "white";
+            exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
+            exportContext.ctx.fill();
+            root.draw(exportContext.ctx);
+            const frame = new VideoFrame(
+              await LibAVWebCodecs.createImageBitmap(canvas),
+              { timestamp: currentFrame * frameTimeMicroseconds }
+            );
+
+            async function encodeFrame(frame) {
+              // const keyFrame = true
+              const keyFrame = currentFrame % 60 === 0
+              videoEncoder.encode(frame, { keyFrame })
+              frame.close()
+            }
+
+            await encodeFrame(frame)
+
+            frame.close()
+
+
+            currentFrame++;
+            setTimeout(processMp4Frame, 4);
+          } else {
+            // Once all frames are processed, reset context and export
+            context = oldContext;
+            root.setFrameNum(oldRootFrame)
+            finishMp4Encoding()
+          }
+        };
+
+        processMp4Frame();
         return
         break
       case "webm":
         
         createProgressModal();
 
-        // Store the original context
-        const oldContext = context;
-        context = exportContext;
-
-        const oldRootFrame = root.currentFrameNum
-        let currentFrame = 0;
-        const bitrate = 1e6
-        const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
 
         await LibAVWebCodecs.load()
         console.log("Codecs loaded")
-        const target = new WebMMuxer.ArrayBufferTarget()
-        const muxer = new WebMMuxer.Muxer({
+        target = new WebMMuxer.ArrayBufferTarget()
+        muxer = new WebMMuxer.Muxer({
           target: target,
           video: {
             codec: 'V_VP9',
@@ -5238,7 +5328,7 @@ async function render() {
           },
           firstTimestampBehavior: 'offset',
         })
-        let videoEncoder = new VideoEncoder({
+        videoEncoder = new VideoEncoder({
           output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),//, currentFrame * frameTimeMicroseconds),
           error: (e) => console.error(e),
         })
