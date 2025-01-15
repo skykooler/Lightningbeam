@@ -4267,6 +4267,9 @@ window.addEventListener("keydown", (e) => {
 function playPause() {
   playing = !playing;
   if (playing) {
+    if (context.activeObject.currentFrameNum >= context.activeObject.maxFrame - 1) {
+      context.activeObject.setFrameNum(0);
+    }
     for (let audioLayer of context.activeObject.audioLayers) {
       if (audioLayer.audible) {
         for (let i in audioLayer.sounds) {
