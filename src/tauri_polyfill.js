@@ -82,11 +82,9 @@ if (!window.__TAURI__) {
       [filenameInput, fileFilter].forEach(el => Object.assign(el.style, {
         width: '100%', padding: '10px', marginBottom: '10px'
       }));
-      [submitBtn, cancelBtn].forEach(el => el.style.padding = '10px 20px');
       
       // Populate filter dropdown and set default filename
       filters.forEach(filter => fileFilter.add(new Option(filter.name, filter.extensions[0])));
-      // filenameInput.value = defaultFilename.split('.')[0];
       filenameInput.value = defaultFilename
       const extension = defaultFilename.split('.').pop();
       filenameInput.focus()

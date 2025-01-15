@@ -2590,51 +2590,49 @@ class Layer extends Widget {
               child[key] = frame.keys[child.idx][key];
             }
           }
-        }
-      }
-    }
-    for (let child of this.children) {
-      if (!context.objectStack.includes(child)) {
-        if (keyframe) {
-          if (child.goToFrame != undefined) {
-            child.setFrameNum(child.goToFrame - 1)
-            if (child.playFromFrame) {
-              child.playing = true
-            } else {
-              child.playing = false
+          if (!context.objectStack.includes(child)) {
+            if (keyframe) {
+              if (child.goToFrame != undefined) {
+                child.setFrameNum(child.goToFrame - 1)
+                if (child.playFromFrame) {
+                  child.playing = true
+                } else {
+                  child.playing = false
+                }
+                child.playing = true
+              }
             }
-            child.playing = true
-          }
-        }
-        if (child.playing) {
-          let lastFrame = 0;
-          for (let i = this.frameNum; i >= 0; i--) {
-            if (
-              this.frames[i] &&
-              this.frames[i].keys[child.idx] &&
-              this.frames[i].keys[child.idx].playFromFrame
-            ) {
-              lastFrame = i;
-              break;
+            if (child.playing) {
+              let lastFrame = 0;
+              for (let i = this.frameNum; i >= 0; i--) {
+                if (
+                  this.frames[i] &&
+                  this.frames[i].keys[child.idx] &&
+                  this.frames[i].keys[child.idx].playFromFrame
+                ) {
+                  lastFrame = i;
+                  break;
+                }
+              }
+              child.setFrameNum(this.frameNum - lastFrame);
             }
           }
-          child.setFrameNum(this.frameNum - lastFrame);
+          const transform = ctx.getTransform()
+          ctx.translate(child.x, child.y)
+          ctx.scale(child.scale_x, child.scale_y)
+          ctx.rotate(child.rotation)
+          child.draw(ctx)
+          if (context.selection.includes(child)) {
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#00ffff";
+            ctx.beginPath();
+            let bbox = child.bbox()
+            ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
+            ctx.stroke()
+          }
+          ctx.setTransform(transform)
         }
       }
-      const transform = ctx.getTransform()
-      ctx.translate(child.x, child.y)
-      ctx.scale(child.scale_x, child.scale_y)
-      ctx.rotate(child.rotation)
-      child.draw(ctx)
-      if (context.selection.includes(child)) {
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#00ffff";
-        ctx.beginPath();
-        let bbox = child.bbox()
-        ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
-        ctx.stroke()
-      }
-      ctx.setTransform(transform)
     }
     if (this.activeShape) {
       this.activeShape.draw(cxt)
