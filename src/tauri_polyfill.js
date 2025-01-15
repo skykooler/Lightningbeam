@@ -47,6 +47,88 @@ if (!window.__TAURI__) {
     });
   };
 
+  function promptForFilename(filters, defaultFilename = '') {
+    function createLabel(text, forId) {
+      const label = document.createElement('label');
+      label.setAttribute('for', forId);
+      label.textContent = text;
+      return label;
+    }
+    return new Promise((resolve, reject) => {
+      // Create and style modal dynamically
+      const modal = document.createElement('div');
+      const modalContent = document.createElement('div');
+      const filenameInput = document.createElement('input');
+      const fileFilter = document.createElement('select');
+      const submitBtn = document.createElement('button');
+      const cancelBtn = document.createElement('button');
+      
+      // Append elements
+      modal.appendChild(modalContent);
+      modalContent.appendChild(createLabel('Enter filename:', 'filenameInput'));
+      modalContent.appendChild(filenameInput);
+      modalContent.appendChild(createLabel('Select file type:', 'fileFilter'));
+      modalContent.appendChild(fileFilter);
+      modalContent.appendChild(submitBtn);
+      modalContent.appendChild(cancelBtn);
+
+      document.body.appendChild(modal);
+
+      // Style modal elements
+      modal.id = "saveOverlay";
+      modal.style.display = 'block';
+      modalContent.id = "saveDialog";
+      modalContent.style.display = 'block';
+      [filenameInput, fileFilter].forEach(el => Object.assign(el.style, {
+        width: '100%', padding: '10px', marginBottom: '10px'
+      }));
+      [submitBtn, cancelBtn].forEach(el => el.style.padding = '10px 20px');
+      
+      // Populate filter dropdown and set default filename
+      filters.forEach(filter => fileFilter.add(new Option(filter.name, filter.extensions[0])));
+      // filenameInput.value = defaultFilename.split('.')[0];
+      filenameInput.value = defaultFilename
+      const extension = defaultFilename.split('.').pop();
+      filenameInput.focus()
+      filenameInput.setSelectionRange(0, defaultFilename.length - extension.length - 1);  // Select only the base filename
+        
+      // Update extension based on selected filter
+      fileFilter.addEventListener('change', () => updateFilename(true));
+      filenameInput.addEventListener('input', () => updateFilename(false));
+
+      function updateFilename(reselect) {
+        const base = filenameInput.value.split('.')[0];
+        filenameInput.value = `${base}.${fileFilter.value}`;
+        if (reselect) {
+          filenameInput.focus()
+          filenameInput.setSelectionRange(0, base.length);  // Select only the base filename
+        }
+      }
+
+      // Handle buttons
+      submitBtn.textContent = 'Submit';
+      cancelBtn.textContent = 'Cancel';
+      submitBtn.onclick = () => {
+        const chosenFilename = filenameInput.value;
+        if (!chosenFilename) reject(new Error('Filename missing.'));
+        resolve(chosenFilename);
+        modal.remove();
+      };
+      cancelBtn.onclick = () => {
+        reject(new Error('User canceled.'));
+        modal.remove();
+      };
+      
+      // Close modal if clicked outside
+      window.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          reject(new Error('User clicked outside.'));
+          modal.remove();
+        }
+      });
+    });
+  }
+
   window.__TAURI__ = {
     core: {
       invoke: () => {}
@@ -184,8 +266,8 @@ if (!window.__TAURI__) {
           input.click();
         });
       },
-      save: async () => {
-        return prompt("Filename", "untitled.beam")
+      save: async (params) => {
+        return await promptForFilename(params.filters, params.defaultPath)
       },
       message: () => {},
       confirm: () => {},

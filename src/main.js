@@ -4841,7 +4841,7 @@ function createProgressModal() {
   // Create text to show the current frame info
   const progressText = document.createElement('p');
   progressText.id = 'progressText';
-  progressText.innerText = 'Rendering frame 0 of 0';
+  progressText.innerText = 'Initializing...';
 
   // Append elements to modalContent
   modalContent.appendChild(progressBar);

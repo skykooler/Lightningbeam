@@ -490,7 +490,7 @@ button {
   display: none;
 }
 
-#overlay {
+#overlay, #saveOverlay {
   display: none; /* Hidden by default */
   position: fixed;
   top: 0;
@@ -502,7 +502,7 @@ button {
 }
 
 /* Scoped styles for the dialog */
-#newFileDialog {
+#newFileDialog, #saveDialog {
   display: none; /* Hidden by default */
   position: fixed;
   top: 50%;
@@ -517,19 +517,19 @@ button {
   z-index: 1000; /* Make sure it's in front of other elements */
 }
 
-#newFileDialog .dialog-label {
+#newFileDialog .dialog-label, #saveDialog label {
   display: block;
   margin: 10px 0 5px;
 }
 
-#newFileDialog .dialog-input {
+#newFileDialog .dialog-input, #saveDialog input {
   width: 100%;
   padding: 8px;
   margin: 5px 0;
   border: 1px solid #aaa;
 }
 
-#newFileDialog .dialog-button {
+#newFileDialog .dialog-button, #saveDialog button {
   width: 100%;
   padding: 10px;
   margin-top: 10px;
@@ -632,11 +632,11 @@ button {
     background-color: #0f0f0f69;
   }
 
-  #newFileDialog {
+  #newFileDialog, #saveDialog {
     background-color: #444;
     border: 1px solid #333;
   }
-  #newFileDialog .dialog-input {
+  #newFileDialog .dialog-input, #saveDialog input {
     border: 1px solid #333;
   }
   #recentFilesList li:hover {
