@@ -52,7 +52,22 @@ if (!window.__TAURI__) {
       invoke: () => {}
     },
     fs: {
-      writeFile: () => {},
+      writeFile: () => {
+        // Create a Blob from the contents
+        const blob = new Blob([contents]);
+        const link = document.createElement('a');
+        const url = URL.createObjectURL(blob);
+    
+        link.href = url;
+        link.download = path;  // Use the file name from the path
+    
+        document.body.appendChild(link);
+        link.click();
+    
+        // Clean up by removing the link and revoking the object URL
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      },
       readFile: () => {},
       writeTextFile: async (path, contents) => {
         // Create a Blob from the contents
@@ -176,9 +191,9 @@ if (!window.__TAURI__) {
       confirm: () => {},
     },
     path: {
-      documentDir: () => {},
+      documentDir: () => "/Documents",
       join: (...segments) => {
-        return segments.filter(segment => segment.length > 0)  // Remove empty strings
+        return segments.filter(segment => (segment && segment.length > 0))  // Remove empty strings
         .join('/')
       },
       basename: (path) => {
