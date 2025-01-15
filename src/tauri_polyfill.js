@@ -52,7 +52,7 @@ if (!window.__TAURI__) {
       invoke: () => {}
     },
     fs: {
-      writeFile: () => {
+      writeFile: (path, contents) => {
         // Create a Blob from the contents
         const blob = new Blob([contents]);
         const link = document.createElement('a');
@@ -191,7 +191,7 @@ if (!window.__TAURI__) {
       confirm: () => {},
     },
     path: {
-      documentDir: () => "/Documents",
+      documentDir: () => {},
       join: (...segments) => {
         return segments.filter(segment => (segment && segment.length > 0))  // Remove empty strings
         .join('/')
