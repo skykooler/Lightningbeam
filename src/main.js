@@ -4134,7 +4134,7 @@ async function greet() {
 window.addEventListener("DOMContentLoaded", () => {
   rootPane = document.querySelector("#root");
   rootPane.appendChild(createPane(panes.toolbar));
-  rootPane.addEventListener("mousemove", (e) => {
+  rootPane.addEventListener("pointermove", (e) => {
     mouseEvent = e;
   });
   let [_toolbar, panel] = splitPane(
@@ -5318,7 +5318,7 @@ function stage() {
   // stageWrapper.appendChild(stage)
   // stageWrapper.appendChild(selectionRect)
   // scroller.appendChild(stageWrapper)
-  stage.addEventListener("mousedown", (e) => {
+  stage.addEventListener("pointerdown", (e) => {
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mousedown", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
@@ -5692,8 +5692,8 @@ function stage() {
     updateMenu();
     updateInfopanel();
   };
-  stage.addEventListener("mouseup", stage.mouseup);
-  stage.addEventListener("mousemove", (e) => {
+  stage.addEventListener("pointerup", stage.mouseup);
+  stage.addEventListener("pointermove", (e) => {
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mousemove", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
@@ -6103,7 +6103,7 @@ function toolbar() {
         colorCvs.colorSelectorWidget.draw(ctx)
 
       };
-      colorCvs.addEventListener("mousedown", (e) => {
+      colorCvs.addEventListener("pointerdown", (e) => {
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
         colorCvs.clickedAlphaGradient = false;
@@ -6113,7 +6113,7 @@ function toolbar() {
         colorCvs.draw();
       });
 
-      window.addEventListener("mouseup", (e) => {
+      window.addEventListener("pointerup", (e) => {
         let mouse = getMousePos(colorCvs, e);
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
@@ -6122,13 +6122,13 @@ function toolbar() {
         colorCvs.colorSelectorWidget.handleMouseEvent("mouseup", mouse.x, mouse.y)
         if (e.target != colorCvs) {
           colorCvs.style.display = "none";
-          window.removeEventListener("mousemove", evtListener);
+          window.removeEventListener("pointermove", evtListener);
         }
       });
     } else {
       colorCvs.style.display = "block";
     }
-    evtListener = window.addEventListener("mousemove", (e) => {
+    evtListener = window.addEventListener("pointermove", (e) => {
       let mouse = getMousePos(colorCvs, e);
       colorCvs.colorSelectorWidget.handleMouseEvent("mousemove", mouse.x, mouse.y)
       colorCvs.draw()
@@ -6259,7 +6259,7 @@ function timeline() {
       updateLayers();
     }
   });
-  timeline_cvs.addEventListener("mousedown", (e) => {
+  timeline_cvs.addEventListener("pointerdown", (e) => {
     let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth) {
@@ -6391,7 +6391,7 @@ function timeline() {
     }
     updateLayers();
   });
-  timeline_cvs.addEventListener("mouseup", (e) => {
+  timeline_cvs.addEventListener("pointerup", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
@@ -6411,7 +6411,7 @@ function timeline() {
       updateMenu();
     }
   });
-  timeline_cvs.addEventListener("mousemove", (e) => {
+  timeline_cvs.addEventListener("pointermove", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
@@ -6703,7 +6703,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     div.className = "vertical-grid";
   }
   div.setAttribute("lb-percent", percent); // TODO: better attribute name
-  div.addEventListener("mousedown", function (event) {
+  div.addEventListener("pointerdown", function (event) {
     // Check if the clicked element is the parent itself and not a child element
     if (event.target === event.currentTarget) {
       if (event.button === 0) {
@@ -6727,7 +6727,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
         splitIndicator.style.flexDirection =
           direction == "vertical" ? "column" : "row";
         document.body.appendChild(splitIndicator);
-        splitIndicator.addEventListener("mousemove", (e) => {
+        splitIndicator.addEventListener("pointermove", (e) => {
           const { clientX: mouseX, clientY: mouseY } = e;
           const rect = splitIndicator.getBoundingClientRect();
 
@@ -6788,12 +6788,12 @@ function splitPane(div, percent, horiz, newPane = undefined) {
               createPane(panes.timeline),
             );
             document.body.removeChild(splitIndicator);
-            document.removeEventListener("mousemove", splitListener);
+            document.removeEventListener("pointermove", splitListener);
             setTimeout(updateUI, 20);
           }
         });
 
-        const splitListener = document.addEventListener("mousemove", (e) => {
+        const splitListener = document.addEventListener("pointermove", (e) => {
           const mouseX = e.clientX;
           const mouseY = e.clientY;
 
@@ -6847,7 +6847,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     console.log("Right-click on the element");
     // Your custom logic here
   });
-  div.addEventListener("mousemove", function (event) {
+  div.addEventListener("pointermove", function (event) {
     // Check if the clicked element is the parent itself and not a child element
     if (event.currentTarget.getAttribute("dragging") == "true") {
       const frac = getMousePositionFraction(event, event.currentTarget);
@@ -6855,7 +6855,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
       updateAll();
     }
   });
-  div.addEventListener("mouseup", (event) => {
+  div.addEventListener("pointerup", (event) => {
     event.currentTarget.setAttribute("dragging", false);
     // event.currentTarget.style.userSelect = 'auto';
   });
