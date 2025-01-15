@@ -4449,97 +4449,106 @@ async function _open(path, returnJson = false) {
 
           const objectOffsets = {};
           const frameIDs = []
-          for (let action of file.actions) {
-            if (!(action.name in actions)) {
-              await messageDialog(
-                `Invalid action ${action.name}. File may be corrupt.`,
-                { title: "Error", kind: "error" },
-              );
-              return;
-            }
+          if (file.version < "1.7.5") {
+            for (let action of file.actions) {
+              if (!(action.name in actions)) {
+                await messageDialog(
+                  `Invalid action ${action.name}. File may be corrupt.`,
+                  { title: "Error", kind: "error" },
+                );
+                return;
+              }
 
-            console.log(action.name);
-            // Data fixes
-            if (file.version <= "1.5") {
-              // Fix coordinates of objects
-              if (action.name == "group") {
-                let bbox;
-                for (let i of action.action.shapes) {
-                  const shape = pointerList[i];
-                  if (bbox == undefined) {
-                    bbox = shape.bbox();
-                  } else {
-                    growBoundingBox(bbox, shape.bbox());
-                  }
-                }
-                for (let i of action.action.objects) {
-                  const object = pointerList[i]; // TODO: rotated bbox
-                  if (bbox == undefined) {
-                    bbox = object.bbox();
-                  } else {
-                    growBoundingBox(bbox, object.bbox());
-                  }
-                }
-                const position = {
-                  x: (bbox.x.min + bbox.x.max) / 2,
-                  y: (bbox.y.min + bbox.y.max) / 2,
-                };
-                action.action.position = position;
-                objectOffsets[action.action.groupUuid] = position;
-                for (let shape of action.action.shapes) {
-                  objectOffsets[shape] = position
-                }
-              } else if (action.name == "editFrame") {
-                for (let key in action.action.newState) {
-                  if (key in objectOffsets) {
-                    action.action.newState[key].x += objectOffsets[key].x;
-                    action.action.newState[key].y += objectOffsets[key].y;
-                  }
-                }
-                for (let key in action.action.oldState) {
-                  if (key in objectOffsets) {
-                    action.action.oldState[key].x += objectOffsets[key].x;
-                    action.action.oldState[key].y += objectOffsets[key].y;
-                  }
-                }
-              } else if (action.name == "addKeyframe") {
-                for (let id in objectOffsets) {
-                  objectOffsets[action.action.uuid.slice(0,8) + id.slice(8)] = objectOffsets[id]
-                }
-              } else if (action.name == "editShape") {
-                if (action.action.shape in objectOffsets) {
-                  console.log("editing shape")
-                  for (let curve of action.action.newCurves) {
-                    for (let point of curve.points) {
-                      point.x -= objectOffsets[action.action.shape].x
-                      point.y -= objectOffsets[action.action.shape].y
+              console.log(action.name);
+              // Data fixes
+              if (file.version <= "1.5") {
+                // Fix coordinates of objects
+                if (action.name == "group") {
+                  let bbox;
+                  for (let i of action.action.shapes) {
+                    const shape = pointerList[i];
+                    if (bbox == undefined) {
+                      bbox = shape.bbox();
+                    } else {
+                      growBoundingBox(bbox, shape.bbox());
                     }
                   }
-                  for (let curve of action.action.oldCurves) {
-                    for (let point of curve.points) {
-                      point.x -= objectOffsets[action.action.shape].x
-                      point.y -= objectOffsets[action.action.shape].y
+                  for (let i of action.action.objects) {
+                    const object = pointerList[i]; // TODO: rotated bbox
+                    if (bbox == undefined) {
+                      bbox = object.bbox();
+                    } else {
+                      growBoundingBox(bbox, object.bbox());
+                    }
+                  }
+                  const position = {
+                    x: (bbox.x.min + bbox.x.max) / 2,
+                    y: (bbox.y.min + bbox.y.max) / 2,
+                  };
+                  action.action.position = position;
+                  objectOffsets[action.action.groupUuid] = position;
+                  for (let shape of action.action.shapes) {
+                    objectOffsets[shape] = position
+                  }
+                } else if (action.name == "editFrame") {
+                  for (let key in action.action.newState) {
+                    if (key in objectOffsets) {
+                      action.action.newState[key].x += objectOffsets[key].x;
+                      action.action.newState[key].y += objectOffsets[key].y;
+                    }
+                  }
+                  for (let key in action.action.oldState) {
+                    if (key in objectOffsets) {
+                      action.action.oldState[key].x += objectOffsets[key].x;
+                      action.action.oldState[key].y += objectOffsets[key].y;
+                    }
+                  }
+                } else if (action.name == "addKeyframe") {
+                  for (let id in objectOffsets) {
+                    objectOffsets[action.action.uuid.slice(0,8) + id.slice(8)] = objectOffsets[id]
+                  }
+                } else if (action.name == "editShape") {
+                  if (action.action.shape in objectOffsets) {
+                    console.log("editing shape")
+                    for (let curve of action.action.newCurves) {
+                      for (let point of curve.points) {
+                        point.x -= objectOffsets[action.action.shape].x
+                        point.y -= objectOffsets[action.action.shape].y
+                      }
+                    }
+                    for (let curve of action.action.oldCurves) {
+                      for (let point of curve.points) {
+                        point.x -= objectOffsets[action.action.shape].x
+                        point.y -= objectOffsets[action.action.shape].y
+                      }
                     }
                   }
                 }
               }
-            }
-            if (file.version <= "1.6") {
-              // Fix copy-paste
-              if (action.name == "duplicateObject") {
-                const obj = pointerList[action.action.object];
-                const objJson = obj.toJSON(true);
-                objJson.idx =
-                  action.action.uuid.slice(0, 8) +
-                  action.action.object.slice(8);
-                action.action.items = [objJson];
-                action.action.object = "root";
-                action.action.frame = root.currentFrame.idx;
+              if (file.version <= "1.6") {
+                // Fix copy-paste
+                if (action.name == "duplicateObject") {
+                  const obj = pointerList[action.action.object];
+                  const objJson = obj.toJSON(true);
+                  objJson.idx =
+                    action.action.uuid.slice(0, 8) +
+                    action.action.object.slice(8);
+                  action.action.items = [objJson];
+                  action.action.object = "root";
+                  action.action.frame = root.currentFrame.idx;
+                }
               }
-            }
 
-            await actions[action.name].execute(action.action);
-            undoStack.push(action);
+              await actions[action.name].execute(action.action);
+              undoStack.push(action);
+            }
+          } else {
+            // disabled for now
+            // for (let action of file.actions) {
+            //   undoStack.push(action)
+            // }
+            root = GraphicsObject.fromJSON(file.json)
+            context.objectStack = [root]
           }
 
           lastSaveIndex = undoStack.length;
@@ -4846,325 +4855,133 @@ function createProgressModal() {
 }
 
 
-// https://semisignal.com/tag/ffmpeg-js/
-function convertDataURIToBinary(dataURI) {
-  const base64 = dataURI.replace(/^data[^,]+,/,'');
-  const raw = window.atob(base64);
-  const rawLength = raw.length;
-
-  const array = new Uint8Array(new ArrayBuffer(rawLength));
-  for (let i = 0; i < rawLength; i++) {
-      array[i] = raw.charCodeAt(i);
-  }
-  return array;
-};
-
-//**blob to dataURL**
-function blobToDataURL(blob, callback) {
-  const a = new FileReader();
-  a.onload = function(e) {callback(e.target.result);}
-  a.readAsDataURL(blob);
-}
-
-function pad(n, width, z) {
-  z = z || '0';
-  n = n + '';
-  return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function downloadObjectURL(url, filename) {
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-async function done(output, path) {
-  await writeFile(
-    path, // The destination file path for saving
-    new Uint8Array(await output.arrayBuffer()),
-  );
-  // const url = URL.createObjectURL(output);
-  // downloadObjectURL(url, "test.mp4")
-  const modal = document.getElementById('progressModal');
-  modal.style.display = 'none';
-  document.querySelector("body").style.cursor = "default";
-}
-
-async function exportMp4(path) {
-  const worker = new Worker("/ffmpeg-worker-mp4.js")
-  // const worker = new Worker("/ffmpeg-worker-webm.js")
-
-  const canvas = document.createElement("canvas");
-  canvas.width = config.fileWidth; // Set desired width
-  canvas.height = config.fileHeight; // Set desired height
-  const ctx = canvas.getContext("2d")
-
-  const images = []
-  const videoChunks = []
-  // const chunkSize = 10;
-  const chunkSize = root.maxFrame+1;
-  let currentFrame = 0;
-
+async function setupVideoExport(ext, path, canvas, exportContext) {
   createProgressModal();
-
-  function processChunk(worker, chunkStart, chunkEnd) {
-
-    const chunkFrames = [];
   
-    // Prepare the frames for the current chunk
-    // for (let i = chunkStart; i < chunkEnd; i++) {
-    function processFrame(i) {
+  await LibAVWebCodecs.load();
+  console.log("Codecs loaded");
 
+  let target;
+  let muxer;
+  let videoEncoder;
+  let videoConfig;
+  const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
+  const oldContext = context;
+  context = exportContext;
+
+  const oldRootFrame = root.currentFrameNum
+  const bitrate = 1e6
+  
+  // Choose muxer and encoder configuration based on file extension
+  if (ext === "mp4") {
+    target = new Mp4Muxer.ArrayBufferTarget();
+    // TODO: add video options dialog for width, height, bitrate
+    muxer = new Mp4Muxer.Muxer({
+      target: target,
+      video: {
+        codec: 'avc',
+        width: config.fileWidth,
+        height: config.fileHeight,
+        frameRate: config.framerate,
+      },
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    });
+
+    videoConfig = {
+      codec: 'avc1.42001f',
+      width: config.fileWidth,
+      height: config.fileHeight,
+      bitrate: bitrate,
+    };
+  } else if (ext === "webm") {
+    target = new WebMMuxer.ArrayBufferTarget();
+    muxer = new WebMMuxer.Muxer({
+      target: target,
+      video: {
+        codec: 'V_VP9',
+        width: config.fileWidth,
+        height: config.fileHeight,
+        frameRate: config.framerate,
+      },
+      firstTimestampBehavior: 'offset',
+    });
+
+    videoConfig = {
+      codec: 'vp09.00.10.08',
+      width: config.fileWidth,
+      height: config.fileHeight,
+      bitrate: bitrate,
+      bitrateMode: "constant",
+    };
+  }
+
+  // Initialize the video encoder
+  videoEncoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta, undefined, undefined, frameTimeMicroseconds),
+    error: (e) => console.error(e),
+  });
+
+  videoEncoder.configure(videoConfig);
+
+  async function finishEncoding() {
+    const progressText = document.getElementById('progressText');
+    progressText.innerText = 'Finalizing...';
+    const progressBar = document.getElementById('progressBar');
+    progressBar.value = 100;
+    await videoEncoder.flush();
+    muxer.finalize();
+    await writeFile(path, new Uint8Array(target.buffer));
+    const modal = document.getElementById('progressModal');
+    modal.style.display = 'none';
+    document.querySelector("body").style.cursor = "default";
+  }
+
+  const processFrame = async (currentFrame) => {
+    if (currentFrame < root.maxFrame) {
       // Update progress bar
       const progressText = document.getElementById('progressText');
-      progressText.innerText = `Rendering frame ${i + 1} of ${root.maxFrame}`;
+      progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
       const progressBar = document.getElementById('progressBar');
-      const progress = Math.round(((i + 1) / root.maxFrame) * 100);
+      const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
       progressBar.value = progress;
 
-      ctx.resetTransform();
-      ctx.beginPath();
-      ctx.fillStyle = "white";
-      ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
-      root.setFrameNum(i);
-      root.draw(ctx);
-      const img = new Image()
-      const mimeType = 'image/jpeg'
-      const imgString = canvas.toDataURL(mimeType,1)
-      const data = convertDataURIToBinary( imgString )
-      chunkFrames.push({
-        name: `img${ pad( chunkFrames.length, 3 ) }.jpeg`,
-        data
-      })
-      img.src = imgString
-      if (i+1 < chunkEnd) {
-        setTimeout(() => processFrame(i+1), 4)
-      } else {
-        // Post the chunk to the worker
-        setTimeout(() => worker.postMessage({
-          type: 'run',
-          // TOTAL_MEMORY: 268435456,
-          TOTAL_MEMORY: 1073741824,
-          arguments: [
-            '-r', config.framerate.toString(), 
-            '-i', 'img%03d.jpeg', 
-            '-c:v', 'libx264', 
-            '-crf', '23', 
-            '-vf', `scale=${parseInt(config.fileWidth/8)*2}:${parseInt(config.fileHeight/8)*2}`, 
-            // '-vf', `scale=${config.fileWidth}:${config.fileHeight}`, 
-            '-pix_fmt', 'yuv420p', 
-            '-vb', '20M',
-            'out.mp4'
-          ],
-          // arguments: [
-          //   '-r', '20', 
-          //   '-i', 'img%03d.jpeg',
-          //   'out.webm'
-          // ],
-          MEMFS: chunkFrames  // Supply the chunk frames
-        }), 1000);
+      root.setFrameNum(currentFrame);
+      exportContext.ctx.fillStyle = "white";
+      exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
+      exportContext.ctx.fill();
+      root.draw(exportContext.ctx);
+      const frame = new VideoFrame(
+        await LibAVWebCodecs.createImageBitmap(canvas),
+        { timestamp: currentFrame * frameTimeMicroseconds }
+      );
 
-        currentFrame += chunkSize
-      }
+      // Encode frame
+      const keyFrame = currentFrame % 60 === 0; // Every 60th frame is a key frame
+      videoEncoder.encode(frame, { keyFrame });
+      frame.close();
+
+      currentFrame++;
+      setTimeout(() => processFrame(currentFrame), 4);
+    } else {
+      // Once all frames are processed, reset context and export
+      context = oldContext;
+      root.setFrameNum(oldRootFrame);
+      finishEncoding();
     }
+  };
 
-    processFrame(chunkStart)
-    
-
-
-    worker.onmessage = function(e) {
-      const msg = e.data;
-  
-      if (msg.type === 'done') {
-        // Add chunk to the videoChunks array
-        videoChunks.push(msg.data.MEMFS[0].data)
-        
-        // Check if we need to process the next chunk or finalize
-        if (currentFrame < root.maxFrame) {
-          const nextChunkStart = currentFrame;
-          const nextChunkEnd = Math.min(currentFrame + chunkSize, root.maxFrame);
-  
-          // Process next chunk after the current one finishes
-          processChunk(worker, nextChunkStart, nextChunkEnd);  // Recurse with updated chunk indices
-        } else {
-          // If all chunks are processed, call finalization
-          const progressText = document.getElementById('progressText');
-          progressText.innerText = 'Finalizing...';
-          const progressBar = document.getElementById('progressBar');
-          progressBar.value = 100;
-          setTimeout(() => concatenateChunks(videoChunks), 1000);  // Finalize once all chunks are processed
-        }
-      } else if (msg.type === "stdout") {
-        console.error(msg.data);
-      } else if (msg.type === "stderr") {
-        console.log(msg.data);
-      }
-    };
-  }
-
-  // worker.onmessage = function(e) {
-  //   const msg = e.data;
-    
-  //   switch (msg.type) {
-  //     // Handle stdout and stderr from FFmpeg
-  //     case "stdout":
-  //       console.error(msg.data);
-  //       break;
-  //     case "stderr":
-  //       console.log(msg.data);
-  //       break;
-  //     case "exit":
-  //       console.log("Process exited with code " + msg.data);
-  //       break;
-  
-  //     // Handle completion of each chunk
-  //     case 'done':
-  //       // Save the chunk's video data as a blob
-  //       const chunkBlob = new Blob([msg.data.MEMFS[0].data], {
-  //         type: "video/mp4"
-  //       });
-  //       videoChunks.push(chunkBlob);  // Add chunk to the videoChunks array
-  
-  //       // If we've processed all chunks, concatenate them
-  //       if (currentFrame >= root.maxFrame) {
-  //         concatenateChunks(videoChunks);
-  //       }
-  //       break;
-  //   }
-  // };
-
-  // Concatenate all video chunks into one MP4 file
-  async function concatenateChunks(chunks) {
-    if (chunks.length==1) {
-      // No need to concatenate, send directly to done
-      const finalBlob = new Blob([chunks[0]], {
-        type: "video/mp4"
-      });
-      // Trigger the done callback with the final video blob
-      done(finalBlob, path);
-      return;
-    }
-
-    const chunkNames = chunks.map((_, index) => `chunk${index + 1}.mp4`);
-    
-    // Create a file list in MEMFS
-    const memfsChunks = chunks.map((chunk, index) => ({
-      name: chunkNames[index],
-      data: chunk
-    }));
-
-    const concatList = chunkNames.map((chunkName) => `file '${chunkName}'`).join('\n');
-  // Create a file in MEMFS for the concat list
-    const concatListFile = {
-      name: 'concat_list.txt',
-      data: new TextEncoder().encode(concatList)
-    };
-
-    // Add the concat list to the MEMFS files
-    memfsChunks.push(concatListFile);
-
-    console.log(chunkNames)
-    console.log(concatList)
-    // Prepare FFmpeg command to concatenate video chunks
-    worker.postMessage({
-      type: 'run',
-      TOTAL_MEMORY: 268435456,
-      arguments: [
-        '-f', 'concat',
-        '-safe', '0',  // Allow using file paths
-        '-i', 'concat_list.txt',  // Use the concat list file
-        // '-c:v', 'copy',
-        '-c:v', 'libx264',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        'final_video.mp4'
-      ],
-      // arguments: [
-      //   '-f', 'concat',
-      //   '-safe', '0',  // Allow using file paths
-      //   '-i', 'concat_list.txt', 
-      //   'final_video.webm'
-      // ],
-      MEMFS: memfsChunks  // Provide the chunks and concat list as input to FFmpeg
-    });
-
-    // Listen for the final output
-    worker.onmessage = function(e) {
-      const msg = e.data;
-
-      switch (msg.type) {
-        case 'done':
-          console.log('done')
-          // Combine the blobs into the final video file
-          const finalBlob = new Blob([msg.data.MEMFS[0].data], {
-            type: "video/mp4"
-          });
-          // Trigger the done callback with the final video blob
-          done(finalBlob, path);
-          break;
-        case 'stderr':
-          console.log(msg.data);
-          break;
-        case 'stdout':
-          console.error(msg.data);
-          break;
-        case 'exit':
-          console.log('FFmpeg worker exit code:', msg.data);
-          break;
-      }
-    };
-  }
-
-  processChunk(worker, 0, Math.min(chunkSize, root.maxFrame))
-
-  function finalize() {
-
-    worker.onmessage = function(e) {
-      var msg = e.data;
-      switch (msg.type) {
-        // Ffmpeg seems to have stdout and stderr swapped
-        case "stdout":
-          console.error(msg.data);
-          break;
-        case "stderr":
-          console.log(msg.data);
-          break;
-        case "exit":
-          console.log("Process exited with code " + msg.data);
-          break;
-
-        case 'done':
-          const blob = new Blob([msg.data.MEMFS[0].data], {
-            type: "video/mp4"
-          });
-          done( blob )
-
-        break;
-      }
-    };
-
-    worker.postMessage({
-      type: 'run',
-      TOTAL_MEMORY: 268435456,
-      arguments: ["-r", "20", "-i", "img%03d.jpeg", "-c:v", "libx264", "-crf", "1", "-vf", `scale=1000:1000`, "-pix_fmt", "yuv420p", "-vb", "20M", "out.mp4"],
-      MEMFS: images
-    });
-  }
+  processFrame(0);
 }
-// exportMp4()
 
 async function render() {
   document.querySelector("body").style.cursor = "wait";
   const path = await saveFileDialog({
     filters: [
+      {
+        name: "WebM files (.webm)",
+        extensions: ["webm"],
+      },
       {
         name: "MP4 files (.mp4)",
         extensions: ["mp4"],
@@ -5178,7 +4995,7 @@ async function render() {
         extensions: ["html"],
       },
     ],
-    defaultPath: await join(await documentDir(), "untitled.mp4"),
+    defaultPath: await join(await documentDir(), "untitled.webm"),
   });
   if (path != undefined) {
     // SVG balks on images
@@ -5192,11 +5009,23 @@ async function render() {
 
     const ext = path.split(".").pop().toLowerCase();
 
+    const canvas = document.createElement("canvas");
+    canvas.width = config.fileWidth; // Set desired width
+    canvas.height = config.fileHeight; // Set desired height
+    let exportContext = {
+      ...context,
+      ctx: canvas.getContext("2d"),
+      selectionRect: undefined,
+      selection: [],
+      shapeselection: [],
+    };
+
+
     switch (ext) {
       case "mp4":
-        exportMp4(path)
-        return
-        break
+      case "webm":
+        await setupVideoExport(ext, path, canvas, exportContext);
+        break;
       case "html":
         fetch("/player.html")
           .then((response) => {
@@ -5226,23 +5055,17 @@ async function render() {
         break;
       case "png":
         const frames = [];
-        const canvas = document.createElement("canvas");
+        canvas = document.createElement("canvas");
         canvas.width = config.fileWidth; // Set desired width
         canvas.height = config.fileHeight; // Set desired height
-        let exportContext = {
-          ...context,
-          ctx: canvas.getContext("2d"),
-          selectionRect: undefined,
-          selection: [],
-          shapeselection: [],
-        };
+        
 
         for (let i = 0; i < root.maxFrame; i++) {
           root.currentFrameNum = i;
           exportContext.ctx.fillStyle = "white";
           exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
           exportContext.ctx.fill();
-          await root.draw(exportContext);
+          root.draw(exportContext);
 
           // Convert the canvas content to a PNG image (this is the "frame" we add to the APNG)
           const imageData = exportContext.ctx.getImageData(

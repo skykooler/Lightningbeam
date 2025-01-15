@@ -1,3 +1,12 @@
+# 0.7.9-alpha:
+New features:
+- MP4 export is now faster and full resolution
+- Added WebM export
+Changes:
+- Files saved in Lightningbeam 0.7.7 or later are now opened by directly parsing the file structure, bypassing the need to replay every action
+Bugfixes:
+- Fix frame number after exporting video
+
 # 0.7.8-alpha:
 Bugfixes:
 - Fix mp4 export on macOS
