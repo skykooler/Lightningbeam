@@ -4449,97 +4449,106 @@ async function _open(path, returnJson = false) {
 
           const objectOffsets = {};
           const frameIDs = []
-          for (let action of file.actions) {
-            if (!(action.name in actions)) {
-              await messageDialog(
-                `Invalid action ${action.name}. File may be corrupt.`,
-                { title: "Error", kind: "error" },
-              );
-              return;
-            }
+          if (file.version < "1.7.5") {
+            for (let action of file.actions) {
+              if (!(action.name in actions)) {
+                await messageDialog(
+                  `Invalid action ${action.name}. File may be corrupt.`,
+                  { title: "Error", kind: "error" },
+                );
+                return;
+              }
 
-            console.log(action.name);
-            // Data fixes
-            if (file.version <= "1.5") {
-              // Fix coordinates of objects
-              if (action.name == "group") {
-                let bbox;
-                for (let i of action.action.shapes) {
-                  const shape = pointerList[i];
-                  if (bbox == undefined) {
-                    bbox = shape.bbox();
-                  } else {
-                    growBoundingBox(bbox, shape.bbox());
-                  }
-                }
-                for (let i of action.action.objects) {
-                  const object = pointerList[i]; // TODO: rotated bbox
-                  if (bbox == undefined) {
-                    bbox = object.bbox();
-                  } else {
-                    growBoundingBox(bbox, object.bbox());
-                  }
-                }
-                const position = {
-                  x: (bbox.x.min + bbox.x.max) / 2,
-                  y: (bbox.y.min + bbox.y.max) / 2,
-                };
-                action.action.position = position;
-                objectOffsets[action.action.groupUuid] = position;
-                for (let shape of action.action.shapes) {
-                  objectOffsets[shape] = position
-                }
-              } else if (action.name == "editFrame") {
-                for (let key in action.action.newState) {
-                  if (key in objectOffsets) {
-                    action.action.newState[key].x += objectOffsets[key].x;
-                    action.action.newState[key].y += objectOffsets[key].y;
-                  }
-                }
-                for (let key in action.action.oldState) {
-                  if (key in objectOffsets) {
-                    action.action.oldState[key].x += objectOffsets[key].x;
-                    action.action.oldState[key].y += objectOffsets[key].y;
-                  }
-                }
-              } else if (action.name == "addKeyframe") {
-                for (let id in objectOffsets) {
-                  objectOffsets[action.action.uuid.slice(0,8) + id.slice(8)] = objectOffsets[id]
-                }
-              } else if (action.name == "editShape") {
-                if (action.action.shape in objectOffsets) {
-                  console.log("editing shape")
-                  for (let curve of action.action.newCurves) {
-                    for (let point of curve.points) {
-                      point.x -= objectOffsets[action.action.shape].x
-                      point.y -= objectOffsets[action.action.shape].y
+              console.log(action.name);
+              // Data fixes
+              if (file.version <= "1.5") {
+                // Fix coordinates of objects
+                if (action.name == "group") {
+                  let bbox;
+                  for (let i of action.action.shapes) {
+                    const shape = pointerList[i];
+                    if (bbox == undefined) {
+                      bbox = shape.bbox();
+                    } else {
+                      growBoundingBox(bbox, shape.bbox());
                     }
                   }
-                  for (let curve of action.action.oldCurves) {
-                    for (let point of curve.points) {
-                      point.x -= objectOffsets[action.action.shape].x
-                      point.y -= objectOffsets[action.action.shape].y
+                  for (let i of action.action.objects) {
+                    const object = pointerList[i]; // TODO: rotated bbox
+                    if (bbox == undefined) {
+                      bbox = object.bbox();
+                    } else {
+                      growBoundingBox(bbox, object.bbox());
+                    }
+                  }
+                  const position = {
+                    x: (bbox.x.min + bbox.x.max) / 2,
+                    y: (bbox.y.min + bbox.y.max) / 2,
+                  };
+                  action.action.position = position;
+                  objectOffsets[action.action.groupUuid] = position;
+                  for (let shape of action.action.shapes) {
+                    objectOffsets[shape] = position
+                  }
+                } else if (action.name == "editFrame") {
+                  for (let key in action.action.newState) {
+                    if (key in objectOffsets) {
+                      action.action.newState[key].x += objectOffsets[key].x;
+                      action.action.newState[key].y += objectOffsets[key].y;
+                    }
+                  }
+                  for (let key in action.action.oldState) {
+                    if (key in objectOffsets) {
+                      action.action.oldState[key].x += objectOffsets[key].x;
+                      action.action.oldState[key].y += objectOffsets[key].y;
+                    }
+                  }
+                } else if (action.name == "addKeyframe") {
+                  for (let id in objectOffsets) {
+                    objectOffsets[action.action.uuid.slice(0,8) + id.slice(8)] = objectOffsets[id]
+                  }
+                } else if (action.name == "editShape") {
+                  if (action.action.shape in objectOffsets) {
+                    console.log("editing shape")
+                    for (let curve of action.action.newCurves) {
+                      for (let point of curve.points) {
+                        point.x -= objectOffsets[action.action.shape].x
+                        point.y -= objectOffsets[action.action.shape].y
+                      }
+                    }
+                    for (let curve of action.action.oldCurves) {
+                      for (let point of curve.points) {
+                        point.x -= objectOffsets[action.action.shape].x
+                        point.y -= objectOffsets[action.action.shape].y
+                      }
                     }
                   }
                 }
               }
-            }
-            if (file.version <= "1.6") {
-              // Fix copy-paste
-              if (action.name == "duplicateObject") {
-                const obj = pointerList[action.action.object];
-                const objJson = obj.toJSON(true);
-                objJson.idx =
-                  action.action.uuid.slice(0, 8) +
-                  action.action.object.slice(8);
-                action.action.items = [objJson];
-                action.action.object = "root";
-                action.action.frame = root.currentFrame.idx;
+              if (file.version <= "1.6") {
+                // Fix copy-paste
+                if (action.name == "duplicateObject") {
+                  const obj = pointerList[action.action.object];
+                  const objJson = obj.toJSON(true);
+                  objJson.idx =
+                    action.action.uuid.slice(0, 8) +
+                    action.action.object.slice(8);
+                  action.action.items = [objJson];
+                  action.action.object = "root";
+                  action.action.frame = root.currentFrame.idx;
+                }
               }
-            }
 
-            await actions[action.name].execute(action.action);
-            undoStack.push(action);
+              await actions[action.name].execute(action.action);
+              undoStack.push(action);
+            }
+          } else {
+            // disabled for now
+            // for (let action of file.actions) {
+            //   undoStack.push(action)
+            // }
+            root = GraphicsObject.fromJSON(file.json)
+            context.objectStack = [root]
           }
 
           lastSaveIndex = undoStack.length;
