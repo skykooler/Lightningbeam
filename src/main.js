@@ -4866,6 +4866,7 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
   // Choose muxer and encoder configuration based on file extension
   if (ext === "mp4") {
     target = new Mp4Muxer.ArrayBufferTarget();
+    // TODO: add video options dialog for width, height, bitrate
     muxer = new Mp4Muxer.Muxer({
       target: target,
       video: {
@@ -4880,8 +4881,8 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
 
     videoConfig = {
       codec: 'avc1.42001f',
-      width: 1280,
-      height: 720,
+      width: config.fileWidth,
+      height: config.fileHeight,
       bitrate: bitrate,
     };
   } else if (ext === "webm") {
