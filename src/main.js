@@ -1530,6 +1530,7 @@ let actions = {
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
         frame.addShape(shape);
+        shape.translate(action.position.x, action.position.y);
         group.getFrame(0).removeShape(shape);
       }
       for (let objectIdx of action.objects) {
