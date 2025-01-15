@@ -5160,6 +5160,124 @@ async function exportMp4(path) {
   }
 }
 
+async function setupVideoExport(ext, path, canvas, exportContext) {
+  createProgressModal();
+  
+  await LibAVWebCodecs.load();
+  console.log("Codecs loaded");
+
+  let target;
+  let muxer;
+  let videoEncoder;
+  let videoConfig;
+  const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
+  const oldContext = context;
+  context = exportContext;
+
+  const oldRootFrame = root.currentFrameNum
+  const bitrate = 1e6
+  
+  // Choose muxer and encoder configuration based on file extension
+  if (ext === "mp4") {
+    target = new Mp4Muxer.ArrayBufferTarget();
+    muxer = new Mp4Muxer.Muxer({
+      target: target,
+      video: {
+        codec: 'avc',
+        width: config.fileWidth,
+        height: config.fileHeight,
+        frameRate: config.framerate,
+      },
+      fastStart: 'in-memory',
+      firstTimestampBehavior: 'offset',
+    });
+
+    videoConfig = {
+      codec: 'avc1.42001f',
+      width: 1280,
+      height: 720,
+      bitrate: bitrate,
+    };
+  } else if (ext === "webm") {
+    target = new WebMMuxer.ArrayBufferTarget();
+    muxer = new WebMMuxer.Muxer({
+      target: target,
+      video: {
+        codec: 'V_VP9',
+        width: config.fileWidth,
+        height: config.fileHeight,
+        frameRate: config.framerate,
+      },
+      firstTimestampBehavior: 'offset',
+    });
+
+    videoConfig = {
+      codec: 'vp09.00.10.08',
+      width: config.fileWidth,
+      height: config.fileHeight,
+      bitrate: bitrate,
+      bitrateMode: "constant",
+    };
+  }
+
+  // Initialize the video encoder
+  videoEncoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta, undefined, undefined, frameTimeMicroseconds),
+    error: (e) => console.error(e),
+  });
+
+  videoEncoder.configure(videoConfig);
+
+  async function finishEncoding() {
+    const progressText = document.getElementById('progressText');
+    progressText.innerText = 'Finalizing...';
+    const progressBar = document.getElementById('progressBar');
+    progressBar.value = 100;
+    await videoEncoder.flush();
+    muxer.finalize();
+    await writeFile(path, new Uint8Array(target.buffer));
+    const modal = document.getElementById('progressModal');
+    modal.style.display = 'none';
+    document.querySelector("body").style.cursor = "default";
+  }
+
+  const processFrame = async (currentFrame) => {
+    if (currentFrame < root.maxFrame) {
+      // Update progress bar
+      const progressText = document.getElementById('progressText');
+      progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
+      const progressBar = document.getElementById('progressBar');
+      const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
+      progressBar.value = progress;
+
+      root.setFrameNum(currentFrame);
+      exportContext.ctx.fillStyle = "white";
+      exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
+      exportContext.ctx.fill();
+      root.draw(exportContext.ctx);
+      const frame = new VideoFrame(
+        await LibAVWebCodecs.createImageBitmap(canvas),
+        { timestamp: currentFrame * frameTimeMicroseconds }
+      );
+
+      // Encode frame
+      const keyFrame = currentFrame % 60 === 0; // Every 60th frame is a key frame
+      videoEncoder.encode(frame, { keyFrame });
+      frame.close();
+
+      currentFrame++;
+      setTimeout(() => processFrame(currentFrame), 4);
+    } else {
+      // Once all frames are processed, reset context and export
+      context = oldContext;
+      root.setFrameNum(oldRootFrame);
+      finishEncoding();
+    }
+  };
+
+  processFrame(0);
+}
+
 async function render() {
   document.querySelector("body").style.cursor = "wait";
   const path = await saveFileDialog({
@@ -5205,203 +5323,12 @@ async function render() {
       selection: [],
       shapeselection: [],
     };
-    const oldContext = context;
-    context = exportContext;
-
-    const oldRootFrame = root.currentFrameNum
-    let currentFrame = 0;
-    const bitrate = 1e6
-    const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
-    let target;
-    let muxer;
-    let videoEncoder;
 
 
     switch (ext) {
       case "mp4":
-        // exportMp4(path)
-        createProgressModal();
-
-        // Store the original context
-
-        await LibAVWebCodecs.load()
-        console.log("Codecs loaded")
-        target = new Mp4Muxer.ArrayBufferTarget()
-        muxer = new Mp4Muxer.Muxer({
-          target: target,
-          video: {
-            codec: 'avc',
-            width: config.fileWidth,
-            height: config.fileHeight,
-            frameRate: config.framerate,
-          },
-          fastStart: 'in-memory',
-          firstTimestampBehavior: 'offset',
-        })
-        videoEncoder = new VideoEncoder({
-          output: (chunk, meta) => muxer.addVideoChunk(chunk, meta, undefined, undefined, frameTimeMicroseconds),//, currentFrame * frameTimeMicroseconds),
-          error: (e) => console.error(e),
-        })
-    
-        videoEncoder.configure({
-          codec: 'avc1.42001f',
-          width: 1280,
-          height: 720,
-          bitrate: 1e6
-        });
-    
-        async function finishMp4Encoding() {
-          const progressText = document.getElementById('progressText');
-          progressText.innerText = 'Finalizing...';
-          const progressBar = document.getElementById('progressBar');
-          progressBar.value = 100;
-          await videoEncoder.flush()
-          muxer.finalize()
-          await writeFile(
-            path,
-            new Uint8Array(target.buffer),
-          );
-          const modal = document.getElementById('progressModal');
-          modal.style.display = 'none';
-          document.querySelector("body").style.cursor = "default";
-        }
-
-        const processMp4Frame = async () => {
-          if (currentFrame < root.maxFrame) {
-            // Update progress bar
-            const progressText = document.getElementById('progressText');
-            progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
-            const progressBar = document.getElementById('progressBar');
-            const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
-            progressBar.value = progress;
-
-            root.setFrameNum(currentFrame)
-            exportContext.ctx.fillStyle = "white";
-            exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
-            exportContext.ctx.fill();
-            root.draw(exportContext.ctx);
-            const frame = new VideoFrame(
-              await LibAVWebCodecs.createImageBitmap(canvas),
-              { timestamp: currentFrame * frameTimeMicroseconds }
-            );
-
-            async function encodeFrame(frame) {
-              // const keyFrame = true
-              const keyFrame = currentFrame % 60 === 0
-              videoEncoder.encode(frame, { keyFrame })
-              frame.close()
-            }
-
-            await encodeFrame(frame)
-
-            frame.close()
-
-
-            currentFrame++;
-            setTimeout(processMp4Frame, 4);
-          } else {
-            // Once all frames are processed, reset context and export
-            context = oldContext;
-            root.setFrameNum(oldRootFrame)
-            finishMp4Encoding()
-          }
-        };
-
-        processMp4Frame();
-        return
-        break
       case "webm":
-        
-        createProgressModal();
-
-
-        await LibAVWebCodecs.load()
-        console.log("Codecs loaded")
-        target = new WebMMuxer.ArrayBufferTarget()
-        muxer = new WebMMuxer.Muxer({
-          target: target,
-          video: {
-            codec: 'V_VP9',
-            width: config.fileWidth,
-            height: config.fileHeight,
-            frameRate: config.framerate,
-          },
-          firstTimestampBehavior: 'offset',
-        })
-        videoEncoder = new VideoEncoder({
-          output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),//, currentFrame * frameTimeMicroseconds),
-          error: (e) => console.error(e),
-        })
-    
-        videoEncoder.configure({
-          codec: 'vp09.00.10.08',
-          width: config.fileWidth,
-          height: config.fileHeight,
-          bitrate,
-          bitrateMode: "constant"
-        })
-    
-        async function finishEncoding() {
-          const progressText = document.getElementById('progressText');
-          progressText.innerText = 'Finalizing...';
-          const progressBar = document.getElementById('progressBar');
-          progressBar.value = 100;
-          await videoEncoder.flush()
-          muxer.finalize()
-          await writeFile(
-            path,
-            new Uint8Array(target.buffer),
-          );
-          const modal = document.getElementById('progressModal');
-          modal.style.display = 'none';
-          document.querySelector("body").style.cursor = "default";
-        }
-
-        const processFrame = async () => {
-          if (currentFrame < root.maxFrame) {
-            // Update progress bar
-            const progressText = document.getElementById('progressText');
-            progressText.innerText = `Rendering frame ${currentFrame + 1} of ${root.maxFrame}`;
-            const progressBar = document.getElementById('progressBar');
-            const progress = Math.round(((currentFrame + 1) / root.maxFrame) * 100);
-            progressBar.value = progress;
-
-            root.setFrameNum(currentFrame)
-            exportContext.ctx.fillStyle = "white";
-            exportContext.ctx.rect(0, 0, config.fileWidth, config.fileHeight);
-            exportContext.ctx.fill();
-            root.draw(exportContext.ctx);
-            const frame = new VideoFrame(
-              await LibAVWebCodecs.createImageBitmap(canvas),
-              { timestamp: currentFrame * frameTimeMicroseconds }
-            );
-
-            async function encodeFrame(frame) {
-              // const keyFrame = true
-              const keyFrame = currentFrame % 60 === 0
-              videoEncoder.encode(frame, { keyFrame })
-              frame.close()
-            }
-
-            await encodeFrame(frame)
-
-            frame.close()
-
-
-            currentFrame++;
-            setTimeout(processFrame, 4);
-          } else {
-            // Once all frames are processed, reset context and export
-            context = oldContext;
-            root.setFrameNum(oldRootFrame)
-            finishEncoding()
-          }
-        };
-
-        processFrame();
-        return
-
-
+        await setupVideoExport(ext, path, canvas, exportContext);
         break;
       case "html":
         fetch("/player.html")
