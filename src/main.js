@@ -4371,7 +4371,7 @@ async function _save(path) {
     //   console.log(action.name);
     // }
     const fileData = {
-      version: "1.7.5",
+      version: "1.7.6",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
