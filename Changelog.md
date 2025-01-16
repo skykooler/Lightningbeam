@@ -1,3 +1,15 @@
+# 0.7.10-alpha:
+New features:
+- Add proper save/export dialog for web UI
+Changes:
+- When trying to play an animation and the scrubber is on the last frame, the animation will play from the beginning
+- Lightningbeam now uses pointer events instead of mouse events for input, so it can be used with styluses and touchscreens
+Bugfixes:
+- Fix outlines losing their colors
+- Fix audio not opening properly
+- Fix delete not working for groups
+- Fix undoing group sending shapes to 0,0
+
 # 0.7.9-alpha:
 New features:
 - MP4 export is now faster and full resolution
