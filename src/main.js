@@ -585,6 +585,8 @@ let actions = {
     },
     execute: (action) => {
       let shape = pointerList[action.shape];
+      console.log(action.shape)
+      console.log(pointerList)
       shape.fillStyle = action.newColor;
     },
     rollback: (action) => {
@@ -685,6 +687,8 @@ let actions = {
         player: player,
         start: action.frameNum,
         img: img,
+        src: action.audiosrc,
+        uuid: action.uuid
       };
       pointerList[action.uuid] = soundObj;
       newAudioLayer.sounds[action.uuid] = soundObj;
@@ -2864,14 +2868,49 @@ class AudioLayer {
     const audioLayer = new AudioLayer(json.idx, json.name);
     // TODO: load audiolayer from json
     audioLayer.sounds = {};
+    for (let id in json.sounds) {
+      const jsonSound = json.sounds[id]
+      const img = new Image();
+      img.className = "audioWaveform";
+      const player = new Tone.Player().toDestination();
+      player.load(jsonSound.src)
+      .then(() => {
+        generateWaveform(img, player.buffer, 50, 25, config.framerate);
+      })
+      .catch(error => {
+        // Handle any errors that occur during the load or waveform generation
+        console.error(error);
+      });
+
+      let soundObj = {
+        player: player,
+        start: jsonSound.start,
+        img: img,
+        src: jsonSound.src,
+        uuid: jsonSound.uuid
+      };
+      pointerList[jsonSound.uuid] = soundObj;
+      audioLayer.sounds[jsonSound.uuid] = soundObj;
+      // TODO: change start time
+      audioLayer.track.add(0, jsonSound.uuid);
+    }
     audioLayer.audible = json.audible;
     return audioLayer;
   }
   toJSON(randomizeUuid = false) {
+    console.log(this.sounds)
     const json = {};
     json.type = "AudioLayer";
     // TODO: build json from audiolayer
     json.sounds = {};
+    for (let id in this.sounds) {
+      const sound = this.sounds[id]
+      json.sounds[id] = {
+        start: sound.start,
+        src: sound.src,
+        uuid: sound.uuid
+      }
+    }
     json.audible = this.audible;
     if (randomizeUuid) {
       json.idx = uuidv4();
@@ -4545,6 +4584,60 @@ async function _open(path, returnJson = false) {
               undoStack.push(action);
             }
           } else {
+            if (file.version < "1.7.6") {
+              function restoreLineColors(obj) {
+                // Step 1: Create colorMapping dictionary
+                const colorMapping = (obj.actions || []).reduce((map, action) => {
+                    if (action.name === "addShape" && action.action.curves.length > 0) {
+                        map[action.action.uuid] = action.action.curves[0].color;
+                    }
+                    return map;
+                }, {});
+            
+                // Step 2: Recursive pass to add colors from colorMapping back to curves
+                function recurse(item) {
+                    if (item?.curves && item.idx && colorMapping[item.idx]) {
+                        item.curves.forEach(curve => {
+                            if (Array.isArray(curve)) curve.push(colorMapping[item.idx]);
+                        });
+                    }
+                    Object.values(item).forEach(value => {
+                        if (typeof value === 'object' && value !== null) recurse(value);
+                    });
+                }
+            
+                recurse(obj);
+              }
+            
+              restoreLineColors(file)
+
+              function restoreAudio(obj) {
+                const audioSrcMapping = (obj.actions || []).reduce((map, action) => {
+                    if (action.name === "addAudio") {
+                        map[action.action.layeruuid] = action.action;
+                    }
+                    return map;
+                }, {});
+            
+                function recurse(item) {
+                    if (item.type=="AudioLayer" && audioSrcMapping[item.idx]) {
+                        const action = audioSrcMapping[item.idx]
+                        item.sounds[action.uuid] = {
+                          start: action.frameNum,
+                          src: action.audiosrc,
+                          uuid: action.uuid
+                        }
+                    }
+                    Object.values(item).forEach(value => {
+                        if (typeof value === 'object' && value !== null) recurse(value);
+                    });
+                }
+            
+                recurse(obj);
+              }
+            
+              restoreAudio(file)
+            }
             // disabled for now
             // for (let action of file.actions) {
             //   undoStack.push(action)
@@ -4867,6 +4960,8 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
   let muxer;
   let videoEncoder;
   let videoConfig;
+  let audioEncoder;
+  let audioConfig;
   const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
   const oldContext = context;
   context = exportContext;
@@ -4896,6 +4991,14 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
       height: config.fileHeight,
       bitrate: bitrate,
     };
+
+    // Todo: add configuration for mono/stereo
+    audioConfig = {
+      codec: 'mp4a.40.2', // AAC codec
+      sampleRate: 44100,
+      numberOfChannels: 2, // Mono
+      bitrate: 64000,
+    };
   } else if (ext === "webm") {
     target = new WebMMuxer.ArrayBufferTarget();
     muxer = new WebMMuxer.Muxer({
@@ -4916,6 +5019,13 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
       bitrate: bitrate,
       bitrateMode: "constant",
     };
+
+    audioConfig = {
+      codec: 'opus',  // Use Opus codec for WebM
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      bitrate: 64000,
+    }
   }
 
   // Initialize the video encoder
@@ -4926,18 +5036,12 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
 
   videoEncoder.configure(videoConfig);
 
-  async function finishEncoding() {
-    const progressText = document.getElementById('progressText');
-    progressText.innerText = 'Finalizing...';
-    const progressBar = document.getElementById('progressBar');
-    progressBar.value = 100;
-    await videoEncoder.flush();
-    muxer.finalize();
-    await writeFile(path, new Uint8Array(target.buffer));
-    const modal = document.getElementById('progressModal');
-    modal.style.display = 'none';
-    document.querySelector("body").style.cursor = "default";
-  }
+  // audioEncoder = new AudioEncoder({
+  //   output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+  //   error: (e) => console.error(e),
+  // });
+
+  // audioEncoder.configure(audioConfig)
 
   const processFrame = async (currentFrame) => {
     if (currentFrame < root.maxFrame) {
