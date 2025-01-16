@@ -585,6 +585,8 @@ let actions = {
     },
     execute: (action) => {
       let shape = pointerList[action.shape];
+      console.log(action.shape)
+      console.log(pointerList)
       shape.fillStyle = action.newColor;
     },
     rollback: (action) => {
@@ -685,6 +687,8 @@ let actions = {
         player: player,
         start: action.frameNum,
         img: img,
+        src: action.audiosrc,
+        uuid: action.uuid
       };
       pointerList[action.uuid] = soundObj;
       newAudioLayer.sounds[action.uuid] = soundObj;
@@ -1530,6 +1534,7 @@ let actions = {
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
         frame.addShape(shape);
+        shape.translate(action.position.x, action.position.y);
         group.getFrame(0).removeShape(shape);
       }
       for (let objectIdx of action.objects) {
@@ -2590,51 +2595,49 @@ class Layer extends Widget {
               child[key] = frame.keys[child.idx][key];
             }
           }
-        }
-      }
-    }
-    for (let child of this.children) {
-      if (!context.objectStack.includes(child)) {
-        if (keyframe) {
-          if (child.goToFrame != undefined) {
-            child.setFrameNum(child.goToFrame - 1)
-            if (child.playFromFrame) {
-              child.playing = true
-            } else {
-              child.playing = false
+          if (!context.objectStack.includes(child)) {
+            if (keyframe) {
+              if (child.goToFrame != undefined) {
+                child.setFrameNum(child.goToFrame - 1)
+                if (child.playFromFrame) {
+                  child.playing = true
+                } else {
+                  child.playing = false
+                }
+                child.playing = true
+              }
             }
-            child.playing = true
-          }
-        }
-        if (child.playing) {
-          let lastFrame = 0;
-          for (let i = this.frameNum; i >= 0; i--) {
-            if (
-              this.frames[i] &&
-              this.frames[i].keys[child.idx] &&
-              this.frames[i].keys[child.idx].playFromFrame
-            ) {
-              lastFrame = i;
-              break;
+            if (child.playing) {
+              let lastFrame = 0;
+              for (let i = this.frameNum; i >= 0; i--) {
+                if (
+                  this.frames[i] &&
+                  this.frames[i].keys[child.idx] &&
+                  this.frames[i].keys[child.idx].playFromFrame
+                ) {
+                  lastFrame = i;
+                  break;
+                }
+              }
+              child.setFrameNum(this.frameNum - lastFrame);
             }
           }
-          child.setFrameNum(this.frameNum - lastFrame);
+          const transform = ctx.getTransform()
+          ctx.translate(child.x, child.y)
+          ctx.scale(child.scale_x, child.scale_y)
+          ctx.rotate(child.rotation)
+          child.draw(ctx)
+          if (context.selection.includes(child)) {
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#00ffff";
+            ctx.beginPath();
+            let bbox = child.bbox()
+            ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
+            ctx.stroke()
+          }
+          ctx.setTransform(transform)
         }
       }
-      const transform = ctx.getTransform()
-      ctx.translate(child.x, child.y)
-      ctx.scale(child.scale_x, child.scale_y)
-      ctx.rotate(child.rotation)
-      child.draw(ctx)
-      if (context.selection.includes(child)) {
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#00ffff";
-        ctx.beginPath();
-        let bbox = child.bbox()
-        ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
-        ctx.stroke()
-      }
-      ctx.setTransform(transform)
     }
     if (this.activeShape) {
       this.activeShape.draw(cxt)
@@ -2865,14 +2868,49 @@ class AudioLayer {
     const audioLayer = new AudioLayer(json.idx, json.name);
     // TODO: load audiolayer from json
     audioLayer.sounds = {};
+    for (let id in json.sounds) {
+      const jsonSound = json.sounds[id]
+      const img = new Image();
+      img.className = "audioWaveform";
+      const player = new Tone.Player().toDestination();
+      player.load(jsonSound.src)
+      .then(() => {
+        generateWaveform(img, player.buffer, 50, 25, config.framerate);
+      })
+      .catch(error => {
+        // Handle any errors that occur during the load or waveform generation
+        console.error(error);
+      });
+
+      let soundObj = {
+        player: player,
+        start: jsonSound.start,
+        img: img,
+        src: jsonSound.src,
+        uuid: jsonSound.uuid
+      };
+      pointerList[jsonSound.uuid] = soundObj;
+      audioLayer.sounds[jsonSound.uuid] = soundObj;
+      // TODO: change start time
+      audioLayer.track.add(0, jsonSound.uuid);
+    }
     audioLayer.audible = json.audible;
     return audioLayer;
   }
   toJSON(randomizeUuid = false) {
+    console.log(this.sounds)
     const json = {};
     json.type = "AudioLayer";
     // TODO: build json from audiolayer
     json.sounds = {};
+    for (let id in this.sounds) {
+      const sound = this.sounds[id]
+      json.sounds[id] = {
+        start: sound.start,
+        src: sound.src,
+        uuid: sound.uuid
+      }
+    }
     json.audible = this.audible;
     if (randomizeUuid) {
       json.idx = uuidv4();
@@ -4135,7 +4173,7 @@ async function greet() {
 window.addEventListener("DOMContentLoaded", () => {
   rootPane = document.querySelector("#root");
   rootPane.appendChild(createPane(panes.toolbar));
-  rootPane.addEventListener("mousemove", (e) => {
+  rootPane.addEventListener("pointermove", (e) => {
     mouseEvent = e;
   });
   let [_toolbar, panel] = splitPane(
@@ -4268,6 +4306,9 @@ window.addEventListener("keydown", (e) => {
 function playPause() {
   playing = !playing;
   if (playing) {
+    if (context.activeObject.currentFrameNum >= context.activeObject.maxFrame - 1) {
+      context.activeObject.setFrameNum(0);
+    }
     for (let audioLayer of context.activeObject.audioLayers) {
       if (audioLayer.audible) {
         for (let i in audioLayer.sounds) {
@@ -4369,7 +4410,7 @@ async function _save(path) {
     //   console.log(action.name);
     // }
     const fileData = {
-      version: "1.7.5",
+      version: "1.7.6",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -4543,6 +4584,60 @@ async function _open(path, returnJson = false) {
               undoStack.push(action);
             }
           } else {
+            if (file.version < "1.7.6") {
+              function restoreLineColors(obj) {
+                // Step 1: Create colorMapping dictionary
+                const colorMapping = (obj.actions || []).reduce((map, action) => {
+                    if (action.name === "addShape" && action.action.curves.length > 0) {
+                        map[action.action.uuid] = action.action.curves[0].color;
+                    }
+                    return map;
+                }, {});
+            
+                // Step 2: Recursive pass to add colors from colorMapping back to curves
+                function recurse(item) {
+                    if (item?.curves && item.idx && colorMapping[item.idx]) {
+                        item.curves.forEach(curve => {
+                            if (Array.isArray(curve)) curve.push(colorMapping[item.idx]);
+                        });
+                    }
+                    Object.values(item).forEach(value => {
+                        if (typeof value === 'object' && value !== null) recurse(value);
+                    });
+                }
+            
+                recurse(obj);
+              }
+            
+              restoreLineColors(file)
+
+              function restoreAudio(obj) {
+                const audioSrcMapping = (obj.actions || []).reduce((map, action) => {
+                    if (action.name === "addAudio") {
+                        map[action.action.layeruuid] = action.action;
+                    }
+                    return map;
+                }, {});
+            
+                function recurse(item) {
+                    if (item.type=="AudioLayer" && audioSrcMapping[item.idx]) {
+                        const action = audioSrcMapping[item.idx]
+                        item.sounds[action.uuid] = {
+                          start: action.frameNum,
+                          src: action.audiosrc,
+                          uuid: action.uuid
+                        }
+                    }
+                    Object.values(item).forEach(value => {
+                        if (typeof value === 'object' && value !== null) recurse(value);
+                    });
+                }
+            
+                recurse(obj);
+              }
+            
+              restoreAudio(file)
+            }
             // disabled for now
             // for (let action of file.actions) {
             //   undoStack.push(action)
@@ -4841,7 +4936,7 @@ function createProgressModal() {
   // Create text to show the current frame info
   const progressText = document.createElement('p');
   progressText.id = 'progressText';
-  progressText.innerText = 'Rendering frame 0 of 0';
+  progressText.innerText = 'Initializing...';
 
   // Append elements to modalContent
   modalContent.appendChild(progressBar);
@@ -4865,6 +4960,8 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
   let muxer;
   let videoEncoder;
   let videoConfig;
+  let audioEncoder;
+  let audioConfig;
   const frameTimeMicroseconds = parseInt(1_000_000 / config.framerate)
   const oldContext = context;
   context = exportContext;
@@ -4894,6 +4991,14 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
       height: config.fileHeight,
       bitrate: bitrate,
     };
+
+    // Todo: add configuration for mono/stereo
+    audioConfig = {
+      codec: 'mp4a.40.2', // AAC codec
+      sampleRate: 44100,
+      numberOfChannels: 2, // Mono
+      bitrate: 64000,
+    };
   } else if (ext === "webm") {
     target = new WebMMuxer.ArrayBufferTarget();
     muxer = new WebMMuxer.Muxer({
@@ -4914,6 +5019,13 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
       bitrate: bitrate,
       bitrateMode: "constant",
     };
+
+    audioConfig = {
+      codec: 'opus',  // Use Opus codec for WebM
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      bitrate: 64000,
+    }
   }
 
   // Initialize the video encoder
@@ -4924,18 +5036,12 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
 
   videoEncoder.configure(videoConfig);
 
-  async function finishEncoding() {
-    const progressText = document.getElementById('progressText');
-    progressText.innerText = 'Finalizing...';
-    const progressBar = document.getElementById('progressBar');
-    progressBar.value = 100;
-    await videoEncoder.flush();
-    muxer.finalize();
-    await writeFile(path, new Uint8Array(target.buffer));
-    const modal = document.getElementById('progressModal');
-    modal.style.display = 'none';
-    document.querySelector("body").style.cursor = "default";
-  }
+  // audioEncoder = new AudioEncoder({
+  //   output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+  //   error: (e) => console.error(e),
+  // });
+
+  // audioEncoder.configure(audioConfig)
 
   const processFrame = async (currentFrame) => {
     if (currentFrame < root.maxFrame) {
@@ -5319,7 +5425,7 @@ function stage() {
   // stageWrapper.appendChild(stage)
   // stageWrapper.appendChild(selectionRect)
   // scroller.appendChild(stageWrapper)
-  stage.addEventListener("mousedown", (e) => {
+  stage.addEventListener("pointerdown", (e) => {
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mousedown", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
@@ -5693,8 +5799,8 @@ function stage() {
     updateMenu();
     updateInfopanel();
   };
-  stage.addEventListener("mouseup", stage.mouseup);
-  stage.addEventListener("mousemove", (e) => {
+  stage.addEventListener("pointerup", stage.mouseup);
+  stage.addEventListener("pointermove", (e) => {
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mousemove", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
@@ -6104,7 +6210,7 @@ function toolbar() {
         colorCvs.colorSelectorWidget.draw(ctx)
 
       };
-      colorCvs.addEventListener("mousedown", (e) => {
+      colorCvs.addEventListener("pointerdown", (e) => {
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
         colorCvs.clickedAlphaGradient = false;
@@ -6114,7 +6220,7 @@ function toolbar() {
         colorCvs.draw();
       });
 
-      window.addEventListener("mouseup", (e) => {
+      window.addEventListener("pointerup", (e) => {
         let mouse = getMousePos(colorCvs, e);
         colorCvs.clickedMainGradient = false;
         colorCvs.clickedHueGradient = false;
@@ -6123,13 +6229,13 @@ function toolbar() {
         colorCvs.colorSelectorWidget.handleMouseEvent("mouseup", mouse.x, mouse.y)
         if (e.target != colorCvs) {
           colorCvs.style.display = "none";
-          window.removeEventListener("mousemove", evtListener);
+          window.removeEventListener("pointermove", evtListener);
         }
       });
     } else {
       colorCvs.style.display = "block";
     }
-    evtListener = window.addEventListener("mousemove", (e) => {
+    evtListener = window.addEventListener("pointermove", (e) => {
       let mouse = getMousePos(colorCvs, e);
       colorCvs.colorSelectorWidget.handleMouseEvent("mousemove", mouse.x, mouse.y)
       colorCvs.draw()
@@ -6260,7 +6366,7 @@ function timeline() {
       updateLayers();
     }
   });
-  timeline_cvs.addEventListener("mousedown", (e) => {
+  timeline_cvs.addEventListener("pointerdown", (e) => {
     let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth) {
@@ -6392,7 +6498,7 @@ function timeline() {
     }
     updateLayers();
   });
-  timeline_cvs.addEventListener("mouseup", (e) => {
+  timeline_cvs.addEventListener("pointerup", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
@@ -6412,7 +6518,7 @@ function timeline() {
       updateMenu();
     }
   });
-  timeline_cvs.addEventListener("mousemove", (e) => {
+  timeline_cvs.addEventListener("pointermove", (e) => {
     let mouse = getMousePos(timeline_cvs, e);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
@@ -6704,7 +6810,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     div.className = "vertical-grid";
   }
   div.setAttribute("lb-percent", percent); // TODO: better attribute name
-  div.addEventListener("mousedown", function (event) {
+  div.addEventListener("pointerdown", function (event) {
     // Check if the clicked element is the parent itself and not a child element
     if (event.target === event.currentTarget) {
       if (event.button === 0) {
@@ -6728,7 +6834,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
         splitIndicator.style.flexDirection =
           direction == "vertical" ? "column" : "row";
         document.body.appendChild(splitIndicator);
-        splitIndicator.addEventListener("mousemove", (e) => {
+        splitIndicator.addEventListener("pointermove", (e) => {
           const { clientX: mouseX, clientY: mouseY } = e;
           const rect = splitIndicator.getBoundingClientRect();
 
@@ -6789,12 +6895,12 @@ function splitPane(div, percent, horiz, newPane = undefined) {
               createPane(panes.timeline),
             );
             document.body.removeChild(splitIndicator);
-            document.removeEventListener("mousemove", splitListener);
+            document.removeEventListener("pointermove", splitListener);
             setTimeout(updateUI, 20);
           }
         });
 
-        const splitListener = document.addEventListener("mousemove", (e) => {
+        const splitListener = document.addEventListener("pointermove", (e) => {
           const mouseX = e.clientX;
           const mouseY = e.clientY;
 
@@ -6848,7 +6954,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     console.log("Right-click on the element");
     // Your custom logic here
   });
-  div.addEventListener("mousemove", function (event) {
+  div.addEventListener("pointermove", function (event) {
     // Check if the clicked element is the parent itself and not a child element
     if (event.currentTarget.getAttribute("dragging") == "true") {
       const frac = getMousePositionFraction(event, event.currentTarget);
@@ -6856,7 +6962,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
       updateAll();
     }
   });
-  div.addEventListener("mouseup", (event) => {
+  div.addEventListener("pointerup", (event) => {
     event.currentTarget.setAttribute("dragging", false);
     // event.currentTarget.style.userSelect = 'auto';
   });

@@ -1109,13 +1109,16 @@ class Bezier {
   }
 
   static fromJSON(json) {
-    return new Bezier(...json)
+    return json[8] ? new Bezier(...json.slice(0, 8)).setColor(json[8]) : new Bezier(...json.slice(0, 8));
   }
   toJSON() {
-    return [this.points[0].x, this.points[0].y,
+    return [
+      this.points[0].x, this.points[0].y,
       this.points[1].x, this.points[1].y,
       this.points[2].x, this.points[2].y,
-      this.points[3].x, this.points[3].y]
+      this.points[3].x, this.points[3].y,
+      this.color
+    ]
   }
 
   static getUtils() {
