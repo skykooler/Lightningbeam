@@ -1,12 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lightningbeam",
-  "version": "0.7.9-alpha",
+  "version": "0.7.10-alpha",
   "identifier": "org.lightningbeam.core",
   "build": {
     "frontendDist": "../src"
   },
-  
   "app": {
     "withGlobalTauri": true,
     "windows": [
