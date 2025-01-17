@@ -354,6 +354,7 @@ let config = {
     undo: "<mod>z",
     redo: "<mod>Z",
     new: "<mod>n",
+    newWindow: "<mod>N",
     save: "<mod>s",
     saveAs: "<mod>S",
     open: "<mod>o",
@@ -4369,6 +4370,10 @@ function decrementFrame() {
   updateUI();
 }
 
+function newWindow() {
+  invoke("create_window", {app: window.__TAURI__.app})
+}
+
 function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.objectStack = [root];
@@ -7880,6 +7885,12 @@ async function renderMenu() {
         enabled: true,
         action: newFile,
         accelerator: getShortcut("new"),
+      },
+      {
+        text: "New Window",
+        enabled: true,
+        action: newWindow,
+        accelerator: getShortcut("newWindow"),
       },
       {
         text: "Save",

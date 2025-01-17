@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex};
 
 use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
