@@ -585,8 +585,6 @@ let actions = {
     },
     execute: (action) => {
       let shape = pointerList[action.shape];
-      console.log(action.shape)
-      console.log(pointerList)
       shape.fillStyle = action.newColor;
     },
     rollback: (action) => {
@@ -4109,6 +4107,7 @@ class GraphicsObject extends Widget {
   removeChild(childObject) {
     let idx = childObject.idx;
     for (let layer of this.layers) {
+      layer.children = layer.children.filter(child => child.idx !== idx);
       for (let frame of layer.frames) {
         delete frame[idx];
       }
