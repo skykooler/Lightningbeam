@@ -1,3 +1,8 @@
+# 0.7.11-alpha:
+Bugfixes:
+- Fix duplicate objects showing up after grouping
+- Fix being unable to scroll audio layers into view
+
 # 0.7.10-alpha:
 New features:
 - Add proper save/export dialog for web UI
