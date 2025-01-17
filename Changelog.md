@@ -1,9 +1,16 @@
+# 0.7.11-alpha:
+Bugfixes:
+- Fix duplicate objects showing up after grouping
+- Fix being unable to scroll audio layers into view
+
 # 0.7.10-alpha:
 New features:
 - Add proper save/export dialog for web UI
+
 Changes:
 - When trying to play an animation and the scrubber is on the last frame, the animation will play from the beginning
 - Lightningbeam now uses pointer events instead of mouse events for input, so it can be used with styluses and touchscreens
+
 Bugfixes:
 - Fix outlines losing their colors
 - Fix audio not opening properly
@@ -14,8 +21,10 @@ Bugfixes:
 New features:
 - MP4 export is now faster and full resolution
 - Added WebM export
+
 Changes:
 - Files saved in Lightningbeam 0.7.7 or later are now opened by directly parsing the file structure, bypassing the need to replay every action
+
 Bugfixes:
 - Fix frame number after exporting video
 
