@@ -60,7 +60,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
-import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, Widget } from "./widgets.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, Widget } from "./widgets.js";
 const {
   writeTextFile: writeTextFile,
   readTextFile: readTextFile,
@@ -6302,6 +6302,9 @@ function timeline() {
   let timeline_cvs = document.createElement("canvas");
   timeline_cvs.className = "timeline";
 
+  // Start building widget hierarchy
+  timeline_cvs.timelinewindow = new TimelineWindow(0, 0, context)
+
   // Load icons for show/hide layer
   timeline_cvs.icons = {};
   timeline_cvs.icons.volume_up_fill = new Icon("assets/volume-up-fill.svg");
@@ -6359,6 +6362,8 @@ function timeline() {
       0,
       Math.min(maxScroll, timeline_cvs.offsetY + deltaY),
     );
+    timeline_cvs.timelinewindow.offsetX = -timeline_cvs.offsetX
+    timeline_cvs.timelinewindow.offsetY = -timeline_cvs.offsetY
 
     const currentTime = Date.now();
     if (currentTime - lastResizeTime > throttleIntervalMs) {
@@ -7139,6 +7144,14 @@ function renderLayers() {
     ctx.fillRect(0, 0, width, height);
     ctx.lineWidth = 1;
 
+
+    ctx.save()
+    ctx.translate(layerWidth, gutterHeight)
+    canvas.timelinewindow.width = width - layerWidth
+    canvas.timelinewindow.height = height - gutterHeight
+    canvas.timelinewindow.draw(ctx)
+    ctx.restore()
+
     // Draw timeline top
     ctx.save();
     ctx.save();
@@ -7222,164 +7235,166 @@ function renderLayers() {
         labelColor,
       );
       ctx.restore();
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(layerWidth, i * layerHeight, width, layerHeight);
-      ctx.clip();
-      ctx.translate(layerWidth - offsetX, i * layerHeight);
-      // Draw empty frames
-      for (let j = Math.floor(offsetX / frameWidth); j < frameCount; j++) {
-        ctx.fillStyle = (j + 1) % 5 == 0 ? shade : backgroundColor;
-        drawBorderedRect(
-          ctx,
-          j * frameWidth,
-          0,
-          frameWidth,
-          layerHeight,
-          shadow,
-          highlight,
-          shadow,
-          shadow,
-        );
-      }
-      // Draw existing frames
-      if (layer instanceof Layer) {
-        for (let j=0; j<layer.frames.length; j++) {
-          const frameInfo = layer.getFrameValue(j)
-          if (frameInfo.valueAtN) {
-            ctx.fillStyle = foregroundColor;
-            drawBorderedRect(
-              ctx,
-              j * frameWidth,
-              0,
-              frameWidth,
-              layerHeight,
-              highlight,
-              shadow,
-              shadow,
-              shadow,
-            );
-            ctx.fillStyle = "#111";
-            ctx.beginPath();
-            ctx.arc(
-              (j + 0.5) * frameWidth,
-              layerHeight * 0.75,
-              frameWidth * 0.25,
-              0,
-              2 * Math.PI,
-            );
-            ctx.fill();
-            if (frameInfo.valueAtN.keyTypes.has("motion")) {
-              ctx.strokeStyle = "#7a00b3";
-              ctx.lineWidth = 2;
-              ctx.beginPath()
-              ctx.moveTo(j*frameWidth, layerHeight*0.25)
-              ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
-              ctx.stroke()
-            }
-            if (frameInfo.valueAtN.keyTypes.has("shape")) {
-              ctx.strokeStyle = "#9bff9b";
-              ctx.lineWidth = 2;
-              ctx.beginPath()
-              ctx.moveTo(j*frameWidth, layerHeight*0.35)
-              ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
-              ctx.stroke()
-            }
-          } else if (frameInfo.prev && frameInfo.next) {
-            ctx.fillStyle = foregroundColor;
-            drawBorderedRect(
-              ctx,
-              j * frameWidth,
-              0,
-              frameWidth,
-              layerHeight,
-              highlight,
-              shadow,
-              backgroundColor,
-              backgroundColor,
-            );
-            if (frameInfo.prev.keyTypes.has("motion")) {
-              ctx.strokeStyle = "#7a00b3";
-              ctx.lineWidth = 2;
-              ctx.beginPath()
-              ctx.moveTo(j*frameWidth, layerHeight*0.25)
-              ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
-              ctx.stroke()
-            }
-            if (frameInfo.prev.keyTypes.has("shape")) {
-              ctx.strokeStyle = "#9bff9b";
-              ctx.lineWidth = 2;
-              ctx.beginPath()
-              ctx.moveTo(j*frameWidth, layerHeight*0.35)
-              ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
-              ctx.stroke()
-            }
-          }
-        }
-        // layer.frames.forEach((frame, j) => {
-        //   if (!frame) return;
-        //   switch (frame.frameType) {
-        //     case "keyframe":
-        //       ctx.fillStyle = foregroundColor;
-        //       drawBorderedRect(
-        //         ctx,
-        //         j * frameWidth,
-        //         0,
-        //         frameWidth,
-        //         layerHeight,
-        //         highlight,
-        //         shadow,
-        //         shadow,
-        //         shadow,
-        //       );
-        //       ctx.fillStyle = "#111";
-        //       ctx.beginPath();
-        //       ctx.arc(
-        //         (j + 0.5) * frameWidth,
-        //         layerHeight * 0.75,
-        //         frameWidth * 0.25,
-        //         0,
-        //         2 * Math.PI,
-        //       );
-        //       ctx.fill();
-        //       break;
-        //     case "normal":
-        //       ctx.fillStyle = foregroundColor;
-        //       drawBorderedRect(
-        //         ctx,
-        //         j * frameWidth,
-        //         0,
-        //         frameWidth,
-        //         layerHeight,
-        //         highlight,
-        //         shadow,
-        //         backgroundColor,
-        //         backgroundColor,
-        //       );
-        //       break;
-        //     case "motion":
-        //       ctx.fillStyle = "#7a00b3";
-        //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
-        //       break;
-        //     case "shape":
-        //       ctx.fillStyle = "#9bff9b";
-        //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
-        //       break;
-        //   }
-        // });
-      } else if (layer instanceof AudioLayer) {
-        // TODO: split waveform into chunks
-        for (let i in layer.sounds) {
-          let sound = layer.sounds[i];
-          // layerTrack.appendChild(sound.img)
-          ctx.drawImage(sound.img, 0, 0);
-        }
-      }
-      // if (context.activeObject.currentFrameNum)
-      ctx.restore();
+
+      // ctx.save();
+      // ctx.beginPath();
+      // ctx.rect(layerWidth, i * layerHeight, width, layerHeight);
+      // ctx.clip();
+      // ctx.translate(layerWidth - offsetX, i * layerHeight);
+      // // Draw empty frames
+      // for (let j = Math.floor(offsetX / frameWidth); j < frameCount; j++) {
+      //   ctx.fillStyle = (j + 1) % 5 == 0 ? shade : backgroundColor;
+      //   drawBorderedRect(
+      //     ctx,
+      //     j * frameWidth,
+      //     0,
+      //     frameWidth,
+      //     layerHeight,
+      //     shadow,
+      //     highlight,
+      //     shadow,
+      //     shadow,
+      //   );
+      // }
+      // // Draw existing frames
+      // if (layer instanceof Layer) {
+      //   for (let j=0; j<layer.frames.length; j++) {
+      //     const frameInfo = layer.getFrameValue(j)
+      //     if (frameInfo.valueAtN) {
+      //       ctx.fillStyle = foregroundColor;
+      //       drawBorderedRect(
+      //         ctx,
+      //         j * frameWidth,
+      //         0,
+      //         frameWidth,
+      //         layerHeight,
+      //         highlight,
+      //         shadow,
+      //         shadow,
+      //         shadow,
+      //       );
+      //       ctx.fillStyle = "#111";
+      //       ctx.beginPath();
+      //       ctx.arc(
+      //         (j + 0.5) * frameWidth,
+      //         layerHeight * 0.75,
+      //         frameWidth * 0.25,
+      //         0,
+      //         2 * Math.PI,
+      //       );
+      //       ctx.fill();
+      //       if (frameInfo.valueAtN.keyTypes.has("motion")) {
+      //         ctx.strokeStyle = "#7a00b3";
+      //         ctx.lineWidth = 2;
+      //         ctx.beginPath()
+      //         ctx.moveTo(j*frameWidth, layerHeight*0.25)
+      //         ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
+      //         ctx.stroke()
+      //       }
+      //       if (frameInfo.valueAtN.keyTypes.has("shape")) {
+      //         ctx.strokeStyle = "#9bff9b";
+      //         ctx.lineWidth = 2;
+      //         ctx.beginPath()
+      //         ctx.moveTo(j*frameWidth, layerHeight*0.35)
+      //         ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
+      //         ctx.stroke()
+      //       }
+      //     } else if (frameInfo.prev && frameInfo.next) {
+      //       ctx.fillStyle = foregroundColor;
+      //       drawBorderedRect(
+      //         ctx,
+      //         j * frameWidth,
+      //         0,
+      //         frameWidth,
+      //         layerHeight,
+      //         highlight,
+      //         shadow,
+      //         backgroundColor,
+      //         backgroundColor,
+      //       );
+      //       if (frameInfo.prev.keyTypes.has("motion")) {
+      //         ctx.strokeStyle = "#7a00b3";
+      //         ctx.lineWidth = 2;
+      //         ctx.beginPath()
+      //         ctx.moveTo(j*frameWidth, layerHeight*0.25)
+      //         ctx.lineTo((j+1)*frameWidth, layerHeight*0.25)
+      //         ctx.stroke()
+      //       }
+      //       if (frameInfo.prev.keyTypes.has("shape")) {
+      //         ctx.strokeStyle = "#9bff9b";
+      //         ctx.lineWidth = 2;
+      //         ctx.beginPath()
+      //         ctx.moveTo(j*frameWidth, layerHeight*0.35)
+      //         ctx.lineTo((j+1)*frameWidth, layerHeight*0.35)
+      //         ctx.stroke()
+      //       }
+      //     }
+      //   }
+      //   // layer.frames.forEach((frame, j) => {
+      //   //   if (!frame) return;
+      //   //   switch (frame.frameType) {
+      //   //     case "keyframe":
+      //   //       ctx.fillStyle = foregroundColor;
+      //   //       drawBorderedRect(
+      //   //         ctx,
+      //   //         j * frameWidth,
+      //   //         0,
+      //   //         frameWidth,
+      //   //         layerHeight,
+      //   //         highlight,
+      //   //         shadow,
+      //   //         shadow,
+      //   //         shadow,
+      //   //       );
+      //   //       ctx.fillStyle = "#111";
+      //   //       ctx.beginPath();
+      //   //       ctx.arc(
+      //   //         (j + 0.5) * frameWidth,
+      //   //         layerHeight * 0.75,
+      //   //         frameWidth * 0.25,
+      //   //         0,
+      //   //         2 * Math.PI,
+      //   //       );
+      //   //       ctx.fill();
+      //   //       break;
+      //   //     case "normal":
+      //   //       ctx.fillStyle = foregroundColor;
+      //   //       drawBorderedRect(
+      //   //         ctx,
+      //   //         j * frameWidth,
+      //   //         0,
+      //   //         frameWidth,
+      //   //         layerHeight,
+      //   //         highlight,
+      //   //         shadow,
+      //   //         backgroundColor,
+      //   //         backgroundColor,
+      //   //       );
+      //   //       break;
+      //   //     case "motion":
+      //   //       ctx.fillStyle = "#7a00b3";
+      //   //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
+      //   //       break;
+      //   //     case "shape":
+      //   //       ctx.fillStyle = "#9bff9b";
+      //   //       ctx.fillRect(j * frameWidth, 0, frameWidth, layerHeight);
+      //   //       break;
+      //   //   }
+      //   // });
+      // } else if (layer instanceof AudioLayer) {
+      //   // TODO: split waveform into chunks
+      //   for (let i in layer.sounds) {
+      //     let sound = layer.sounds[i];
+      //     // layerTrack.appendChild(sound.img)
+      //     ctx.drawImage(sound.img, 0, 0);
+      //   }
+      // }
+      // // if (context.activeObject.currentFrameNum)
+      // ctx.restore();
       i++;
     }
     ctx.restore();
+
     // Draw highlighted frame
     ctx.save();
     ctx.translate(layerWidth - offsetX, -offsetY);
