@@ -6350,6 +6350,7 @@ function timeline() {
 
     let maxScroll =
       context.activeObject.layers.length * layerHeight +
+      context.activeObject.audioLayers.length * layerHeight +
       gutterHeight -
       timeline_cvs.height;
 
