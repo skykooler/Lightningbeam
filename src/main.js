@@ -8317,3 +8317,5 @@ function renderAll() {
 }
 
 renderAll();
+
+setTimeout(() => {console.log("Opened files", JSON.stringify(window.openedFiles))}, 1000)
