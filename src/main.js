@@ -3689,6 +3689,9 @@ class GraphicsObject extends Widget {
     graphicsObject.currentFrameNum = json.currentFrameNum;
     graphicsObject.currentLayer = json.currentLayer;
     graphicsObject.children = [];
+    if (json.parent in pointerList) {
+      graphicsObject.parent = pointerList[json.parent]
+    }
     for (let layer of json.layers) {
       graphicsObject.layers.push(Layer.fromJSON(layer));
     }
@@ -3715,6 +3718,7 @@ class GraphicsObject extends Widget {
     json.currentFrameNum = this.currentFrameNum;
     json.currentLayer = this.currentLayer;
     json.layers = [];
+    json.parent = this.parent?.idx
     for (let layer of this.layers) {
       json.layers.push(layer.toJSON(randomizeUuid));
     }
@@ -4588,6 +4592,20 @@ async function _open(path, returnJson = false) {
               undoStack.push(action);
             }
           } else {
+            if (file.version < "1.7.7") {
+              function setParentReferences(obj, parentIdx = null) {
+                if (obj.type === "GraphicsObject") {
+                  obj.parent = parentIdx; // Set the parent property
+                }
+              
+                if (Array.isArray(obj.children)) {
+                  for (const child of obj.children) {
+                    setParentReferences(child, obj.type === "GraphicsObject" ? obj.idx : parentIdx);
+                  }
+                }
+              }
+              setParentReferences(file.json)
+            }
             if (file.version < "1.7.6") {
               function restoreLineColors(obj) {
                 // Step 1: Create colorMapping dictionary
@@ -6395,6 +6413,7 @@ function timeline() {
 
         const frame = layer.getFrame(timeline_cvs.clicked_frame);
         if (frame.exists) {
+          console.log(frame.keys)
           if (!e.shiftKey) {
             // Check if the clicked frame is already in the selection
             const existingIndex = context.selectedFrames.findIndex(
