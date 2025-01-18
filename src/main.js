@@ -7897,6 +7897,11 @@ async function renderMenu() {
         action: () => {},
       },
       {
+        text: "Close Window",
+        enabled: true,
+        action: quit,
+      },
+      {
         text: "Quit Lightningbeam",
         enabled: true,
         action: quit,
