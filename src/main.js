@@ -379,6 +379,7 @@ let config = {
   recentFiles: [],
   scrollSpeed: 1,
   debug: false,
+  reopenLastSession: false
 };
 
 function getShortcut(shortcut) {
@@ -421,13 +422,8 @@ async function saveConfig() {
 }
 
 async function addRecentFile(filePath) {
-  if (!config.recentFiles.includes(filePath)) {
-    config.recentFiles.unshift(filePath);
-    if (config.recentFiles.length > 10) {
-      config.recentFiles = config.recentFiles.slice(0, 10);
-    }
-    await saveConfig(config);
-  }
+  config.recentFiles = [filePath, ...config.recentFiles.filter(file => file !== filePath)].slice(0, 10);
+  await saveConfig(config);
 }
 
 // Pointers to all objects
@@ -6730,7 +6726,11 @@ async function startup() {
   await loadConfig();
   createNewFileDialog(_newFile, _open, config);
   if (!window.openedFiles?.length) {
-    showNewFileDialog(config);
+    if (config.reopenLastSession && config.recentFiles?.length) {
+      _open(config.recentFiles[0])
+    } else {
+      showNewFileDialog(config);
+    }
   }
 }
 
