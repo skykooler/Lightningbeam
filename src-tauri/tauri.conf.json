@@ -51,7 +51,8 @@
       {
         "ext": [
           "beam"
-        ]
+        ],
+        "mimeType": "application/lightningbeam"
       }
     ]
   }
