@@ -145,12 +145,14 @@ function createNewFileDialog(newFileCallback, openFileCallback, config) {
 }
 
 function showNewFileDialog(config) {
+    if (!overlay) return;
     overlay.style.display = 'block';
     newFileDialog.style.display = 'block';
     displayFiles(config.recentFiles); // Reload the recent files
 }
 
 function closeDialog() {
+    if (!overlay) return;
     overlay.style.display = 'none';
     newFileDialog.style.display = 'none';
 }

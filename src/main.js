@@ -6705,7 +6705,9 @@ function outliner(object = undefined) {
 async function startup() {
   await loadConfig();
   createNewFileDialog(_newFile, _open, config);
-  showNewFileDialog(config);
+  if (!window.openedFiles) {
+    showNewFileDialog(config);
+  }
 }
 
 startup();

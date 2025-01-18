@@ -4,7 +4,7 @@ use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
-use tauri::{webview, AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 
 #[derive(Default)]
@@ -96,14 +96,14 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
   let fs_scope = app.fs_scope();
 
   // This is for the `asset:` protocol to work:
-  // let asset_protocol_scope = app.asset_protocol_scope();
+  let asset_protocol_scope = app.asset_protocol_scope();
 
   for file in &files {
     // This requires the `fs` plugin:
     let _ = fs_scope.allow_file(file);
 
     // This is for the `asset:` protocol:
-    // let _ = asset_protocol_scope.allow_file(file);
+    let _ = asset_protocol_scope.allow_file(file);
   }
 
   // -- Scope handling end --
@@ -118,13 +118,8 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
     .join(",");
   warn!("{}",files);
 
-  // tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-  //   .initialization_script(&format!("window.openedFiles = [{files}]"))
-  //   .build()
-  //   .unwrap();
   let window = app.get_webview_window("main").unwrap();
   window.eval(&format!("window.openedFiles = [{files}]")).unwrap();
-  // window.emit("openedFiles", &format!("[{files}]")).unwrap();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
