@@ -4418,7 +4418,7 @@ async function _save(path) {
     //   console.log(action.name);
     // }
     const fileData = {
-      version: "1.7.6",
+      version: "1.7.7",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -4598,13 +4598,12 @@ async function _open(path, returnJson = false) {
                   obj.parent = parentIdx; // Set the parent property
                 }
               
-                if (Array.isArray(obj.children)) {
-                  for (const child of obj.children) {
-                    setParentReferences(child, obj.type === "GraphicsObject" ? obj.idx : parentIdx);
-                  }
-                }
+                Object.values(obj).forEach(child => {
+                  if (typeof child === 'object' && child !== null) setParentReferences(child, obj.type === "GraphicsObject" ? obj.idx : parentIdx);
+                })
               }
               setParentReferences(file.json)
+              console.log(file.json)
             }
             if (file.version < "1.7.6") {
               function restoreLineColors(obj) {
@@ -4796,23 +4795,27 @@ async function importFile() {
       function assignUUIDs(obj, existing) {
         const uuidCache = {}; // Cache to store UUIDs for existing values
 
-        function deepAssign(obj) {
+        function replaceUuids(obj) {
           for (const [key, value] of Object.entries(obj)) {
             if (typeof value === "object" && value !== null) {
-              // Recurse for nested objects
-              deepAssign(value);
+              replaceUuids(value);
             } else if (value in existing && key != "name") {
-              // If the value is in the "existing" list, assign a UUID
               if (!uuidCache[value]) {
-                uuidCache[value] = uuidv4(); // Store the generated UUID for the value
+                uuidCache[value] = uuidv4();
               }
-              obj[key] = uuidCache[value]; // Assign the UUID to the object property
-            } else if (key in existing) {
-              // If the value is in the "existing" list, assign a UUID
-              if (!uuidCache[key]) {
-                uuidCache[key] = uuidv4(); // Store the generated UUID for the value
-              }
-              obj[key] = uuidCache[key]; // Assign the UUID to the object property
+              obj[key] = uuidCache[value];
+            }
+          }
+        }
+
+        function replaceReferences(obj) {
+          for (const [key, value] of Object.entries(obj)) {
+            if (key in existing) {
+              obj[uuidCache[key]] = obj[key];
+              delete obj[key]
+            }
+            if (typeof value === "object" && value !== null) {
+              replaceReferences(value);
             } else if (value in uuidCache) {
               obj[key] = value
             }
@@ -4820,7 +4823,8 @@ async function importFile() {
         }
 
         // Start the recursion with the provided object
-        deepAssign(obj);
+        replaceUuids(obj);
+        replaceReferences(obj)
 
         return obj; // Return the updated object
       }
