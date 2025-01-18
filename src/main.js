@@ -350,7 +350,6 @@ let context = {
 let config = {
   shortcuts: {
     playAnimation: " ",
-    // undo: "<ctrl>+z"
     undo: "<mod>z",
     redo: "<mod>Z",
     new: "<mod>n",
