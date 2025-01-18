@@ -43,6 +43,12 @@
         "files": {},
         "release": "1"
       }
-    }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["beam"],
+        "mimeType": "text/plain"
+      }
+    ]
   }
 }
