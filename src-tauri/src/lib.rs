@@ -4,7 +4,7 @@ use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{webview, AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 
 #[derive(Default)]
@@ -39,22 +39,52 @@ fn error(msg: String) {
   error!("{}",msg);
 }
 
+use tauri::PhysicalSize;
+
 #[tauri::command]
-async fn create_window(app: tauri::AppHandle) {
+async fn create_window(app: tauri::AppHandle, path: Option<String>) {
     let state = app.state::<Mutex<AppState>>();
 
     // Lock the mutex to get mutable access:
     let mut state = state.lock().unwrap();
-    
+
     // Increment the counter and generate a unique window label
     let window_label = format!("window{}", state.counter);
     state.counter += 1;
-    
+
     // Build the new window with the unique label
-    let _webview_window = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App("index.html".into()))
+    let webview_window = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App("index.html".into()))
+        .title("Lightningbeam")
         .build()
         .unwrap();
+
+    // Get the current monitor's screen size from the new window
+    if let Ok(Some(monitor)) = webview_window.current_monitor() {
+        let screen_size = monitor.size(); // Get the size of the monitor
+        let width = 4096;
+        let height = 4096;
+
+        // Set the window size to be the smaller of the specified size or the screen size
+        let new_width = width.min(screen_size.width as u32);
+        let new_height = height.min(screen_size.height as u32 - 100);
+
+        // Set the size using PhysicalSize
+        webview_window.set_size(tauri::Size::Physical(PhysicalSize::new(new_width, new_height)))
+            .expect("Failed to set window size");
+    } else {
+        eprintln!("Could not detect the current monitor.");
+    }
+
+    // Set the opened file if provided
+    if let Some(val) = path {
+        // Pass path data to the window via JavaScript
+        webview_window.eval(&format!("window.openedFiles = [\"{val}\"]")).unwrap();
+
+        // Set the window title if provided
+        webview_window.set_title(&val).expect("Failed to set window title");
+    }
 }
+
 
 fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
   // -- Scope handling start --

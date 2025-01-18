@@ -4370,8 +4370,8 @@ function decrementFrame() {
   updateUI();
 }
 
-function newWindow() {
-  invoke("create_window", {app: window.__TAURI__.app})
+function newWindow(path) {
+  invoke("create_window", {app: window.__TAURI__.app, path: path})
 }
 
 function _newFile(width, height, fps) {
@@ -8318,4 +8318,9 @@ function renderAll() {
 
 renderAll();
 
-setTimeout(() => {console.log("Opened files", JSON.stringify(window.openedFiles))}, 1000)
+if (window.openedFiles?.length>0) {
+  _open(window.openedFiles[0])
+  for (let i=1; i<window.openedFiles.length; i++) {
+    newWindow(window.openedFiles[i])
+  }
+}
