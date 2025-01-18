@@ -1,3 +1,12 @@
+# 0.7.12-alpha:
+New features:
+- Add "New Window" command
+- Enable files to be opened with Lightningbeam
+Bugfixes:
+- Fix error when an object is deleted from a frame
+- Fix parent references being lost
+- Fix objects not showing up when imported multiple times
+
 # 0.7.11-alpha:
 Bugfixes:
 - Fix duplicate objects showing up after grouping
