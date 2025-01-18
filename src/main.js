@@ -354,6 +354,7 @@ let config = {
     undo: "<mod>z",
     redo: "<mod>Z",
     new: "<mod>n",
+    newWindow: "<mod>N",
     save: "<mod>s",
     saveAs: "<mod>S",
     open: "<mod>o",
@@ -3688,6 +3689,9 @@ class GraphicsObject extends Widget {
     graphicsObject.currentFrameNum = json.currentFrameNum;
     graphicsObject.currentLayer = json.currentLayer;
     graphicsObject.children = [];
+    if (json.parent in pointerList) {
+      graphicsObject.parent = pointerList[json.parent]
+    }
     for (let layer of json.layers) {
       graphicsObject.layers.push(Layer.fromJSON(layer));
     }
@@ -3714,6 +3718,7 @@ class GraphicsObject extends Widget {
     json.currentFrameNum = this.currentFrameNum;
     json.currentLayer = this.currentLayer;
     json.layers = [];
+    json.parent = this.parent?.idx
     for (let layer of this.layers) {
       json.layers.push(layer.toJSON(randomizeUuid));
     }
@@ -4369,6 +4374,10 @@ function decrementFrame() {
   updateUI();
 }
 
+function newWindow(path) {
+  invoke("create_window", {app: window.__TAURI__.app, path: path})
+}
+
 function _newFile(width, height, fps) {
   root = new GraphicsObject("root");
   context.objectStack = [root];
@@ -4409,7 +4418,7 @@ async function _save(path) {
     //   console.log(action.name);
     // }
     const fileData = {
-      version: "1.7.6",
+      version: "1.7.7",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
@@ -4583,6 +4592,19 @@ async function _open(path, returnJson = false) {
               undoStack.push(action);
             }
           } else {
+            if (file.version < "1.7.7") {
+              function setParentReferences(obj, parentIdx = null) {
+                if (obj.type === "GraphicsObject") {
+                  obj.parent = parentIdx; // Set the parent property
+                }
+              
+                Object.values(obj).forEach(child => {
+                  if (typeof child === 'object' && child !== null) setParentReferences(child, obj.type === "GraphicsObject" ? obj.idx : parentIdx);
+                })
+              }
+              setParentReferences(file.json)
+              console.log(file.json)
+            }
             if (file.version < "1.7.6") {
               function restoreLineColors(obj) {
                 // Step 1: Create colorMapping dictionary
@@ -4773,23 +4795,27 @@ async function importFile() {
       function assignUUIDs(obj, existing) {
         const uuidCache = {}; // Cache to store UUIDs for existing values
 
-        function deepAssign(obj) {
+        function replaceUuids(obj) {
           for (const [key, value] of Object.entries(obj)) {
             if (typeof value === "object" && value !== null) {
-              // Recurse for nested objects
-              deepAssign(value);
+              replaceUuids(value);
             } else if (value in existing && key != "name") {
-              // If the value is in the "existing" list, assign a UUID
               if (!uuidCache[value]) {
-                uuidCache[value] = uuidv4(); // Store the generated UUID for the value
+                uuidCache[value] = uuidv4();
               }
-              obj[key] = uuidCache[value]; // Assign the UUID to the object property
-            } else if (key in existing) {
-              // If the value is in the "existing" list, assign a UUID
-              if (!uuidCache[key]) {
-                uuidCache[key] = uuidv4(); // Store the generated UUID for the value
-              }
-              obj[key] = uuidCache[key]; // Assign the UUID to the object property
+              obj[key] = uuidCache[value];
+            }
+          }
+        }
+
+        function replaceReferences(obj) {
+          for (const [key, value] of Object.entries(obj)) {
+            if (key in existing) {
+              obj[uuidCache[key]] = obj[key];
+              delete obj[key]
+            }
+            if (typeof value === "object" && value !== null) {
+              replaceReferences(value);
             } else if (value in uuidCache) {
               obj[key] = value
             }
@@ -4797,7 +4823,8 @@ async function importFile() {
         }
 
         // Start the recursion with the provided object
-        deepAssign(obj);
+        replaceUuids(obj);
+        replaceReferences(obj)
 
         return obj; // Return the updated object
       }
@@ -5944,6 +5971,7 @@ function stage() {
             for (let child of context.selection) {
               if (!context.activeObject.currentFrame) continue;
               if (!context.activeObject.currentFrame.keys) continue;
+              if (!child.idx in context.activeObject.currentFrame.keys) continue;
               context.activeObject.currentFrame.keys[child.idx].x +=
                 mouse.x - context.lastMouse.x;
               context.activeObject.currentFrame.keys[child.idx].y +=
@@ -6389,6 +6417,7 @@ function timeline() {
 
         const frame = layer.getFrame(timeline_cvs.clicked_frame);
         if (frame.exists) {
+          console.log(frame.keys)
           if (!e.shiftKey) {
             // Check if the clicked frame is already in the selection
             const existingIndex = context.selectedFrames.findIndex(
@@ -6700,7 +6729,9 @@ function outliner(object = undefined) {
 async function startup() {
   await loadConfig();
   createNewFileDialog(_newFile, _open, config);
-  showNewFileDialog(config);
+  if (!window.openedFiles) {
+    showNewFileDialog(config);
+  }
 }
 
 startup();
@@ -7882,6 +7913,12 @@ async function renderMenu() {
         accelerator: getShortcut("new"),
       },
       {
+        text: "New Window",
+        enabled: true,
+        action: newWindow,
+        accelerator: getShortcut("newWindow"),
+      },
+      {
         text: "Save",
         enabled: true,
         action: save,
@@ -8306,3 +8343,10 @@ function renderAll() {
 }
 
 renderAll();
+
+if (window.openedFiles?.length>0) {
+  _open(window.openedFiles[0])
+  for (let i=1; i<window.openedFiles.length; i++) {
+    newWindow(window.openedFiles[i])
+  }
+}
