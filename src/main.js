@@ -5949,6 +5949,7 @@ function stage() {
             for (let child of context.selection) {
               if (!context.activeObject.currentFrame) continue;
               if (!context.activeObject.currentFrame.keys) continue;
+              if (!child.idx in context.activeObject.currentFrame.keys) continue;
               context.activeObject.currentFrame.keys[child.idx].x +=
                 mouse.x - context.lastMouse.x;
               context.activeObject.currentFrame.keys[child.idx].y +=
