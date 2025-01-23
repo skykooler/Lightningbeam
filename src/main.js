@@ -5064,6 +5064,19 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
 
   // audioEncoder.configure(audioConfig)
 
+  async function finishEncoding() {
+    const progressText = document.getElementById('progressText');
+    progressText.innerText = 'Finalizing...';
+    const progressBar = document.getElementById('progressBar');
+    progressBar.value = 100;
+    await videoEncoder.flush();
+    muxer.finalize();
+    await writeFile(path, new Uint8Array(target.buffer));
+    const modal = document.getElementById('progressModal');
+    modal.style.display = 'none';
+    document.querySelector("body").style.cursor = "default";
+  }
+
   const processFrame = async (currentFrame) => {
     if (currentFrame < root.maxFrame) {
       // Update progress bar
@@ -5966,7 +5979,7 @@ function stage() {
             for (let child of context.selection) {
               if (!context.activeObject.currentFrame) continue;
               if (!context.activeObject.currentFrame.keys) continue;
-              if (!child.idx in context.activeObject.currentFrame.keys) continue;
+              if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
               context.activeObject.currentFrame.keys[child.idx].x +=
                 mouse.x - context.lastMouse.x;
               context.activeObject.currentFrame.keys[child.idx].y +=
