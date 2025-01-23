@@ -1297,6 +1297,7 @@ let actions = {
       const selectedFrames = structuredClone(context.selectedFrames);
       for (let frame of selectedFrames) {
         frame.replacementUuid = uuidv4();
+        frame.layer = context.activeObject.layers.length - frame.layer - 1;
       }
       // const fillFrames = []
       // for (let i=0; i<context.activeObject.layers.length;i++) {
@@ -1332,7 +1333,8 @@ let actions = {
         }
       }
       for (let frameObj of frameBuffer) {
-        const layer_idx = frameObj.layer + action.offset.layers;
+        // TODO: figure out object tracking when moving frames between layers
+        const layer_idx = frameObj.layer// + action.offset.layers;
         let layer = object.layers[layer_idx];
         let frame = frameObj.frame;
         layer.addFrame(frameObj.frameNum + action.offset.frames, frame, []); //fillFrames[layer_idx])
@@ -6550,7 +6552,7 @@ function timeline() {
     updateLayers();
   });
   timeline_cvs.addEventListener("pointerup", (e) => {
-    let mouse = getMousePos(timeline_cvs, e);
+    let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
       mouse.x += timeline_cvs.offsetX - layerWidth;
@@ -6570,7 +6572,7 @@ function timeline() {
     }
   });
   timeline_cvs.addEventListener("pointermove", (e) => {
-    let mouse = getMousePos(timeline_cvs, e);
+    let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
       mouse.x += timeline_cvs.offsetX - layerWidth;
