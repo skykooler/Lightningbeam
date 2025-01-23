@@ -1,3 +1,12 @@
+# 0.7.14-alpha:
+Changes:
+- Moving frames can now be undone
+- A wait cursor is shown during file loading
+
+Bugfixes:
+- Fix clicking on layers bug
+- Fix "frame deleting" issue when clicking on frames in a scrolled timeline
+
 # 0.7.13-alpha:
 Changes:
 - changed file MIME type from text/plain to application/lightningbeam to prevent editor woes on Linux

@@ -1297,6 +1297,7 @@ let actions = {
       const selectedFrames = structuredClone(context.selectedFrames);
       for (let frame of selectedFrames) {
         frame.replacementUuid = uuidv4();
+        frame.layer = context.activeObject.layers.length - frame.layer - 1;
       }
       // const fillFrames = []
       // for (let i=0; i<context.activeObject.layers.length;i++) {
@@ -1332,7 +1333,8 @@ let actions = {
         }
       }
       for (let frameObj of frameBuffer) {
-        const layer_idx = frameObj.layer + action.offset.layers;
+        // TODO: figure out object tracking when moving frames between layers
+        const layer_idx = frameObj.layer// + action.offset.layers;
         let layer = object.layers[layer_idx];
         let frame = frameObj.frame;
         layer.addFrame(frameObj.frameNum + action.offset.frames, frame, []); //fillFrames[layer_idx])
@@ -1341,7 +1343,27 @@ let actions = {
       updateUI();
     },
     rollback: (action) => {
-      // your code here
+      const object = pointerList[action.object];
+      const frameBuffer = [];
+      for (let frameObj of action.selectedFrames) {
+        let layer = object.layers[frameObj.layer];
+        let frame = layer.frames[frameObj.frameNum + action.offset.frames];
+        if (frameObj) {
+          frameBuffer.push({
+            frame: frame,
+            frameNum: frameObj.frameNum,
+            layer: frameObj.layer,
+          });
+          layer.deleteFrame(frame.idx, "none")
+        }
+      }
+      for (let frameObj of frameBuffer) {
+        let layer = object.layers[frameObj.layer];
+        let frame = frameObj.frame;
+        if (frameObj) {
+          layer.addFrame(frameObj.frameNum, frame, [])
+        }
+      }
     },
   },
   addMotionTween: {
@@ -3763,7 +3785,7 @@ class GraphicsObject extends Widget {
     this.setFrameNum(this.currentFrameNum - 1);
   }
   getFrame(num) {
-    return this.activeLayer.getFrame(num);
+    return this.activeLayer?.getFrame(num);
   }
   setFrameNum(num) {
     num = Math.max(0, num);
@@ -4470,6 +4492,7 @@ async function saveAs() {
 }
 
 async function _open(path, returnJson = false) {
+  document.body.style.cursor = "wait"
   closeDialog();
   try {
     const contents = await readTextFile(path);
@@ -4479,6 +4502,7 @@ async function _open(path, returnJson = false) {
         title: "Load error",
         kind: "error",
       });
+      document.body.style.cursor = "default"
       return;
     }
     if (file.version >= minFileVersion) {
@@ -4489,6 +4513,7 @@ async function _open(path, returnJson = false) {
               "Could not import from this file. Re-save it with a current version of Lightningbeam.",
             );
           }
+          document.body.style.cursor = "default"
           return file.json;
         } else {
           _newFile(file.width, file.height, file.fps);
@@ -4497,6 +4522,7 @@ async function _open(path, returnJson = false) {
               title: "Parse error",
               kind: "error",
             });
+            document.body.style.cursor = "default"
             return;
           }
 
@@ -4509,6 +4535,7 @@ async function _open(path, returnJson = false) {
                   `Invalid action ${action.name}. File may be corrupt.`,
                   { title: "Error", kind: "error" },
                 );
+                document.body.style.cursor = "default"
                 return;
               }
 
@@ -4713,6 +4740,7 @@ async function _open(path, returnJson = false) {
       );
     }
   }
+  document.body.style.cursor = "default"
 }
 
 async function open() {
@@ -4729,7 +4757,8 @@ async function open() {
   });
   console.log(path);
   if (path) {
-    _open(path);
+    document.body.style.cursor = "wait"
+    setTimeout(()=>_open(path),10);
   }
 }
 
@@ -6543,14 +6572,14 @@ function timeline() {
           updateUI();
           updateMenu();
         } else {
-          context.activeObject.currentLayer = i;
+          context.activeObject.currentLayer = i - context.activeObject.audioLayers.length;
         }
       }
     }
     updateLayers();
   });
   timeline_cvs.addEventListener("pointerup", (e) => {
-    let mouse = getMousePos(timeline_cvs, e);
+    let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
       mouse.x += timeline_cvs.offsetX - layerWidth;
@@ -6570,7 +6599,7 @@ function timeline() {
     }
   });
   timeline_cvs.addEventListener("pointermove", (e) => {
-    let mouse = getMousePos(timeline_cvs, e);
+    let mouse = getMousePos(timeline_cvs, e, true, true);
     mouse.y += timeline_cvs.offsetY;
     if (mouse.x > layerWidth || timeline_cvs.draggingFrames) {
       mouse.x += timeline_cvs.offsetX - layerWidth;
@@ -6748,7 +6777,8 @@ async function startup() {
   createNewFileDialog(_newFile, _open, config);
   if (!window.openedFiles?.length) {
     if (config.reopenLastSession && config.recentFiles?.length) {
-      _open(config.recentFiles[0])
+      document.body.style.cursor = "wait"
+      setTimeout(()=>_open(config.recentFiles[0]), 10)
     } else {
       showNewFileDialog(config);
     }
@@ -7886,7 +7916,8 @@ async function renderMenu() {
       text: file,
       enabled: true,
       action: () => {
-        _open(file);
+        document.body.style.cursor = "wait"
+        setTimeout(()=>_open(file),10);
       },
     });
   });
@@ -8371,7 +8402,8 @@ function renderAll() {
 renderAll();
 
 if (window.openedFiles?.length>0) {
-  _open(window.openedFiles[0])
+  document.body.style.cursor = "wait"
+  setTimeout(()=>_open(window.openedFiles[0]),10)
   for (let i=1; i<window.openedFiles.length; i++) {
     newWindow(window.openedFiles[i])
   }
