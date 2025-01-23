@@ -4492,6 +4492,7 @@ async function saveAs() {
 }
 
 async function _open(path, returnJson = false) {
+  document.body.style.cursor = "wait"
   closeDialog();
   try {
     const contents = await readTextFile(path);
@@ -4501,6 +4502,7 @@ async function _open(path, returnJson = false) {
         title: "Load error",
         kind: "error",
       });
+      document.body.style.cursor = "default"
       return;
     }
     if (file.version >= minFileVersion) {
@@ -4511,6 +4513,7 @@ async function _open(path, returnJson = false) {
               "Could not import from this file. Re-save it with a current version of Lightningbeam.",
             );
           }
+          document.body.style.cursor = "default"
           return file.json;
         } else {
           _newFile(file.width, file.height, file.fps);
@@ -4519,6 +4522,7 @@ async function _open(path, returnJson = false) {
               title: "Parse error",
               kind: "error",
             });
+            document.body.style.cursor = "default"
             return;
           }
 
@@ -4531,6 +4535,7 @@ async function _open(path, returnJson = false) {
                   `Invalid action ${action.name}. File may be corrupt.`,
                   { title: "Error", kind: "error" },
                 );
+                document.body.style.cursor = "default"
                 return;
               }
 
@@ -4735,6 +4740,7 @@ async function _open(path, returnJson = false) {
       );
     }
   }
+  document.body.style.cursor = "default"
 }
 
 async function open() {
@@ -4751,7 +4757,8 @@ async function open() {
   });
   console.log(path);
   if (path) {
-    _open(path);
+    document.body.style.cursor = "wait"
+    setTimeout(()=>_open(path),10);
   }
 }
 
@@ -6770,7 +6777,8 @@ async function startup() {
   createNewFileDialog(_newFile, _open, config);
   if (!window.openedFiles?.length) {
     if (config.reopenLastSession && config.recentFiles?.length) {
-      _open(config.recentFiles[0])
+      document.body.style.cursor = "wait"
+      setTimeout(()=>_open(config.recentFiles[0]), 10)
     } else {
       showNewFileDialog(config);
     }
@@ -7908,7 +7916,8 @@ async function renderMenu() {
       text: file,
       enabled: true,
       action: () => {
-        _open(file);
+        document.body.style.cursor = "wait"
+        setTimeout(()=>_open(file),10);
       },
     });
   });
@@ -8393,7 +8402,8 @@ function renderAll() {
 renderAll();
 
 if (window.openedFiles?.length>0) {
-  _open(window.openedFiles[0])
+  document.body.style.cursor = "wait"
+  setTimeout(()=>_open(window.openedFiles[0]),10)
   for (let i=1; i<window.openedFiles.length; i++) {
     newWindow(window.openedFiles[i])
   }
