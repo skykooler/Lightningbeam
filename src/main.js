@@ -93,7 +93,7 @@ function forwardConsole(fnName, dest) {
     const stackLines = error.stack.split("\n");
 
     let message = args.join(" ");  // Join all arguments into a single string
-    const location = stackLines[1].match(/([a-zA-Z0-9_-]+\.js:\d+)/);
+    const location = stackLines.length>1 ? stackLines[1].match(/([a-zA-Z0-9_-]+\.js:\d+)/) : stackLines.toString();
 
     if (fnName === "error") {
       // Send the full stack trace for errors
@@ -350,7 +350,6 @@ let context = {
 let config = {
   shortcuts: {
     playAnimation: " ",
-    // undo: "<ctrl>+z"
     undo: "<mod>z",
     redo: "<mod>Z",
     new: "<mod>n",
@@ -379,6 +378,7 @@ let config = {
   recentFiles: [],
   scrollSpeed: 1,
   debug: false,
+  reopenLastSession: false
 };
 
 function getShortcut(shortcut) {
@@ -421,13 +421,8 @@ async function saveConfig() {
 }
 
 async function addRecentFile(filePath) {
-  if (!config.recentFiles.includes(filePath)) {
-    config.recentFiles.unshift(filePath);
-    if (config.recentFiles.length > 10) {
-      config.recentFiles = config.recentFiles.slice(0, 10);
-    }
-    await saveConfig(config);
-  }
+  config.recentFiles = [filePath, ...config.recentFiles.filter(file => file !== filePath)].slice(0, 10);
+  await saveConfig(config);
 }
 
 // Pointers to all objects
@@ -1327,12 +1322,14 @@ let actions = {
       for (let frameObj of action.selectedFrames) {
         let layer = object.layers[frameObj.layer];
         let frame = layer.frames[frameObj.frameNum];
-        frameBuffer.push({
-          frame: frame,
-          frameNum: frameObj.frameNum,
-          layer: frameObj.layer,
-        });
-        layer.deleteFrame(frame.idx, undefined, frameObj.replacementUuid);
+        if (frameObj) {
+          frameBuffer.push({
+            frame: frame,
+            frameNum: frameObj.frameNum,
+            layer: frameObj.layer,
+          });
+          layer.deleteFrame(frame.idx, undefined, frameObj.replacementUuid);
+        }
       }
       for (let frameObj of frameBuffer) {
         const layer_idx = frameObj.layer + action.offset.layers;
@@ -1448,6 +1445,7 @@ let actions = {
       let serializableShapes = [];
       let serializableObjects = [];
       let bbox;
+      const frame = context.activeObject.currentFrame
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
         if (bbox == undefined) {
@@ -1457,12 +1455,14 @@ let actions = {
         }
       }
       for (let object of context.selection) {
-        serializableObjects.push(object.idx);
-        // TODO: rotated bbox
-        if (bbox == undefined) {
-          bbox = object.bbox();
-        } else {
-          growBoundingBox(bbox, object.bbox());
+        if (object.idx in frame.keys) {
+          serializableObjects.push(object.idx);
+          // TODO: rotated bbox
+          if (bbox == undefined) {
+            bbox = object.bbox();
+          } else {
+            growBoundingBox(bbox, object.bbox());
+          }
         }
       }
       context.shapeselection = [];
@@ -1472,7 +1472,7 @@ let actions = {
         objects: serializableObjects,
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
-        frame: context.activeObject.currentFrame.idx,
+        frame: frame.idx,
         layer: context.activeObject.activeLayer.idx,
         position: {
           x: (bbox.x.min + bbox.x.max) / 2,
@@ -2637,14 +2637,14 @@ class Layer extends Widget {
           ctx.setTransform(transform)
         }
       }
-    }
-    if (this.activeShape) {
-      this.activeShape.draw(cxt)
-    }
-    if (context.activeCurve) {
-      if (frame.shapes.indexOf(context.activeCurve.shape) != -1) {
-        cxt.selected = true
+      if (this.activeShape) {
+        this.activeShape.draw(cxt)
+      }
+      if (context.activeCurve) {
+        if (frame.shapes.indexOf(context.activeCurve.shape) != -1) {
+          cxt.selected = true
 
+        }
       }
     }
   }
@@ -2965,20 +2965,22 @@ class BaseShape {
     ctx.lineCap = "round";
 
     // Create a repeating pattern for indicating selected shapes
-    let patternCanvas = document.createElement('canvas');
-    patternCanvas.width = 2;
-    patternCanvas.height = 2;
-    let patternCtx = patternCanvas.getContext('2d');
-    // Draw the pattern:
-    // black,       transparent,
-    // transparent, white
-    patternCtx.fillStyle = 'black';
-    patternCtx.fillRect(0, 0, 1, 1);
-    patternCtx.clearRect(1, 0, 1, 1);
-    patternCtx.clearRect(0, 1, 1, 1);
-    patternCtx.fillStyle = 'white';
-    patternCtx.fillRect(1, 1, 1, 1);
-    let pattern = ctx.createPattern(patternCanvas, 'repeat'); // repeat the pattern across the canvas
+    if (!this.patternCanvas) {
+      this.patternCanvas = document.createElement('canvas');
+      this.patternCanvas.width = 2;
+      this.patternCanvas.height = 2;
+      let patternCtx = this.patternCanvas.getContext('2d');
+      // Draw the pattern:
+      // black,       transparent,
+      // transparent, white
+      patternCtx.fillStyle = 'black';
+      patternCtx.fillRect(0, 0, 1, 1);
+      patternCtx.clearRect(1, 0, 1, 1);
+      patternCtx.clearRect(0, 1, 1, 1);
+      patternCtx.fillStyle = 'white';
+      patternCtx.fillRect(1, 1, 1, 1);
+    }
+    let pattern = ctx.createPattern(this.patternCanvas, 'repeat'); // repeat the pattern across the canvas
 
     // for (let region of this.regions) {
     //   // if (region.filled) continue;
@@ -4114,7 +4116,9 @@ class GraphicsObject extends Widget {
     for (let layer of this.layers) {
       layer.children = layer.children.filter(child => child.idx !== idx);
       for (let frame of layer.frames) {
-        delete frame[idx];
+        if (frame) {
+          delete frame[idx];
+        }
       }
     }
     // this.children.splice(this.children.indexOf(childObject), 1);
@@ -5069,6 +5073,19 @@ async function setupVideoExport(ext, path, canvas, exportContext) {
 
   // audioEncoder.configure(audioConfig)
 
+  async function finishEncoding() {
+    const progressText = document.getElementById('progressText');
+    progressText.innerText = 'Finalizing...';
+    const progressBar = document.getElementById('progressBar');
+    progressBar.value = 100;
+    await videoEncoder.flush();
+    muxer.finalize();
+    await writeFile(path, new Uint8Array(target.buffer));
+    const modal = document.getElementById('progressModal');
+    modal.style.display = 'none';
+    document.querySelector("body").style.cursor = "default";
+  }
+
   const processFrame = async (currentFrame) => {
     if (currentFrame < root.maxFrame) {
       // Update progress bar
@@ -5971,7 +5988,7 @@ function stage() {
             for (let child of context.selection) {
               if (!context.activeObject.currentFrame) continue;
               if (!context.activeObject.currentFrame.keys) continue;
-              if (!child.idx in context.activeObject.currentFrame.keys) continue;
+              if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
               context.activeObject.currentFrame.keys[child.idx].x +=
                 mouse.x - context.lastMouse.x;
               context.activeObject.currentFrame.keys[child.idx].y +=
@@ -6729,8 +6746,12 @@ function outliner(object = undefined) {
 async function startup() {
   await loadConfig();
   createNewFileDialog(_newFile, _open, config);
-  if (!window.openedFiles) {
-    showNewFileDialog(config);
+  if (!window.openedFiles?.length) {
+    if (config.reopenLastSession && config.recentFiles?.length) {
+      _open(config.recentFiles[0])
+    } else {
+      showNewFileDialog(config);
+    }
   }
 }
 
@@ -7895,6 +7916,11 @@ async function renderMenu() {
         text: "Settings",
         enabled: false,
         action: () => {},
+      },
+      {
+        text: "Close Window",
+        enabled: true,
+        action: quit,
       },
       {
         text: "Quit Lightningbeam",

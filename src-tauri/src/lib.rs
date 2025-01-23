@@ -126,87 +126,94 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
 pub fn run() {
     let pkg_name = env!("CARGO_PKG_NAME").to_string();
     tauri::Builder::default()
-        .setup(|app| {
-          {
-            app.manage(Mutex::new(AppState::default()));
-          }
-          #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
-          {
-            let mut files = Vec::new();
+      .manage(Mutex::new(AppState::default()))
+      .setup(|app| {
+        #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
+        {
+          let mut files = Vec::new();
 
-            // NOTICE: `args` may include URL protocol (`your-app-protocol://`)
-            // or arguments (`--`) if your app supports them.
-            // files may aslo be passed as `file://path/to/file`
-            for maybe_file in std::env::args().skip(1) {
-              // skip flags like -f or --flag
-              if maybe_file.starts_with('-') {
-                continue;
-              }
-
-              // handle `file://` path urls and skip other urls
-              if let Ok(url) = Url::parse(&maybe_file) {
-              // if let Ok(url) = url::Url::parse(&maybe_file) {
-                if let Ok(path) = url.to_file_path() {
-                  files.push(path);
-                }
-              } else {
-                files.push(PathBuf::from(maybe_file))
-              }
+          // NOTICE: `args` may include URL protocol (`your-app-protocol://`)
+          // or arguments (`--`) if your app supports them.
+          // files may also be passed as `file://path/to/file`
+          for maybe_file in std::env::args().skip(1) {
+            // skip flags like -f or --flag
+            if maybe_file.starts_with('-') {
+              continue;
             }
 
-            handle_file_associations(app.handle().clone(), files);
-          }
-          #[cfg(debug_assertions)] // only include this code on debug builds
-          {
-            let window = app.get_webview_window("main").unwrap();
-            window.open_devtools();
-            window.close_devtools();
-          }
-          Ok(())
-        })
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-                .format(|out, message, record| {
-                    let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                    out.finish(format_args!(
-                        "{}[{}] {}",
-                        date,
-                        record.level(),
-                        message
-                      ))
-                  })
-                .targets([
-                    Target::new(TargetKind::Stdout),
-                    // LogDir locations:
-                    // Linux: /home/user/.local/share/org.lightningbeam.core/logs
-                    // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
-                    // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
-                    Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
-                    Target::new(TargetKind::Webview),
-                ])
-                .build()
-        )
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error, create_window])
-        // .manage(window_counter)
-        .build(tauri::generate_context!())
-        .expect("error while running tauri application")
-        .run(
-          #[allow(unused_variables)]
-          |app, event| {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            if let tauri::RunEvent::Opened { urls } = event {
-              let files = urls
-                .into_iter()
-                .filter_map(|url| url.to_file_path().ok())
-                .collect::<Vec<_>>();
-    
-              handle_file_associations(app.clone(), files);
+            // handle `file://` path urls and skip other urls
+            if let Ok(url) = Url::parse(&maybe_file) {
+            // if let Ok(url) = url::Url::parse(&maybe_file) {
+              if let Ok(path) = url.to_file_path() {
+                files.push(path);
+              }
+            } else {
+              files.push(PathBuf::from(maybe_file))
             }
-          },
-        );
+          }
+
+          handle_file_associations(app.handle().clone(), files);
+        }
+        #[cfg(debug_assertions)] // only include this code on debug builds
+        {
+          let window = app.get_webview_window("main").unwrap();
+          window.open_devtools();
+          window.close_devtools();
+        }
+        Ok(())
+      })
+      .plugin(
+          tauri_plugin_log::Builder::new()
+              .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+              .format(|out, message, record| {
+                  let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                  out.finish(format_args!(
+                      "{}[{}] {}",
+                      date,
+                      record.level(),
+                      message
+                    ))
+                })
+              .targets([
+                  Target::new(TargetKind::Stdout),
+                  // LogDir locations:
+                  // Linux: /home/user/.local/share/org.lightningbeam.core/logs
+                  // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
+                  // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
+                  Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
+                  Target::new(TargetKind::Webview),
+              ])
+              .build()
+      )
+      .plugin(tauri_plugin_dialog::init())
+      .plugin(tauri_plugin_fs::init())
+      .plugin(tauri_plugin_shell::init())
+      .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error, create_window])
+      // .manage(window_counter)
+      .build(tauri::generate_context!())
+      .expect("error while running tauri application")
+      .run(
+        #[allow(unused_variables)]
+        |app, event| {
+          #[cfg(any(target_os = "macos", target_os = "ios"))]
+          if let tauri::RunEvent::Opened { urls } = event {
+            let app = app.clone();
+            let files = urls
+              .into_iter()
+              .filter_map(|url| url.to_file_path().ok())
+              .map(|f| {
+                let file = f.to_string_lossy().replace('\\', "\\\\"); // escape backslash
+                format!("\"{file}\"",) // wrap in quotes for JS array
+              })
+              .collect::<Vec<_>>();
+  
+            tauri::async_runtime::spawn(async move {
+              for path in files {
+                create_window(app.clone(), Some(path)).await;
+              }
+            });
+          }
+        },
+      );
     tracing_subscriber::fmt().with_env_filter(EnvFilter::new(format!("{}=trace", pkg_name))).init();
 }

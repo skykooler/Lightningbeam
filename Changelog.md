@@ -1,7 +1,17 @@
+# 0.7.13-alpha:
+Changes:
+- changed file MIME type from text/plain to application/lightningbeam to prevent editor woes on Linux
+
+Bugfixes:
+- Port several live fixes to version control
+- Fix opening files on macOS
+- Improve rendering speed by 10x or more when multiple layers are present
+
 # 0.7.12-alpha:
 New features:
 - Add "New Window" command
 - Enable files to be opened with Lightningbeam
+
 Bugfixes:
 - Fix error when an object is deleted from a frame
 - Fix parent references being lost
