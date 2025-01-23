@@ -2,6 +2,7 @@
 New features:
 - Add "New Window" command
 - Enable files to be opened with Lightningbeam
+
 Bugfixes:
 - Fix error when an object is deleted from a frame
 - Fix parent references being lost

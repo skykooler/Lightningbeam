@@ -2960,20 +2960,22 @@ class BaseShape {
     ctx.lineCap = "round";
 
     // Create a repeating pattern for indicating selected shapes
-    let patternCanvas = document.createElement('canvas');
-    patternCanvas.width = 2;
-    patternCanvas.height = 2;
-    let patternCtx = patternCanvas.getContext('2d');
-    // Draw the pattern:
-    // black,       transparent,
-    // transparent, white
-    patternCtx.fillStyle = 'black';
-    patternCtx.fillRect(0, 0, 1, 1);
-    patternCtx.clearRect(1, 0, 1, 1);
-    patternCtx.clearRect(0, 1, 1, 1);
-    patternCtx.fillStyle = 'white';
-    patternCtx.fillRect(1, 1, 1, 1);
-    let pattern = ctx.createPattern(patternCanvas, 'repeat'); // repeat the pattern across the canvas
+    if (!this.patternCanvas) {
+      this.patternCanvas = document.createElement('canvas');
+      this.patternCanvas.width = 2;
+      this.patternCanvas.height = 2;
+      let patternCtx = this.patternCanvas.getContext('2d');
+      // Draw the pattern:
+      // black,       transparent,
+      // transparent, white
+      patternCtx.fillStyle = 'black';
+      patternCtx.fillRect(0, 0, 1, 1);
+      patternCtx.clearRect(1, 0, 1, 1);
+      patternCtx.clearRect(0, 1, 1, 1);
+      patternCtx.fillStyle = 'white';
+      patternCtx.fillRect(1, 1, 1, 1);
+    }
+    let pattern = ctx.createPattern(this.patternCanvas, 'repeat'); // repeat the pattern across the canvas
 
     // for (let region of this.regions) {
     //   // if (region.filled) continue;
