@@ -1343,7 +1343,27 @@ let actions = {
       updateUI();
     },
     rollback: (action) => {
-      // your code here
+      const object = pointerList[action.object];
+      const frameBuffer = [];
+      for (let frameObj of action.selectedFrames) {
+        let layer = object.layers[frameObj.layer];
+        let frame = layer.frames[frameObj.frameNum + action.offset.frames];
+        if (frameObj) {
+          frameBuffer.push({
+            frame: frame,
+            frameNum: frameObj.frameNum,
+            layer: frameObj.layer,
+          });
+          layer.deleteFrame(frame.idx, "none")
+        }
+      }
+      for (let frameObj of frameBuffer) {
+        let layer = object.layers[frameObj.layer];
+        let frame = frameObj.frame;
+        if (frameObj) {
+          layer.addFrame(frameObj.frameNum, frame, [])
+        }
+      }
     },
   },
   addMotionTween: {
