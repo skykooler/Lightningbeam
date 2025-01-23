@@ -3763,7 +3763,7 @@ class GraphicsObject extends Widget {
     this.setFrameNum(this.currentFrameNum - 1);
   }
   getFrame(num) {
-    return this.activeLayer.getFrame(num);
+    return this.activeLayer?.getFrame(num);
   }
   setFrameNum(num) {
     num = Math.max(0, num);
@@ -6543,7 +6543,7 @@ function timeline() {
           updateUI();
           updateMenu();
         } else {
-          context.activeObject.currentLayer = i;
+          context.activeObject.currentLayer = i - context.activeObject.audioLayers.length;
         }
       }
     }
