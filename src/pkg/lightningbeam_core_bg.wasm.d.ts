@@ -9,6 +9,7 @@ export const coreinterface_new: () => number;
 export const coreinterface_init: (a: number) => void;
 export const coreinterface_play: (a: number, b: number) => void;
 export const coreinterface_stop: (a: number) => void;
+export const coreinterface_resume_audio: (a: number, b: number) => void;
 export const coreinterface_add_sine_track: (a: number, b: number, c: number) => void;
 export const coreinterface_get_timestamp: (a: number) => number;
 export const coreinterface_get_tracks: (a: number, b: number) => void;

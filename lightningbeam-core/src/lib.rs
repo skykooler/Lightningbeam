@@ -95,6 +95,7 @@ pub trait AudioOutput {
   fn start(&mut self) -> Result<(), Box<dyn std::error::Error>>;
   fn play(&mut self, start_timestamp: Timestamp);
   fn stop(&mut self);
+  fn resume(&mut self) -> Result<(), anyhow::Error>;
   fn register_track_manager(&mut self, track_manager: Arc<Mutex<TrackManager>>);
   fn get_timestamp(&mut self) -> Timestamp;
   fn set_chunk_size(&mut self, chunk_size: usize);
@@ -217,6 +218,11 @@ impl CoreInterface {
     // Lock the Mutex to get access to TrackManager
     let mut track_manager = self.track_manager.lock().unwrap();
     track_manager.stop();
+  }
+  pub fn resume_audio(&mut self) -> Result<(), JsValue> {
+    // Call this on user gestures if audio gets suspended
+    self.cpal_audio_output.resume()
+        .map_err(|e| JsValue::from_str(&format!("Failed to resume audio: {}", e)))
   }
   pub fn add_sine_track(&mut self, frequency: f32) -> Result<(), String> {
     if frequency.is_nan() || frequency.is_infinite() || frequency <= 0.0 {

@@ -3,6 +3,11 @@ use cpal::{Sample};
 use std::sync::{Arc, Mutex};
 use crate::{TrackManager, Timestamp, Duration, SampleCount, AudioOutput, PlaybackState};
 
+#[derive(PartialEq)]
+enum AudioState {
+    Suspended,
+    Running,
+}
 
 // #[cfg(feature = "wasm")]
 // use wasm_bindgen::prelude::*;
@@ -13,6 +18,7 @@ pub struct CpalAudioOutput {
   track_manager: Option<Arc<Mutex<TrackManager>>>,
   _stream: Option<cpal::Stream>,
   playback_state: PlaybackState,
+  audio_state: AudioState,
   timestamp: Arc<Mutex<Timestamp>>,
   chunk_size: usize,
   sample_rate: u32,
@@ -26,6 +32,7 @@ impl CpalAudioOutput {
       track_manager: None,
       _stream: None,
       playback_state: PlaybackState::Stopped,
+      audio_state: AudioState::Suspended,
       timestamp: Arc::new(Mutex::new(Timestamp::from_seconds(0.0))),
       chunk_size: 0,
       sample_rate: 44100, // Default sample rate, updated later
@@ -110,11 +117,6 @@ impl AudioOutput for CpalAudioOutput {
     .ok_or_else(|| "No output device available")?;
     let supported_config = device.default_output_config()?;
     self._stream = Some(self.build_stream::<f32>(&device, supported_config)?);
-    if let Some(stream) = self._stream.as_ref() {
-      stream.play().unwrap();
-    } else {
-      eprintln!("Stream is not initialized!");
-    }
     Ok(())
   }
   
@@ -125,6 +127,17 @@ impl AudioOutput for CpalAudioOutput {
   
   fn stop(&mut self) {
     self.playback_state = PlaybackState::Stopped;
+  }
+
+  fn resume(&mut self) -> Result<(), anyhow::Error> {
+    if self.audio_state == AudioState::Suspended {
+      if let Some(stream) = &self._stream {
+        stream.play()?;
+        self.audio_state = AudioState::Running;
+        log::info!("Audio resumed");
+      }
+    }
+    Ok(())
   }
   
   fn register_track_manager(&mut self, track_manager: Arc<Mutex<TrackManager>>) {

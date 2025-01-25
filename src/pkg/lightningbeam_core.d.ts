@@ -7,6 +7,7 @@ export class CoreInterface {
   init(): void;
   play(timestamp: number): void;
   stop(): void;
+  resume_audio(): void;
   add_sine_track(frequency: number): void;
   get_timestamp(): number;
   get_tracks(): JsTrack[];
@@ -30,6 +31,7 @@ export interface InitOutput {
   readonly coreinterface_init: (a: number) => void;
   readonly coreinterface_play: (a: number, b: number) => void;
   readonly coreinterface_stop: (a: number) => void;
+  readonly coreinterface_resume_audio: (a: number, b: number) => void;
   readonly coreinterface_add_sine_track: (a: number, b: number, c: number) => void;
   readonly coreinterface_get_timestamp: (a: number) => number;
   readonly coreinterface_get_tracks: (a: number, b: number) => void;

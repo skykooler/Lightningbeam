@@ -8419,5 +8419,26 @@ async function testAudio() {
   coreInterface.init()
   coreInterface.play(0.0)
   console.log(coreInterface)
+
+  let audioStarted = false;
+  const startCoreInterfaceAudio = () => {
+    if (!audioStarted) {
+      try {
+        coreInterface.resume_audio();
+        audioStarted = true;
+        console.log("Started CoreInterface Audio!")
+      } catch (err) {
+        console.error("Audio resume failed:", err);
+      }
+    }
+
+    // Remove the event listeners to prevent them from firing again
+    document.removeEventListener("click", startCoreInterfaceAudio);
+    document.removeEventListener("keydown", startCoreInterfaceAudio);
+  };
+
+  // Add event listeners for mouse click and key press
+  document.addEventListener("click", startCoreInterfaceAudio);
+  document.addEventListener("keydown", startCoreInterfaceAudio);
 }
 testAudio()
