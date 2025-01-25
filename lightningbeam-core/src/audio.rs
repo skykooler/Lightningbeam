@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat, StreamConfig, SupportedBufferSize, SampleRate, BufferSize};
+use cpal::{Sample};
 use std::sync::{Arc, Mutex};
 use crate::{TrackManager, Timestamp, Duration, SampleCount, AudioOutput, PlaybackState};
 
@@ -44,15 +44,29 @@ where
     self.sample_rate = supported_config.sample_rate.0;
     let num_channels = supported_config.channels as usize; // Get channel count
 
+    let buffer_size_range = match config.buffer_size() {
+      cpal::SupportedBufferSize::Range { min, max } => (*min, *max),
+      cpal::SupportedBufferSize::Unknown => {
+          // Use a reasonable default range if the device doesn't specify
+          (256, 4096)
+      }
+  };
+
+    // Define the desired buffer size and clamp it to the supported range
+    let desired_buffer_size = 2048;
+    let clamped_buffer_size = desired_buffer_size.clamp(buffer_size_range.0, buffer_size_range.1);
+
+    let mut stream_config = supported_config.clone();
+    stream_config.buffer_size = cpal::BufferSize::Fixed(clamped_buffer_size);
+
     let track_manager = self.track_manager.clone();
-    let playback_state = self.playback_state.clone();
     let timestamp = self.timestamp.clone();
     let sample_rate = self.sample_rate;
 
     let err_fn = |err| eprintln!("Audio stream error: {:?}", err);
 
     let stream = device.build_output_stream(
-        &supported_config,
+        &stream_config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             if let Some(track_manager) = &track_manager {
                 let num_frames = data.len() / num_channels; // Stereo: divide by 2
@@ -60,14 +74,12 @@ where
                 let chunk_duration = Duration::new(num_frames as f64 / sample_rate as f64);
 
                 let mut track_manager = track_manager.lock().unwrap();
-                let playing = matches!(playback_state, PlaybackState::Playing);
 
                 let mut timestamp_guard = timestamp.lock().unwrap();
                 let timestamp = &mut *timestamp_guard;
 
                 let chunk = track_manager.update_audio(
                     timestamp.clone(),
-                    playing,
                     sample_count,
                     sample_rate,
                 );

@@ -78,6 +78,8 @@ const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
 
+import init, { CoreInterface } from './pkg/lightningbeam_core.js';
+
 window.onerror = (message, source, lineno, colno, error) => {
   invoke("error", { msg: `${message} at ${source}:${lineno}:${colno}\n${error?.stack || ''}` });
 };
@@ -8408,3 +8410,14 @@ if (window.openedFiles?.length>0) {
     newWindow(window.openedFiles[i])
   }
 }
+
+async function testAudio() {
+  console.log("Starting rust")
+  await init();
+  console.log("Rust started")
+  const coreInterface = new CoreInterface(100, 100)
+  coreInterface.init()
+  coreInterface.play(0.0)
+  console.log(coreInterface)
+}
+testAudio()

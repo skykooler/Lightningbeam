@@ -5,112 +5,89 @@ use audio::{CpalAudioOutput};
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 use std::sync::{Arc, Mutex};
+use std::fmt;
 
 #[cfg(feature = "wasm")]
 mod wasm_imports {
-    pub use wasm_bindgen::prelude::*;
-    pub use web_sys::console;
-    use wasm_logger;
+  pub use wasm_bindgen::prelude::*;
+  pub use web_sys::console;
 }
 #[cfg(feature = "wasm")]
 use wasm_imports::*;
 
 
-pub trait AudioTrack: Send {
-  /// Render a chunk of audio for the given timestamp and duration.
-  fn render_chunk(&mut self, timestamp: Timestamp, duration: SampleCount) -> Vec<f32>;
+pub trait Track: Send {
+  fn get_name(&self) -> &str {
+    "Unnamed Track"
+  }
 
-  /// Get the sample rate of the audio track.
-  fn sample_rate(&self) -> u32;
-}
-
-pub trait VideoTrack: Send {
-  /// Render a frame for the given timestamp.
-  fn render_frame(&self, timestamp: Timestamp) -> Frame;
-
-  /// Get the frame rate of the video track.
-  fn frame_rate(&self) -> f64;
+  fn set_name(&mut self, _name: String) {
+  }
+  /// Render audio for the given timestamp and duration.
+  /// Returns `None` if this track doesn't produce audio.
+  fn render_audio(&mut self, _timestamp: Timestamp, _duration: SampleCount, _sample_rate: u32, _playing: bool) -> Option<Vec<f32>> {
+    None
+  }
+  
+  /// Render a video frame for the given timestamp.
+  /// Returns `None` if this track doesn't produce video.
+  fn render_video(&self, _timestamp: Timestamp, _playing: bool) -> Option<Frame> {
+    None
+  }
 }
 
 pub struct TrackManager {
-  audio_tracks: Vec<Box<dyn AudioTrack>>,
-  video_tracks: Vec<Box<dyn VideoTrack>>,
-  // sample_rate: u32,
-  // frame_duration: Duration, // Duration of each frame in seconds (e.g., 1/60 for 60 FPS)
+  tracks: Vec<Box<dyn Track>>,
   timestamp: Timestamp,
   playback_state: PlaybackState,
 }
 
 impl TrackManager {
-  pub fn new(sample_rate: u32, frame_duration: f64) -> Self {
+  pub fn new() -> Self {
     Self {
-      audio_tracks: Vec::new(),
-      video_tracks: Vec::new(),
-      // sample_rate,
-      // frame_duration: Duration::new(frame_duration),
-      playback_state: PlaybackState::Stopped,
+      tracks: Vec::new(),
       timestamp: Timestamp::from_seconds(0.0),
+      playback_state: PlaybackState::Stopped,
     }
   }
   
-  pub fn add_audio_track(&mut self, track: Box<dyn AudioTrack>) {
-    self.audio_tracks.push(track);
+  pub fn add_track(&mut self, track: Box<dyn Track>) {
+    self.tracks.push(track);
   }
   
-  pub fn add_video_track(&mut self, track: Box<dyn VideoTrack>) {
-    self.video_tracks.push(track);
+  pub fn update_audio(&mut self, timestamp: Timestamp, chunk_size: SampleCount, sample_rate: u32) -> Vec<f32> {
+    
+    let mut mixed = vec![0.0; chunk_size.as_usize()];
+    let playing = matches!(self.playback_state, PlaybackState::Playing);
+    
+    for track in &mut self.tracks {
+      if let Some(samples) = track.render_audio(timestamp, chunk_size, sample_rate, playing) {
+        for (i, sample) in samples.iter().enumerate() {
+          mixed[i] += *sample;
+        }
+      }
+    }
+    
+    mixed
   }
-
+  
+  pub fn update_video(&self, timestamp: Timestamp) -> Vec<Frame> {
+    let playing = matches!(self.playback_state, PlaybackState::Playing);
+    self.tracks
+    .iter()
+    .filter_map(|track| track.render_video(timestamp, playing))
+    .collect()
+  }
+  
   pub fn play(&mut self, start_timestamp: Timestamp) {
     self.timestamp = start_timestamp;
     self.playback_state = PlaybackState::Playing;
   }
-
   pub fn stop(&mut self) {
-      self.playback_state = PlaybackState::Stopped;
+    self.playback_state = PlaybackState::Stopped;
   }
-  
-  // pub fn play(&mut self, timestamp: Timestamp, audio_output: &mut dyn AudioOutput, video_output: &mut dyn FrameTarget) {
-  //   let mut timestamp = timestamp.clone();
-    
-  //   // Main playback loop
-  //   loop {
-  //     // Render and play audio chunks
-  //     let mut audio_mix: Vec<f32> = vec![0.0; self.frame_duration.to_samples(self.sample_rate) as usize];
-  //     for track in &mut self.audio_tracks {
-  //       let chunk = track.render_chunk(timestamp, self.frame_duration);
-  //       for (i, sample) in chunk.iter().enumerate() {
-  //         audio_mix[i] += sample; // Simple mixing (sum of samples)
-  //       }
-  //     }
-  //     audio_output.play_chunk(audio_mix);
-      
-  //     // Render video frames
-  //     for track in &self.video_tracks {
-  //       let track_frame = track.render_frame(timestamp);
-  //     }
-      
-  //     // Update timestamp
-  //     timestamp += self.frame_duration;
-      
-  //     // Break condition (e.g., end of tracks)
-  //     if self.audio_tracks.iter().all(|t| t.render_chunk(timestamp, self.frame_duration).is_empty()) {
-  //       break;
-  //     }
-  //   }
-  // }
-  pub fn update_audio(&mut self, timestamp: Timestamp, playing: bool, chunk_size: SampleCount, sample_rate: u32) -> Vec<f32> {
-    let mut mixed_audio = vec![0.0; chunk_size.as_usize()];
-
-    // TODO: render video
-    for track in &mut self.audio_tracks {
-      let track_audio = track.render_chunk(timestamp, chunk_size);
-      for (i, sample) in track_audio.iter().enumerate() {
-          mixed_audio[i] += *sample; // Simple mixing, add samples together
-      }
-    }
-
-    mixed_audio
+  pub fn get_tracks(&self) -> &Vec<Box<dyn Track>> {
+    &self.tracks
   }
 }
 
@@ -136,39 +113,75 @@ enum PlaybackState {
 pub struct SineWaveTrack {
   frequency: f32,
   phase: f32,
-  sample_rate: u32,
+  name: String,
 }
 
 impl SineWaveTrack {
-  pub fn new(frequency: f32, sample_rate: u32) -> Self {
+  pub fn new(frequency: f32) -> Self {
     Self {
       frequency,
       phase: 0.0,
-      sample_rate,
+      name: "Sine Wave Track".to_string(),
     }
   }
 }
 
-impl AudioTrack for SineWaveTrack {
-  fn render_chunk(&mut self, timestamp: Timestamp, chunk_size: SampleCount) -> Vec<f32> {
+impl Track for SineWaveTrack {
+  fn get_name(&self) -> &str {
+    &self.name
+  }
+  fn set_name(&mut self, name: String) {
+    self.name = name;
+  }
+  fn render_audio(&mut self, _timestamp: Timestamp, chunk_size: SampleCount, sample_rate: u32, playing: bool) -> Option<Vec<f32>> {
     let mut chunk = Vec::with_capacity(chunk_size.as_usize());
-    let phase_increment = (2.0 * std::f32::consts::PI * self.frequency) / self.sample_rate as f32;
-
+    let phase_increment = (2.0 * std::f32::consts::PI * self.frequency) / sample_rate as f32;
+    
     for _ in 0..chunk_size.as_usize() {
-        chunk.push((self.phase).sin());
-        self.phase += phase_increment;
-        if self.phase > 2.0 * std::f32::consts::PI {
-            self.phase -= 2.0 * std::f32::consts::PI;
-        }
+      if playing {
+        chunk.push((self.phase).sin()*0.25);
+      } else {
+        chunk.push(0.0);
+      }
+      self.phase += phase_increment;
+      if self.phase > 2.0 * std::f32::consts::PI {
+        self.phase -= 2.0 * std::f32::consts::PI;
+      }
     }
-
-    chunk
-  }
-  fn sample_rate(&self) -> u32 {
-    self.sample_rate
+    
+    Some(chunk)
   }
 }
 
+#[cfg(feature="wasm")]
+#[wasm_bindgen]
+pub struct JsTrack {
+    name: String,
+}
+
+#[cfg(feature="wasm")]
+#[wasm_bindgen]
+impl JsTrack {
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+#[cfg(feature="wasm")]
+impl fmt::Display for JsTrack {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      write!(f, "JsTrack {{ name: {} }}", self.name)
+  }
+}
+
+#[cfg(feature="wasm")]
+#[wasm_bindgen]
+impl JsTrack {
+    #[wasm_bindgen(js_name = toString)]
+    pub fn to_string(&self) -> String {
+        format!("{}", self) // Calls the Display implementation
+    }
+}
 
 #[cfg(feature="wasm")]
 #[wasm_bindgen]
@@ -183,9 +196,9 @@ pub struct CoreInterface {
 #[wasm_bindgen]
 impl CoreInterface {
   #[wasm_bindgen(constructor)]
-  pub fn new(sample_rate: u32, frame_duration: f64) -> Self {
+  pub fn new() -> Self {
     Self {
-      track_manager: Arc::new(Mutex::new(TrackManager::new(sample_rate, frame_duration))),
+      track_manager: Arc::new(Mutex::new(TrackManager::new())),
       cpal_audio_output: Box::new(CpalAudioOutput::new())
     }
   }
@@ -193,15 +206,42 @@ impl CoreInterface {
     println!("Init CoreInterface");
     let track_manager_clone = self.track_manager.clone();
     self.cpal_audio_output.register_track_manager(track_manager_clone);
-    self.cpal_audio_output.start();
+    let _ = self.cpal_audio_output.start();
   }
   pub fn play(&mut self, timestamp: f64) {
     // Lock the Mutex to get access to TrackManager
     let mut track_manager = self.track_manager.lock().unwrap();
     track_manager.play(Timestamp::new(timestamp));
   }
+  pub fn stop(&mut self) {
+    // Lock the Mutex to get access to TrackManager
+    let mut track_manager = self.track_manager.lock().unwrap();
+    track_manager.stop();
+  }
+  pub fn add_sine_track(&mut self, frequency: f32) -> Result<(), String> {
+    if frequency.is_nan() || frequency.is_infinite() || frequency <= 0.0 {
+      return Err(format!("Invalid frequency: {}", frequency));
+    }
+    log::info!("Freq: {}", frequency);
+    let mut track_manager = self.track_manager.lock().unwrap();
+    let sine_track = SineWaveTrack::new(frequency);
+    track_manager.add_track(Box::new(sine_track));
+
+    Ok(())
+  }
+
   pub fn get_timestamp(&mut self) -> f64 {
     self.cpal_audio_output.get_timestamp().as_seconds()
+  }
+  pub fn get_tracks(&mut self) -> Vec<JsTrack> {
+    let track_manager = self.track_manager.lock().unwrap();
+    let tracks = track_manager.get_tracks();
+    tracks
+    .iter()
+    .map(|track| JsTrack {
+        name: track.get_name().to_string(),
+    })
+    .collect()
   }
 }
 
@@ -209,29 +249,29 @@ impl CoreInterface {
 struct PlainTextLogger;
 
 impl Log for PlainTextLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
+  fn enabled(&self, metadata: &Metadata) -> bool {
+    metadata.level() <= Level::Info
+  }
+  
+  fn log(&self, record: &Record) {
+    if self.enabled(record.metadata()) {
+      console::log_1(&format!(
+        "{} [{}:{}] {}",
+        record.level(),
+        record.file().unwrap_or("unknown"),
+        record.line().unwrap_or(0),
+        record.args()
+      ).into());
     }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            console::log_1(&format!(
-                "{} [{}:{}] {}",
-                record.level(),
-                record.file().unwrap_or("unknown"),
-                record.line().unwrap_or(0),
-                record.args()
-            ).into());
-        }
-    }
-
-    fn flush(&self) {}
+  }
+  
+  fn flush(&self) {}
 }
 
 pub fn init_plain_text_logger() -> Result<(), SetLoggerError> {
-    log::set_boxed_logger(Box::new(PlainTextLogger))?;
-    log::set_max_level(LevelFilter::Info);
-    Ok(())
+  log::set_boxed_logger(Box::new(PlainTextLogger))?;
+  log::set_max_level(LevelFilter::Info);
+  Ok(())
 }
 
 #[cfg(test)]
@@ -249,14 +289,14 @@ mod tests {
 #[cfg(feature="wasm")]
 #[wasm_bindgen(start)]
 pub fn main_js() -> Result<(), JsValue> {
-    // This provides better error messages in debug mode.
-    // It's disabled in release mode so it doesn't bloat up the file size.
-    #[cfg(debug_assertions)]
-    console_error_panic_hook::set_once();
-    init_plain_text_logger().expect("Failed to initialize plain text logger");
-
-
-    log::info!("Logger initialized!");
-
-    Ok(())
+  // This provides better error messages in debug mode.
+  // It's disabled in release mode so it doesn't bloat up the file size.
+  #[cfg(debug_assertions)]
+  console_error_panic_hook::set_once();
+  init_plain_text_logger().expect("Failed to initialize plain text logger");
+  
+  
+  log::info!("Logger initialized!");
+  
+  Ok(())
 }
