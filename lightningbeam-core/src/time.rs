@@ -6,9 +6,18 @@ pub struct Timestamp(f64);
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct Duration(f64);
 
+/// A strongly-typed representation of a number of samples.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub struct SampleCount(usize);
+
 impl Timestamp {
     /// Create a new timestamp in seconds.
     pub fn new(seconds: f64) -> Self {
+        Timestamp(seconds)
+    }
+
+    /// Create a new timestamp from seconds. (dummy method)
+    pub fn from_seconds(seconds: f64) -> Self {
         Timestamp(seconds)
     }
 
@@ -40,6 +49,10 @@ impl Timestamp {
     /// Subtract another timestamp, producing a duration.
     pub fn subtract_timestamp(&self, other: Timestamp) -> Duration {
         Duration(self.0 - other.0)
+    }
+
+    pub fn set(&mut self, other: Timestamp) {
+        self.0 = other.as_seconds();
     }
 }
 
@@ -79,6 +92,10 @@ impl Duration {
         (self.0 * sample_rate as f64).round() as u64
     }
 
+    pub fn to_std(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos((self.0/1_000_000_000.0).round() as u64)
+    }
+
     /// Add two durations together.
     pub fn add(&self, other: Duration) -> Duration {
         Duration(self.0 + other.0)
@@ -87,6 +104,18 @@ impl Duration {
     /// Subtract one duration from another.
     pub fn subtract(&self, other: Duration) -> Duration {
         Duration(self.0 - other.0)
+    }
+}
+
+
+impl SampleCount {
+    /// Create a new count of samples.
+    pub fn new(samples: usize) -> Self {
+        SampleCount(samples)
+    }
+
+    pub fn as_usize(&self) -> usize {
+        self.0
     }
 }
 

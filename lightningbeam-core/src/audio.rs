@@ -1,24 +1,92 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
-use cpal::{BufferSize, SupportedBufferSize};
+use cpal::{Sample, SampleFormat, StreamConfig, SupportedBufferSize, SampleRate, BufferSize};
 use std::sync::{Arc, Mutex};
-use crate::AudioOutput;
+use crate::{TrackManager, Timestamp, Duration, SampleCount, AudioOutput, PlaybackState};
 
+
+// #[cfg(feature = "wasm")]
+// use wasm_bindgen::prelude::*;
+
+// #[cfg(feature="wasm")]
+// #[wasm_bindgen]
 pub struct CpalAudioOutput {
-  stream: Option<Stream>,
-  buffer: Arc<Mutex<Vec<f32>>>, // Shared buffer for audio chunks
+  track_manager: Option<Arc<Mutex<TrackManager>>>,
+  _stream: Option<cpal::Stream>,
+  playback_state: PlaybackState,
+  timestamp: Arc<Mutex<Timestamp>>,
+  chunk_size: usize,
   sample_rate: u32,
-  channels: u16,
 }
 
+// #[cfg(feature="wasm")]
+// #[wasm_bindgen]
 impl CpalAudioOutput {
-  pub fn new(sample_rate: u32, channels: u16) -> Self {
+  pub fn new() -> Self {
     Self {
-      stream: None,
-      buffer: Arc::new(Mutex::new(Vec::new())),
-      sample_rate,
-      channels,
+      track_manager: None,
+      _stream: None,
+      playback_state: PlaybackState::Stopped,
+      timestamp: Arc::new(Mutex::new(Timestamp::from_seconds(0.0))),
+      chunk_size: 0,
+      sample_rate: 44100, // Default sample rate, updated later
     }
+  }
+  
+  fn build_stream<T>(
+    &mut self,
+    device: &cpal::Device,
+    config: cpal::SupportedStreamConfig,
+) -> Result<cpal::Stream, anyhow::Error>
+where
+    T: Sample + From<f32> + cpal::SizedSample,
+{
+    let supported_config = config.config();
+    self.sample_rate = supported_config.sample_rate.0;
+    let num_channels = supported_config.channels as usize; // Get channel count
+
+    let track_manager = self.track_manager.clone();
+    let playback_state = self.playback_state.clone();
+    let timestamp = self.timestamp.clone();
+    let sample_rate = self.sample_rate;
+
+    let err_fn = |err| eprintln!("Audio stream error: {:?}", err);
+
+    let stream = device.build_output_stream(
+        &supported_config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            if let Some(track_manager) = &track_manager {
+                let num_frames = data.len() / num_channels; // Stereo: divide by 2
+                let sample_count = SampleCount::new(num_frames);
+                let chunk_duration = Duration::new(num_frames as f64 / sample_rate as f64);
+
+                let mut track_manager = track_manager.lock().unwrap();
+                let playing = matches!(playback_state, PlaybackState::Playing);
+
+                let mut timestamp_guard = timestamp.lock().unwrap();
+                let timestamp = &mut *timestamp_guard;
+
+                let chunk = track_manager.update_audio(
+                    timestamp.clone(),
+                    playing,
+                    sample_count,
+                    sample_rate,
+                );
+
+                // Write samples (interleaved stereo)
+                for (i, frame) in chunk.iter().enumerate() {
+                    let sample = T::from(*frame);
+                    data[i * num_channels] = sample; // Left channel
+                    data[i * num_channels + 1] = sample; // Right channel (or process separately)
+                }
+
+                *timestamp_guard += chunk_duration;
+            }
+        },
+        err_fn,
+        None,
+    )?;
+
+    Ok(stream)
   }
 }
 
@@ -27,79 +95,34 @@ impl AudioOutput for CpalAudioOutput {
     let host = cpal::default_host();
     let device = host
     .default_output_device()
-    .ok_or("No output device available")?;
-    let supported_config = device
-    .default_output_config().unwrap();
-    // .with_sample_rate(SampleRate(self.sample_rate));
-    let config = StreamConfig {
-      channels: self.channels,
-      sample_rate: SampleRate(self.sample_rate),
-      buffer_size: match supported_config.buffer_size() {
-        SupportedBufferSize::Range { min, max: _ } => BufferSize::Fixed(*min),
-        SupportedBufferSize::Unknown => BufferSize::Default,
-      },
-    };
-    
-    let buffer = self.buffer.clone();
-    let sample_format = supported_config.sample_format();
-    
-    let stream = match sample_format {
-      SampleFormat::F32 => device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _| {
-          let mut buffer = buffer.lock().unwrap();
-          for (out_sample, buffer_sample) in data.iter_mut().zip(buffer.iter()) {
-            *out_sample = *buffer_sample;
-          }
-          buffer.clear(); // Clear buffer after playback
-        },
-        move |err| {
-          eprintln!("Audio stream error: {:?}", err);
-        },
-      ),
-      SampleFormat::I16 => device.build_output_stream(
-        &config,
-        move |data: &mut [i16], _| {
-          let mut buffer = buffer.lock().unwrap();
-          for (out_sample, buffer_sample) in data.iter_mut().zip(buffer.iter()) {
-            *out_sample = (*buffer_sample * i16::MAX as f32) as i16;
-          }
-          buffer.clear();
-        },
-        move |err| {
-          eprintln!("Audio stream error: {:?}", err);
-        },
-      ),
-      SampleFormat::U16 => device.build_output_stream(
-        &config,
-        move |data: &mut [u16], _| {
-          let mut buffer = buffer.lock().unwrap();
-          for (out_sample, buffer_sample) in data.iter_mut().zip(buffer.iter()) {
-            *out_sample = ((*buffer_sample + 1.0) * 0.5 * u16::MAX as f32) as u16;
-          }
-          buffer.clear();
-        },
-        move |err| {
-          eprintln!("Audio stream error: {:?}", err);
-        },
-      ),
-    };
-    
-    // If the stream creation failed, return the error
-    let stream = stream.map_err(|e| {
-      format!(
-        "Failed to build output stream for sample format {:?}: {:?}",
-        sample_format, e
-      )
-    })?;
-    
-    stream.play()?;
-    self.stream = Some(stream);
+    .ok_or_else(|| "No output device available")?;
+    let supported_config = device.default_output_config()?;
+    self._stream = Some(self.build_stream::<f32>(&device, supported_config)?);
+    if let Some(stream) = self._stream.as_ref() {
+      stream.play().unwrap();
+    } else {
+      eprintln!("Stream is not initialized!");
+    }
     Ok(())
   }
-
-  fn play_chunk(&mut self, chunk: Vec<f32>) {
-    let mut buffer = self.buffer.lock().unwrap();
-    buffer.extend(chunk);
+  
+  fn play(&mut self, start_timestamp: Timestamp) {
+    self.timestamp.lock().unwrap().set(start_timestamp);
+    self.playback_state = PlaybackState::Playing;
   }
-}    
+  
+  fn stop(&mut self) {
+    self.playback_state = PlaybackState::Stopped;
+  }
+  
+  fn register_track_manager(&mut self, track_manager: Arc<Mutex<TrackManager>>) {
+    self.track_manager = Some(track_manager);
+  }
+  
+  fn get_timestamp(&mut self) -> Timestamp {
+    *self.timestamp.lock().unwrap()
+  }
+  fn set_chunk_size(&mut self, chunk_size: usize) {
+    self.chunk_size = chunk_size
+  }
+}
