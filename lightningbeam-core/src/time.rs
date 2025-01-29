@@ -54,11 +54,24 @@ impl Timestamp {
     pub fn set(&mut self, other: Timestamp) {
         self.0 = other.as_seconds();
     }
+
+    pub fn max(&self, other: Timestamp) -> Timestamp {
+        Timestamp(self.0.max(other.0))
+    }
+
+    pub fn min(&self, other: Timestamp) -> Timestamp {
+        Timestamp(self.0.min(other.0))
+    }
 }
 
 impl Duration {
     /// Create a new duration in seconds.
     pub fn new(seconds: f64) -> Self {
+        Duration(seconds)
+    }
+
+    /// Create a new duration from seconds. (dummy method)
+    pub fn from_seconds(seconds: f64) -> Self {
         Duration(seconds)
     }
 
@@ -117,6 +130,24 @@ impl SampleCount {
     pub fn as_usize(&self) -> usize {
         self.0
     }
+
+    pub fn to_duration(&self, sample_rate: u32) -> Duration {
+        Duration((self.0 as f64) / (sample_rate as f64))
+    }
+
+    pub fn max(&self, other: SampleCount) -> SampleCount {
+        SampleCount(self.0.max(other.0))
+    }
+
+    pub fn min(&self, other: SampleCount) -> SampleCount {
+        SampleCount(self.0.min(other.0))
+    }
+}
+
+impl PartialEq<usize> for SampleCount{
+    fn eq(&self, other: &usize) -> bool {
+        self.0 == *other
+    }
 }
 
 // Overloading operators for more natural usage
@@ -138,6 +169,14 @@ impl Sub<Duration> for Timestamp {
     }
 }
 
+impl Sub<Timestamp> for Timestamp {
+    type Output = Duration;
+
+    fn sub(self, other: Timestamp) -> Duration {
+        self.subtract_timestamp(other)
+    }
+}
+
 impl AddAssign<Duration> for Timestamp {
     fn add_assign(&mut self, duration: Duration) {
         self.0 += duration.0;
@@ -147,6 +186,33 @@ impl AddAssign<Duration> for Timestamp {
 impl SubAssign<Duration> for Timestamp {
     fn sub_assign(&mut self, duration: Duration) {
         self.0 -= duration.0;
+    }
+}
+
+
+impl Add for SampleCount {
+    type Output = SampleCount;
+    fn add(self, other: SampleCount) -> SampleCount {
+        SampleCount(self.0 + other.0)
+    }
+}
+
+impl Sub for SampleCount {
+    type Output = SampleCount;
+    fn sub(self, other: SampleCount) -> SampleCount {
+        SampleCount(self.0 - other.0)
+    }
+}
+
+impl AddAssign<SampleCount> for SampleCount {
+    fn add_assign(&mut self, other: SampleCount) {
+        self.0 += other.0;
+    }
+}
+
+impl SubAssign<SampleCount> for SampleCount {
+    fn sub_assign(&mut self, other: SampleCount) {
+        self.0 -= other.0;
     }
 }
 
