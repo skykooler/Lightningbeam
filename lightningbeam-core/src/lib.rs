@@ -124,6 +124,7 @@ pub trait AudioOutput {
   fn register_track_manager(&mut self, track_manager: Arc<Mutex<TrackManager>>);
   fn get_timestamp(&mut self) -> Timestamp;
   fn set_chunk_size(&mut self, chunk_size: usize);
+  fn check_resize(&mut self) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 pub trait FrameTarget {
@@ -372,64 +373,64 @@ fn decode_audio(
 ) -> Result<(), Box<dyn Error>> {
   // Create a media source from the byte slice
   let mss = MediaSourceStream::new(
-      Box::new(Cursor::new(audio_data.to_vec())),
-      Default::default(),
+    Box::new(Cursor::new(audio_data.to_vec())),
+    Default::default(),
   );
-
+  
   // Use a fresh hint (no extension specified) for format detection
   let hint = Hint::new();
-
+  
   // Probe the media source for a supported format
   let probed = symphonia::default::get_probe()
-      .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
-
+  .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())?;
+  
   // Get the format reader
   let mut format = probed.format;
-
+  
   // Find the first supported audio track
   let default_track = format
-      .tracks()
-      .iter()
-      .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-      .ok_or("No supported audio track found")?;
-
+  .tracks()
+  .iter()
+  .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+  .ok_or("No supported audio track found")?;
+  
   // Create a decoder for the track
   let mut decoder = symphonia::default::get_codecs()
-      .make(&default_track.codec_params, &DecoderOptions::default())?;
-
+  .make(&default_track.codec_params, &DecoderOptions::default())?;
+  
   // Get the sample rate from the track
   let sample_rate = default_track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
   let mut decoded_samples = Vec::new();
-
+  
   // Decode loop
   loop {
-      let packet = match format.next_packet() {
-          Ok(packet) => packet,
-          Err(_) => break, // End of stream
-      };
-
-      match decoder.decode(&packet)? {
-          AudioBufferRef::F32(buf) => {
-              for i in 0..buf.frames() {
-                  for c in 0..buf.spec().channels.count() {
-                      decoded_samples.push(buf.chan(c)[i]);
-                  }
-              }
+    let packet = match format.next_packet() {
+      Ok(packet) => packet,
+      Err(_) => break, // End of stream
+    };
+    
+    match decoder.decode(&packet)? {
+      AudioBufferRef::F32(buf) => {
+        for i in 0..buf.frames() {
+          for c in 0..buf.spec().channels.count() {
+            decoded_samples.push(buf.chan(c)[i]);
           }
-          AudioBufferRef::S16(buf) => {
-              for i in 0..buf.frames() {
-                  for c in 0..buf.spec().channels.count() {
-                      decoded_samples.push(buf.chan(c)[i] as f32 / 32768.0);
-                  }
-              }
-          }
-          _ => return Err("Unsupported audio format".into()),
+        }
       }
+      AudioBufferRef::S16(buf) => {
+        for i in 0..buf.frames() {
+          for c in 0..buf.spec().channels.count() {
+            decoded_samples.push(buf.chan(c)[i] as f32 / 32768.0);
+          }
+        }
+      }
+      _ => return Err("Unsupported audio format".into()),
+    }
   }
-
+  
   // Add the decoded audio to the track
   track.add_buffer(start_time, sample_rate, decoded_samples);
-
+  
   Ok(())
 }
 
@@ -469,7 +470,11 @@ pub struct CoreInterface {
   #[wasm_bindgen(skip)]
   track_manager: Arc<Mutex<TrackManager>>,
   #[wasm_bindgen(skip)]
-  cpal_audio_output: Box<dyn AudioOutput>,
+  cpal_audio_output: Arc<Mutex<dyn AudioOutput>>,
+  #[wasm_bindgen(skip)]
+  resize_interval_id: Option<i32>,
+  #[wasm_bindgen(skip)]
+  resize_closure: Option<Closure<dyn FnMut()>>,
 }
 
 #[cfg(feature="wasm")]
@@ -479,14 +484,21 @@ impl CoreInterface {
   pub fn new() -> Self {
     Self {
       track_manager: Arc::new(Mutex::new(TrackManager::new())),
-      cpal_audio_output: Box::new(CpalAudioOutput::new())
+      cpal_audio_output: Arc::new(Mutex::new(CpalAudioOutput::new())),
+      resize_interval_id: None,
+      resize_closure: None,
     }
   }
   pub fn init(&mut self) {
     println!("Init CoreInterface");
-    let track_manager_clone = self.track_manager.clone();
-    self.cpal_audio_output.register_track_manager(track_manager_clone);
-    let _ = self.cpal_audio_output.start();
+    {
+      let track_manager_clone = self.track_manager.clone();
+      let mut cpal_audio_output = self.cpal_audio_output.lock().unwrap();
+      cpal_audio_output.register_track_manager(track_manager_clone);
+      let _ = cpal_audio_output.start();
+    }
+    
+    self.start_resize_polling();
   }
   pub fn play(&mut self, timestamp: f64) {
     // Lock the Mutex to get access to TrackManager
@@ -500,8 +512,51 @@ impl CoreInterface {
   }
   pub fn resume_audio(&mut self) -> Result<(), JsValue> {
     // Call this on user gestures if audio gets suspended
-    self.cpal_audio_output.resume()
+    self.cpal_audio_output.lock().unwrap().resume()
     .map_err(|e| JsValue::from_str(&format!("Failed to resume audio: {}", e)))
+  }
+  // In CoreInterface
+  fn start_resize_polling(&mut self) {
+    #[cfg(target_arch = "wasm32")]
+    {
+      use wasm_bindgen::{prelude::*, JsCast};
+      use js_sys::Array;
+      
+      let window = web_sys::window().unwrap();
+      let audio_output = Arc::clone(&self.cpal_audio_output);
+      
+      // Use weak reference to break cycle
+      let weak_audio = Arc::downgrade(&audio_output);
+      let closure = Closure::<dyn FnMut()>::new(move || {
+        if let Some(audio) = weak_audio.upgrade() {
+          // NON-BLOCKING lock attempt
+          if let Ok(mut audio) = audio.try_lock() {
+            let _ = audio.check_resize();
+          }
+        }
+      });
+      
+      let args = Array::new();
+      let interval_id = window
+      .set_interval_with_callback_and_timeout_and_arguments(
+        closure.as_ref().unchecked_ref(),
+        50,
+        &args
+      )
+      .unwrap();
+      
+      self.resize_interval_id = Some(interval_id);
+      self.resize_closure = Some(closure);
+    }
+    
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+      let mut audio = self.cpal_audio_output.clone();
+      std::thread::spawn(move || loop {
+        let _ = audio.check_resize();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+      });
+    }
   }
   pub fn add_sine_track(&mut self, frequency: f32) -> Result<(), String> {
     if frequency.is_nan() || frequency.is_infinite() || frequency <= 0.0 {
@@ -516,7 +571,7 @@ impl CoreInterface {
   }
   
   pub fn get_timestamp(&mut self) -> f64 {
-    self.cpal_audio_output.get_timestamp().as_seconds()
+    self.cpal_audio_output.lock().unwrap().get_timestamp().as_seconds()
   }
   pub fn get_tracks(&mut self) -> Vec<JsTrack> {
     let track_manager = self.track_manager.lock().unwrap();
@@ -528,8 +583,20 @@ impl CoreInterface {
     })
     .collect()
   }
+  
 }
 
+// Cleanup implementation
+#[cfg(feature = "wasm")]
+impl Drop for CoreInterface {
+  fn drop(&mut self) {
+    if let Some(interval_id) = self.resize_interval_id {
+      web_sys::window()
+      .unwrap()
+      .clear_interval_with_handle(interval_id);
+    }
+  }
+}
 
 struct PlainTextLogger;
 
