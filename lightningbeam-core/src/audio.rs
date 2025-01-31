@@ -57,6 +57,9 @@ impl StutterDetector {
       scheduling_threshold: AtomicU32::new(1200), // 1.2 stored in fixed point
     }
   }
+  pub fn reset(&mut self) {
+    *self = Self::new();
+  }
   fn get_scheduling_threshold(&self) -> f32 {
     self.scheduling_threshold.load(Ordering::Relaxed) as f32 / 1000.0
   }
@@ -201,7 +204,7 @@ impl CpalAudioOutput {
                 history.iter().sum::<StdDuration>() / history.len() as u32
               }
             };
-
+            
             // log::info!("Average delay: {:?}", avg_delay);
             
             // Determine stutter
@@ -246,50 +249,58 @@ impl CpalAudioOutput {
       err_fn,
       None,
     )?;
-
+    
     // Update current buffer size after stream creation
     let detector = self.stutter_detector.lock().unwrap();
     detector.current_buffer_size.store(clamped_buffer_size, Ordering::Relaxed);
     
     Ok(stream)
   }
-
+  
   fn recreate_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
     // Stop and destroy old stream first
     if let Some(old_stream) = self._stream.take() {
-        old_stream.pause()?;
-        // Explicitly drop the stream
-        drop(old_stream);
+      old_stream.pause()?;
+      // Explicitly drop the stream
+      drop(old_stream);
     }
-
+    
     // Add a small delay to ensure resources are freed (especially important in WASM)
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::sleep(std::time::Duration::from_millis(50));
     
     #[cfg(target_arch = "wasm32")]
     {
-        use wasm_bindgen_futures::spawn_local;
-        use gloo_timers::future::sleep;
-        spawn_local(async {
-            sleep(std::time::Duration::from_millis(50)).await;
-        });
+      use wasm_bindgen_futures::spawn_local;
+      use gloo_timers::future::sleep;
+      spawn_local(async {
+        sleep(std::time::Duration::from_millis(50)).await;
+      });
     }
-
+    
     // Recreate stream with current configuration
     let host = cpal::default_host();
     let device = host.default_output_device()
-        .ok_or_else(|| "No output device available")?;
+    .ok_or_else(|| "No output device available")?;
     let supported_config = device.default_output_config()?;
+    
+    {
+      let mut detector = self.stutter_detector.lock().unwrap();
+      let desired_buffer_size = detector.desired_buffer_size.load(Ordering::Relaxed);
+      detector.reset();
+      detector.desired_buffer_size.store(desired_buffer_size, Ordering::Relaxed);
+    }
+    // let mut history = detector.delay_history.lock().unwrap();
     
     self._stream = Some(self.build_stream::<f32>(&device, supported_config)?);
     
     // Restart playback if needed
     if self.audio_state == AudioState::Running {
-        self._stream.as_ref().unwrap().play()?;
+      self._stream.as_ref().unwrap().play()?;
     }
-
+    
     Ok(())
-}
+  }
 }
 
 impl AudioOutput for CpalAudioOutput {
