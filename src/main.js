@@ -2099,7 +2099,7 @@ function redo() {
     updateMenu();
   }
 }
-
+/*
 class Frame {
   constructor(frameType = "normal", uuid = undefined) {
     this.keys = {};
@@ -2202,6 +2202,23 @@ class TempFrame {
 }
 
 const tempFrame = new TempFrame();
+*/
+
+/*
+Theory:
+class Keyframe:
+    time: float
+    value: float
+    interpolation: str  # 'linear', 'bezier', 'step'
+    # Optional: bezier handles, easing functions
+    
+class AnimationCurve:
+    parameter: str
+    keyframes: List[Keyframe]  # kept sorted by time
+    
+class AnimationData:
+    curves: Dict[str, AnimationCurve]  # parameter name -> curve
+*/
 
 class Layer extends Widget {
   constructor(uuid) {
@@ -2212,12 +2229,16 @@ class Layer extends Widget {
       this.idx = uuid;
     }
     this.name = "Layer";
-    this.frames = [new Frame("keyframe", this.idx + "-F1")];
-    this.frameNum = 0;
+    // this.frames = [new Frame("keyframe", this.idx + "-F1")];
+    this.animationData = {}
+    // this.frameNum = 0;
     this.visible = true;
     this.audible = true;
     pointerList[this.idx] = this;
+    this.children = []
+    this.shapes = []
   }
+  // TODO
   static fromJSON(json) {
     const layer = new Layer(json.idx);
     for (let i in json.children) {
@@ -2245,18 +2266,12 @@ class Layer extends Widget {
         layer.frames.push(undefined)
       }
     }
-    // for (let frame in layer.frames) {
-    //   if (layer.frames[frame]) {
-    //     if (["motion", "shape"].indexOf(layer.frames[frame].frameType) != -1) {
-    //       layer.updateFrameNextAndPrev(frame, layer.frames[frame].frameType);
-    //     }
-    //   }
-    // }
     layer.visible = json.visible;
     layer.audible = json.audible;
 
     return layer;
   }
+  // TODO
   toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "Layer";
@@ -2293,6 +2308,15 @@ class Layer extends Widget {
     json.visible = this.visible;
     json.audible = this.audible;
     return json;
+  }
+  getFrame(t) {
+    for (let child of this.children) {
+      for (let prop of childProperties) {
+        let animationCurve = this.animationData[`${child.idx}.${prop}`]
+        let value = interpolateAnimation(animationCurve, t)
+        // and put it in a list and return it
+      }
+    }
   }
   getFrame(num) {
     if (this.frames[num]) {
@@ -3006,26 +3030,6 @@ class BaseShape {
     }
     let pattern = ctx.createPattern(this.patternCanvas, 'repeat'); // repeat the pattern across the canvas
 
-    // for (let region of this.regions) {
-    //   // if (region.filled) continue;
-    //   if ((region.fillStyle || region.fillImage) && region.filled) {
-    //     // ctx.fillStyle = region.fill
-    //     if (region.fillImage) {
-    //       let pat = ctx.createPattern(region.fillImage, "no-repeat")
-    //       ctx.fillStyle = pat
-    //     } else {
-    //       ctx.fillStyle = region.fillStyle
-    //     }
-    //     ctx.beginPath()
-    //     for (let curve of region.curves) {
-    //       ctx.lineTo(curve.points[0].x, curve.points[0].y)
-    //       ctx.bezierCurveTo(curve.points[1].x, curve.points[1].y,
-    //                         curve.points[2].x, curve.points[2].y,
-    //                         curve.points[3].x, curve.points[3].y)
-    //     }
-    //     ctx.fill()
-    //   }
-    // }
     if (this.filled) {
       ctx.beginPath();
       if (this.fillImage && this.fillImage instanceof Element) {
