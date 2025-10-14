@@ -435,7 +435,8 @@ let startProps = {};
 let actions = {
   addShape: {
     create: (parent, shape, ctx) => {
-      if (!parent.currentFrame?.exists) return;
+      // parent should be a GraphicsObject
+      if (!parent.activeLayer) return;
       if (shape.curves.length == 0) return;
       redoStack.length = 0; // Clear redo stack
       let serializableCurves = [];
@@ -448,6 +449,7 @@ let actions = {
       };
       let action = {
         parent: parent.idx,
+        layer: parent.activeLayer.idx,
         curves: serializableCurves,
         startx: shape.startx,
         starty: shape.starty,
@@ -459,23 +461,20 @@ let actions = {
           lineWidth: c.lineWidth,
         },
         uuid: uuidv4(),
-        frame: parent.currentFrame.idx,
+        time: parent.currentTime, // Use currentTime instead of currentFrame
       };
       undoStack.push({ name: "addShape", action: action });
       actions.addShape.execute(action);
       updateMenu();
     },
     execute: (action) => {
-      let object = pointerList[action.parent];
-      let frame = action.frame
-        ? pointerList[action.frame]
-        : object.currentFrame;
+      let layer = pointerList[action.layer];
       let curvesList = action.curves;
       let cxt = {
         ...context,
         ...action.context,
       };
-      let shape = new Shape(action.startx, action.starty, cxt, action.uuid);
+      let shape = new Shape(action.startx, action.starty, cxt, layer, action.uuid);
       for (let curve of curvesList) {
         shape.addCurve(
           new Bezier(
@@ -492,16 +491,55 @@ let actions = {
       }
       let shapes = shape.update();
       for (let newShape of shapes) {
-        frame.addShape(newShape, cxt.sendToBack, frame);
+        // Add shape to layer's shapes array
+        layer.shapes.push(newShape);
+
+        // Determine zOrder based on sendToBack
+        let zOrder;
+        if (cxt.sendToBack) {
+          // Insert at back (zOrder 0), shift all other shapes up
+          zOrder = 0;
+          // Increment zOrder for all existing shapes
+          for (let existingShape of layer.shapes) {
+            if (existingShape !== newShape) {
+              let existingZOrderCurve = layer.animationData.curves[`shape.${existingShape.idx}.zOrder`];
+              if (existingZOrderCurve) {
+                // Find keyframe at this time and increment it
+                for (let kf of existingZOrderCurve.keyframes) {
+                  if (kf.time === action.time) {
+                    kf.value += 1;
+                  }
+                }
+              }
+            }
+          }
+        } else {
+          // Insert at front (max zOrder + 1)
+          zOrder = layer.shapes.length - 1;
+        }
+
+        // Add keyframes to AnimationData for this shape
+        let existsKeyframe = new Keyframe(action.time, 1, "hold");
+        layer.animationData.addKeyframe(`shape.${newShape.idx}.exists`, existsKeyframe);
+
+        let zOrderKeyframe = new Keyframe(action.time, zOrder, "hold");
+        layer.animationData.addKeyframe(`shape.${newShape.idx}.zOrder`, zOrderKeyframe);
       }
     },
     rollback: (action) => {
-      let object = pointerList[action.parent];
-      let frame = action.frame
-        ? pointerList[action.frame]
-        : object.currentFrame;
+      let layer = pointerList[action.layer];
       let shape = pointerList[action.uuid];
-      frame.removeShape(shape);
+
+      // Remove shape from layer's shapes array
+      let shapeIndex = layer.shapes.indexOf(shape);
+      if (shapeIndex !== -1) {
+        layer.shapes.splice(shapeIndex, 1);
+      }
+
+      // Remove keyframes from AnimationData
+      delete layer.animationData.curves[`shape.${shape.idx}.exists`];
+      delete layer.animationData.curves[`shape.${shape.idx}.zOrder`];
+
       delete pointerList[action.uuid];
     },
   },
@@ -1900,8 +1938,19 @@ function selectCurve(context, mouse) {
   let closestDist = mouseTolerance;
   let closestCurve = undefined;
   let closestShape = undefined;
-  for (let shape of context.activeObject.currentFrame.shapes) {
+
+  // Get visible shapes from Layer using AnimationData
+  let currentTime = context.activeObject?.currentTime || 0;
+  let layer = context.activeObject?.activeLayer;
+  if (!layer) return undefined;
+
+  for (let shape of layer.shapes) {
     if (shape instanceof TempShape) continue;
+
+    // Check if shape exists at current time
+    let existsValue = layer.animationData.interpolate(`shape.${shape.idx}.exists`, currentTime);
+    if (!existsValue || existsValue <= 0) continue;
+
     if (
       mouse.x > shape.boundingBox.x.min - mouseTolerance &&
       mouse.x < shape.boundingBox.x.max + mouseTolerance &&
@@ -2099,7 +2148,9 @@ function redo() {
     updateMenu();
   }
 }
-/*
+
+// LEGACY: Frame class - being phased out in favor of AnimationData
+// TODO: Remove once all code is migrated to AnimationData system
 class Frame {
   constructor(frameType = "normal", uuid = undefined) {
     this.keys = {};
@@ -2202,23 +2253,239 @@ class TempFrame {
 }
 
 const tempFrame = new TempFrame();
-*/
 
-/*
-Theory:
-class Keyframe:
-    time: float
-    value: float
-    interpolation: str  # 'linear', 'bezier', 'step'
-    # Optional: bezier handles, easing functions
-    
-class AnimationCurve:
-    parameter: str
-    keyframes: List[Keyframe]  # kept sorted by time
-    
-class AnimationData:
-    curves: Dict[str, AnimationCurve]  # parameter name -> curve
-*/
+// Animation system classes
+class Keyframe {
+  constructor(time, value, interpolation = "linear", uuid = undefined) {
+    this.time = time;
+    this.value = value;
+    this.interpolation = interpolation; // 'linear', 'bezier', 'step', 'hold'
+    // For bezier interpolation
+    this.easeIn = { x: 0.42, y: 0 };  // Default ease-in control point
+    this.easeOut = { x: 0.58, y: 1 }; // Default ease-out control point
+    if (!uuid) {
+      this.idx = uuidv4();
+    } else {
+      this.idx = uuid;
+    }
+  }
+
+  static fromJSON(json) {
+    const keyframe = new Keyframe(json.time, json.value, json.interpolation, json.idx);
+    if (json.easeIn) keyframe.easeIn = json.easeIn;
+    if (json.easeOut) keyframe.easeOut = json.easeOut;
+    return keyframe;
+  }
+
+  toJSON() {
+    return {
+      idx: this.idx,
+      time: this.time,
+      value: this.value,
+      interpolation: this.interpolation,
+      easeIn: this.easeIn,
+      easeOut: this.easeOut
+    };
+  }
+}
+
+class AnimationCurve {
+  constructor(parameter, uuid = undefined) {
+    this.parameter = parameter; // e.g., "x", "y", "rotation", "scale_x", "exists"
+    this.keyframes = []; // Always kept sorted by time
+    if (!uuid) {
+      this.idx = uuidv4();
+    } else {
+      this.idx = uuid;
+    }
+  }
+
+  addKeyframe(keyframe) {
+    this.keyframes.push(keyframe);
+    // Keep sorted by time
+    this.keyframes.sort((a, b) => a.time - b.time);
+  }
+
+  removeKeyframe(keyframe) {
+    const index = this.keyframes.indexOf(keyframe);
+    if (index >= 0) {
+      this.keyframes.splice(index, 1);
+    }
+  }
+
+  getKeyframeAtTime(time) {
+    return this.keyframes.find(kf => kf.time === time);
+  }
+
+  // Find the two keyframes that bracket the given time
+  getBracketingKeyframes(time) {
+    if (this.keyframes.length === 0) return { prev: null, next: null };
+    if (this.keyframes.length === 1) return { prev: this.keyframes[0], next: this.keyframes[0] };
+
+    // Binary search to find the last keyframe at or before time
+    let left = 0;
+    let right = this.keyframes.length - 1;
+    let prevIndex = -1;
+
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      if (this.keyframes[mid].time <= time) {
+        prevIndex = mid;  // This could be our answer
+        left = mid + 1;   // But check if there's a better one to the right
+      } else {
+        right = mid - 1;  // Time is too large, search left
+      }
+    }
+
+    // If time is before all keyframes
+    if (prevIndex === -1) {
+      return { prev: this.keyframes[0], next: this.keyframes[0], t: 0 };
+    }
+
+    // If time is after all keyframes
+    if (prevIndex === this.keyframes.length - 1) {
+      return { prev: this.keyframes[prevIndex], next: this.keyframes[prevIndex], t: 1 };
+    }
+
+    const prev = this.keyframes[prevIndex];
+    const next = this.keyframes[prevIndex + 1];
+    const t = (time - prev.time) / (next.time - prev.time);
+
+    return { prev, next, t };
+  }
+
+  interpolate(time) {
+    if (this.keyframes.length === 0) return null;
+
+    const { prev, next, t } = this.getBracketingKeyframes(time);
+
+    if (!prev || !next) return null;
+    if (prev === next) return prev.value;
+
+    // Handle different interpolation types
+    switch (prev.interpolation) {
+      case "step":
+      case "hold":
+        return prev.value;
+
+      case "linear":
+        // Simple linear interpolation
+        if (typeof prev.value === "number" && typeof next.value === "number") {
+          return prev.value + (next.value - prev.value) * t;
+        }
+        return prev.value;
+
+      case "bezier":
+        // Cubic bezier interpolation using control points
+        if (typeof prev.value === "number" && typeof next.value === "number") {
+          // Use ease-in/ease-out control points
+          const easedT = this.cubicBezierEase(t, prev.easeOut, next.easeIn);
+          return prev.value + (next.value - prev.value) * easedT;
+        }
+        return prev.value;
+
+      default:
+        return prev.value;
+    }
+  }
+
+  // Cubic bezier easing function
+  cubicBezierEase(t, easeOut, easeIn) {
+    // Simplified cubic bezier for 0,0 -> easeOut -> easeIn -> 1,1
+    const u = 1 - t;
+    return 3 * u * u * t * easeOut.y +
+           3 * u * t * t * easeIn.y +
+           t * t * t;
+  }
+
+  static fromJSON(json) {
+    const curve = new AnimationCurve(json.parameter, json.idx);
+    for (let kfJson of json.keyframes || []) {
+      curve.keyframes.push(Keyframe.fromJSON(kfJson));
+    }
+    return curve;
+  }
+
+  toJSON() {
+    return {
+      idx: this.idx,
+      parameter: this.parameter,
+      keyframes: this.keyframes.map(kf => kf.toJSON())
+    };
+  }
+}
+
+class AnimationData {
+  constructor(uuid = undefined) {
+    this.curves = {}; // parameter name -> AnimationCurve
+    if (!uuid) {
+      this.idx = uuidv4();
+    } else {
+      this.idx = uuid;
+    }
+  }
+
+  getCurve(parameter) {
+    return this.curves[parameter];
+  }
+
+  getOrCreateCurve(parameter) {
+    if (!this.curves[parameter]) {
+      this.curves[parameter] = new AnimationCurve(parameter);
+    }
+    return this.curves[parameter];
+  }
+
+  addKeyframe(parameter, keyframe) {
+    const curve = this.getOrCreateCurve(parameter);
+    curve.addKeyframe(keyframe);
+  }
+
+  removeKeyframe(parameter, keyframe) {
+    const curve = this.curves[parameter];
+    if (curve) {
+      curve.removeKeyframe(keyframe);
+    }
+  }
+
+  removeCurve(parameter) {
+    delete this.curves[parameter];
+  }
+
+  interpolate(parameter, time) {
+    const curve = this.curves[parameter];
+    if (!curve) return null;
+    return curve.interpolate(time);
+  }
+
+  // Get all animated values at a given time
+  getValuesAtTime(time) {
+    const values = {};
+    for (let parameter in this.curves) {
+      values[parameter] = this.curves[parameter].interpolate(time);
+    }
+    return values;
+  }
+
+  static fromJSON(json) {
+    const animData = new AnimationData(json.idx);
+    for (let param in json.curves || {}) {
+      animData.curves[param] = AnimationCurve.fromJSON(json.curves[param]);
+    }
+    return animData;
+  }
+
+  toJSON() {
+    const curves = {};
+    for (let param in this.curves) {
+      curves[param] = this.curves[param].toJSON();
+    }
+    return {
+      idx: this.idx,
+      curves: curves
+    };
+  }
+}
 
 class Layer extends Widget {
   constructor(uuid) {
@@ -2229,8 +2496,9 @@ class Layer extends Widget {
       this.idx = uuid;
     }
     this.name = "Layer";
-    // this.frames = [new Frame("keyframe", this.idx + "-F1")];
-    this.animationData = {}
+    // LEGACY: Keep frames array for backwards compatibility during migration
+    this.frames = [new Frame("keyframe", this.idx + "-F1")];
+    this.animationData = new AnimationData();
     // this.frameNum = 0;
     this.visible = true;
     this.audible = true;
@@ -2238,7 +2506,6 @@ class Layer extends Widget {
     this.children = []
     this.shapes = []
   }
-  // TODO
   static fromJSON(json) {
     const layer = new Layer(json.idx);
     for (let i in json.children) {
@@ -2246,32 +2513,46 @@ class Layer extends Widget {
       layer.children.push(GraphicsObject.fromJSON(child));
     }
     layer.name = json.name;
-    layer.frames = [];
-    for (let i in json.frames) {
-      const frame = json.frames[i];
-      if (!frame) {
-        layer.frames.push(undefined)
-        continue;
-      }
-      if (frame.frameType=="keyframe") {
-        layer.frames.push(Frame.fromJSON(frame));
-      } else {
-        if (layer.frames[layer.frames.length-1]) {
-          if (frame.frameType == "motion") {
-            layer.frames[layer.frames.length-1].keyTypes.add("motion")
-          } else if (frame.frameType == "shape") {
-            layer.frames[layer.frames.length-1].keyTypes.add("shape")
-          }
+
+    // Load animation data if present (new system)
+    if (json.animationData) {
+      layer.animationData = AnimationData.fromJSON(json.animationData);
+    }
+
+    // Load shapes if present
+    if (json.shapes) {
+      layer.shapes = json.shapes.map(shape => Shape.fromJSON(shape));
+    }
+
+    // Load frames if present (old system - for backwards compatibility)
+    if (json.frames) {
+      layer.frames = [];
+      for (let i in json.frames) {
+        const frame = json.frames[i];
+        if (!frame) {
+          layer.frames.push(undefined)
+          continue;
         }
-        layer.frames.push(undefined)
+        if (frame.frameType=="keyframe") {
+          layer.frames.push(Frame.fromJSON(frame));
+        } else {
+          if (layer.frames[layer.frames.length-1]) {
+            if (frame.frameType == "motion") {
+              layer.frames[layer.frames.length-1].keyTypes.add("motion")
+            } else if (frame.frameType == "shape") {
+              layer.frames[layer.frames.length-1].keyTypes.add("shape")
+            }
+          }
+          layer.frames.push(undefined)
+        }
       }
     }
+
     layer.visible = json.visible;
     layer.audible = json.audible;
 
     return layer;
   }
-  // TODO
   toJSON(randomizeUuid = false) {
     const json = {};
     json.type = "Layer";
@@ -2285,38 +2566,112 @@ class Layer extends Widget {
     json.children = [];
     let idMap = {}
     for (let child of this.children) {
-      // TODO: we may not need the randomizeUuid parameter anymore
       let childJson = child.toJSON(randomizeUuid)
       idMap[child.idx] = childJson.idx
       json.children.push(childJson);
     }
-    json.frames = [];
-    for (let frame of this.frames) {
-      if (frame) {
-        let frameJson = frame.toJSON(randomizeUuid)
-        for (let key in frameJson.keys) {
-          if (key in idMap) {
-            frameJson.keys[idMap[key]] = frameJson.keys[key]
-            // delete frameJson.keys[key]
+
+    // Serialize animation data (new system)
+    json.animationData = this.animationData.toJSON();
+
+    // If randomizing UUIDs, update the curve parameter keys to use new child IDs
+    if (randomizeUuid && json.animationData.curves) {
+      const newCurves = {};
+      for (let paramKey in json.animationData.curves) {
+        // paramKey format: "childId.property"
+        const parts = paramKey.split('.');
+        if (parts.length >= 2) {
+          const oldChildId = parts[0];
+          const property = parts.slice(1).join('.');
+          if (oldChildId in idMap) {
+            const newParamKey = `${idMap[oldChildId]}.${property}`;
+            newCurves[newParamKey] = json.animationData.curves[paramKey];
+            newCurves[newParamKey].parameter = newParamKey;
+          } else {
+            newCurves[paramKey] = json.animationData.curves[paramKey];
           }
+        } else {
+          newCurves[paramKey] = json.animationData.curves[paramKey];
         }
-        json.frames.push(frameJson);
-      } else {
-        json.frames.push(undefined)
+      }
+      json.animationData.curves = newCurves;
+    }
+
+    // Serialize shapes
+    json.shapes = this.shapes.map(shape => shape.toJSON(randomizeUuid));
+
+    // Serialize frames (old system - for backwards compatibility)
+    if (this.frames) {
+      json.frames = [];
+      for (let frame of this.frames) {
+        if (frame) {
+          let frameJson = frame.toJSON(randomizeUuid)
+          for (let key in frameJson.keys) {
+            if (key in idMap) {
+              frameJson.keys[idMap[key]] = frameJson.keys[key]
+            }
+          }
+          json.frames.push(frameJson);
+        } else {
+          json.frames.push(undefined)
+        }
       }
     }
+
     json.visible = this.visible;
     json.audible = this.audible;
     return json;
   }
-  getFrame(t) {
+  // Get all animated property values for all children at a given time
+  getAnimatedState(time) {
+    const state = {
+      shapes: [...this.shapes],  // Base shapes from layer
+      childStates: {}            // Animated states for each child GraphicsObject
+    };
+
+    // For each child, get its animated properties at this time
     for (let child of this.children) {
-      for (let prop of childProperties) {
-        let animationCurve = this.animationData[`${child.idx}.${prop}`]
-        let value = interpolateAnimation(animationCurve, t)
-        // and put it in a list and return it
+      const childState = {};
+
+      // Animatable properties for GraphicsObjects
+      const properties = ['x', 'y', 'rotation', 'scale_x', 'scale_y', 'exists', 'shapeIndex'];
+
+      for (let prop of properties) {
+        const paramKey = `${child.idx}.${prop}`;
+        const value = this.animationData.interpolate(paramKey, time);
+
+        if (value !== null) {
+          childState[prop] = value;
+        }
+      }
+
+      if (Object.keys(childState).length > 0) {
+        state.childStates[child.idx] = childState;
       }
     }
+
+    return state;
+  }
+
+  // Helper method to add a keyframe for a child's property
+  addKeyframeForChild(childId, property, time, value, interpolation = "linear") {
+    const paramKey = `${childId}.${property}`;
+    const keyframe = new Keyframe(time, value, interpolation);
+    this.animationData.addKeyframe(paramKey, keyframe);
+    return keyframe;
+  }
+
+  // Helper method to remove a keyframe
+  removeKeyframeForChild(childId, property, keyframe) {
+    const paramKey = `${childId}.${property}`;
+    this.animationData.removeKeyframe(paramKey, keyframe);
+  }
+
+  // Helper method to get all keyframes for a child's property
+  getKeyframesForChild(childId, property) {
+    const paramKey = `${childId}.${property}`;
+    const curve = this.animationData.getCurve(paramKey);
+    return curve ? curve.keyframes : [];
   }
   getFrame(num) {
     if (this.frames[num]) {
@@ -2611,13 +2966,36 @@ class Layer extends Widget {
       t = (this.frameNum - frameInfo.prevIndex) / (frameInfo.nextIndex - frameInfo.prevIndex);
     }
 
+    // NEW: Draw shapes using AnimationData curves for exists and zOrder
+    let currentTime = context.activeObject?.currentTime || 0;
+    let visibleShapes = [];
+
+    for (let shape of this.shapes) {
+      // Check if shape exists at current time (>0 allows for future fade-in/out animations)
+      let existsValue = this.animationData.interpolate(`shape.${shape.idx}.exists`, currentTime);
+      if (existsValue !== null && existsValue > 0) {
+        let zOrder = this.animationData.interpolate(`shape.${shape.idx}.zOrder`, currentTime);
+        visibleShapes.push({ shape, zOrder: zOrder || 0 });
+      }
+    }
+
+    // Sort by zOrder (lowest first = back, highest last = front)
+    visibleShapes.sort((a, b) => a.zOrder - b.zOrder);
+
+    // Draw sorted shapes
+    for (let { shape } of visibleShapes) {
+      cxt.selected = context.shapeselection.includes(shape);
+      shape.draw(cxt);
+    }
+
+    // LEGACY: Keep old frame-based shape drawing for backwards compatibility
     if (frame) {
-      // Update shapes and children
+      // Update shapes and children from legacy Frame system
       for (let shape of frame.shapes) {
         // If prev.frameType is "shape", look for a matching shape in next
         if (frameInfo.prev && frameInfo.prev.keyTypes.has("shape")) {
           const shape2 = frameInfo.next.shapes.find(s => s.shapeId === shape.shapeId);
-          
+
           if (shape2) {
             // If matching shape is found, interpolate and draw
             shape.lerpShape(shape2, t).draw(cxt);
@@ -2685,15 +3063,18 @@ class Layer extends Widget {
           ctx.setTransform(transform)
         }
       }
-      if (this.activeShape) {
-        this.activeShape.draw(cxt)
-      }
       if (context.activeCurve) {
         if (frame.shapes.indexOf(context.activeCurve.shape) != -1) {
           cxt.selected = true
 
         }
       }
+    }
+    // Draw activeShape regardless of whether frame exists
+    if (this.activeShape) {
+      console.log("Layer.draw: Drawing activeShape", this.activeShape);
+      this.activeShape.draw(cxt)
+      console.log("Layer.draw: Drew activeShape");
     }
   }
   bbox() {
@@ -2711,15 +3092,19 @@ class Layer extends Widget {
     return bbox
   }
   mousedown(x, y) {
+    console.log("Layer.mousedown called - this:", this.name, "activeLayer:", context.activeLayer?.name, "mode:", mode);
     const mouse = {x: x, y: y}
     if (this==context.activeLayer) {
+      console.log("This IS the active layer");
       switch(mode) {
         case "rectangle":
         case "ellipse":
         case "draw":
+          console.log("Creating shape for mode:", mode);
           this.clicked = true
-          this.activeShape = new Shape(x, y, context, uuidv4())
+          this.activeShape = new Shape(x, y, context, this, uuidv4())
           this.lastMouse = mouse;
+          console.log("Shape created:", this.activeShape);
           break;
         case "select":
         case "transform":
@@ -2798,7 +3183,9 @@ class Layer extends Widget {
           }
           break;
         case "rectangle":
+          console.log("Layer.mousemove rectangle - activeShape:", this.activeShape);
           if (this.activeShape) {
+            console.log("Updating rectangle shape");
             this.activeShape.clear();
             this.activeShape.addLine(x, this.activeShape.starty);
             this.activeShape.addLine(x, y);
@@ -2808,6 +3195,7 @@ class Layer extends Widget {
               this.activeShape.starty,
             );
             this.activeShape.update();
+            console.log("Rectangle updated");
           }
           break;
         case "ellipse":
@@ -2872,6 +3260,7 @@ class Layer extends Widget {
     }
   }
   mouseup(x, y) {
+    console.log("Layer.mouseup called - mode:", mode, "activeShape:", this.activeShape);
     this.clicked = false
     if (this==context.activeLayer) {
       switch (mode) {
@@ -2883,7 +3272,9 @@ class Layer extends Widget {
         case "rectangle":
         case "ellipse":
           if (this.activeShape) {
+            console.log("Adding shape via actions.addShape.create");
             actions.addShape.create(context.activeObject, this.activeShape);
+            console.log("Shape added, clearing activeShape");
             this.activeShape = undefined;
           }
           break;
@@ -3232,8 +3623,9 @@ class TempShape extends BaseShape {
 }
 
 class Shape extends BaseShape {
-  constructor(startx, starty, context, uuid = undefined, shapeId = undefined) {
+  constructor(startx, starty, context, parent, uuid = undefined, shapeId = undefined) {
     super(startx, starty);
+    this.parent = parent; // Reference to parent Layer (required)
     this.vertices = [];
     this.triangles = [];
     this.fillStyle = context.fillStyle;
@@ -3695,7 +4087,8 @@ class GraphicsObject extends Widget {
     pointerList[this.idx] = this;
     this.name = this.idx;
 
-    this.currentFrameNum = 0;
+    this.currentFrameNum = 0; // LEGACY: kept for backwards compatibility
+    this.currentTime = 0; // New: continuous time for AnimationData curves
     this.currentLayer = 0;
     this.children = [new Layer(uuid + "-L1")];
     // this.layers = [new Layer(uuid + "-L1")];
@@ -5504,11 +5897,12 @@ function stage() {
   // stageWrapper.appendChild(selectionRect)
   // scroller.appendChild(stageWrapper)
   stage.addEventListener("pointerdown", (e) => {
+    console.log("POINTERDOWN EVENT - mode:", mode);
     let mouse = getMousePos(stage, e);
+    console.log("Mouse position:", mouse);
     root.handleMouseEvent("mousedown", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
     let selection;
-    if (!context.activeObject.currentFrame?.exists) return;
     switch (mode) {
       case "rectangle":
       case "ellipse":
@@ -5806,7 +6200,6 @@ function stage() {
     context.dragging = false;
     context.dragDirection = undefined;
     context.selectionRect = undefined;
-    if (!context.activeObject.currentFrame?.exists) return;
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mouseup", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
@@ -5894,7 +6287,6 @@ function stage() {
       stage.mouseup(e);
       return;
     }
-    if (!context.activeObject.currentFrame?.exists) return;
     switch (mode) {
       case "draw":
         stage.style.cursor = "default";
