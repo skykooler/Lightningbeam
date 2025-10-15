@@ -1,5 +1,6 @@
 import { backgroundColor, foregroundColor, frameWidth, highlight, layerHeight, shade, shadow } from "./styles.js";
 import { clamp, drawBorderedRect, drawCheckerboardBackground, hslToRgb, hsvToRgb, rgbToHex } from "./utils.js"
+import { TimelineState, TimeRuler } from "./timeline.js"
 
 function growBoundingBox(bboxa, bboxb) {
   bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
@@ -512,10 +513,113 @@ class TimelineWindow extends ScrollableWindow {
     }
   }
   mousedown(x, y) {
-    
+
   }
 }
-  
+
+/**
+ * TimelineWindowV2 - New timeline widget using AnimationData curve-based system
+ * Phase 1: Time ruler with zoom-adaptive intervals and playhead
+ */
+class TimelineWindowV2 extends Widget {
+  constructor(x, y, context) {
+    super(x, y)
+    this.context = context
+    this.width = 800
+    this.height = 400
+
+    // Create shared timeline state (24 fps default)
+    this.timelineState = new TimelineState(24)
+
+    // Create time ruler widget
+    this.ruler = new TimeRuler(this.timelineState)
+
+    // Track if we're dragging playhead
+    this.draggingPlayhead = false
+  }
+
+  draw(ctx) {
+    ctx.save()
+
+    // Draw background
+    ctx.fillStyle = '#1e1e1e'
+    ctx.fillRect(0, 0, this.width, this.height)
+
+    // Draw time ruler at top
+    this.ruler.draw(ctx, this.width)
+
+    // TODO Phase 2: Draw track hierarchy below ruler
+    // TODO Phase 3: Draw segments
+    // TODO Phase 4: Draw minimized curves
+
+    ctx.restore()
+  }
+
+  mousedown(x, y) {
+    console.log("TimelineV2 mousedown:", x, y, "ruler height:", this.ruler.height);
+    // Check if clicking in ruler area
+    if (y <= this.ruler.height) {
+      // Let the ruler handle the mousedown (for playhead dragging)
+      const hitPlayhead = this.ruler.mousedown(x, y);
+      console.log("Ruler mousedown returned:", hitPlayhead);
+      if (hitPlayhead) {
+        this.draggingPlayhead = true
+        this._globalEvents.add("mousemove")
+        this._globalEvents.add("mouseup")
+        console.log("Started dragging playhead");
+        return true
+      }
+    }
+    return false
+  }
+
+  mousemove(x, y) {
+    if (this.draggingPlayhead) {
+      console.log("TimelineV2 mousemove while dragging:", x, y);
+      // Let the ruler handle the mousemove
+      this.ruler.mousemove(x, y)
+
+      // Sync GraphicsObject currentTime with timeline playhead
+      if (this.context.activeObject) {
+        this.context.activeObject.currentTime = this.timelineState.currentTime
+      }
+      return true
+    }
+    return false
+  }
+
+  mouseup(x, y) {
+    if (this.draggingPlayhead) {
+      // Let the ruler handle the mouseup
+      this.ruler.mouseup(x, y)
+
+      this.draggingPlayhead = false
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+      return true
+    }
+    return false
+  }
+
+  // Zoom controls (can be called from keyboard shortcuts)
+  zoomIn() {
+    this.timelineState.zoomIn()
+  }
+
+  zoomOut() {
+    this.timelineState.zoomOut()
+  }
+
+  // Toggle time format
+  toggleTimeFormat() {
+    if (this.timelineState.timeFormat === 'frames') {
+      this.timelineState.timeFormat = 'seconds'
+    } else {
+      this.timelineState.timeFormat = 'frames'
+    }
+  }
+}
+
 export {
   SCROLL,
   Widget,
@@ -527,5 +631,6 @@ export {
   HBox, VBox,
   ScrollableWindow,
   ScrollableWindowHeaders,
-  TimelineWindow
+  TimelineWindow,
+  TimelineWindowV2
 };

@@ -60,7 +60,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
-import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, Widget } from "./widgets.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, Widget } from "./widgets.js";
 const {
   writeTextFile: writeTextFile,
   readTextFile: readTextFile,
@@ -347,6 +347,7 @@ let context = {
   selectedFrames: [],
   dragDirection: undefined,
   zoomLevel: 1,
+  timelineWidget: null, // Reference to TimelineWindowV2 widget for zoom controls
 };
 
 let config = {
@@ -661,7 +662,7 @@ let actions = {
         fillImage: img,
         strokeShape: false,
       };
-      let imageShape = new Shape(0, 0, ct, action.shapeUuid);
+      let imageShape = new Shape(0, 0, ct, imageObject.activeLayer, action.shapeUuid);
       imageShape.addLine(img.width, 0);
       imageShape.addLine(img.width, img.height);
       imageShape.addLine(0, img.height);
@@ -1507,7 +1508,10 @@ let actions = {
       let serializableShapes = [];
       let serializableObjects = [];
       let bbox;
-      const frame = context.activeObject.currentFrame
+      const currentTime = context.activeObject?.currentTime || 0;
+      const layer = context.activeObject.activeLayer;
+
+      // For shapes - use AnimationData system
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
         if (bbox == undefined) {
@@ -1516,8 +1520,11 @@ let actions = {
           growBoundingBox(bbox, shape.bbox());
         }
       }
+
+      // For objects - check legacy frame system if available
+      const frame = context.activeObject.currentFrame;
       for (let object of context.selection) {
-        if (object.idx in frame.keys) {
+        if (frame && object.idx in frame.keys) {
           serializableObjects.push(object.idx);
           // TODO: rotated bbox
           if (bbox == undefined) {
@@ -1527,6 +1534,7 @@ let actions = {
           }
         }
       }
+
       context.shapeselection = [];
       context.selection = [];
       let action = {
@@ -1534,8 +1542,9 @@ let actions = {
         objects: serializableObjects,
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
-        frame: frame.idx,
-        layer: context.activeObject.activeLayer.idx,
+        frame: frame?.idx,
+        layer: layer.idx,
+        currentTime: currentTime,
         position: {
           x: (bbox.x.min + bbox.x.max) / 2,
           y: (bbox.y.min + bbox.y.max) / 2,
@@ -1548,41 +1557,62 @@ let actions = {
     execute: (action) => {
       let group = new GraphicsObject(action.groupUuid);
       let parent = pointerList[action.parent];
-      let frame = action.frame
-        ? pointerList[action.frame]
-        : parent.currentFrame;
-      let layer;
-      if (action.layer) {
-        layer = pointerList[action.layer]
-      } else {
-        for (let _layer of parent.layers) {
-          for (let _frame of _layer.frames) {
-            if (_frame && (_frame.idx == frame.idx)) {
-              layer = _layer
-            }
-          }
-        }
-        if (layer==undefined) {
-          layer = parent.activeLayer
-        }
-      }
+      let layer = pointerList[action.layer] || parent.activeLayer;
+      const currentTime = action.currentTime || 0;
+
+      // Move shapes from parent layer to group's first layer
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
         shape.translate(-action.position.x, -action.position.y);
-        group.currentFrame.addShape(shape);
-        frame.removeShape(shape);
+
+        // Remove shape from parent layer's shapes array
+        let shapeIndex = layer.shapes.indexOf(shape);
+        if (shapeIndex !== -1) {
+          layer.shapes.splice(shapeIndex, 1);
+        }
+
+        // Remove animation curves for this shape from parent layer
+        layer.animationData.removeCurve(`shape.${shape.idx}.exists`);
+        layer.animationData.removeCurve(`shape.${shape.idx}.zOrder`);
+
+        // Add shape to group's first layer
+        let groupLayer = group.activeLayer;
+        shape.parent = groupLayer;
+        groupLayer.shapes.push(shape);
+
+        // Add animation curves for this shape in group's layer
+        let existsCurve = new AnimationCurve(`shape.${shape.idx}.exists`);
+        existsCurve.addKeyframe(new Keyframe(0, 1, 'linear'));
+        groupLayer.animationData.setCurve(`shape.${shape.idx}.exists`, existsCurve);
+
+        let zOrderCurve = new AnimationCurve(`shape.${shape.idx}.zOrder`);
+        zOrderCurve.addKeyframe(new Keyframe(0, groupLayer.shapes.length - 1, 'linear'));
+        groupLayer.animationData.setCurve(`shape.${shape.idx}.zOrder`, zOrderCurve);
       }
+
+      // Move objects (children) to the group
+      // For legacy frame-based children, use frame.keys if available
+      let frame = action.frame ? pointerList[action.frame] : parent.currentFrame;
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
-        group.addObject(
-          object,
-          frame.keys[objectIdx].x - action.position.x,
-          frame.keys[objectIdx].y - action.position.y,
-        );
+        if (frame && frame.keys && frame.keys[objectIdx]) {
+          group.addObject(
+            object,
+            frame.keys[objectIdx].x - action.position.x,
+            frame.keys[objectIdx].y - action.position.y,
+            currentTime
+          );
+        } else {
+          group.addObject(object, 0, 0, currentTime);
+        }
         parent.removeChild(object);
       }
-      parent.addObject(group, action.position.x, action.position.y, frame);
+
+      // Add group to parent using time-based API
+      parent.addObject(group, action.position.x, action.position.y, currentTime);
       context.selection = [group];
+      context.activeCurve = undefined;
+      context.activeVertex = undefined;
       updateUI();
       updateInfopanel();
     },
@@ -1758,8 +1788,13 @@ let actions = {
           selection.push(child.idx);
         }
       }
-      for (let shape of context.activeObject.currentFrame.shapes) {
-        shapeselection.push(shape.idx);
+      // Use getVisibleShapes instead of currentFrame.shapes
+      let currentTime = context.activeObject?.currentTime || 0;
+      let layer = context.activeObject?.activeLayer;
+      if (layer) {
+        for (let shape of layer.getVisibleShapes(currentTime)) {
+          shapeselection.push(shape.idx);
+        }
       }
       let action = {
         selection: selection,
@@ -1944,13 +1979,7 @@ function selectCurve(context, mouse) {
   let layer = context.activeObject?.activeLayer;
   if (!layer) return undefined;
 
-  for (let shape of layer.shapes) {
-    if (shape instanceof TempShape) continue;
-
-    // Check if shape exists at current time
-    let existsValue = layer.animationData.interpolate(`shape.${shape.idx}.exists`, currentTime);
-    if (!existsValue || existsValue <= 0) continue;
-
+  for (let shape of layer.getVisibleShapes(currentTime)) {
     if (
       mouse.x > shape.boundingBox.x.min - mouseTolerance &&
       mouse.x < shape.boundingBox.x.max + mouseTolerance &&
@@ -1978,8 +2007,13 @@ function selectVertex(context, mouse) {
   let closestDist = mouseTolerance;
   let closestVertex = undefined;
   let closestShape = undefined;
-  for (let shape of context.activeObject.currentFrame.shapes) {
-    if (shape instanceof TempShape) continue;
+
+  // Get visible shapes from Layer using AnimationData
+  let currentTime = context.activeObject?.currentTime || 0;
+  let layer = context.activeObject?.activeLayer;
+  if (!layer) return undefined;
+
+  for (let shape of layer.getVisibleShapes(currentTime)) {
     if (
       mouse.x > shape.boundingBox.x.min - mouseTolerance &&
       mouse.x < shape.boundingBox.x.max + mouseTolerance &&
@@ -2355,12 +2389,18 @@ class AnimationCurve {
   }
 
   interpolate(time) {
-    if (this.keyframes.length === 0) return null;
+    if (this.keyframes.length === 0) {
+      return null;
+    }
 
     const { prev, next, t } = this.getBracketingKeyframes(time);
 
-    if (!prev || !next) return null;
-    if (prev === next) return prev.value;
+    if (!prev || !next) {
+      return null;
+    }
+    if (prev === next) {
+      return prev.value;
+    }
 
     // Handle different interpolation types
     switch (prev.interpolation) {
@@ -2452,6 +2492,10 @@ class AnimationData {
     delete this.curves[parameter];
   }
 
+  setCurve(parameter, curve) {
+    this.curves[parameter] = curve;
+  }
+
   interpolate(parameter, time) {
     const curve = this.curves[parameter];
     if (!curve) return null;
@@ -2521,7 +2565,7 @@ class Layer extends Widget {
 
     // Load shapes if present
     if (json.shapes) {
-      layer.shapes = json.shapes.map(shape => Shape.fromJSON(shape));
+      layer.shapes = json.shapes.map(shape => Shape.fromJSON(shape, layer));
     }
 
     // Load frames if present (old system - for backwards compatibility)
@@ -2951,6 +2995,21 @@ class Layer extends Widget {
     };
   }
 
+  // Get all shapes that exist at the given time
+  getVisibleShapes(time) {
+    const visibleShapes = [];
+    for (let shape of this.shapes) {
+      if (shape instanceof TempShape) continue;
+
+      // Check if shape exists at current time
+      let existsValue = this.animationData.interpolate(`shape.${shape.idx}.exists`, time);
+      if (existsValue && existsValue > 0) {
+        visibleShapes.push(shape);
+      }
+    }
+    return visibleShapes;
+  }
+
   draw(ctx) {
     // super.draw(ctx)
     if (!this.visible) return;
@@ -3163,7 +3222,7 @@ class Layer extends Widget {
             strokeShape: false,
             sendToBack: true,
           };
-          let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
+          let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt, this);
           shape.fromPoints(points, 1);
           actions.addShape.create(context.activeObject, shape, cxt);
           break;
@@ -3652,7 +3711,7 @@ class Shape extends BaseShape {
     this.regionIdx = 0;
     this.inProgress = true;
   }
-  static fromJSON(json) {
+  static fromJSON(json, parent) {
     let fillImage = undefined;
     if (json.fillImage && Object.keys(json.fillImage).length !== 0) {
       let img = new Image();
@@ -3672,6 +3731,7 @@ class Shape extends BaseShape {
         fillShape: json.filled,
         strokeShape: json.stroked,
       },
+      parent,
       json.idx,
       json.shapeId,
     );
@@ -3774,6 +3834,7 @@ class Shape extends BaseShape {
       this.startx,
       this.starty,
       {},
+      this.parent,
       idx.slice(0, 8) + this.idx.slice(8),
       this.shapeId,
     );
@@ -4231,15 +4292,24 @@ class GraphicsObject extends Widget {
   }
   bbox() {
     let bbox;
-    // for (let layer of this.layers) {
-    //   let frame = layer.getFrame(this.currentFrameNum);
-    //   if (frame.shapes.length > 0 && bbox == undefined) {
-    //     bbox = structuredClone(frame.shapes[0].boundingBox);
-    //   }
-    //   for (let shape of frame.shapes) {
-    //     growBoundingBox(bbox, shape.boundingBox);
-    //   }
-    // }
+
+    // NEW: Include shapes from AnimationData system
+    let currentTime = this.currentTime || 0;
+    for (let layer of this.layers) {
+      for (let shape of layer.shapes) {
+        // Check if shape exists at current time
+        let existsValue = layer.animationData.interpolate(`shape.${shape.idx}.exists`, currentTime);
+        if (existsValue !== null && existsValue > 0) {
+          if (!bbox) {
+            bbox = structuredClone(shape.boundingBox);
+          } else {
+            growBoundingBox(bbox, shape.boundingBox);
+          }
+        }
+      }
+    }
+
+    // Include children
     if (this.children.length > 0) {
       if (!bbox) {
         bbox = structuredClone(this.children[0].bbox());
@@ -4248,6 +4318,7 @@ class GraphicsObject extends Widget {
         growBoundingBox(bbox, child.bbox());
       }
     }
+
     if (bbox == undefined) {
       bbox = { x: { min: 0, max: 0 }, y: { min: 0, max: 0 } };
     }
@@ -4259,7 +4330,7 @@ class GraphicsObject extends Widget {
     bbox.y.max += this.y;
     return bbox;
   }
-  /*
+
   draw(context, calculateTransform=false) {
     let ctx = context.ctx;
     ctx.save();
@@ -4279,34 +4350,142 @@ class GraphicsObject extends Widget {
       this.idx in context.activeAction.selection
     )
       return;
+
     for (let layer of this.layers) {
       if (context.activeObject == this && !layer.visible) continue;
-      let frame = layer.getFrame(this.currentFrameNum);
-      for (let shape of frame.shapes) {
+
+      // Draw activeShape (shape being drawn in progress) for active layer only
+      if (layer === context.activeLayer && layer.activeShape) {
+        let cxt = {...context};
+        layer.activeShape.draw(cxt);
+      }
+
+      // NEW: Use AnimationData system to draw shapes
+      let currentTime = this.currentTime || 0;
+      let visibleShapes = [];
+
+      for (let shape of layer.shapes) {
+        if (shape instanceof TempShape) continue;
+        let existsValue = layer.animationData.interpolate(`shape.${shape.idx}.exists`, currentTime);
+        if (existsValue !== null && existsValue > 0) {
+          let zOrder = layer.animationData.interpolate(`shape.${shape.idx}.zOrder`, currentTime);
+          visibleShapes.push({ shape, zOrder: zOrder || 0 });
+        }
+      }
+
+      // Sort by zOrder
+      visibleShapes.sort((a, b) => a.zOrder - b.zOrder);
+
+      // Draw sorted shapes
+      for (let { shape } of visibleShapes) {
         let cxt = {...context}
         if (context.shapeselection.indexOf(shape) >= 0) {
           cxt.selected = true
         }
         shape.draw(cxt);
       }
+
+      // Draw child objects using AnimationData curves
       for (let child of layer.children) {
         if (child == context.activeObject) continue;
         let idx = child.idx;
-        if (idx in frame.keys) {
-          child.x = frame.keys[idx].x;
-          child.y = frame.keys[idx].y;
-          child.rotation = frame.keys[idx].rotation;
-          child.scale_x = frame.keys[idx].scale_x;
-          child.scale_y = frame.keys[idx].scale_y;
+
+        // Use AnimationData to get child's transform
+        let childX = layer.animationData.interpolate(`child.${idx}.x`, currentTime);
+        let childY = layer.animationData.interpolate(`child.${idx}.y`, currentTime);
+        let childRotation = layer.animationData.interpolate(`child.${idx}.rotation`, currentTime);
+        let childScaleX = layer.animationData.interpolate(`child.${idx}.scale_x`, currentTime);
+        let childScaleY = layer.animationData.interpolate(`child.${idx}.scale_y`, currentTime);
+
+        if (childX !== null && childY !== null) {
+          child.x = childX;
+          child.y = childY;
+          child.rotation = childRotation || 0;
+          child.scale_x = childScaleX || 1;
+          child.scale_y = childScaleY || 1;
           ctx.save();
           child.draw(context);
-          if (true) {
-          }
           ctx.restore();
         }
       }
     }
     if (this == context.activeObject) {
+      // Draw selection rectangles for selected items
+      if (mode == "select") {
+        for (let item of context.selection) {
+          if (!item) continue;
+          ctx.save();
+          ctx.strokeStyle = "#00ffff";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          let bbox = getRotatedBoundingBox(item);
+          ctx.rect(
+            bbox.x.min,
+            bbox.y.min,
+            bbox.x.max - bbox.x.min,
+            bbox.y.max - bbox.y.min,
+          );
+          ctx.stroke();
+          ctx.restore();
+        }
+        // Draw drag selection rectangle
+        if (context.selectionRect) {
+          ctx.save();
+          ctx.strokeStyle = "#00ffff";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.rect(
+            context.selectionRect.x1,
+            context.selectionRect.y1,
+            context.selectionRect.x2 - context.selectionRect.x1,
+            context.selectionRect.y2 - context.selectionRect.y1,
+          );
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else if (mode == "transform") {
+        let bbox = undefined;
+        for (let item of context.selection) {
+          if (bbox == undefined) {
+            bbox = getRotatedBoundingBox(item);
+          } else {
+            growBoundingBox(bbox, getRotatedBoundingBox(item));
+          }
+        }
+        if (bbox != undefined) {
+          ctx.save();
+          ctx.strokeStyle = "#00ffff";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          let xdiff = bbox.x.max - bbox.x.min;
+          let ydiff = bbox.y.max - bbox.y.min;
+          ctx.rect(bbox.x.min, bbox.y.min, xdiff, ydiff);
+          ctx.stroke();
+          ctx.fillStyle = "#000000";
+          let rectRadius = 5;
+          for (let i of [
+            [0, 0],
+            [0.5, 0],
+            [1, 0],
+            [1, 0.5],
+            [1, 1],
+            [0.5, 1],
+            [0, 1],
+            [0, 0.5],
+          ]) {
+            ctx.beginPath();
+            ctx.rect(
+              bbox.x.min + xdiff * i[0] - rectRadius,
+              bbox.y.min + ydiff * i[1] - rectRadius,
+              rectRadius * 2,
+              rectRadius * 2,
+            );
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+      }
+
       if (context.activeCurve) {
         ctx.strokeStyle = "magenta";
         ctx.beginPath();
@@ -4358,7 +4537,10 @@ class GraphicsObject extends Widget {
         ctx.fill();
         ctx.restore();
       }
-  */
+    }
+    ctx.restore();
+  }
+  /*
   draw(ctx) {
     super.draw(ctx)
     if (this==context.activeObject) {
@@ -4440,6 +4622,7 @@ class GraphicsObject extends Widget {
       }
     }
   }
+  */
   transformCanvas(ctx) {
     if (this.parent) {
       this.parent.transformCanvas(ctx)
@@ -4510,27 +4693,53 @@ class GraphicsObject extends Widget {
     }
     super.handleMouseEvent(eventType, x, y)
   }
-  addObject(object, x = 0, y = 0, frame = undefined, layer=undefined) {
-    if (frame == undefined) {
-      frame = this.currentFrame;
+  addObject(object, x = 0, y = 0, time = undefined, layer=undefined) {
+    if (time == undefined) {
+      time = this.currentTime || 0;
     }
     if (layer==undefined) {
       layer = this.activeLayer
     }
-    // this.children.push(object);
+
     layer.children.push(object)
     object.parent = this;
     object.x = x;
     object.y = y;
     let idx = object.idx;
-    frame.keys[idx] = {
-      x: x,
-      y: y,
-      rotation: 0,
-      scale_x: 1,
-      scale_y: 1,
-      goToFrame: 1,
-    };
+
+    // Add animation curves for the object's position/transform in the layer
+    let xCurve = new AnimationCurve(`child.${idx}.x`);
+    xCurve.addKeyframe(new Keyframe(time, x, 'linear'));
+    layer.animationData.setCurve(`child.${idx}.x`, xCurve);
+
+    let yCurve = new AnimationCurve(`child.${idx}.y`);
+    yCurve.addKeyframe(new Keyframe(time, y, 'linear'));
+    layer.animationData.setCurve(`child.${idx}.y`, yCurve);
+
+    let rotationCurve = new AnimationCurve(`child.${idx}.rotation`);
+    rotationCurve.addKeyframe(new Keyframe(time, 0, 'linear'));
+    layer.animationData.setCurve(`child.${idx}.rotation`, rotationCurve);
+
+    let scaleXCurve = new AnimationCurve(`child.${idx}.scale_x`);
+    scaleXCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
+    layer.animationData.setCurve(`child.${idx}.scale_x`, scaleXCurve);
+
+    let scaleYCurve = new AnimationCurve(`child.${idx}.scale_y`);
+    scaleYCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
+    layer.animationData.setCurve(`child.${idx}.scale_y`, scaleYCurve);
+
+    // LEGACY: Also update frame.keys for backwards compatibility
+    let frame = this.currentFrame;
+    if (frame) {
+      frame.keys[idx] = {
+        x: x,
+        y: y,
+        rotation: 0,
+        scale_x: 1,
+        scale_y: 1,
+        goToFrame: 1,
+      };
+    }
   }
   removeChild(childObject) {
     let idx = childObject.idx;
@@ -5759,15 +5968,35 @@ function stage() {
 
   stage.addEventListener("wheel", (event) => {
     event.preventDefault();
-    const deltaX = event.deltaX * config.scrollSpeed;
-    const deltaY = event.deltaY * config.scrollSpeed;
 
-    stage.offsetX += deltaX;
-    stage.offsetY += deltaY;
-    const currentTime = Date.now();
-    if (currentTime - lastResizeTime > throttleIntervalMs) {
-      lastResizeTime = currentTime;
+    // Check if this is a pinch-zoom gesture (ctrlKey is set on trackpad pinch)
+    if (event.ctrlKey) {
+      // Pinch zoom - zoom in/out based on deltaY
+      const zoomFactor = event.deltaY > 0 ? 0.95 : 1.05;
+      const oldZoom = context.zoomLevel;
+      context.zoomLevel = Math.max(1/8, Math.min(8, context.zoomLevel * zoomFactor));
+
+      // Update scroll position to zoom towards mouse
+      if (context.mousePos) {
+        const actualZoomFactor = context.zoomLevel / oldZoom;
+        stage.offsetX = (stage.offsetX + context.mousePos.x) * actualZoomFactor - context.mousePos.x;
+        stage.offsetY = (stage.offsetY + context.mousePos.y) * actualZoomFactor - context.mousePos.y;
+      }
+
       updateUI();
+      updateMenu();
+    } else {
+      // Regular scroll
+      const deltaX = event.deltaX * config.scrollSpeed;
+      const deltaY = event.deltaY * config.scrollSpeed;
+
+      stage.offsetX += deltaX;
+      stage.offsetY += deltaY;
+      const currentTime = Date.now();
+      if (currentTime - lastResizeTime > throttleIntervalMs) {
+        lastResizeTime = currentTime;
+        updateUI();
+      }
     }
   });
   // scroller.className = "scroll"
@@ -5912,7 +6141,7 @@ function stage() {
         // context.lastMouse = mouse;
         break;
       case "select":
-        if (context.activeObject.currentFrame.frameType != "keyframe") break;
+        // No longer need keyframe check with AnimationData system
         selection = selectVertex(context, mouse);
         if (selection) {
           context.dragging = true;
@@ -5966,8 +6195,15 @@ function stage() {
                 i--
               ) {
                 child = context.activeObject.activeLayer.children[i];
-                if (!(child.idx in context.activeObject.currentFrame.keys))
-                  continue;
+
+                // Check if child exists using AnimationData curves
+                let currentTime = context.activeObject.currentTime || 0;
+                let childX = context.activeObject.activeLayer.animationData.interpolate(`child.${child.idx}.x`, currentTime);
+                let childY = context.activeObject.activeLayer.animationData.interpolate(`child.${child.idx}.y`, currentTime);
+
+                // Skip if child doesn't have position data at current time
+                if (childX === null || childY === null) continue;
+
                 // let bbox = child.bbox()
                 if (hitTest(mouse, child)) {
                   if (context.selection.indexOf(child) != -1) {
@@ -6245,6 +6481,15 @@ function stage() {
             }
           }
           actions.editShape.create(context.activeCurve.shape, newCurves);
+          // Add the shape to selection after editing
+          if (e.shiftKey) {
+            if (!context.shapeselection.includes(context.activeCurve.shape)) {
+              context.shapeselection.push(context.activeCurve.shape);
+            }
+          } else {
+            context.shapeselection = [context.activeCurve.shape];
+          }
+          actions.select.create();
         } else if (context.selection.length) {
           actions.select.create();
           // actions.editFrame.create(context.activeObject.currentFrame)
@@ -6412,14 +6657,31 @@ function stage() {
               context.activeCurve.startmouse,
             ).points;
           } else {
+            // TODO: Add user preference for keyframing behavior:
+            // - Auto-keyframe (current): create/update keyframe at current time
+            // - Edit previous (Flash-style): update most recent keyframe before current time
+            // - Ephemeral (Blender-style): changes don't persist without manual keyframe
+            // Could also add modifier key (e.g. Shift) to toggle between modes
+
+            // Move selected children (groups) using AnimationData with auto-keyframing
             for (let child of context.selection) {
-              if (!context.activeObject.currentFrame) continue;
-              if (!context.activeObject.currentFrame.keys) continue;
-              if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
-              context.activeObject.currentFrame.keys[child.idx].x +=
-                mouse.x - context.lastMouse.x;
-              context.activeObject.currentFrame.keys[child.idx].y +=
-                mouse.y - context.lastMouse.y;
+              let currentTime = context.activeObject.currentTime || 0;
+              let layer = context.activeObject.activeLayer;
+
+              // Get current position from AnimationData
+              let childX = layer.animationData.interpolate(`child.${child.idx}.x`, currentTime);
+              let childY = layer.animationData.interpolate(`child.${child.idx}.y`, currentTime);
+
+              // Skip if child doesn't have position data
+              if (childX === null || childY === null) continue;
+
+              // Update position
+              let newX = childX + (mouse.x - context.lastMouse.x);
+              let newY = childY + (mouse.y - context.lastMouse.y);
+
+              // Auto-keyframe: create/update keyframe at current time
+              layer.animationData.addKeyframe(`child.${child.idx}.x`, new Keyframe(currentTime, newX, 'linear'));
+              layer.animationData.addKeyframe(`child.${child.idx}.y`, new Keyframe(currentTime, newY, 'linear'));
             }
           }
         } else if (context.selectionRect) {
@@ -6432,9 +6694,14 @@ function stage() {
               context.selection.push(child);
             }
           }
-          for (let shape of context.activeObject.currentFrame.shapes) {
-            if (hitTest(regionToBbox(context.selectionRect), shape)) {
-              context.shapeselection.push(shape);
+          // Use getVisibleShapes instead of currentFrame.shapes
+          let currentTime = context.activeObject?.currentTime || 0;
+          let layer = context.activeObject?.activeLayer;
+          if (layer) {
+            for (let shape of layer.getVisibleShapes(currentTime)) {
+              if (hitTest(regionToBbox(context.selectionRect), shape)) {
+                context.shapeselection.push(shape);
+              }
             }
           }
         } else {
@@ -6603,6 +6870,7 @@ function toolbar() {
   for (let tool in tools) {
     let toolbtn = document.createElement("button");
     toolbtn.className = "toolbtn";
+    toolbtn.setAttribute("data-tool", tool); // For UI testing
     let icon = document.createElement("img");
     icon.className = "icon";
     icon.src = tools[tool].icon;
@@ -7040,6 +7308,133 @@ function timeline() {
   return timeline_cvs;
 }
 
+function timelineV2() {
+  let canvas = document.createElement("canvas");
+  canvas.className = "timeline-v2";
+
+  // Create TimelineWindowV2 widget
+  const timelineWidget = new TimelineWindowV2(0, 0, context);
+
+  // Store reference in context for zoom controls
+  context.timelineWidget = timelineWidget;
+
+  // Update canvas size based on container
+  function updateCanvasSize() {
+    const canvasStyles = window.getComputedStyle(canvas);
+    canvas.width = parseInt(canvasStyles.width);
+    canvas.height = parseInt(canvasStyles.height);
+
+    // Update widget dimensions
+    timelineWidget.width = canvas.width;
+    timelineWidget.height = canvas.height;
+
+    // Render
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    timelineWidget.draw(ctx);
+  }
+
+  // Store updateCanvasSize on the widget so zoom controls can trigger redraw
+  timelineWidget.requestRedraw = updateCanvasSize;
+
+  // Add custom property to store the time format toggle button
+  // so createPane can add it to the header
+  canvas.headerControls = () => {
+    const toggleButton = document.createElement("button");
+    toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
+    toggleButton.style.marginLeft = '10px';
+    toggleButton.addEventListener("click", () => {
+      timelineWidget.toggleTimeFormat();
+      toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
+      updateCanvasSize(); // Redraw after format change
+    });
+    return [toggleButton];
+  };
+
+  // Set up ResizeObserver
+  const resizeObserver = new ResizeObserver(() => {
+    updateCanvasSize();
+  });
+  resizeObserver.observe(canvas);
+
+  // Mouse event handlers
+  canvas.addEventListener("pointerdown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Capture pointer to ensure we get move/up events even if cursor leaves canvas
+    canvas.setPointerCapture(e.pointerId);
+
+    timelineWidget.handleMouseEvent("mousedown", x, y);
+    updateCanvasSize(); // Redraw after interaction
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    timelineWidget.handleMouseEvent("mousemove", x, y);
+    updateCanvasSize(); // Redraw after interaction
+  });
+
+  canvas.addEventListener("pointerup", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Release pointer capture
+    canvas.releasePointerCapture(e.pointerId);
+
+    timelineWidget.handleMouseEvent("mouseup", x, y);
+    updateCanvasSize(); // Redraw after interaction
+  });
+
+  // Add wheel event for pinch-zoom support
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+
+    // Check if this is a pinch-zoom gesture (ctrlKey is set on trackpad pinch)
+    if (event.ctrlKey) {
+      // Pinch zoom - zoom in/out based on deltaY
+      const zoomFactor = event.deltaY > 0 ? 0.95 : 1.05;
+      const oldPixelsPerSecond = timelineWidget.timelineState.pixelsPerSecond;
+
+      // Calculate the time under the mouse BEFORE zooming
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseTimeBeforeZoom = timelineWidget.timelineState.pixelToTime(mouseX);
+
+      // Apply zoom
+      timelineWidget.timelineState.pixelsPerSecond *= zoomFactor;
+
+      // Clamp to reasonable range
+      timelineWidget.timelineState.pixelsPerSecond = Math.max(10, Math.min(10000, timelineWidget.timelineState.pixelsPerSecond));
+
+      // Adjust viewport so the time under the mouse stays in the same place
+      // We want: pixelToTime(mouseX) == mouseTimeBeforeZoom
+      // pixelToTime(mouseX) = (mouseX / pixelsPerSecond) + viewportStartTime
+      // So: viewportStartTime = mouseTimeBeforeZoom - (mouseX / pixelsPerSecond)
+      timelineWidget.timelineState.viewportStartTime = mouseTimeBeforeZoom - (mouseX / timelineWidget.timelineState.pixelsPerSecond);
+      timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
+
+      updateCanvasSize();
+    } else {
+      // Regular scroll - horizontal scroll for timeline
+      const deltaX = event.deltaX * config.scrollSpeed;
+
+      // Update viewport horizontal scroll
+      timelineWidget.timelineState.viewportStartTime += deltaX / timelineWidget.timelineState.pixelsPerSecond;
+      timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
+
+      updateCanvasSize();
+    }
+  });
+
+  updateCanvasSize();
+  return canvas;
+}
+
 function infopanel() {
   let panel = document.createElement("div");
   panel.className = "infopanel";
@@ -7263,6 +7658,14 @@ function createPane(paneType = undefined, div = undefined) {
     // Prevent the click event from propagating to the window click listener
     event.stopPropagation();
   });
+
+  // Add custom header controls if the content element provides them
+  if (content.headerControls && typeof content.headerControls === 'function') {
+    const controls = content.headerControls();
+    for (const control of controls) {
+      header.appendChild(control);
+    }
+  }
 
   div.className = "vertical-grid";
   header.style.height = "calc( 2 * var(--lineheight))";
@@ -7509,13 +7912,13 @@ function renderUI() {
 
     context.ctx = ctx;
     // root.draw(context);
-    root.draw(ctx)
+    root.draw(context)
     if (context.activeObject != root) {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
       ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
       const transform = ctx.getTransform()
       context.activeObject.transformCanvas(ctx)
-      context.activeObject.draw(ctx);
+      context.activeObject.draw(context);
       ctx.setTransform(transform)
     }
     if (context.activeShape) {
@@ -8669,6 +9072,10 @@ const panes = {
   timeline: {
     name: "timeline",
     func: timeline,
+  },
+  timelineV2: {
+    name: "timeline-v2",
+    func: timelineV2,
   },
   infopanel: {
     name: "infopanel",
