@@ -1,5 +1,7 @@
 // Timeline V2 - New timeline implementation for AnimationData curve-based system
 
+import { backgroundColor, foregroundColor, shadow, labelColor, scrubberColor } from "./styles.js"
+
 /**
  * TimelineState - Global state for timeline display and interaction
  */
@@ -163,7 +165,7 @@ class TimeRuler {
     ctx.save()
 
     // Background
-    ctx.fillStyle = '#2a2a2a'
+    ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, width, this.height)
 
     // Determine interval based on current zoom and format
@@ -200,7 +202,7 @@ class TimeRuler {
     const startFrame = Math.floor(this.state.timeToFrame(startTime) / interval) * interval
     const endFrame = Math.ceil(this.state.timeToFrame(endTime) / interval) * interval
 
-    ctx.fillStyle = '#cccccc'
+    ctx.fillStyle = labelColor
     ctx.font = '11px sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'top'
@@ -212,7 +214,7 @@ class TimeRuler {
       if (x < 0 || x > width) continue
 
       // Major tick
-      ctx.strokeStyle = '#888888'
+      ctx.strokeStyle = foregroundColor
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(x, this.height - 10)
@@ -232,7 +234,7 @@ class TimeRuler {
 
           if (minorX < 0 || minorX > width) continue
 
-          ctx.strokeStyle = '#555555'
+          ctx.strokeStyle = shadow
           ctx.beginPath()
           ctx.moveTo(minorX, this.height - 5)
           ctx.lineTo(minorX, this.height)
@@ -249,7 +251,7 @@ class TimeRuler {
     const startTick = Math.floor(startTime / interval) * interval
     const endTick = Math.ceil(endTime / interval) * interval
 
-    ctx.fillStyle = '#cccccc'
+    ctx.fillStyle = labelColor
     ctx.font = '11px sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'top'
@@ -260,7 +262,7 @@ class TimeRuler {
       if (x < 0 || x > width) continue
 
       // Major tick
-      ctx.strokeStyle = '#888888'
+      ctx.strokeStyle = foregroundColor
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(x, this.height - 10)
@@ -278,7 +280,7 @@ class TimeRuler {
 
         if (minorX < 0 || minorX > width) continue
 
-        ctx.strokeStyle = '#555555'
+        ctx.strokeStyle = shadow
         ctx.beginPath()
         ctx.moveTo(minorX, this.height - 5)
         ctx.lineTo(minorX, this.height)
@@ -296,7 +298,7 @@ class TimeRuler {
     // Only draw if playhead is visible
     if (x < 0 || x > width) return
 
-    ctx.strokeStyle = '#ff0000'
+    ctx.strokeStyle = scrubberColor
     ctx.lineWidth = 2
     ctx.beginPath()
     ctx.moveTo(x, 0)
@@ -304,7 +306,7 @@ class TimeRuler {
     ctx.stroke()
 
     // Playhead handle (triangle at top)
-    ctx.fillStyle = '#ff0000'
+    ctx.fillStyle = scrubberColor
     ctx.beginPath()
     ctx.moveTo(x, 0)
     ctx.lineTo(x - 6, 8)
@@ -332,7 +334,6 @@ class TimeRuler {
     this.state.currentTime = this.state.pixelToTime(x)
     this.state.currentTime = Math.max(0, this.state.currentTime)
     this.draggingPlayhead = true
-    console.log("TimeRuler: Set draggingPlayhead = true, currentTime =", this.state.currentTime);
     return true
   }
 
@@ -340,11 +341,9 @@ class TimeRuler {
    * Handle mouse move - drag playhead
    */
   mousemove(x, y) {
-    console.log("TimeRuler.mousemove called, draggingPlayhead =", this.draggingPlayhead);
     if (this.draggingPlayhead) {
       const newTime = this.state.pixelToTime(x);
       this.state.currentTime = Math.max(0, newTime);
-      console.log("TimeRuler: Updated currentTime to", this.state.currentTime);
       return true
     }
     return false

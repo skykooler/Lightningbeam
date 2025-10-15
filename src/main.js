@@ -467,6 +467,7 @@ let actions = {
       undoStack.push({ name: "addShape", action: action });
       actions.addShape.execute(action);
       updateMenu();
+      updateLayers();
     },
     execute: (action) => {
       let layer = pointerList[action.layer];
@@ -1553,6 +1554,7 @@ let actions = {
       undoStack.push({ name: "group", action: action });
       actions.group.execute(action);
       updateMenu();
+      updateLayers();
     },
     execute: (action) => {
       let group = new GraphicsObject(action.groupUuid);
@@ -4818,7 +4820,7 @@ window.addEventListener("DOMContentLoaded", () => {
     rootPane,
     10,
     true,
-    createPane(panes.timeline),
+    createPane(panes.timelineV2),
   );
   let [stageAndTimeline, _infopanel] = splitPane(
     panel,
@@ -7394,6 +7396,11 @@ function timelineV2() {
   canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
 
+    // Get mouse position
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+
     // Check if this is a pinch-zoom gesture (ctrlKey is set on trackpad pinch)
     if (event.ctrlKey) {
       // Pinch zoom - zoom in/out based on deltaY
@@ -7401,8 +7408,6 @@ function timelineV2() {
       const oldPixelsPerSecond = timelineWidget.timelineState.pixelsPerSecond;
 
       // Calculate the time under the mouse BEFORE zooming
-      const rect = canvas.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
       const mouseTimeBeforeZoom = timelineWidget.timelineState.pixelToTime(mouseX);
 
       // Apply zoom
@@ -7420,12 +7425,23 @@ function timelineV2() {
 
       updateCanvasSize();
     } else {
-      // Regular scroll - horizontal scroll for timeline
-      const deltaX = event.deltaX * config.scrollSpeed;
+      // Check if mouse is over the ruler area (horizontal scroll) or track area (vertical scroll)
+      if (mouseY <= timelineWidget.ruler.height) {
+        // Mouse over ruler - horizontal scroll for timeline
+        const deltaX = event.deltaX * config.scrollSpeed;
+        timelineWidget.timelineState.viewportStartTime += deltaX / timelineWidget.timelineState.pixelsPerSecond;
+        timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
+      } else {
+        // Mouse over track area - vertical scroll for tracks
+        const deltaY = event.deltaY * config.scrollSpeed;
+        timelineWidget.trackScrollOffset -= deltaY;
 
-      // Update viewport horizontal scroll
-      timelineWidget.timelineState.viewportStartTime += deltaX / timelineWidget.timelineState.pixelsPerSecond;
-      timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
+        // Clamp scroll offset
+        const trackAreaHeight = canvas.height - timelineWidget.ruler.height;
+        const totalTracksHeight = timelineWidget.trackHierarchy.getTotalHeight();
+        const maxScroll = Math.min(0, trackAreaHeight - totalTracksHeight);
+        timelineWidget.trackScrollOffset = Math.max(maxScroll, Math.min(0, timelineWidget.trackScrollOffset));
+      }
 
       updateCanvasSize();
     }
@@ -7896,6 +7912,10 @@ function updateUI() {
   uiDirty = true;
 }
 
+// Add updateUI and updateMenu to context so widgets can call them
+context.updateUI = updateUI;
+context.updateMenu = updateMenu;
+
 function renderUI() {
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d");
@@ -8016,6 +8036,11 @@ function updateLayers() {
 }
 
 function renderLayers() {
+  // Also trigger TimelineV2 redraw if it exists
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+
   for (let canvas of document.querySelectorAll(".timeline")) {
     const width = canvas.width;
     const height = canvas.height;

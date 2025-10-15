@@ -1,6 +1,6 @@
-import { backgroundColor, foregroundColor, frameWidth, highlight, layerHeight, shade, shadow } from "./styles.js";
+import { backgroundColor, foregroundColor, frameWidth, highlight, layerHeight, shade, shadow, labelColor } from "./styles.js";
 import { clamp, drawBorderedRect, drawCheckerboardBackground, hslToRgb, hsvToRgb, rgbToHex } from "./utils.js"
-import { TimelineState, TimeRuler } from "./timeline.js"
+import { TimelineState, TimeRuler, TrackHierarchy } from "./timeline.js"
 
 function growBoundingBox(bboxa, bboxb) {
   bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
@@ -520,6 +520,7 @@ class TimelineWindow extends ScrollableWindow {
 /**
  * TimelineWindowV2 - New timeline widget using AnimationData curve-based system
  * Phase 1: Time ruler with zoom-adaptive intervals and playhead
+ * Phase 2: Track hierarchy display
  */
 class TimelineWindowV2 extends Widget {
   constructor(x, y, context) {
@@ -534,48 +535,235 @@ class TimelineWindowV2 extends Widget {
     // Create time ruler widget
     this.ruler = new TimeRuler(this.timelineState)
 
+    // Create track hierarchy manager
+    this.trackHierarchy = new TrackHierarchy()
+
     // Track if we're dragging playhead
     this.draggingPlayhead = false
+
+    // Vertical scroll offset for track hierarchy
+    this.trackScrollOffset = 0
   }
 
   draw(ctx) {
     ctx.save()
 
     // Draw background
-    ctx.fillStyle = '#1e1e1e'
+    ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, this.width, this.height)
 
     // Draw time ruler at top
     this.ruler.draw(ctx, this.width)
 
-    // TODO Phase 2: Draw track hierarchy below ruler
+    // Phase 2: Build and draw track hierarchy
+    if (this.context.activeObject) {
+      this.trackHierarchy.buildTracks(this.context.activeObject)
+      this.drawTracks(ctx)
+    }
+
     // TODO Phase 3: Draw segments
     // TODO Phase 4: Draw minimized curves
 
     ctx.restore()
   }
 
+  /**
+   * Draw track hierarchy (Phase 2)
+   */
+  drawTracks(ctx) {
+    ctx.save()
+    ctx.translate(0, this.ruler.height)  // Start below ruler
+
+    // Clip to available track area
+    const trackAreaHeight = this.height - this.ruler.height
+    ctx.beginPath()
+    ctx.rect(0, 0, this.width, trackAreaHeight)
+    ctx.clip()
+
+    // Apply vertical scroll offset
+    ctx.translate(0, this.trackScrollOffset)
+
+    const indentSize = 20  // Pixels per indent level
+
+    for (let i = 0; i < this.trackHierarchy.tracks.length; i++) {
+      const track = this.trackHierarchy.tracks[i]
+      const y = i * this.trackHierarchy.trackHeight
+
+      // Check if this track is selected
+      const isSelected = this.isTrackSelected(track)
+
+      // Draw track background (alternating colors or selected highlight)
+      if (isSelected) {
+        ctx.fillStyle = highlight  // Highlighted color for selected track
+      } else {
+        ctx.fillStyle = i % 2 === 0 ? backgroundColor : shade
+      }
+      ctx.fillRect(0, y, this.width, this.trackHierarchy.trackHeight)
+
+      // Draw track border
+      ctx.strokeStyle = shadow
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(0, y + this.trackHierarchy.trackHeight)
+      ctx.lineTo(this.width, y + this.trackHierarchy.trackHeight)
+      ctx.stroke()
+
+      // Calculate indent
+      const indent = track.indent * indentSize
+
+      // Draw expand/collapse indicator for layers and objects with children
+      if (track.type === 'layer' || (track.type === 'object' && track.object.children && track.object.children.length > 0)) {
+        const triangleX = indent + 8
+        const triangleY = y + this.trackHierarchy.trackHeight / 2
+
+        ctx.fillStyle = foregroundColor
+        ctx.beginPath()
+        if (track.collapsed) {
+          // Collapsed: right-pointing triangle ▶
+          ctx.moveTo(triangleX, triangleY - 4)
+          ctx.lineTo(triangleX + 6, triangleY)
+          ctx.lineTo(triangleX, triangleY + 4)
+        } else {
+          // Expanded: down-pointing triangle ▼
+          ctx.moveTo(triangleX - 4, triangleY - 2)
+          ctx.lineTo(triangleX + 4, triangleY - 2)
+          ctx.lineTo(triangleX, triangleY + 4)
+        }
+        ctx.closePath()
+        ctx.fill()
+      }
+
+      // Draw track name
+      ctx.fillStyle = labelColor
+      ctx.font = '12px sans-serif'
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(track.name, indent + 20, y + this.trackHierarchy.trackHeight / 2)
+
+      // Draw type indicator
+      ctx.fillStyle = foregroundColor
+      ctx.font = '10px sans-serif'
+      const typeText = track.type === 'layer' ? '[L]' : track.type === 'object' ? '[G]' : '[S]'
+      ctx.fillText(typeText, indent + 20 + ctx.measureText(track.name).width + 8, y + this.trackHierarchy.trackHeight / 2)
+    }
+
+    ctx.restore()
+  }
+
   mousedown(x, y) {
-    console.log("TimelineV2 mousedown:", x, y, "ruler height:", this.ruler.height);
     // Check if clicking in ruler area
     if (y <= this.ruler.height) {
       // Let the ruler handle the mousedown (for playhead dragging)
       const hitPlayhead = this.ruler.mousedown(x, y);
-      console.log("Ruler mousedown returned:", hitPlayhead);
       if (hitPlayhead) {
         this.draggingPlayhead = true
         this._globalEvents.add("mousemove")
         this._globalEvents.add("mouseup")
-        console.log("Started dragging playhead");
         return true
       }
+    }
+
+    // Check if clicking in track area
+    const trackY = y - this.ruler.height
+    if (trackY >= 0) {
+      // Adjust for vertical scroll offset
+      const adjustedY = trackY - this.trackScrollOffset
+      const track = this.trackHierarchy.getTrackAtY(adjustedY)
+      if (track) {
+        const indentSize = 20
+        const indent = track.indent * indentSize
+        const triangleX = indent + 8
+
+        // Check if clicking on expand/collapse triangle
+        if (x >= triangleX - 8 && x <= triangleX + 14) {
+          // Toggle collapsed state
+          if (track.type === 'layer') {
+            track.object.collapsed = !track.object.collapsed
+          } else if (track.type === 'object') {
+            track.object.trackCollapsed = !track.object.trackCollapsed
+          }
+          // Rebuild tracks after collapsing/expanding
+          this.trackHierarchy.buildTracks(this.context.activeObject)
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
+        // Clicking elsewhere on track selects it
+        this.selectTrack(track)
+        if (this.requestRedraw) this.requestRedraw()
+        return true
+      }
+    }
+
+    return false
+  }
+
+  /**
+   * Check if a track is currently selected
+   */
+  isTrackSelected(track) {
+    if (track.type === 'layer') {
+      return this.context.activeLayer === track.object
+    } else if (track.type === 'shape') {
+      return this.context.shapeselection?.includes(track.object)
+    } else if (track.type === 'object') {
+      return this.context.selection?.includes(track.object)
     }
     return false
   }
 
+  /**
+   * Select a track and update the stage selection
+   */
+  selectTrack(track) {
+    // Store old selection before changing
+    this.context.oldselection = this.context.selection
+    this.context.oldshapeselection = this.context.shapeselection
+
+    if (track.type === 'layer') {
+      // Find the index of this layer in the activeObject
+      const layerIndex = this.context.activeObject.children.indexOf(track.object)
+      if (layerIndex !== -1) {
+        this.context.activeObject.currentLayer = layerIndex
+      }
+      // Clear selections when selecting layer
+      this.context.selection = []
+      this.context.shapeselection = []
+    } else if (track.type === 'shape') {
+      // Find the layer this shape belongs to and select it
+      for (let i = 0; i < this.context.activeObject.allLayers.length; i++) {
+        const layer = this.context.activeObject.allLayers[i]
+        if (layer.shapes && layer.shapes.includes(track.object)) {
+          // Find index in children array
+          const layerIndex = this.context.activeObject.children.indexOf(layer)
+          if (layerIndex !== -1) {
+            this.context.activeObject.currentLayer = layerIndex
+          }
+          // Set shape selection
+          this.context.shapeselection = [track.object]
+          this.context.selection = []
+          break
+        }
+      }
+    } else if (track.type === 'object') {
+      // Select the GraphicsObject
+      this.context.selection = [track.object]
+      this.context.shapeselection = []
+    }
+
+    // Update the stage UI to reflect selection changes
+    if (this.context.updateUI) {
+      this.context.updateUI()
+    }
+
+    // Update menu to enable/disable menu items based on selection
+    if (this.context.updateMenu) {
+      this.context.updateMenu()
+    }
+  }
+
   mousemove(x, y) {
     if (this.draggingPlayhead) {
-      console.log("TimelineV2 mousemove while dragging:", x, y);
       // Let the ruler handle the mousemove
       this.ruler.mousemove(x, y)
 
