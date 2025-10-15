@@ -20,6 +20,9 @@ class TimelineState {
 
     // Ruler settings
     this.rulerHeight = 30  // Height of time ruler in pixels
+
+    // Snapping (Phase 5)
+    this.snapToFrames = false  // Whether to snap keyframes to frame boundaries
   }
 
   /**
@@ -146,6 +149,17 @@ class TimelineState {
     this.pixelsPerSecond /= factor
     // Clamp to reasonable range
     this.pixelsPerSecond = Math.max(this.pixelsPerSecond, 10)  // Min zoom
+  }
+
+  /**
+   * Snap time to nearest frame boundary (Phase 5)
+   */
+  snapTime(time) {
+    if (!this.snapToFrames) {
+      return time
+    }
+    const frame = Math.round(time * this.framerate)
+    return frame / this.framerate
   }
 }
 
@@ -472,21 +486,72 @@ class TrackHierarchy {
   }
 
   /**
+   * Calculate height for a specific track based on its curves mode (Phase 4)
+   */
+  getTrackHeight(track) {
+    const baseHeight = this.trackHeight
+
+    // Only objects and shapes can have curves
+    if (track.type !== 'object' && track.type !== 'shape') {
+      return baseHeight
+    }
+
+    const obj = track.object
+
+    // Calculate additional height needed for curves
+    if (obj.curvesMode === 'minimized') {
+      // Count curves for this object/shape
+      // For minimized mode: 15px per curve
+      // This is a simplified calculation - actual curve count would require AnimationData lookup
+      // For now, assume 3-5 curves per object (x, y, rotation, etc)
+      const estimatedCurves = 5
+      return baseHeight + (estimatedCurves * 15) + 10  // +10 for padding
+    } else if (obj.curvesMode === 'expanded') {
+      // Use the object's curvesHeight property
+      return baseHeight + (obj.curvesHeight || 150) + 10  // +10 for padding
+    }
+
+    return baseHeight
+  }
+
+  /**
    * Calculate total height needed for all tracks
    */
   getTotalHeight() {
-    return this.tracks.length * this.trackHeight
+    let totalHeight = 0
+    for (let track of this.tracks) {
+      totalHeight += this.getTrackHeight(track)
+    }
+    return totalHeight
   }
 
   /**
    * Get track at a given Y position
    */
   getTrackAtY(y) {
-    const trackIndex = Math.floor(y / this.trackHeight)
-    if (trackIndex >= 0 && trackIndex < this.tracks.length) {
-      return this.tracks[trackIndex]
+    let currentY = 0
+    for (let i = 0; i < this.tracks.length; i++) {
+      const track = this.tracks[i]
+      const trackHeight = this.getTrackHeight(track)
+
+      if (y >= currentY && y < currentY + trackHeight) {
+        return track
+      }
+
+      currentY += trackHeight
     }
     return null
+  }
+
+  /**
+   * Get Y position for a specific track index (Phase 4)
+   */
+  getTrackY(trackIndex) {
+    let y = 0
+    for (let i = 0; i < trackIndex && i < this.tracks.length; i++) {
+      y += this.getTrackHeight(this.tracks[i])
+    }
+    return y
   }
 }
 

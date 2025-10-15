@@ -75,6 +75,7 @@ const {
 } = window.__TAURI__.dialog;
 const { documentDir, join, basename, appLocalDataDir } = window.__TAURI__.path;
 const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu;
+const { PhysicalPosition, LogicalPosition } = window.__TAURI__.dpi;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
 
@@ -348,6 +349,7 @@ let context = {
   dragDirection: undefined,
   zoomLevel: 1,
   timelineWidget: null, // Reference to TimelineWindowV2 widget for zoom controls
+  config: null, // Reference to config object (set after config is initialized)
 };
 
 let config = {
@@ -403,6 +405,7 @@ async function loadConfig() {
     // const configData = await readTextFile(configPath);
     const configData = localStorage.getItem("lightningbeamConfig") || "{}";
     config = deepMerge({ ...config }, JSON.parse(configData));
+    context.config = config; // Make config accessible to widgets via context
     updateUI();
   } catch (error) {
     console.log("Error loading config, returning default config:", error);
@@ -1736,6 +1739,7 @@ let actions = {
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
         layer.children.splice(layer.children.indexOf(object), 1);
+        object.parentLayer = layer;
         layer.children.push(object);
       }
       updateUI();
@@ -1932,6 +1936,27 @@ function uuidv4() {
     ).toString(16),
   );
 }
+
+/**
+ * Generate a consistent pastel color from a UUID string
+ * Uses hash of UUID to ensure same UUID always produces same color
+ */
+function uuidToColor(uuid) {
+  // Simple hash function
+  let hash = 0;
+  for (let i = 0; i < uuid.length; i++) {
+    hash = uuid.charCodeAt(i) + ((hash << 5) - hash);
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+
+  // Generate HSL color with fixed saturation and lightness for pastel appearance
+  const hue = Math.abs(hash % 360);
+  const saturation = 65; // Medium saturation for pleasant pastels
+  const lightness = 70;  // Light enough to be pastel but readable
+
+  return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+}
+
 function vectorDist(a, b) {
   return Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 }
@@ -2326,9 +2351,10 @@ class Keyframe {
 }
 
 class AnimationCurve {
-  constructor(parameter, uuid = undefined) {
+  constructor(parameter, uuid = undefined, parentAnimationData = null) {
     this.parameter = parameter; // e.g., "x", "y", "rotation", "scale_x", "exists"
     this.keyframes = []; // Always kept sorted by time
+    this.parentAnimationData = parentAnimationData; // Reference to parent AnimationData for duration updates
     if (!uuid) {
       this.idx = uuidv4();
     } else {
@@ -2337,20 +2363,106 @@ class AnimationCurve {
   }
 
   addKeyframe(keyframe) {
-    this.keyframes.push(keyframe);
-    // Keep sorted by time
-    this.keyframes.sort((a, b) => a.time - b.time);
+    // Time resolution based on framerate - half a frame's duration
+    // This can be exposed via UI later
+    const framerate = context.config?.framerate || 24;
+    const timeResolution = (1 / framerate) / 2;
+
+    // Check if there's already a keyframe within the time resolution
+    const existingKeyframe = this.getKeyframeAtTime(keyframe.time, timeResolution);
+
+    if (existingKeyframe) {
+      // Update the existing keyframe's value instead of adding a new one
+      existingKeyframe.value = keyframe.value;
+      existingKeyframe.interpolation = keyframe.interpolation;
+      if (keyframe.easeIn) existingKeyframe.easeIn = keyframe.easeIn;
+      if (keyframe.easeOut) existingKeyframe.easeOut = keyframe.easeOut;
+    } else {
+      // Add new keyframe
+      this.keyframes.push(keyframe);
+      // Keep sorted by time
+      this.keyframes.sort((a, b) => a.time - b.time);
+    }
+
+    // Update animation duration after adding keyframe
+    if (this.parentAnimationData) {
+      this.parentAnimationData.updateDuration();
+    }
   }
 
   removeKeyframe(keyframe) {
     const index = this.keyframes.indexOf(keyframe);
     if (index >= 0) {
       this.keyframes.splice(index, 1);
+
+      // Update animation duration after removing keyframe
+      if (this.parentAnimationData) {
+        this.parentAnimationData.updateDuration();
+      }
     }
   }
 
-  getKeyframeAtTime(time) {
-    return this.keyframes.find(kf => kf.time === time);
+  getKeyframeAtTime(time, timeResolution = 0) {
+    if (this.keyframes.length === 0) return null;
+
+    // If no tolerance, use exact match with binary search
+    if (timeResolution === 0) {
+      let left = 0;
+      let right = this.keyframes.length - 1;
+
+      while (left <= right) {
+        const mid = Math.floor((left + right) / 2);
+        if (this.keyframes[mid].time === time) {
+          return this.keyframes[mid];
+        } else if (this.keyframes[mid].time < time) {
+          left = mid + 1;
+        } else {
+          right = mid - 1;
+        }
+      }
+      return null;
+    }
+
+    // With tolerance, find the closest keyframe within timeResolution
+    let left = 0;
+    let right = this.keyframes.length - 1;
+    let closest = null;
+    let closestDist = Infinity;
+
+    // Binary search to find the insertion point
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      const dist = Math.abs(this.keyframes[mid].time - time);
+
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = this.keyframes[mid];
+      }
+
+      if (this.keyframes[mid].time < time) {
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+
+    // Also check adjacent keyframes for closest match
+    if (left < this.keyframes.length) {
+      const dist = Math.abs(this.keyframes[left].time - time);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = this.keyframes[left];
+      }
+    }
+    if (right >= 0) {
+      const dist = Math.abs(this.keyframes[right].time - time);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = this.keyframes[right];
+      }
+    }
+
+    return closestDist < timeResolution ? closest : null;
   }
 
   // Find the two keyframes that bracket the given time
@@ -2426,6 +2538,10 @@ class AnimationCurve {
         }
         return prev.value;
 
+      case "zero":
+        // Return 0 for the entire interval (used for inactive segments)
+        return 0;
+
       default:
         return prev.value;
     }
@@ -2438,6 +2554,20 @@ class AnimationCurve {
     return 3 * u * u * t * easeOut.y +
            3 * u * t * t * easeIn.y +
            t * t * t;
+  }
+
+  // Display color for this curve in timeline (based on parameter type) - Phase 4
+  get displayColor() {
+    // Auto-determined from parameter name
+    if (this.parameter.endsWith('.x')) return '#7a00b3'  // purple
+    if (this.parameter.endsWith('.y')) return '#ff00ff'  // magenta
+    if (this.parameter.endsWith('.rotation')) return '#5555ff'  // blue
+    if (this.parameter.endsWith('.scale_x')) return '#ffaa00'  // orange
+    if (this.parameter.endsWith('.scale_y')) return '#ffff55'  // yellow
+    if (this.parameter.endsWith('.exists')) return '#55ff55'  // green
+    if (this.parameter.endsWith('.zOrder')) return '#55ffff'  // cyan
+    if (this.parameter.endsWith('.frameNumber')) return '#ff5555'  // red
+    return '#ffffff'  // default white
   }
 
   static fromJSON(json) {
@@ -2458,8 +2588,10 @@ class AnimationCurve {
 }
 
 class AnimationData {
-  constructor(uuid = undefined) {
+  constructor(parentLayer = null, uuid = undefined) {
     this.curves = {}; // parameter name -> AnimationCurve
+    this.duration = 0; // Duration in seconds (max time of all keyframes)
+    this.parentLayer = parentLayer; // Reference to parent Layer for updating segment keyframes
     if (!uuid) {
       this.idx = uuidv4();
     } else {
@@ -2473,7 +2605,7 @@ class AnimationData {
 
   getOrCreateCurve(parameter) {
     if (!this.curves[parameter]) {
-      this.curves[parameter] = new AnimationCurve(parameter);
+      this.curves[parameter] = new AnimationCurve(parameter, undefined, this);
     }
     return this.curves[parameter];
   }
@@ -2495,7 +2627,11 @@ class AnimationData {
   }
 
   setCurve(parameter, curve) {
+    // Set parent reference for duration tracking
+    curve.parentAnimationData = this;
     this.curves[parameter] = curve;
+    // Update duration after adding curve with keyframes
+    this.updateDuration();
   }
 
   interpolate(parameter, time) {
@@ -2513,11 +2649,78 @@ class AnimationData {
     return values;
   }
 
-  static fromJSON(json) {
-    const animData = new AnimationData(json.idx);
-    for (let param in json.curves || {}) {
-      animData.curves[param] = AnimationCurve.fromJSON(json.curves[param]);
+  /**
+   * Update the duration based on all keyframes
+   * Called automatically when keyframes are added/removed
+   */
+  updateDuration() {
+    // Calculate max time from all keyframes in all curves
+    let maxTime = 0;
+    for (let parameter in this.curves) {
+      const curve = this.curves[parameter];
+      if (curve.keyframes && curve.keyframes.length > 0) {
+        const lastKeyframe = curve.keyframes[curve.keyframes.length - 1];
+        maxTime = Math.max(maxTime, lastKeyframe.time);
+      }
     }
+
+    // Update this AnimationData's duration
+    this.duration = maxTime;
+
+    // If this layer belongs to a nested group, update the segment keyframes in the parent
+    if (this.parentLayer && this.parentLayer.parentObject) {
+      this.updateParentSegmentKeyframes();
+    }
+  }
+
+  /**
+   * Update segment keyframes in parent layer when this layer's duration changes
+   * This ensures that nested group segments automatically resize when internal animation is added
+   */
+  updateParentSegmentKeyframes() {
+    const parentObject = this.parentLayer.parentObject;
+
+    // Get the layer that contains this nested object (parentObject.parentLayer)
+    if (!parentObject.parentLayer || !parentObject.parentLayer.animationData) {
+      return;
+    }
+
+    const parentLayer = parentObject.parentLayer;
+
+    // Get the frameNumber curve for this nested object using the correct naming convention
+    const curveName = `child.${parentObject.idx}.frameNumber`;
+    const frameNumberCurve = parentLayer.animationData.getCurve(curveName);
+
+    if (!frameNumberCurve || frameNumberCurve.keyframes.length < 2) {
+      return;
+    }
+
+    // Update the last keyframe to match the new duration
+    const lastKeyframe = frameNumberCurve.keyframes[frameNumberCurve.keyframes.length - 1];
+    const newFrameValue = Math.ceil(this.duration * config.framerate) + 1; // +1 because frameNumber is 1-indexed
+    const newTime = this.duration;
+
+    // Only update if the time or value actually changed
+    if (lastKeyframe.value !== newFrameValue || lastKeyframe.time !== newTime) {
+      lastKeyframe.value = newFrameValue;
+      lastKeyframe.time = newTime;
+
+      // Re-sort keyframes in case the time change affects order
+      frameNumberCurve.keyframes.sort((a, b) => a.time - b.time);
+
+      // Don't recursively call updateDuration to avoid infinite loop
+    }
+  }
+
+  static fromJSON(json, parentLayer = null) {
+    const animData = new AnimationData(parentLayer, json.idx);
+    for (let param in json.curves || {}) {
+      const curve = AnimationCurve.fromJSON(json.curves[param]);
+      curve.parentAnimationData = animData; // Restore parent reference
+      animData.curves[param] = curve;
+    }
+    // Recalculate duration after loading all curves
+    animData.updateDuration();
     return animData;
   }
 
@@ -2534,7 +2737,7 @@ class AnimationData {
 }
 
 class Layer extends Widget {
-  constructor(uuid) {
+  constructor(uuid, parentObject = null) {
     super(0,0)
     if (!uuid) {
       this.idx = uuidv4();
@@ -2544,7 +2747,8 @@ class Layer extends Widget {
     this.name = "Layer";
     // LEGACY: Keep frames array for backwards compatibility during migration
     this.frames = [new Frame("keyframe", this.idx + "-F1")];
-    this.animationData = new AnimationData();
+    this.animationData = new AnimationData(this);
+    this.parentObject = parentObject; // Reference to parent GraphicsObject (for nested objects)
     // this.frameNum = 0;
     this.visible = true;
     this.audible = true;
@@ -2552,17 +2756,19 @@ class Layer extends Widget {
     this.children = []
     this.shapes = []
   }
-  static fromJSON(json) {
-    const layer = new Layer(json.idx);
+  static fromJSON(json, parentObject = null) {
+    const layer = new Layer(json.idx, parentObject);
     for (let i in json.children) {
       const child = json.children[i];
-      layer.children.push(GraphicsObject.fromJSON(child));
+      const childObject = GraphicsObject.fromJSON(child);
+      childObject.parentLayer = layer;
+      layer.children.push(childObject);
     }
     layer.name = json.name;
 
     // Load animation data if present (new system)
     if (json.animationData) {
-      layer.animationData = AnimationData.fromJSON(json.animationData);
+      layer.animationData = AnimationData.fromJSON(json.animationData, layer);
     }
 
     // Load shapes if present
@@ -3244,9 +3450,7 @@ class Layer extends Widget {
           }
           break;
         case "rectangle":
-          console.log("Layer.mousemove rectangle - activeShape:", this.activeShape);
           if (this.activeShape) {
-            console.log("Updating rectangle shape");
             this.activeShape.clear();
             this.activeShape.addLine(x, this.activeShape.starty);
             this.activeShape.addLine(x, y);
@@ -3256,7 +3460,6 @@ class Layer extends Widget {
               this.activeShape.starty,
             );
             this.activeShape.update();
-            console.log("Rectangle updated");
           }
           break;
         case "ellipse":
@@ -3712,6 +3915,11 @@ class Shape extends BaseShape {
     pointerList[this.idx] = this;
     this.regionIdx = 0;
     this.inProgress = true;
+
+    // Timeline display settings (Phase 3)
+    this.showSegment = true  // Show segment bar in timeline
+    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
+    this.curvesHeight = 150  // Height in pixels when curves are expanded
   }
   static fromJSON(json, parent) {
     let fillImage = undefined;
@@ -3793,6 +4001,9 @@ class Shape extends BaseShape {
       });
     }
     return json;
+  }
+  get segmentColor() {
+    return uuidToColor(this.idx);
   }
   addCurve(curve) {
     if (curve.color == undefined) {
@@ -4153,12 +4364,20 @@ class GraphicsObject extends Widget {
     this.currentFrameNum = 0; // LEGACY: kept for backwards compatibility
     this.currentTime = 0; // New: continuous time for AnimationData curves
     this.currentLayer = 0;
-    this.children = [new Layer(uuid + "-L1")];
+    this.children = [new Layer(uuid + "-L1", this)];
     // this.layers = [new Layer(uuid + "-L1")];
     this.audioLayers = [];
     // this.children = []
 
     this.shapes = [];
+
+    // Parent reference for nested objects (set when added to a layer)
+    this.parentLayer = null
+
+    // Timeline display settings (Phase 3)
+    this.showSegment = true  // Show segment bar in timeline
+    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
+    this.curvesHeight = 150  // Height in pixels when curves are expanded
 
     this._globalEvents.add("mousedown")
     this._globalEvents.add("mousemove")
@@ -4179,7 +4398,7 @@ class GraphicsObject extends Widget {
       graphicsObject.parent = pointerList[json.parent]
     }
     for (let layer of json.layers) {
-      graphicsObject.layers.push(Layer.fromJSON(layer));
+      graphicsObject.layers.push(Layer.fromJSON(layer, graphicsObject));
     }
     for (let audioLayer of json.audioLayers) {
       graphicsObject.audioLayers.push(AudioLayer.fromJSON(audioLayer));
@@ -4223,6 +4442,20 @@ class GraphicsObject extends Widget {
   get layers() {
     return this.children
   }
+
+  /**
+   * Get the total duration of this GraphicsObject's animation
+   * Returns the maximum duration across all layers
+   */
+  get duration() {
+    let maxDuration = 0;
+    for (let layer of this.layers) {
+      if (layer.animationData && layer.animationData.duration > maxDuration) {
+        maxDuration = layer.animationData.duration;
+      }
+    }
+    return maxDuration;
+  }
   get allLayers() {
     return [...this.audioLayers, ...this.layers];
   }
@@ -4239,6 +4472,9 @@ class GraphicsObject extends Widget {
         }),
       ) + 1
     );
+  }
+  get segmentColor() {
+    return uuidToColor(this.idx);
   }
   advanceFrame() {
     this.setFrameNum(this.currentFrameNum + 1);
@@ -4398,6 +4634,7 @@ class GraphicsObject extends Widget {
         let childRotation = layer.animationData.interpolate(`child.${idx}.rotation`, currentTime);
         let childScaleX = layer.animationData.interpolate(`child.${idx}.scale_x`, currentTime);
         let childScaleY = layer.animationData.interpolate(`child.${idx}.scale_y`, currentTime);
+        let childFrameNumber = layer.animationData.interpolate(`child.${idx}.frameNumber`, currentTime);
 
         if (childX !== null && childY !== null) {
           child.x = childX;
@@ -4405,6 +4642,13 @@ class GraphicsObject extends Widget {
           child.rotation = childRotation || 0;
           child.scale_x = childScaleX || 1;
           child.scale_y = childScaleY || 1;
+
+          // Set child's currentTime based on its frameNumber
+          // frameNumber 1 = time 0, frameNumber 2 = time 1/framerate, etc.
+          if (childFrameNumber !== null) {
+            child.currentTime = (childFrameNumber - 1) / config.framerate;
+          }
+
           ctx.save();
           child.draw(context);
           ctx.restore();
@@ -4705,6 +4949,7 @@ class GraphicsObject extends Widget {
 
     layer.children.push(object)
     object.parent = this;
+    object.parentLayer = layer;
     object.x = x;
     object.y = y;
     let idx = object.idx;
@@ -4729,6 +4974,29 @@ class GraphicsObject extends Widget {
     let scaleYCurve = new AnimationCurve(`child.${idx}.scale_y`);
     scaleYCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
     layer.animationData.setCurve(`child.${idx}.scale_y`, scaleYCurve);
+
+    // Initialize frameNumber curve with two keyframes defining the segment
+    // The segment length is based on the object's internal animation duration
+    let frameNumberCurve = new AnimationCurve(`child.${idx}.frameNumber`);
+
+    // Get the object's animation duration (max time across all its layers)
+    const objectDuration = object.duration || 0;
+    const framerate = config.framerate;
+
+    // Calculate the last frame number (frameNumber 1 = time 0, so add 1)
+    const lastFrameNumber = Math.max(1, Math.ceil(objectDuration * framerate) + 1);
+
+    // Calculate the end time for the segment (minimum 1 frame duration)
+    const segmentDuration = Math.max(objectDuration, 1 / framerate);
+    const endTime = time + segmentDuration;
+
+    // Start keyframe: frameNumber 1 at the current time, linear interpolation
+    frameNumberCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
+
+    // End keyframe: last frame at end time, zero interpolation (inactive after this)
+    frameNumberCurve.addKeyframe(new Keyframe(endTime, lastFrameNumber, 'zero'));
+
+    layer.animationData.setCurve(`child.${idx}.frameNumber`, frameNumberCurve);
 
     // LEGACY: Also update frame.keys for backwards compatibility
     let frame = this.currentFrame;
@@ -4755,6 +5023,73 @@ class GraphicsObject extends Widget {
     }
     // this.children.splice(this.children.indexOf(childObject), 1);
   }
+
+  /**
+   * Update this object's frameNumber curve in its parent layer based on child content
+   * This is called when shapes/children are added/modified within this object
+   */
+  updateFrameNumberCurve() {
+    // Find parent layer that contains this object
+    if (!this.parent || !this.parent.animationData) return;
+
+    const parentLayer = this.parent;
+    const frameNumberKey = `child.${this.idx}.frameNumber`;
+
+    // Collect all keyframe times from this object's content
+    let allKeyframeTimes = new Set();
+
+    // Check all layers in this object
+    for (let layer of this.layers) {
+      if (!layer.animationData) continue;
+
+      // Get keyframes from all shape curves
+      for (let shape of layer.shapes) {
+        const existsKey = `shape.${shape.idx}.exists`;
+        const existsCurve = layer.animationData.curves[existsKey];
+        if (existsCurve && existsCurve.keyframes) {
+          for (let kf of existsCurve.keyframes) {
+            allKeyframeTimes.add(kf.time);
+          }
+        }
+      }
+
+      // Get keyframes from all child object curves
+      for (let child of layer.children) {
+        const childFrameNumberKey = `child.${child.idx}.frameNumber`;
+        const childFrameNumberCurve = layer.animationData.curves[childFrameNumberKey];
+        if (childFrameNumberCurve && childFrameNumberCurve.keyframes) {
+          for (let kf of childFrameNumberCurve.keyframes) {
+            allKeyframeTimes.add(kf.time);
+          }
+        }
+      }
+    }
+
+    if (allKeyframeTimes.size === 0) return;
+
+    // Sort times
+    const times = Array.from(allKeyframeTimes).sort((a, b) => a - b);
+    const firstTime = times[0];
+    const lastTime = times[times.length - 1];
+
+    // Calculate frame numbers (1-based)
+    const framerate = this.framerate || 24;
+    const firstFrame = Math.floor(firstTime * framerate) + 1;
+    const lastFrame = Math.floor(lastTime * framerate) + 1;
+
+    // Update or create frameNumber curve in parent layer
+    let frameNumberCurve = parentLayer.animationData.curves[frameNumberKey];
+    if (!frameNumberCurve) {
+      frameNumberCurve = new AnimationCurve(frameNumberKey);
+      parentLayer.animationData.setCurve(frameNumberKey, frameNumberCurve);
+    }
+
+    // Clear existing keyframes and add new ones
+    frameNumberCurve.keyframes = [];
+    frameNumberCurve.addKeyframe(new Keyframe(firstTime, firstFrame, 'hold'));
+    frameNumberCurve.addKeyframe(new Keyframe(lastTime, lastFrame, 'hold'));
+  }
+
   addLayer(layer) {
     this.children.push(layer);
   }
@@ -4859,7 +5194,7 @@ window.addEventListener("contextmenu", async (e) => {
   //   items: [
   //   ],
   // });
-  // menu.popup({ x: event.clientX, y: event.clientY });
+  // menu.popup({ x: e.clientX, y: e.clientY });
 })
 
 window.addEventListener("keydown", (e) => {
@@ -4946,23 +5281,25 @@ window.addEventListener("keydown", (e) => {
 function playPause() {
   playing = !playing;
   if (playing) {
-    if (context.activeObject.currentFrameNum >= context.activeObject.maxFrame - 1) {
-      context.activeObject.setFrameNum(0);
+    // Reset to start if we're at the end
+    const duration = context.activeObject.duration;
+    if (duration > 0 && context.activeObject.currentTime >= duration) {
+      context.activeObject.currentTime = 0;
     }
+
+    // Start audio from current time
     for (let audioLayer of context.activeObject.audioLayers) {
       if (audioLayer.audible) {
         for (let i in audioLayer.sounds) {
           let sound = audioLayer.sounds[i];
-          sound.player.start(
-            0,
-            context.activeObject.currentFrameNum / config.framerate,
-          );
+          sound.player.start(0, context.activeObject.currentTime);
         }
       }
     }
     lastFrameTime = performance.now();
     advanceFrame();
   } else {
+    // Stop audio
     for (let audioLayer of context.activeObject.audioLayers) {
       for (let i in audioLayer.sounds) {
         let sound = audioLayer.sounds[i];
@@ -4973,23 +5310,34 @@ function playPause() {
 }
 
 function advanceFrame() {
-  context.activeObject.advanceFrame();
-  updateLayers();
-  updateUI();
-  if (playing) {
-    if (
-      context.activeObject.currentFrameNum <
-      context.activeObject.maxFrame - 1
-    ) {
-      const now = performance.now();
-      const elapsedTime = now - lastFrameTime;
+  // Calculate elapsed time since last frame (in seconds)
+  const now = performance.now();
+  const elapsedTime = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
 
-      // Calculate the time remaining for the next frame
-      const targetTimePerFrame = 1000 / config.framerate;
-      const timeToWait = Math.max(0, targetTimePerFrame - elapsedTime);
-      lastFrameTime = now + timeToWait;
-      setTimeout(advanceFrame, timeToWait);
+  // Advance currentTime
+  context.activeObject.currentTime += elapsedTime;
+
+  // Sync timeline playhead position
+  if (context.timelineWidget?.timelineState) {
+    context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
+  }
+
+  // Redraw stage and timeline
+  updateUI();
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+
+  if (playing) {
+    const duration = context.activeObject.duration;
+
+    // Check if we've reached the end
+    if (duration > 0 && context.activeObject.currentTime < duration) {
+      // Continue playing
+      requestAnimationFrame(advanceFrame);
     } else {
+      // Animation finished
       playing = false;
       for (let audioLayer of context.activeObject.audioLayers) {
         for (let i in audioLayer.sounds) {
@@ -4998,8 +5346,6 @@ function advanceFrame() {
         }
       }
     }
-  } else {
-    updateMenu();
   }
 }
 
@@ -5550,6 +5896,118 @@ function addFrame() {
 function addKeyframe() {
   actions.addKeyframe.create();
 }
+
+/**
+ * Add keyframes to AnimationData curves at the current playhead position
+ * For new timeline system (Phase 5)
+ */
+function addKeyframeAtPlayhead() {
+  // Get the timeline widget and current time
+  if (!context.timelineWidget) {
+    console.warn('Timeline widget not available');
+    return;
+  }
+
+  const currentTime = context.timelineWidget.timelineState.currentTime;
+
+  // Determine which object to add keyframes to based on selection
+  let targetObjects = [];
+
+  // If shapes are selected, add keyframes to those shapes
+  if (context.shapeselection && context.shapeselection.length > 0) {
+    targetObjects = context.shapeselection;
+  }
+  // If objects are selected, add keyframes to those objects
+  else if (context.selection && context.selection.length > 0) {
+    targetObjects = context.selection;
+  }
+  // Otherwise, if no selection, don't do anything
+  else {
+    console.log('No shapes or objects selected to add keyframes to');
+    return;
+  }
+
+  // For each selected object/shape, add keyframes to all its curves
+  for (let obj of targetObjects) {
+    // Determine if this is a shape or an object
+    const isShape = obj.constructor.name !== 'GraphicsObject';
+
+    // Find which layer this object/shape belongs to
+    let animationData = null;
+
+    if (isShape) {
+      // For shapes, find the layer recursively
+      const findShapeLayer = (searchObj) => {
+        for (let layer of searchObj.children) {
+          if (layer.shapes && layer.shapes.includes(obj)) {
+            animationData = layer.animationData;
+            return true;
+          }
+          if (layer.children) {
+            for (let child of layer.children) {
+              if (findShapeLayer(child)) return true;
+            }
+          }
+        }
+        return false;
+      };
+      findShapeLayer(context.activeObject);
+    } else {
+      // For objects (groups), find the parent layer
+      for (let layer of context.activeObject.allLayers) {
+        if (layer.children && layer.children.includes(obj)) {
+          animationData = layer.animationData;
+          break;
+        }
+      }
+    }
+
+    if (!animationData) continue;
+
+    // Get all curves for this object/shape by iterating through animationData.curves
+    const curves = [];
+    const prefix = isShape ? `shape.${obj.idx}.` : `child.${obj.idx}.`;
+
+    for (let curveName in animationData.curves) {
+      if (curveName.startsWith(prefix)) {
+        curves.push(animationData.curves[curveName]);
+      }
+    }
+
+    // For each curve, add a keyframe at the current time with the interpolated value
+    for (let curve of curves) {
+      // Get the current interpolated value at this time
+      const currentValue = curve.interpolate(currentTime);
+
+      // Check if there's already a keyframe at this exact time
+      const existingKeyframe = curve.keyframes.find(kf => Math.abs(kf.time - currentTime) < 0.001);
+
+      if (existingKeyframe) {
+        // Update the existing keyframe's value
+        existingKeyframe.value = currentValue;
+        console.log(`Updated keyframe at time ${currentTime} on ${curve.parameter}`);
+      } else {
+        // Create a new keyframe
+        const newKeyframe = new Keyframe(
+          currentTime,
+          currentValue,
+          'linear' // Default to linear interpolation
+        );
+
+        curve.addKeyframe(newKeyframe);
+        console.log(`Added keyframe at time ${currentTime} on ${curve.parameter} with value ${currentValue}`);
+      }
+    }
+  }
+
+  // Trigger a redraw of the timeline
+  if (context.timelineWidget.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+
+  console.log(`Added keyframes at time ${currentTime} for ${targetObjects.length} object(s)`);
+}
+
 function deleteFrame() {
   let frame = context.activeObject.currentFrame;
   let layer = context.activeObject.activeLayer;
@@ -6684,6 +7142,11 @@ function stage() {
               // Auto-keyframe: create/update keyframe at current time
               layer.animationData.addKeyframe(`child.${child.idx}.x`, new Keyframe(currentTime, newX, 'linear'));
               layer.animationData.addKeyframe(`child.${child.idx}.y`, new Keyframe(currentTime, newY, 'linear'));
+
+              // Trigger timeline redraw
+              if (context.timelineWidget && context.timelineWidget.requestRedraw) {
+                context.timelineWidget.requestRedraw();
+              }
             }
           }
         } else if (context.selectionRect) {
@@ -7365,8 +7828,16 @@ function timelineV2() {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
+    // Prevent default drag behavior on canvas
+    e.preventDefault();
+
     // Capture pointer to ensure we get move/up events even if cursor leaves canvas
     canvas.setPointerCapture(e.pointerId);
+
+    // Store event for modifier key access during clicks (for Shift-click multi-select)
+    timelineWidget.lastClickEvent = e;
+    // Also store for drag operations initially
+    timelineWidget.lastDragEvent = e;
 
     timelineWidget.handleMouseEvent("mousedown", x, y);
     updateCanvasSize(); // Redraw after interaction
@@ -7376,6 +7847,10 @@ function timelineV2() {
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+
+    // Store event for modifier key access during drag (for Shift-drag constraint)
+    timelineWidget.lastDragEvent = e;
+
     timelineWidget.handleMouseEvent("mousemove", x, y);
     updateCanvasSize(); // Redraw after interaction
   });
@@ -7389,6 +7864,23 @@ function timelineV2() {
     canvas.releasePointerCapture(e.pointerId);
 
     timelineWidget.handleMouseEvent("mouseup", x, y);
+    updateCanvasSize(); // Redraw after interaction
+  });
+
+  // Context menu (right-click) for deleting keyframes
+  canvas.addEventListener("contextmenu", (e) => {
+    e.preventDefault(); // Prevent default browser context menu
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Store event for access to clientX/clientY for menu positioning
+    timelineWidget.lastEvent = e;
+    // Also store as click event for consistency
+    timelineWidget.lastClickEvent = e;
+
+    timelineWidget.handleMouseEvent("contextmenu", x, y);
     updateCanvasSize(); // Redraw after interaction
   });
 
@@ -7407,8 +7899,11 @@ function timelineV2() {
       const zoomFactor = event.deltaY > 0 ? 0.95 : 1.05;
       const oldPixelsPerSecond = timelineWidget.timelineState.pixelsPerSecond;
 
+      // Adjust mouse position to account for track header offset
+      const timelineMouseX = mouseX - timelineWidget.trackHeaderWidth;
+
       // Calculate the time under the mouse BEFORE zooming
-      const mouseTimeBeforeZoom = timelineWidget.timelineState.pixelToTime(mouseX);
+      const mouseTimeBeforeZoom = timelineWidget.timelineState.pixelToTime(timelineMouseX);
 
       // Apply zoom
       timelineWidget.timelineState.pixelsPerSecond *= zoomFactor;
@@ -7417,31 +7912,30 @@ function timelineV2() {
       timelineWidget.timelineState.pixelsPerSecond = Math.max(10, Math.min(10000, timelineWidget.timelineState.pixelsPerSecond));
 
       // Adjust viewport so the time under the mouse stays in the same place
-      // We want: pixelToTime(mouseX) == mouseTimeBeforeZoom
-      // pixelToTime(mouseX) = (mouseX / pixelsPerSecond) + viewportStartTime
-      // So: viewportStartTime = mouseTimeBeforeZoom - (mouseX / pixelsPerSecond)
-      timelineWidget.timelineState.viewportStartTime = mouseTimeBeforeZoom - (mouseX / timelineWidget.timelineState.pixelsPerSecond);
+      // We want: pixelToTime(timelineMouseX) == mouseTimeBeforeZoom
+      // pixelToTime(timelineMouseX) = (timelineMouseX / pixelsPerSecond) + viewportStartTime
+      // So: viewportStartTime = mouseTimeBeforeZoom - (timelineMouseX / pixelsPerSecond)
+      timelineWidget.timelineState.viewportStartTime = mouseTimeBeforeZoom - (timelineMouseX / timelineWidget.timelineState.pixelsPerSecond);
       timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
 
       updateCanvasSize();
     } else {
-      // Check if mouse is over the ruler area (horizontal scroll) or track area (vertical scroll)
-      if (mouseY <= timelineWidget.ruler.height) {
-        // Mouse over ruler - horizontal scroll for timeline
-        const deltaX = event.deltaX * config.scrollSpeed;
-        timelineWidget.timelineState.viewportStartTime += deltaX / timelineWidget.timelineState.pixelsPerSecond;
-        timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
-      } else {
-        // Mouse over track area - vertical scroll for tracks
-        const deltaY = event.deltaY * config.scrollSpeed;
-        timelineWidget.trackScrollOffset -= deltaY;
+      // Regular scroll - handle both horizontal and vertical scrolling everywhere
+      const deltaX = event.deltaX * config.scrollSpeed;
+      const deltaY = event.deltaY * config.scrollSpeed;
 
-        // Clamp scroll offset
-        const trackAreaHeight = canvas.height - timelineWidget.ruler.height;
-        const totalTracksHeight = timelineWidget.trackHierarchy.getTotalHeight();
-        const maxScroll = Math.min(0, trackAreaHeight - totalTracksHeight);
-        timelineWidget.trackScrollOffset = Math.max(maxScroll, Math.min(0, timelineWidget.trackScrollOffset));
-      }
+      // Horizontal scroll for timeline
+      timelineWidget.timelineState.viewportStartTime += deltaX / timelineWidget.timelineState.pixelsPerSecond;
+      timelineWidget.timelineState.viewportStartTime = Math.max(0, timelineWidget.timelineState.viewportStartTime);
+
+      // Vertical scroll for tracks
+      timelineWidget.trackScrollOffset -= deltaY;
+
+      // Clamp scroll offset
+      const trackAreaHeight = canvas.height - timelineWidget.ruler.height;
+      const totalTracksHeight = timelineWidget.trackHierarchy.getTotalHeight();
+      const maxScroll = Math.min(0, trackAreaHeight - totalTracksHeight);
+      timelineWidget.trackScrollOffset = Math.max(maxScroll, Math.min(0, timelineWidget.trackScrollOffset));
 
       updateCanvasSize();
     }
@@ -7937,8 +8431,7 @@ function renderUI() {
       ctx.fillStyle = "rgba(255,255,255,0.5)";
       ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
       const transform = ctx.getTransform()
-      context.activeObject.transformCanvas(ctx)
-      context.activeObject.draw(context);
+      context.activeObject.draw(context, true);
       ctx.setTransform(transform)
     }
     if (context.activeShape) {
@@ -9003,6 +9496,13 @@ async function renderMenu() {
       newBlankKeyframeMenuItem,
       deleteFrameMenuItem,
       duplicateKeyframeMenuItem,
+      {
+        text: "Add Keyframe at Playhead",
+        enabled: (context.selection && context.selection.length > 0) ||
+                 (context.shapeselection && context.shapeselection.length > 0),
+        action: addKeyframeAtPlayhead,
+        accelerator: "K",
+      },
       {
         text: "Add Motion Tween",
         enabled: activeFrame,
