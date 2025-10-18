@@ -1,0 +1,18 @@
+[package]
+name = "daw-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.15"
+symphonia = { version = "0.5", features = ["all"] }
+rtrb = "0.3"
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 1  # Faster compile times while still reasonable performance

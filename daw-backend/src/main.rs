@@ -1,0 +1,420 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use daw_backend::{AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track};
+use std::env;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Get audio file paths from command line arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <audio_file1> [audio_file2] [audio_file3] ...", args[0]);
+        eprintln!("Example: {} track1.wav track2.wav", args[0]);
+        return Ok(());
+    }
+
+    println!("DAW Backend - Phase 4: Clips & Timeline\n");
+
+    // Load all audio files
+    let mut audio_files = Vec::new();
+    let mut max_sample_rate = 0;
+    let mut max_channels = 0;
+
+    for (i, path) in args.iter().skip(1).enumerate() {
+        println!("Loading file {}: {}", i + 1, path);
+        match AudioFile::load(path) {
+            Ok(audio_file) => {
+                let duration = audio_file.frames as f64 / audio_file.sample_rate as f64;
+                println!(
+                    "  {} Hz, {} channels, {} frames ({:.2}s)",
+                    audio_file.sample_rate, audio_file.channels, audio_file.frames, duration
+                );
+
+                max_sample_rate = max_sample_rate.max(audio_file.sample_rate);
+                max_channels = max_channels.max(audio_file.channels);
+
+                audio_files.push((
+                    Path::new(path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                    PathBuf::from(path),
+                    audio_file,
+                ));
+            }
+            Err(e) => {
+                eprintln!("  Error loading {}: {}", path, e);
+                eprintln!("  Skipping this file...");
+            }
+        }
+    }
+
+    if audio_files.is_empty() {
+        eprintln!("No audio files loaded. Exiting.");
+        return Ok(());
+    }
+
+    println!("\nProject settings:");
+    println!("  Sample rate: {} Hz", max_sample_rate);
+    println!("  Channels: {}", max_channels);
+    println!("  Files: {}", audio_files.len());
+
+    // Initialize cpal
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or("No output device available")?;
+    println!("\nUsing audio device: {}", device.name()?);
+
+    // Get the default output config to determine sample format
+    let default_config = device.default_output_config()?;
+    let sample_format = default_config.sample_format();
+
+    // Create a custom config matching the project settings
+    let config = cpal::StreamConfig {
+        channels: max_channels as u16,
+        sample_rate: cpal::SampleRate(max_sample_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    println!("Output config: {:?} with format {:?}", config, sample_format);
+
+    // Create lock-free command and event queues
+    let (command_tx, command_rx) = rtrb::RingBuffer::<daw_backend::Command>::new(256);
+    let (event_tx, event_rx) = rtrb::RingBuffer::<AudioEvent>::new(256);
+
+    // Create the audio engine
+    let mut engine = Engine::new(max_sample_rate, max_channels, command_rx, event_tx);
+
+    // Add all files to the audio pool and create tracks with clips
+    let mut track_ids = Vec::new();
+    let mut clip_info = Vec::new(); // Store (track_id, clip_id, name, duration)
+    let mut max_duration = 0.0f64;
+    let mut clip_id_counter = 0u32;
+
+    println!("\nCreating tracks and clips:");
+    for (i, (name, path, audio_file)) in audio_files.into_iter().enumerate() {
+        let duration = audio_file.frames as f64 / audio_file.sample_rate as f64;
+        max_duration = max_duration.max(duration);
+
+        // Add audio file to pool
+        let pool_file = PoolAudioFile::new(
+            path,
+            audio_file.data,
+            audio_file.channels,
+            audio_file.sample_rate,
+        );
+        let pool_index = engine.audio_pool_mut().add_file(pool_file);
+
+        // Create track
+        let track_id = i as u32;
+        let mut track = Track::new(track_id, name.clone());
+
+        // Create clip that plays the entire file starting at time 0
+        let clip_id = clip_id_counter;
+        let clip = Clip::new(
+            clip_id,
+            pool_index,
+            0.0,        // start at beginning of timeline
+            duration,   // full duration
+            0.0,        // no offset into file
+        );
+        clip_id_counter += 1;
+
+        track.add_clip(clip);
+        engine.add_track(track);
+        track_ids.push(track_id);
+        clip_info.push((track_id, clip_id, name.clone(), duration));
+
+        println!("  Track {}: {} (clip {} at 0.0s, duration {:.2}s)", i, name, clip_id, duration);
+    }
+
+    println!("\nTimeline duration: {:.2}s", max_duration);
+
+    let mut controller = engine.get_controller(command_tx);
+
+    // Wrap engine in Arc<Mutex> for thread-safe access
+    let engine = Arc::new(Mutex::new(engine));
+
+    // Build the output stream
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config, engine)?,
+        cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config, engine)?,
+        cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config, engine)?,
+        _ => return Err("Unsupported sample format".into()),
+    };
+
+    // Start the audio stream
+    stream.play()?;
+    println!("\nAudio stream started!");
+    print_help();
+    print_status(0.0, max_duration, &track_ids);
+
+    // Spawn event listener thread
+    let event_rx = Arc::new(Mutex::new(event_rx));
+    let event_rx_clone = Arc::clone(&event_rx);
+    let _event_thread = thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(50));
+            let mut rx = event_rx_clone.lock().unwrap();
+            while let Ok(event) = rx.pop() {
+                match event {
+                    AudioEvent::PlaybackPosition(pos) => {
+                        // Clear the line and show position
+                        print!("\r\x1b[K");
+                        print!("Position: {:.2}s / {:.2}s", pos, max_duration);
+                        print!("  [");
+                        let bar_width = 30;
+                        let filled = ((pos / max_duration) * bar_width as f64) as usize;
+                        for i in 0..bar_width {
+                            if i < filled {
+                                print!("=");
+                            } else if i == filled {
+                                print!(">");
+                            } else {
+                                print!(" ");
+                            }
+                        }
+                        print!("]");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::PlaybackStopped => {
+                        print!("\r\x1b[K");
+                        println!("Playback stopped (end of timeline)");
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::BufferUnderrun => {
+                        eprintln!("\nWarning: Buffer underrun detected");
+                    }
+                }
+            }
+        }
+    });
+
+    // Simple command loop
+    loop {
+        let mut input = String::new();
+        print!("\r\x1b[K> ");
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        // Parse input
+        if input.is_empty() {
+            controller.play();
+            println!("Playing...");
+        } else if input == "q" || input == "quit" {
+            println!("Quitting...");
+            break;
+        } else if input == "s" || input == "stop" {
+            controller.stop();
+            println!("Stopped (reset to beginning)");
+        } else if input == "p" || input == "play" {
+            controller.play();
+            println!("Playing...");
+        } else if input == "pause" {
+            controller.pause();
+            println!("Paused");
+        } else if input.starts_with("seek ") {
+            // Parse seek time
+            if let Ok(seconds) = input[5..].trim().parse::<f64>() {
+                if seconds >= 0.0 {
+                    controller.seek(seconds);
+                    println!("Seeking to {:.2}s", seconds);
+                } else {
+                    println!("Invalid seek time (must be >= 0.0)");
+                }
+            } else {
+                println!("Invalid seek format. Usage: seek <seconds>");
+            }
+        } else if input.starts_with("volume ") {
+            // Parse: volume <track_id> <volume>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(volume)) = (parts[1].parse::<u32>(), parts[2].parse::<f32>()) {
+                    if track_ids.contains(&track_id) {
+                        controller.set_track_volume(track_id, volume);
+                        println!("Set track {} volume to {:.2}", track_id, volume);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: volume <track_id> <volume>");
+                }
+            } else {
+                println!("Usage: volume <track_id> <volume>");
+            }
+        } else if input.starts_with("mute ") {
+            // Parse: mute <track_id>
+            if let Ok(track_id) = input[5..].trim().parse::<u32>() {
+                if track_ids.contains(&track_id) {
+                    controller.set_track_mute(track_id, true);
+                    println!("Muted track {}", track_id);
+                } else {
+                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                }
+            } else {
+                println!("Usage: mute <track_id>");
+            }
+        } else if input.starts_with("unmute ") {
+            // Parse: unmute <track_id>
+            if let Ok(track_id) = input[7..].trim().parse::<u32>() {
+                if track_ids.contains(&track_id) {
+                    controller.set_track_mute(track_id, false);
+                    println!("Unmuted track {}", track_id);
+                } else {
+                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                }
+            } else {
+                println!("Usage: unmute <track_id>");
+            }
+        } else if input.starts_with("solo ") {
+            // Parse: solo <track_id>
+            if let Ok(track_id) = input[5..].trim().parse::<u32>() {
+                if track_ids.contains(&track_id) {
+                    controller.set_track_solo(track_id, true);
+                    println!("Soloed track {}", track_id);
+                } else {
+                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                }
+            } else {
+                println!("Usage: solo <track_id>");
+            }
+        } else if input.starts_with("unsolo ") {
+            // Parse: unsolo <track_id>
+            if let Ok(track_id) = input[7..].trim().parse::<u32>() {
+                if track_ids.contains(&track_id) {
+                    controller.set_track_solo(track_id, false);
+                    println!("Unsoloed track {}", track_id);
+                } else {
+                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                }
+            } else {
+                println!("Usage: unsolo <track_id>");
+            }
+        } else if input.starts_with("move ") {
+            // Parse: move <track_id> <clip_id> <new_start_time>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 4 {
+                if let (Ok(track_id), Ok(clip_id), Ok(time)) =
+                    (parts[1].parse::<u32>(), parts[2].parse::<u32>(), parts[3].parse::<f64>()) {
+                    // Validate track and clip exist
+                    if let Some((_tid, _cid, name, _)) = clip_info.iter().find(|(t, c, _, _)| *t == track_id && *c == clip_id) {
+                        controller.move_clip(track_id, clip_id, time);
+                        println!("Moved clip {} ('{}') on track {} to {:.2}s", clip_id, name, track_id, time);
+                    } else {
+                        println!("Invalid track ID or clip ID");
+                        println!("Available clips:");
+                        for (tid, cid, name, dur) in &clip_info {
+                            println!("  Track {}, Clip {} ('{}', duration {:.2}s)", tid, cid, name, dur);
+                        }
+                    }
+                } else {
+                    println!("Invalid format. Usage: move <track_id> <clip_id> <time>");
+                }
+            } else {
+                println!("Usage: move <track_id> <clip_id> <time>");
+            }
+        } else if input == "tracks" {
+            println!("Available tracks: {:?}", track_ids);
+        } else if input == "clips" {
+            println!("Available clips:");
+            for (tid, cid, name, dur) in &clip_info {
+                println!("  Track {}, Clip {} ('{}', duration {:.2}s)", tid, cid, name, dur);
+            }
+        } else if input == "help" || input == "h" {
+            print_help();
+        } else {
+            println!("Unknown command: {}. Type 'help' for commands.", input);
+        }
+    }
+
+    // Drop the stream to stop playback
+    drop(stream);
+    println!("Goodbye!");
+
+    Ok(())
+}
+
+fn print_help() {
+    println!("\nTransport Commands:");
+    println!("  ENTER           - Play");
+    println!("  p, play         - Play");
+    println!("  pause           - Pause");
+    println!("  s, stop         - Stop and reset to beginning");
+    println!("  seek <time>     - Seek to position in seconds (e.g. 'seek 10.5')");
+    println!("\nTrack Commands:");
+    println!("  tracks          - List all track IDs");
+    println!("  volume <id> <v> - Set track volume (e.g. 'volume 0 0.5' for 50%)");
+    println!("  mute <id>       - Mute a track");
+    println!("  unmute <id>     - Unmute a track");
+    println!("  solo <id>       - Solo a track (only soloed tracks play)");
+    println!("  unsolo <id>     - Unsolo a track");
+    println!("\nClip Commands:");
+    println!("  clips           - List all clips");
+    println!("  move <t> <c> <s> - Move clip to new timeline position");
+    println!("                    (e.g. 'move 0 0 5.0' moves clip 0 on track 0 to 5.0s)");
+    println!("\nOther:");
+    println!("  h, help         - Show this help");
+    println!("  q, quit         - Quit");
+    println!();
+}
+
+fn print_status(position: f64, duration: f64, track_ids: &[u32]) {
+    println!("Position: {:.2}s / {:.2}s", position, duration);
+    println!("Tracks: {:?}", track_ids);
+}
+
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    engine: Arc<Mutex<Engine>>,
+) -> Result<cpal::Stream, Box<dyn std::error::Error>>
+where
+    T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
+{
+    let err_fn = |err| eprintln!("Audio stream error: {}", err);
+
+    // Preallocate a large buffer for format conversion to avoid allocations in audio callback
+    // Size it generously to handle typical buffer sizes (up to 8192 samples = 2048 frames * stereo * 2x safety)
+    let conversion_buffer = Arc::new(Mutex::new(vec![0.0f32; 16384]));
+
+    let stream = device.build_output_stream(
+        config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            // Lock the engine
+            let mut engine = engine.lock().unwrap();
+
+            // Lock and reuse the conversion buffer (no allocation - buffer is pre-sized)
+            let mut f32_buffer = conversion_buffer.lock().unwrap();
+
+            // Safety check - if buffer is too small, we have a problem
+            if f32_buffer.len() < data.len() {
+                eprintln!("ERROR: Audio buffer size {} exceeds preallocated buffer size {}",
+                         data.len(), f32_buffer.len());
+                return;
+            }
+
+            // Get a slice of the preallocated buffer
+            let buffer_slice = &mut f32_buffer[..data.len()];
+            buffer_slice.fill(0.0);
+
+            engine.process(buffer_slice);
+
+            // Convert f32 samples to output format
+            for (i, sample) in data.iter_mut().enumerate() {
+                *sample = cpal::Sample::from_sample(buffer_slice[i]);
+            }
+        },
+        err_fn,
+        None,
+    )?;
+
+    Ok(stream)
+}
