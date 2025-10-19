@@ -208,6 +208,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print!("> ");
                         io::stdout().flush().ok();
                     }
+                    AudioEvent::BufferPoolStats(stats) => {
+                        print!("\r\x1b[K");
+                        println!("\n=== Buffer Pool Statistics ===");
+                        println!("  Total buffers:     {}", stats.total_buffers);
+                        println!("  Available buffers: {}", stats.available_buffers);
+                        println!("  In-use buffers:    {}", stats.in_use_buffers);
+                        println!("  Peak usage:        {}", stats.peak_usage);
+                        println!("  Total allocations: {}", stats.total_allocations);
+                        println!("  Buffer size:       {} samples", stats.buffer_size);
+                        if stats.total_allocations == 0 {
+                            println!("  Status: \x1b[32mOK\x1b[0m - Zero allocations during playback");
+                        } else {
+                            println!("  Status: \x1b[33mWARNING\x1b[0m - {} allocation(s) occurred", stats.total_allocations);
+                            println!("  Recommendation: Increase initial buffer pool capacity to {}", stats.peak_usage + 2);
+                        }
+                        println!();
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
                 }
             }
         }
@@ -644,6 +663,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Usage: offset <track_id> <seconds> (positive=later, negative=earlier)");
             }
+        } else if input == "stats" || input == "buffers" {
+            controller.request_buffer_pool_stats();
         } else if input == "help" || input == "h" {
             print_help();
         } else {
@@ -697,6 +718,8 @@ fn print_help() {
     println!("                    (e.g. 'note 0 0 0.0 60 100 0.5' adds middle C)");
     println!("  loadmidi <t> <file> [start] - Load .mid file into track");
     println!("                    (e.g. 'loadmidi 0 song.mid 0.0')");
+    println!("\nDiagnostics:");
+    println!("  stats, buffers  - Show buffer pool statistics");
     println!("\nOther:");
     println!("  h, help         - Show this help");
     println!("  q, quit         - Quit");

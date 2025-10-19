@@ -397,6 +397,11 @@ impl Engine {
                 // Add a pre-loaded MIDI clip to the track
                 let _ = self.project.add_midi_clip(track_id, clip);
             }
+            Command::RequestBufferPoolStats => {
+                // Send buffer pool statistics back to UI
+                let stats = self.buffer_pool.stats();
+                let _ = self.event_tx.push(AudioEvent::BufferPoolStats(stats));
+            }
         }
     }
 
@@ -548,5 +553,11 @@ impl EngineController {
     /// Add a pre-loaded MIDI clip to a track
     pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) {
         let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip));
+    }
+
+    /// Request buffer pool statistics
+    /// The statistics will be sent via an AudioEvent::BufferPoolStats event
+    pub fn request_buffer_pool_stats(&mut self) {
+        let _ = self.command_tx.push(Command::RequestBufferPoolStats);
     }
 }

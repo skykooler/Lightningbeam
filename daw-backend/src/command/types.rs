@@ -1,4 +1,5 @@
 use crate::audio::{ClipId, MidiClip, MidiClipId, TrackId};
+use crate::audio::buffer_pool::BufferPoolStats;
 
 /// Commands sent from UI/control thread to audio thread
 #[derive(Debug, Clone)]
@@ -62,6 +63,10 @@ pub enum Command {
     AddMidiNote(TrackId, MidiClipId, f64, u8, u8, f64),
     /// Add a pre-loaded MIDI clip to a track
     AddLoadedMidiClip(TrackId, MidiClip),
+
+    // Diagnostics commands
+    /// Request buffer pool statistics
+    RequestBufferPoolStats,
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -75,4 +80,6 @@ pub enum AudioEvent {
     BufferUnderrun,
     /// A new track was created (track_id, is_metatrack, name)
     TrackCreated(TrackId, bool, String),
+    /// Buffer pool statistics response
+    BufferPoolStats(BufferPoolStats),
 }
