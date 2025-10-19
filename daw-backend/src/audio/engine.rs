@@ -1,14 +1,19 @@
+use crate::audio::buffer_pool::BufferPool;
 use crate::audio::clip::ClipId;
+use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
 use crate::audio::pool::AudioPool;
+use crate::audio::project::Project;
 use crate::audio::track::{Track, TrackId};
 use crate::command::{AudioEvent, Command};
+use crate::effects::{Effect, GainEffect, PanEffect, SimpleEQ};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Audio engine for Phase 4: timeline with clips and audio pool
+/// Audio engine for Phase 6: hierarchical tracks with groups
 pub struct Engine {
-    tracks: Vec<Track>,
+    project: Project,
     audio_pool: AudioPool,
+    buffer_pool: BufferPool,
     playhead: u64,          // Playhead position in samples
     sample_rate: u32,
     playing: bool,
@@ -25,8 +30,11 @@ pub struct Engine {
     frames_since_last_event: usize,
     event_interval_frames: usize,
 
-    // Mix buffer for combining tracks
+    // Mix buffer for output
     mix_buffer: Vec<f32>,
+
+    // ID counters
+    next_midi_clip_id: MidiClipId,
 }
 
 impl Engine {
@@ -39,9 +47,13 @@ impl Engine {
     ) -> Self {
         let event_interval_frames = (sample_rate as usize * channels as usize) / 10; // Update 10 times per second
 
+        // Calculate a reasonable buffer size for the pool (typical audio callback size * channels)
+        let buffer_size = 512 * channels as usize;
+
         Self {
-            tracks: Vec::new(),
+            project: Project::new(),
             audio_pool: AudioPool::new(),
+            buffer_pool: BufferPool::new(8, buffer_size), // 8 buffers should handle deep nesting
             playhead: 0,
             sample_rate,
             playing: false,
@@ -52,14 +64,53 @@ impl Engine {
             frames_since_last_event: 0,
             event_interval_frames,
             mix_buffer: Vec::new(),
+            next_midi_clip_id: 0,
         }
     }
 
-    /// Add a track to the engine
+    /// Add an audio track to the engine
     pub fn add_track(&mut self, track: Track) -> TrackId {
-        let id = track.id;
-        self.tracks.push(track);
+        // For backwards compatibility, we'll extract the track data and add it to the project
+        let name = track.name.clone();
+        let id = self.project.add_audio_track(name, None);
+
+        // Copy over the track properties
+        if let Some(node) = self.project.get_track_mut(id) {
+            if let crate::audio::track::TrackNode::Audio(audio_track) = node {
+                audio_track.clips = track.clips;
+                audio_track.effects = track.effects;
+                audio_track.volume = track.volume;
+                audio_track.muted = track.muted;
+                audio_track.solo = track.solo;
+            }
+        }
+
         id
+    }
+
+    /// Add an audio track by name
+    pub fn add_audio_track(&mut self, name: String) -> TrackId {
+        self.project.add_audio_track(name, None)
+    }
+
+    /// Add a group track by name
+    pub fn add_group_track(&mut self, name: String) -> TrackId {
+        self.project.add_group_track(name, None)
+    }
+
+    /// Add a MIDI track by name
+    pub fn add_midi_track(&mut self, name: String) -> TrackId {
+        self.project.add_midi_track(name, None)
+    }
+
+    /// Get access to the project
+    pub fn project(&self) -> &Project {
+        &self.project
+    }
+
+    /// Get mutable access to the project
+    pub fn project_mut(&mut self) -> &mut Project {
+        &mut self.project
     }
 
     /// Get mutable reference to audio pool
@@ -95,27 +146,24 @@ impl Engine {
                 self.mix_buffer.resize(output.len(), 0.0);
             }
 
-            // Clear mix buffer
-            self.mix_buffer.fill(0.0);
+            // Ensure buffer pool has the correct buffer size
+            if self.buffer_pool.buffer_size() != output.len() {
+                // Reallocate buffer pool with correct size if needed
+                self.buffer_pool = BufferPool::new(8, output.len());
+            }
 
             // Convert playhead from samples to seconds for timeline-based rendering
             let playhead_seconds = self.playhead as f64 / (self.sample_rate as f64 * self.channels as f64);
 
-            // Check if any track is soloed
-            let any_solo = self.tracks.iter().any(|t| t.solo);
-
-            // Mix all active tracks using timeline-based rendering
-            for track in &self.tracks {
-                if track.is_active(any_solo) {
-                    track.render(
-                        &mut self.mix_buffer,
-                        &self.audio_pool,
-                        playhead_seconds,
-                        self.sample_rate,
-                        self.channels,
-                    );
-                }
-            }
+            // Render the entire project hierarchy into the mix buffer
+            self.project.render(
+                &mut self.mix_buffer,
+                &self.audio_pool,
+                &mut self.buffer_pool,
+                playhead_seconds,
+                self.sample_rate,
+                self.channels,
+            );
 
             // Copy mix to output
             output.copy_from_slice(&self.mix_buffer);
@@ -165,26 +213,174 @@ impl Engine {
                     .store(self.playhead, Ordering::Relaxed);
             }
             Command::SetTrackVolume(track_id, volume) => {
-                if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+                if let Some(track) = self.project.get_track_mut(track_id) {
                     track.set_volume(volume);
                 }
             }
             Command::SetTrackMute(track_id, muted) => {
-                if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+                if let Some(track) = self.project.get_track_mut(track_id) {
                     track.set_muted(muted);
                 }
             }
             Command::SetTrackSolo(track_id, solo) => {
-                if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+                if let Some(track) = self.project.get_track_mut(track_id) {
                     track.set_solo(solo);
                 }
             }
             Command::MoveClip(track_id, clip_id, new_start_time) => {
-                if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
                     if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
                         clip.start_time = new_start_time;
                     }
                 }
+            }
+            Command::AddGainEffect(track_id, gain_db) => {
+                // Get the track node and handle audio tracks, MIDI tracks, and groups
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Gain") {
+                            effect.set_parameter(0, gain_db);
+                        } else {
+                            track.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Gain") {
+                            effect.set_parameter(0, gain_db);
+                        } else {
+                            track.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "Gain") {
+                            effect.set_parameter(0, gain_db);
+                        } else {
+                            group.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::AddPanEffect(track_id, pan) => {
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Pan") {
+                            effect.set_parameter(0, pan);
+                        } else {
+                            track.add_effect(Box::new(PanEffect::with_pan(pan)));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Pan") {
+                            effect.set_parameter(0, pan);
+                        } else {
+                            track.add_effect(Box::new(PanEffect::with_pan(pan)));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "Pan") {
+                            effect.set_parameter(0, pan);
+                        } else {
+                            group.add_effect(Box::new(PanEffect::with_pan(pan)));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::AddEQEffect(track_id, low_db, mid_db, high_db) => {
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
+                            effect.set_parameter(0, low_db);
+                            effect.set_parameter(1, mid_db);
+                            effect.set_parameter(2, high_db);
+                        } else {
+                            let mut eq = SimpleEQ::new();
+                            eq.set_parameter(0, low_db);
+                            eq.set_parameter(1, mid_db);
+                            eq.set_parameter(2, high_db);
+                            track.add_effect(Box::new(eq));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
+                            effect.set_parameter(0, low_db);
+                            effect.set_parameter(1, mid_db);
+                            effect.set_parameter(2, high_db);
+                        } else {
+                            let mut eq = SimpleEQ::new();
+                            eq.set_parameter(0, low_db);
+                            eq.set_parameter(1, mid_db);
+                            eq.set_parameter(2, high_db);
+                            track.add_effect(Box::new(eq));
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
+                            effect.set_parameter(0, low_db);
+                            effect.set_parameter(1, mid_db);
+                            effect.set_parameter(2, high_db);
+                        } else {
+                            let mut eq = SimpleEQ::new();
+                            eq.set_parameter(0, low_db);
+                            eq.set_parameter(1, mid_db);
+                            eq.set_parameter(2, high_db);
+                            group.add_effect(Box::new(eq));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::ClearEffects(track_id) => {
+                let _ = self.project.clear_effects(track_id);
+            }
+            Command::CreateGroup(name) => {
+                let track_id = self.project.add_group_track(name.clone(), None);
+                // Notify UI about the new group
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, true, name));
+            }
+            Command::AddToGroup(track_id, group_id) => {
+                // Move the track to the new group (Project handles removing from old parent)
+                self.project.move_to_group(track_id, group_id);
+            }
+            Command::RemoveFromGroup(track_id) => {
+                // Move to root level (None as parent)
+                self.project.move_to_root(track_id);
+            }
+            Command::CreateMidiTrack(name) => {
+                let track_id = self.project.add_midi_track(name.clone(), None);
+                // Notify UI about the new MIDI track
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
+            }
+            Command::CreateMidiClip(track_id, start_time, duration) => {
+                // Create a new MIDI clip with unique ID
+                let clip_id = self.next_midi_clip_id;
+                self.next_midi_clip_id += 1;
+                let clip = MidiClip::new(clip_id, start_time, duration);
+                let _ = self.project.add_midi_clip(track_id, clip);
+            }
+            Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration) => {
+                // Add a MIDI note event to the specified clip
+                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        // Convert time to sample timestamp
+                        let timestamp = (time_offset * self.sample_rate as f64) as u64;
+                        let note_on = MidiEvent::note_on(timestamp, 0, note, velocity);
+                        clip.events.push(note_on);
+
+                        // Add note off event
+                        let note_off_timestamp = ((time_offset + duration) * self.sample_rate as f64) as u64;
+                        let note_off = MidiEvent::note_off(note_off_timestamp, 0, note, 64);
+                        clip.events.push(note_off);
+
+                        // Sort events by timestamp
+                        clip.events.sort_by_key(|e| e.timestamp);
+                    }
+                }
+            }
+            Command::AddLoadedMidiClip(track_id, clip) => {
+                // Add a pre-loaded MIDI clip to the track
+                let _ = self.project.add_midi_clip(track_id, clip);
             }
         }
     }
@@ -201,7 +397,7 @@ impl Engine {
 
     /// Get number of tracks
     pub fn track_count(&self) -> usize {
-        self.tracks.len()
+        self.project.track_count()
     }
 }
 
@@ -256,6 +452,26 @@ impl EngineController {
         let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
     }
 
+    /// Add or update gain effect on track
+    pub fn add_gain_effect(&mut self, track_id: TrackId, gain_db: f32) {
+        let _ = self.command_tx.push(Command::AddGainEffect(track_id, gain_db));
+    }
+
+    /// Add or update pan effect on track
+    pub fn add_pan_effect(&mut self, track_id: TrackId, pan: f32) {
+        let _ = self.command_tx.push(Command::AddPanEffect(track_id, pan));
+    }
+
+    /// Add or update EQ effect on track
+    pub fn add_eq_effect(&mut self, track_id: TrackId, low_db: f32, mid_db: f32, high_db: f32) {
+        let _ = self.command_tx.push(Command::AddEQEffect(track_id, low_db, mid_db, high_db));
+    }
+
+    /// Clear all effects from a track
+    pub fn clear_effects(&mut self, track_id: TrackId) {
+        let _ = self.command_tx.push(Command::ClearEffects(track_id));
+    }
+
     /// Get current playhead position in samples
     pub fn get_playhead_samples(&self) -> u64 {
         self.playhead.load(Ordering::Relaxed)
@@ -265,5 +481,40 @@ impl EngineController {
     pub fn get_playhead_seconds(&self) -> f64 {
         let samples = self.playhead.load(Ordering::Relaxed);
         samples as f64 / (self.sample_rate as f64 * self.channels as f64)
+    }
+
+    /// Create a new group track
+    pub fn create_group(&mut self, name: String) {
+        let _ = self.command_tx.push(Command::CreateGroup(name));
+    }
+
+    /// Add a track to a group
+    pub fn add_to_group(&mut self, track_id: TrackId, group_id: TrackId) {
+        let _ = self.command_tx.push(Command::AddToGroup(track_id, group_id));
+    }
+
+    /// Remove a track from its parent group
+    pub fn remove_from_group(&mut self, track_id: TrackId) {
+        let _ = self.command_tx.push(Command::RemoveFromGroup(track_id));
+    }
+
+    /// Create a new MIDI track
+    pub fn create_midi_track(&mut self, name: String) {
+        let _ = self.command_tx.push(Command::CreateMidiTrack(name));
+    }
+
+    /// Create a new MIDI clip on a track
+    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) {
+        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time, duration));
+    }
+
+    /// Add a MIDI note to a clip
+    pub fn add_midi_note(&mut self, track_id: TrackId, clip_id: MidiClipId, time_offset: f64, note: u8, velocity: u8, duration: f64) {
+        let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration));
+    }
+
+    /// Add a pre-loaded MIDI clip to a track
+    pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) {
+        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip));
     }
 }

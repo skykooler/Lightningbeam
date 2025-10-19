@@ -7,6 +7,7 @@ edition = "2021"
 cpal = "0.15"
 symphonia = { version = "0.5", features = ["all"] }
 rtrb = "0.3"
+midly = "0.5"
 
 [dev-dependencies]
 

@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use daw_backend::{AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track};
+use daw_backend::{load_midi_file, AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track, TrackNode};
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("DAW Backend - Phase 4: Clips & Timeline\n");
+    println!("DAW Backend - Phase 6: Hierarchical Tracks\n");
 
     // Load all audio files
     let mut audio_files = Vec::new();
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = Engine::new(max_sample_rate, max_channels, command_rx, event_tx);
 
     // Add all files to the audio pool and create tracks with clips
-    let mut track_ids = Vec::new();
+    let track_ids = Arc::new(Mutex::new(Vec::new()));
     let mut clip_info = Vec::new(); // Store (track_id, clip_id, name, duration)
     let mut max_duration = 0.0f64;
     let mut clip_id_counter = 0u32;
@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         track.add_clip(clip);
         engine.add_track(track);
-        track_ids.push(track_id);
+        track_ids.lock().unwrap().push(track_id);
         clip_info.push((track_id, clip_id, name.clone(), duration));
 
         println!("  Track {}: {} (clip {} at 0.0s, duration {:.2}s)", i, name, clip_id, duration);
@@ -140,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wrap engine in Arc<Mutex> for thread-safe access
     let engine = Arc::new(Mutex::new(engine));
+    let engine_for_commands = Arc::clone(&engine);
 
     // Build the output stream
     let stream = match sample_format {
@@ -153,11 +154,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.play()?;
     println!("\nAudio stream started!");
     print_help();
-    print_status(0.0, max_duration, &track_ids);
+    {
+        let ids = track_ids.lock().unwrap();
+        print_status(0.0, max_duration, &ids);
+    }
 
     // Spawn event listener thread
     let event_rx = Arc::new(Mutex::new(event_rx));
     let event_rx_clone = Arc::clone(&event_rx);
+    let track_ids_clone = Arc::clone(&track_ids);
     let _event_thread = thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(50));
@@ -191,6 +196,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     AudioEvent::BufferUnderrun => {
                         eprintln!("\nWarning: Buffer underrun detected");
+                    }
+                    AudioEvent::TrackCreated(track_id, is_group, name) => {
+                        print!("\r\x1b[K");
+                        if is_group {
+                            println!("Group {} created: '{}' (ID: {})", track_id, name, track_id);
+                        } else {
+                            println!("Track {} created: '{}' (ID: {})", track_id, name, track_id);
+                        }
+                        track_ids_clone.lock().unwrap().push(track_id);
+                        print!("> ");
+                        io::stdout().flush().ok();
                     }
                 }
             }
@@ -238,11 +254,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() == 3 {
                 if let (Ok(track_id), Ok(volume)) = (parts[1].parse::<u32>(), parts[2].parse::<f32>()) {
-                    if track_ids.contains(&track_id) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
                         controller.set_track_volume(track_id, volume);
                         println!("Set track {} volume to {:.2}", track_id, volume);
                     } else {
-                        println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
                     }
                 } else {
                     println!("Invalid format. Usage: volume <track_id> <volume>");
@@ -253,11 +271,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if input.starts_with("mute ") {
             // Parse: mute <track_id>
             if let Ok(track_id) = input[5..].trim().parse::<u32>() {
-                if track_ids.contains(&track_id) {
+                let ids = track_ids.lock().unwrap();
+                if ids.contains(&track_id) {
+                    drop(ids);
                     controller.set_track_mute(track_id, true);
                     println!("Muted track {}", track_id);
                 } else {
-                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                    println!("Invalid track ID. Available tracks: {:?}", *ids);
                 }
             } else {
                 println!("Usage: mute <track_id>");
@@ -265,11 +285,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if input.starts_with("unmute ") {
             // Parse: unmute <track_id>
             if let Ok(track_id) = input[7..].trim().parse::<u32>() {
-                if track_ids.contains(&track_id) {
+                let ids = track_ids.lock().unwrap();
+                if ids.contains(&track_id) {
+                    drop(ids);
                     controller.set_track_mute(track_id, false);
                     println!("Unmuted track {}", track_id);
                 } else {
-                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                    println!("Invalid track ID. Available tracks: {:?}", *ids);
                 }
             } else {
                 println!("Usage: unmute <track_id>");
@@ -277,11 +299,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if input.starts_with("solo ") {
             // Parse: solo <track_id>
             if let Ok(track_id) = input[5..].trim().parse::<u32>() {
-                if track_ids.contains(&track_id) {
+                let ids = track_ids.lock().unwrap();
+                if ids.contains(&track_id) {
+                    drop(ids);
                     controller.set_track_solo(track_id, true);
                     println!("Soloed track {}", track_id);
                 } else {
-                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                    println!("Invalid track ID. Available tracks: {:?}", *ids);
                 }
             } else {
                 println!("Usage: solo <track_id>");
@@ -289,11 +313,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if input.starts_with("unsolo ") {
             // Parse: unsolo <track_id>
             if let Ok(track_id) = input[7..].trim().parse::<u32>() {
-                if track_ids.contains(&track_id) {
+                let ids = track_ids.lock().unwrap();
+                if ids.contains(&track_id) {
+                    drop(ids);
                     controller.set_track_solo(track_id, false);
                     println!("Unsoloed track {}", track_id);
                 } else {
-                    println!("Invalid track ID. Available tracks: {:?}", track_ids);
+                    println!("Invalid track ID. Available tracks: {:?}", *ids);
                 }
             } else {
                 println!("Usage: unsolo <track_id>");
@@ -322,11 +348,249 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Usage: move <track_id> <clip_id> <time>");
             }
         } else if input == "tracks" {
-            println!("Available tracks: {:?}", track_ids);
+            let ids = track_ids.lock().unwrap();
+            println!("Available tracks: {:?}", *ids);
         } else if input == "clips" {
+            // Query the actual project state for all clips
+            let engine = engine_for_commands.lock().unwrap();
+            let project = engine.project();
+            let track_ids_list = track_ids.lock().unwrap().clone();
+
             println!("Available clips:");
-            for (tid, cid, name, dur) in &clip_info {
-                println!("  Track {}, Clip {} ('{}', duration {:.2}s)", tid, cid, name, dur);
+            let mut clip_count = 0;
+
+            for &track_id in &track_ids_list {
+                if let Some(track_node) = project.get_track(track_id) {
+                    match track_node {
+                        TrackNode::Audio(track) => {
+                            for clip in &track.clips {
+                                println!("  Track {} ({}), Audio Clip {}: start {:.2}s, duration {:.2}s",
+                                        track_id, track.name, clip.id, clip.start_time,
+                                        clip.end_time() - clip.start_time);
+                                clip_count += 1;
+                            }
+                        }
+                        TrackNode::Midi(track) => {
+                            for clip in &track.clips {
+                                let event_count = clip.events.len();
+                                println!("  Track {} ({}), MIDI Clip {}: start {:.2}s, duration {:.2}s, {} events",
+                                        track_id, track.name, clip.id, clip.start_time,
+                                        clip.duration, event_count);
+                                clip_count += 1;
+                            }
+                        }
+                        TrackNode::Group(_) => {
+                            // Groups don't have clips
+                        }
+                    }
+                }
+            }
+
+            if clip_count == 0 {
+                println!("  (no clips)");
+            }
+        } else if input.starts_with("gain ") {
+            // Parse: gain <track_id> <gain_db>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(gain_db)) = (parts[1].parse::<u32>(), parts[2].parse::<f32>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        controller.add_gain_effect(track_id, gain_db);
+                        println!("Set gain on track {} to {:.1} dB", track_id, gain_db);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: gain <track_id> <gain_db>");
+                }
+            } else {
+                println!("Usage: gain <track_id> <gain_db>");
+            }
+        } else if input.starts_with("pan ") {
+            // Parse: pan <track_id> <pan>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(pan)) = (parts[1].parse::<u32>(), parts[2].parse::<f32>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        let clamped_pan = pan.clamp(-1.0, 1.0);
+                        controller.add_pan_effect(track_id, clamped_pan);
+                        let pos = if clamped_pan < -0.01 {
+                            format!("{:.0}% left", -clamped_pan * 100.0)
+                        } else if clamped_pan > 0.01 {
+                            format!("{:.0}% right", clamped_pan * 100.0)
+                        } else {
+                            "center".to_string()
+                        };
+                        println!("Set pan on track {} to {} ({:.2})", track_id, pos, clamped_pan);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: pan <track_id> <pan>");
+                }
+            } else {
+                println!("Usage: pan <track_id> <pan> (where pan is -1.0=left, 0.0=center, 1.0=right)");
+            }
+        } else if input.starts_with("eq ") {
+            // Parse: eq <track_id> <low_db> <mid_db> <high_db>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 5 {
+                if let (Ok(track_id), Ok(low), Ok(mid), Ok(high)) =
+                    (parts[1].parse::<u32>(), parts[2].parse::<f32>(), parts[3].parse::<f32>(), parts[4].parse::<f32>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        controller.add_eq_effect(track_id, low, mid, high);
+                        println!("Set EQ on track {}: Low {:.1} dB, Mid {:.1} dB, High {:.1} dB",
+                                track_id, low, mid, high);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: eq <track_id> <low_db> <mid_db> <high_db>");
+                }
+            } else {
+                println!("Usage: eq <track_id> <low_db> <mid_db> <high_db>");
+            }
+        } else if input.starts_with("clearfx ") {
+            // Parse: clearfx <track_id>
+            if let Ok(track_id) = input[8..].trim().parse::<u32>() {
+                let ids = track_ids.lock().unwrap();
+                if ids.contains(&track_id) {
+                    drop(ids);
+                    controller.clear_effects(track_id);
+                    println!("Cleared all effects from track {}", track_id);
+                } else {
+                    println!("Invalid track ID. Available tracks: {:?}", *ids);
+                }
+            } else {
+                println!("Usage: clearfx <track_id>");
+            }
+        } else if input.starts_with("group ") {
+            // Parse: group <name>
+            let name = input[6..].trim().to_string();
+            if !name.is_empty() {
+                controller.create_group(name.clone());
+                println!("Created group '{}'", name);
+            } else {
+                println!("Usage: group <name>");
+            }
+        } else if input.starts_with("addtogroup ") {
+            // Parse: addtogroup <track_id> <group_id>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(group_id)) = (parts[1].parse::<u32>(), parts[2].parse::<u32>()) {
+                    controller.add_to_group(track_id, group_id);
+                    println!("Added track {} to group {}", track_id, group_id);
+                } else {
+                    println!("Invalid format. Usage: addtogroup <track_id> <group_id>");
+                }
+            } else {
+                println!("Usage: addtogroup <track_id> <group_id>");
+            }
+        } else if input.starts_with("removefromgroup ") {
+            // Parse: removefromgroup <track_id>
+            if let Ok(track_id) = input[16..].trim().parse::<u32>() {
+                controller.remove_from_group(track_id);
+                println!("Removed track {} from its group", track_id);
+            } else {
+                println!("Usage: removefromgroup <track_id>");
+            }
+        } else if input.starts_with("midi ") {
+            // Parse: midi <name>
+            let name = input[5..].trim().to_string();
+            if !name.is_empty() {
+                controller.create_midi_track(name.clone());
+                println!("Created MIDI track '{}'", name);
+            } else {
+                println!("Usage: midi <name>");
+            }
+        } else if input.starts_with("midiclip ") {
+            // Parse: midiclip <track_id> <start_time> <duration>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 4 {
+                if let (Ok(track_id), Ok(start_time), Ok(duration)) =
+                    (parts[1].parse::<u32>(), parts[2].parse::<f64>(), parts[3].parse::<f64>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        controller.create_midi_clip(track_id, start_time, duration);
+                        println!("Created MIDI clip on track {} at {:.2}s (duration {:.2}s)",
+                                track_id, start_time, duration);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: midiclip <track_id> <start_time> <duration>");
+                }
+            } else {
+                println!("Usage: midiclip <track_id> <start_time> <duration>");
+            }
+        } else if input.starts_with("note ") {
+            // Parse: note <track_id> <clip_id> <time_offset> <note> <velocity> <duration>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 7 {
+                if let (Ok(track_id), Ok(clip_id), Ok(time_offset), Ok(note), Ok(velocity), Ok(duration)) =
+                    (parts[1].parse::<u32>(), parts[2].parse::<u32>(), parts[3].parse::<f64>(),
+                     parts[4].parse::<u8>(), parts[5].parse::<u8>(), parts[6].parse::<f64>()) {
+                    if note > 127 || velocity > 127 {
+                        println!("Note and velocity must be 0-127");
+                    } else {
+                        controller.add_midi_note(track_id, clip_id, time_offset, note, velocity, duration);
+                        println!("Added note {} (velocity {}) to clip {} on track {} at offset {:.2}s (duration {:.2}s)",
+                                note, velocity, clip_id, track_id, time_offset, duration);
+                    }
+                } else {
+                    println!("Invalid format. Usage: note <track_id> <clip_id> <time_offset> <note> <velocity> <duration>");
+                }
+            } else {
+                println!("Usage: note <track_id> <clip_id> <time_offset> <note> <velocity> <duration>");
+            }
+        } else if input.starts_with("loadmidi ") {
+            // Parse: loadmidi <track_id> <file_path> [start_time]
+            let parts: Vec<&str> = input.splitn(4, ' ').collect();
+            if parts.len() >= 3 {
+                if let Ok(track_id) = parts[1].parse::<u32>() {
+                    let file_path = parts[2];
+                    let start_time = if parts.len() == 4 {
+                        parts[3].parse::<f64>().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+
+                        // Load the MIDI file (this happens on the UI thread, not audio thread)
+                        match load_midi_file(file_path, clip_id_counter, max_sample_rate) {
+                            Ok(mut clip) => {
+                                clip.start_time = start_time;
+                                let event_count = clip.events.len();
+                                let duration = clip.duration;
+                                let clip_id = clip.id;
+                                clip_id_counter += 1;
+
+                                controller.add_loaded_midi_clip(track_id, clip);
+                                println!("Loaded MIDI file '{}' to track {} as clip {} at {:.2}s ({} events, duration {:.2}s)",
+                                        file_path, track_id, clip_id, start_time, event_count, duration);
+                            }
+                            Err(e) => {
+                                println!("Error loading MIDI file: {}", e);
+                            }
+                        }
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: loadmidi <track_id> <file_path> [start_time]");
+                }
+            } else {
+                println!("Usage: loadmidi <track_id> <file_path> [start_time]");
             }
         } else if input == "help" || input == "h" {
             print_help();
@@ -360,6 +624,25 @@ fn print_help() {
     println!("  clips           - List all clips");
     println!("  move <t> <c> <s> - Move clip to new timeline position");
     println!("                    (e.g. 'move 0 0 5.0' moves clip 0 on track 0 to 5.0s)");
+    println!("\nEffect Commands:");
+    println!("  gain <id> <db>  - Add/update gain effect (e.g. 'gain 0 6.0' for +6dB)");
+    println!("  pan <id> <pan>  - Add/update pan effect (-1.0=left, 0.0=center, 1.0=right)");
+    println!("  eq <id> <l> <m> <h> - Add/update 3-band EQ (low, mid, high in dB)");
+    println!("                    (e.g. 'eq 0 3.0 0.0 -2.0')");
+    println!("  clearfx <id>    - Clear all effects from a track");
+    println!("\nGroup Commands:");
+    println!("  group <name>    - Create a new group track");
+    println!("  addtogroup <t> <g> - Add track to group (e.g. 'addtogroup 0 2')");
+    println!("  removefromgroup <t> - Remove track from its parent group");
+    println!("\nMIDI Commands:");
+    println!("  midi <name>     - Create a new MIDI track");
+    println!("  midiclip <t> <s> <d> - Create MIDI clip on track (start, duration)");
+    println!("                    (e.g. 'midiclip 0 0.0 4.0')");
+    println!("  note <t> <c> <o> <n> <v> <d> - Add note to MIDI clip");
+    println!("                    (track, clip, time_offset, note, velocity, duration)");
+    println!("                    (e.g. 'note 0 0 0.0 60 100 0.5' adds middle C)");
+    println!("  loadmidi <t> <file> [start] - Load .mid file into track");
+    println!("                    (e.g. 'loadmidi 0 song.mid 0.0')");
     println!("\nOther:");
     println!("  h, help         - Show this help");
     println!("  q, quit         - Quit");
