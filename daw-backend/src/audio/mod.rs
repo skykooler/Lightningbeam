@@ -12,4 +12,4 @@ pub use engine::{Engine, EngineController};
 pub use midi::{MidiClip, MidiClipId, MidiEvent};
 pub use pool::{AudioFile as PoolAudioFile, AudioPool};
 pub use project::Project;
-pub use track::{AudioTrack, GroupTrack, MidiTrack, Track, TrackId, TrackNode};
+pub use track::{AudioTrack, Metatrack, MidiTrack, RenderContext, Track, TrackId, TrackNode};

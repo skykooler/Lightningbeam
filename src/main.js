@@ -507,7 +507,7 @@ let actions = {
           // Increment zOrder for all existing shapes
           for (let existingShape of layer.shapes) {
             if (existingShape !== newShape) {
-              let existingZOrderCurve = layer.animationData.curves[`shape.${existingShape.idx}.zOrder`];
+              let existingZOrderCurve = layer.animationData.curves[`shape.${existingShape.shapeId}.zOrder`];
               if (existingZOrderCurve) {
                 // Find keyframe at this time and increment it
                 for (let kf of existingZOrderCurve.keyframes) {
@@ -3216,20 +3216,70 @@ class Layer extends Widget {
   // Get all shapes that exist at the given time
   getVisibleShapes(time) {
     const visibleShapes = [];
+
+    // Calculate tolerance based on framerate (half a frame)
+    const halfFrameDuration = 0.5 / config.framerate;
+
+    // Group shapes by shapeId
+    const shapesByShapeId = new Map();
     for (let shape of this.shapes) {
       if (shape instanceof TempShape) continue;
-
-      // Check if shape exists at current time
-      let existsValue = this.animationData.interpolate(`shape.${shape.shapeId}.exists`, time);
-      if (existsValue && existsValue > 0) {
-        visibleShapes.push(shape);
+      if (!shapesByShapeId.has(shape.shapeId)) {
+        shapesByShapeId.set(shape.shapeId, []);
       }
+      shapesByShapeId.get(shape.shapeId).push(shape);
     }
+
+    // For each logical shape (shapeId), determine which version to return for EDITING
+    for (let [shapeId, shapes] of shapesByShapeId) {
+      // Check if this logical shape exists at current time
+      let existsValue = this.animationData.interpolate(`shape.${shapeId}.exists`, time);
+      if (existsValue === null || existsValue <= 0) continue;
+
+      // Get shapeIndex curve
+      const shapeIndexCurve = this.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
+
+      if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
+        // No shapeIndex curve, return shape with index 0
+        const shape = shapes.find(s => s.shapeIndex === 0);
+        if (shape) {
+          visibleShapes.push(shape);
+        }
+        continue;
+      }
+
+      // Find bracketing keyframes
+      const { prev: prevKf, next: nextKf } = shapeIndexCurve.getBracketingKeyframes(time);
+
+      // Get interpolated shapeIndex value
+      let shapeIndexValue = shapeIndexCurve.interpolate(time);
+      if (shapeIndexValue === null) shapeIndexValue = 0;
+
+      // Check if we're at a keyframe (within half a frame)
+      const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < halfFrameDuration;
+      const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < halfFrameDuration;
+
+      if (atPrevKeyframe) {
+        // At previous keyframe - return that version for editing
+        const shape = shapes.find(s => s.shapeIndex === prevKf.value);
+        if (shape) visibleShapes.push(shape);
+      } else if (atNextKeyframe) {
+        // At next keyframe - return that version for editing
+        const shape = shapes.find(s => s.shapeIndex === nextKf.value);
+        if (shape) visibleShapes.push(shape);
+      } else if (prevKf && prevKf.interpolation === 'hold') {
+        // Between keyframes but using "hold" interpolation - no morphing
+        // Return the previous keyframe's shape since that's what's shown
+        const shape = shapes.find(s => s.shapeIndex === prevKf.value);
+        if (shape) visibleShapes.push(shape);
+      }
+      // Otherwise: between keyframes with morphing, return nothing (can't edit a morph)
+    }
+
     return visibleShapes;
   }
 
   draw(ctx) {
-    console.log(`[Layer.draw] CALLED - shapes:`, this.shapes ? this.shapes.length : 0);
     // super.draw(ctx)
     if (!this.visible) return;
     let frameInfo = this.getFrameValue(this.frameNum);
@@ -3260,11 +3310,8 @@ class Layer extends Widget {
     // Process each logical shape (shapeId)
     let visibleShapes = [];
     for (let [shapeId, shapes] of shapesByShapeId) {
-      console.log(`[Layer.draw] Processing shapeId ${shapeId}, have ${shapes.length} versions:`, shapes.map(s => ({idx: s.idx, shapeIndex: s.shapeIndex})));
-
       // Check if this logical shape exists at current time
       let existsValue = this.animationData.interpolate(`shape.${shapeId}.exists`, currentTime);
-      console.log(`[Layer.draw] existsValue for ${shapeId} at time ${currentTime}:`, existsValue);
       if (existsValue === null || existsValue <= 0) continue;
 
       // Get z-order
@@ -3283,12 +3330,10 @@ class Layer extends Widget {
 
       // Find surrounding keyframes
       const { prev: prevKf, next: nextKf } = getKeyframesSurrounding(shapeIndexCurve.keyframes, currentTime);
-      console.log(`[Layer.draw] Keyframes for ${shapeId}: prev=`, prevKf, 'next=', nextKf);
 
       // Get interpolated value
       let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
       if (shapeIndexValue === null) shapeIndexValue = 0;
-      console.log(`[Layer.draw] shapeIndexValue at time ${currentTime}:`, shapeIndexValue);
 
       // Sort shape versions by shapeIndex
       shapes.sort((a, b) => a.shapeIndex - b.shapeIndex);
@@ -3297,18 +3342,13 @@ class Layer extends Widget {
       // Check if we're at either the previous or next keyframe value (no morphing needed)
       const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < 0.001;
       const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < 0.001;
-      console.log(`[Layer.draw] atPrevKeyframe=${atPrevKeyframe}, atNextKeyframe=${atNextKeyframe}`);
 
       if (atPrevKeyframe || atNextKeyframe) {
         // No morphing - display the shape at the keyframe value
         const targetValue = atNextKeyframe ? nextKf.value : prevKf.value;
-        console.log(`[Layer.draw] Showing single shape with shapeIndex=${targetValue}`);
         const shape = shapes.find(s => s.shapeIndex === targetValue);
         if (shape) {
-          console.log(`[Layer.draw] Found shape with idx=${shape.idx}, shapeIndex=${shape.shapeIndex}`);
           visibleShapes.push({ shape, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape) });
-        } else {
-          console.warn(`[Layer.draw] Could not find shape with shapeIndex=${targetValue}`);
         }
       } else if (prevKf && nextKf && prevKf.value !== nextKf.value) {
         // Morph between shapes specified by surrounding keyframes
@@ -4692,16 +4732,122 @@ class GraphicsObject extends Widget {
         layer.activeShape.draw(cxt);
       }
 
-      // NEW: Use AnimationData system to draw shapes
+      // NEW: Use AnimationData system to draw shapes with shape tweening/morphing
       let currentTime = this.currentTime || 0;
-      let visibleShapes = [];
 
+      // Group shapes by shapeId (multiple Shape objects can share a shapeId for tweening)
+      const shapesByShapeId = new Map();
       for (let shape of layer.shapes) {
         if (shape instanceof TempShape) continue;
-        let existsValue = layer.animationData.interpolate(`shape.${shape.shapeId}.exists`, currentTime);
-        if (existsValue !== null && existsValue > 0) {
-          let zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, currentTime);
-          visibleShapes.push({ shape, zOrder: zOrder || 0 });
+        if (!shapesByShapeId.has(shape.shapeId)) {
+          shapesByShapeId.set(shape.shapeId, []);
+        }
+        shapesByShapeId.get(shape.shapeId).push(shape);
+      }
+
+      // Process each logical shape (shapeId) and determine what to draw
+      let visibleShapes = [];
+      for (let [shapeId, shapes] of shapesByShapeId) {
+        // Check if this logical shape exists at current time
+        const existsCurveKey = `shape.${shapeId}.exists`;
+        let existsValue = layer.animationData.interpolate(existsCurveKey, currentTime);
+        console.log(`[Widget.draw] Checking shape ${shapeId} at time ${currentTime}: existsValue=${existsValue}, curve=${layer.animationData.curves[existsCurveKey] ? 'exists' : 'missing'}`);
+        if (layer.animationData.curves[existsCurveKey]) {
+          console.log(`[Widget.draw] Curve keyframes:`, layer.animationData.curves[existsCurveKey].keyframes);
+        }
+        if (existsValue === null || existsValue <= 0) {
+          console.log(`[Widget.draw] Skipping shape ${shapeId} - not visible`);
+          continue;
+        }
+
+        // Get z-order
+        let zOrder = layer.animationData.interpolate(`shape.${shapeId}.zOrder`, currentTime);
+
+        // Get shapeIndex curve and surrounding keyframes
+        const shapeIndexCurve = layer.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
+        console.log(`[Widget.draw] shapeIndexCurve for ${shapeId}:`, shapeIndexCurve ? 'exists' : 'missing', 'keyframes:', shapeIndexCurve?.keyframes?.length);
+        console.log(`[Widget.draw] Available shapes for ${shapeId}:`, shapes.map(s => ({idx: s.idx, shapeIndex: s.shapeIndex})));
+        if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
+          // No shapeIndex curve, just show shape with index 0
+          const shape = shapes.find(s => s.shapeIndex === 0);
+          console.log(`[Widget.draw] No shapeIndex curve - looking for shape with index 0:`, shape ? 'found' : 'NOT FOUND');
+          if (shape) {
+            console.log(`[Widget.draw] Adding shape to visibleShapes`);
+            visibleShapes.push({
+              shape,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape)
+            });
+          }
+          continue;
+        }
+
+        // Find surrounding keyframes using AnimationCurve's built-in method
+        const { prev: prevKf, next: nextKf } = shapeIndexCurve.getBracketingKeyframes(currentTime);
+        console.log(`[Widget.draw] Keyframes: prevKf=${JSON.stringify(prevKf)}, nextKf=${JSON.stringify(nextKf)}`);
+
+        // Get interpolated value
+        let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
+        if (shapeIndexValue === null) shapeIndexValue = 0;
+        console.log(`[Widget.draw] shapeIndexValue=${shapeIndexValue}`);
+
+        // Sort shape versions by shapeIndex
+        shapes.sort((a, b) => a.shapeIndex - b.shapeIndex);
+        console.log(`[Widget.draw] Sorted shapes:`, shapes.map(s => `idx=${s.idx.substring(0,8)} shapeIndex=${s.shapeIndex}`));
+
+        // Determine whether to morph based on whether interpolated value equals a keyframe value
+        const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < 0.001;
+        const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < 0.001;
+        console.log(`[Widget.draw] atPrevKeyframe=${atPrevKeyframe}, atNextKeyframe=${atNextKeyframe}`);
+
+        if (atPrevKeyframe || atNextKeyframe) {
+          // No morphing - display the shape at the keyframe value
+          const targetValue = atNextKeyframe ? nextKf.value : prevKf.value;
+          const shape = shapes.find(s => s.shapeIndex === targetValue);
+          if (shape) {
+            visibleShapes.push({
+              shape,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape)
+            });
+          }
+        } else if (prevKf && nextKf && prevKf.value !== nextKf.value) {
+          // Morph between shapes specified by surrounding keyframes
+          const shape1 = shapes.find(s => s.shapeIndex === prevKf.value);
+          const shape2 = shapes.find(s => s.shapeIndex === nextKf.value);
+
+          if (shape1 && shape2) {
+            // Calculate t based on time position between keyframes
+            const t = (currentTime - prevKf.time) / (nextKf.time - prevKf.time);
+            const morphedShape = shape1.lerpShape(shape2, t);
+            visibleShapes.push({
+              shape: morphedShape,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape1) || context.shapeselection.includes(shape2)
+            });
+          } else if (shape1) {
+            visibleShapes.push({
+              shape: shape1,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape1)
+            });
+          } else if (shape2) {
+            visibleShapes.push({
+              shape: shape2,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape2)
+            });
+          }
+        } else if (nextKf) {
+          // Only next keyframe exists, show that shape
+          const shape = shapes.find(s => s.shapeIndex === nextKf.value);
+          if (shape) {
+            visibleShapes.push({
+              shape,
+              zOrder: zOrder || 0,
+              selected: context.shapeselection.includes(shape)
+            });
+          }
         }
       }
 
@@ -4709,9 +4855,9 @@ class GraphicsObject extends Widget {
       visibleShapes.sort((a, b) => a.zOrder - b.zOrder);
 
       // Draw sorted shapes
-      for (let { shape } of visibleShapes) {
+      for (let { shape, selected } of visibleShapes) {
         let cxt = {...context}
-        if (context.shapeselection.indexOf(shape) >= 0) {
+        if (selected) {
           cxt.selected = true
         }
         shape.draw(cxt);

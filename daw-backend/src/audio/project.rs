@@ -2,7 +2,7 @@ use super::buffer_pool::BufferPool;
 use super::clip::Clip;
 use super::midi::MidiClip;
 use super::pool::AudioPool;
-use super::track::{AudioTrack, GroupTrack, MidiTrack, TrackId, TrackNode};
+use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
 use crate::effects::Effect;
 use std::collections::HashMap;
 
@@ -69,7 +69,7 @@ impl Project {
     /// The new group's ID
     pub fn add_group_track(&mut self, name: String, parent_id: Option<TrackId>) -> TrackId {
         let id = self.next_id();
-        let group = GroupTrack::new(id, name);
+        let group = Metatrack::new(id, name);
         self.tracks.insert(id, TrackNode::Group(group));
 
         if let Some(parent) = parent_id {
@@ -285,6 +285,14 @@ impl Project {
 
         let any_solo = self.any_solo();
 
+        // Create initial render context
+        let ctx = RenderContext::new(
+            playhead_seconds,
+            sample_rate,
+            channels,
+            output.len(),
+        );
+
         // Render each root track
         for &track_id in &self.root_tracks.clone() {
             self.render_track(
@@ -292,9 +300,7 @@ impl Project {
                 output,
                 pool,
                 buffer_pool,
-                playhead_seconds,
-                sample_rate,
-                channels,
+                ctx,
                 any_solo,
                 false, // root tracks are not inside a soloed parent
             );
@@ -308,9 +314,7 @@ impl Project {
         output: &mut [f32],
         pool: &AudioPool,
         buffer_pool: &mut BufferPool,
-        playhead_seconds: f64,
-        sample_rate: u32,
-        channels: u32,
+        ctx: RenderContext,
         any_solo: bool,
         parent_is_soloed: bool,
     ) {
@@ -352,16 +356,17 @@ impl Project {
         match self.tracks.get_mut(&track_id) {
             Some(TrackNode::Audio(track)) => {
                 // Render audio track directly into output
-                track.render(output, pool, playhead_seconds, sample_rate, channels);
+                track.render(output, pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Midi(track)) => {
                 // Render MIDI track directly into output
-                track.render(output, playhead_seconds, sample_rate, channels);
+                track.render(output, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Group(group)) => {
-                // Get children IDs and check if this group is soloed
+                // Get children IDs, check if this group is soloed, and transform context
                 let children: Vec<TrackId> = group.children.clone();
                 let this_group_is_soloed = group.solo;
+                let child_ctx = group.transform_context(ctx);
 
                 // Acquire a temporary buffer for the group mix
                 let mut group_buffer = buffer_pool.acquire();
@@ -377,9 +382,7 @@ impl Project {
                         &mut group_buffer,
                         pool,
                         buffer_pool,
-                        playhead_seconds,
-                        sample_rate,
-                        channels,
+                        child_ctx,
                         any_solo,
                         children_parent_soloed,
                     );
@@ -388,7 +391,7 @@ impl Project {
                 // Apply group effects
                 if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
                     for effect in &mut group.effects {
-                        effect.process(&mut group_buffer, channels as usize, sample_rate);
+                        effect.process(&mut group_buffer, ctx.channels as usize, ctx.sample_rate);
                     }
 
                     // Apply group volume and mix into output

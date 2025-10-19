@@ -35,13 +35,23 @@ pub enum Command {
     /// Clear all effects from a track
     ClearEffects(TrackId),
 
-    // Group management commands
-    /// Create a new group track with a name
-    CreateGroup(String),
-    /// Add a track to a group (track_id, group_id)
-    AddToGroup(TrackId, TrackId),
-    /// Remove a track from its parent group
-    RemoveFromGroup(TrackId),
+    // Metatrack management commands
+    /// Create a new metatrack with a name
+    CreateMetatrack(String),
+    /// Add a track to a metatrack (track_id, metatrack_id)
+    AddToMetatrack(TrackId, TrackId),
+    /// Remove a track from its parent metatrack
+    RemoveFromMetatrack(TrackId),
+
+    // Metatrack transformation commands
+    /// Set metatrack time stretch factor (track_id, stretch_factor)
+    /// 0.5 = half speed, 1.0 = normal, 2.0 = double speed
+    SetTimeStretch(TrackId, f32),
+    /// Set metatrack time offset in seconds (track_id, offset)
+    /// Positive = shift content later, negative = shift earlier
+    SetOffset(TrackId, f64),
+    /// Set metatrack pitch shift in semitones (track_id, semitones) - for future use
+    SetPitchShift(TrackId, f32),
 
     // MIDI commands
     /// Create a new MIDI track with a name
@@ -63,6 +73,6 @@ pub enum AudioEvent {
     PlaybackStopped,
     /// Audio buffer underrun detected
     BufferUnderrun,
-    /// A new track was created (track_id, is_group, name)
+    /// A new track was created (track_id, is_metatrack, name)
     TrackCreated(TrackId, bool, String),
 }

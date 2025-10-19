@@ -197,10 +197,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AudioEvent::BufferUnderrun => {
                         eprintln!("\nWarning: Buffer underrun detected");
                     }
-                    AudioEvent::TrackCreated(track_id, is_group, name) => {
+                    AudioEvent::TrackCreated(track_id, is_metatrack, name) => {
                         print!("\r\x1b[K");
-                        if is_group {
-                            println!("Group {} created: '{}' (ID: {})", track_id, name, track_id);
+                        if is_metatrack {
+                            println!("Metatrack {} created: '{}' (ID: {})", track_id, name, track_id);
                         } else {
                             println!("Track {} created: '{}' (ID: {})", track_id, name, track_id);
                         }
@@ -470,35 +470,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Usage: clearfx <track_id>");
             }
-        } else if input.starts_with("group ") {
-            // Parse: group <name>
-            let name = input[6..].trim().to_string();
+        } else if input.starts_with("meta ") {
+            // Parse: meta <name>
+            let name = input[5..].trim().to_string();
             if !name.is_empty() {
-                controller.create_group(name.clone());
-                println!("Created group '{}'", name);
+                controller.create_metatrack(name.clone());
+                println!("Created metatrack '{}'", name);
             } else {
-                println!("Usage: group <name>");
+                println!("Usage: meta <name>");
             }
-        } else if input.starts_with("addtogroup ") {
-            // Parse: addtogroup <track_id> <group_id>
+        } else if input.starts_with("addtometa ") {
+            // Parse: addtometa <track_id> <metatrack_id>
             let parts: Vec<&str> = input.split_whitespace().collect();
             if parts.len() == 3 {
-                if let (Ok(track_id), Ok(group_id)) = (parts[1].parse::<u32>(), parts[2].parse::<u32>()) {
-                    controller.add_to_group(track_id, group_id);
-                    println!("Added track {} to group {}", track_id, group_id);
+                if let (Ok(track_id), Ok(metatrack_id)) = (parts[1].parse::<u32>(), parts[2].parse::<u32>()) {
+                    controller.add_to_metatrack(track_id, metatrack_id);
+                    println!("Added track {} to metatrack {}", track_id, metatrack_id);
                 } else {
-                    println!("Invalid format. Usage: addtogroup <track_id> <group_id>");
+                    println!("Invalid format. Usage: addtometa <track_id> <metatrack_id>");
                 }
             } else {
-                println!("Usage: addtogroup <track_id> <group_id>");
+                println!("Usage: addtometa <track_id> <metatrack_id>");
             }
-        } else if input.starts_with("removefromgroup ") {
-            // Parse: removefromgroup <track_id>
-            if let Ok(track_id) = input[16..].trim().parse::<u32>() {
-                controller.remove_from_group(track_id);
-                println!("Removed track {} from its group", track_id);
+        } else if input.starts_with("removefrommeta ") {
+            // Parse: removefrommeta <track_id>
+            if let Ok(track_id) = input[15..].trim().parse::<u32>() {
+                controller.remove_from_metatrack(track_id);
+                println!("Removed track {} from its metatrack", track_id);
             } else {
-                println!("Usage: removefromgroup <track_id>");
+                println!("Usage: removefrommeta <track_id>");
             }
         } else if input.starts_with("midi ") {
             // Parse: midi <name>
@@ -592,6 +592,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 println!("Usage: loadmidi <track_id> <file_path> [start_time]");
             }
+        } else if input.starts_with("stretch ") {
+            // Parse: stretch <track_id> <factor>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(stretch)) = (parts[1].parse::<u32>(), parts[2].parse::<f32>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        controller.set_time_stretch(track_id, stretch);
+                        let speed = if stretch < 0.99 {
+                            format!("{:.0}% speed (slower)", stretch * 100.0)
+                        } else if stretch > 1.01 {
+                            format!("{:.0}% speed (faster)", stretch * 100.0)
+                        } else {
+                            "normal speed".to_string()
+                        };
+                        println!("Set time stretch on track {} to {:.2}x ({})", track_id, stretch, speed);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: stretch <track_id> <factor>");
+                }
+            } else {
+                println!("Usage: stretch <track_id> <factor> (0.5=half speed, 1.0=normal, 2.0=double speed)");
+            }
+        } else if input.starts_with("offset ") {
+            // Parse: offset <track_id> <seconds>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 3 {
+                if let (Ok(track_id), Ok(offset)) = (parts[1].parse::<u32>(), parts[2].parse::<f64>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        controller.set_offset(track_id, offset);
+                        let direction = if offset > 0.01 {
+                            format!("{:.2}s later", offset)
+                        } else if offset < -0.01 {
+                            format!("{:.2}s earlier", -offset)
+                        } else {
+                            "no offset".to_string()
+                        };
+                        println!("Set time offset on track {} to {:.2}s (content shifted {})", track_id, offset, direction);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: offset <track_id> <seconds>");
+                }
+            } else {
+                println!("Usage: offset <track_id> <seconds> (positive=later, negative=earlier)");
+            }
         } else if input == "help" || input == "h" {
             print_help();
         } else {
@@ -630,10 +682,12 @@ fn print_help() {
     println!("  eq <id> <l> <m> <h> - Add/update 3-band EQ (low, mid, high in dB)");
     println!("                    (e.g. 'eq 0 3.0 0.0 -2.0')");
     println!("  clearfx <id>    - Clear all effects from a track");
-    println!("\nGroup Commands:");
-    println!("  group <name>    - Create a new group track");
-    println!("  addtogroup <t> <g> - Add track to group (e.g. 'addtogroup 0 2')");
-    println!("  removefromgroup <t> - Remove track from its parent group");
+    println!("\nMetatrack Commands:");
+    println!("  meta <name>     - Create a new metatrack");
+    println!("  addtometa <t> <m> - Add track to metatrack (e.g. 'addtometa 0 2')");
+    println!("  removefrommeta <t> - Remove track from its parent metatrack");
+    println!("  stretch <id> <f> - Set time stretch (0.5=half speed, 1.0=normal, 2.0=double)");
+    println!("  offset <id> <s> - Set time offset in seconds (positive=later, negative=earlier)");
     println!("\nMIDI Commands:");
     println!("  midi <name>     - Create a new MIDI track");
     println!("  midiclip <t> <s> <d> - Create MIDI clip on track (start, duration)");

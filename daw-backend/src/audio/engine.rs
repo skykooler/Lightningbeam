@@ -334,18 +334,33 @@ impl Engine {
             Command::ClearEffects(track_id) => {
                 let _ = self.project.clear_effects(track_id);
             }
-            Command::CreateGroup(name) => {
+            Command::CreateMetatrack(name) => {
                 let track_id = self.project.add_group_track(name.clone(), None);
-                // Notify UI about the new group
+                // Notify UI about the new metatrack
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, true, name));
             }
-            Command::AddToGroup(track_id, group_id) => {
-                // Move the track to the new group (Project handles removing from old parent)
-                self.project.move_to_group(track_id, group_id);
+            Command::AddToMetatrack(track_id, metatrack_id) => {
+                // Move the track to the new metatrack (Project handles removing from old parent)
+                self.project.move_to_group(track_id, metatrack_id);
             }
-            Command::RemoveFromGroup(track_id) => {
+            Command::RemoveFromMetatrack(track_id) => {
                 // Move to root level (None as parent)
                 self.project.move_to_root(track_id);
+            }
+            Command::SetTimeStretch(track_id, stretch) => {
+                if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.time_stretch = stretch.max(0.01); // Prevent zero or negative stretch
+                }
+            }
+            Command::SetOffset(track_id, offset) => {
+                if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.offset = offset;
+                }
+            }
+            Command::SetPitchShift(track_id, semitones) => {
+                if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.pitch_shift = semitones;
+                }
             }
             Command::CreateMidiTrack(name) => {
                 let track_id = self.project.add_midi_track(name.clone(), None);
@@ -483,19 +498,36 @@ impl EngineController {
         samples as f64 / (self.sample_rate as f64 * self.channels as f64)
     }
 
-    /// Create a new group track
-    pub fn create_group(&mut self, name: String) {
-        let _ = self.command_tx.push(Command::CreateGroup(name));
+    /// Create a new metatrack
+    pub fn create_metatrack(&mut self, name: String) {
+        let _ = self.command_tx.push(Command::CreateMetatrack(name));
     }
 
-    /// Add a track to a group
-    pub fn add_to_group(&mut self, track_id: TrackId, group_id: TrackId) {
-        let _ = self.command_tx.push(Command::AddToGroup(track_id, group_id));
+    /// Add a track to a metatrack
+    pub fn add_to_metatrack(&mut self, track_id: TrackId, metatrack_id: TrackId) {
+        let _ = self.command_tx.push(Command::AddToMetatrack(track_id, metatrack_id));
     }
 
-    /// Remove a track from its parent group
-    pub fn remove_from_group(&mut self, track_id: TrackId) {
-        let _ = self.command_tx.push(Command::RemoveFromGroup(track_id));
+    /// Remove a track from its parent metatrack
+    pub fn remove_from_metatrack(&mut self, track_id: TrackId) {
+        let _ = self.command_tx.push(Command::RemoveFromMetatrack(track_id));
+    }
+
+    /// Set metatrack time stretch factor
+    /// 0.5 = half speed, 1.0 = normal, 2.0 = double speed
+    pub fn set_time_stretch(&mut self, track_id: TrackId, stretch: f32) {
+        let _ = self.command_tx.push(Command::SetTimeStretch(track_id, stretch));
+    }
+
+    /// Set metatrack time offset in seconds
+    /// Positive = shift content later, negative = shift earlier
+    pub fn set_offset(&mut self, track_id: TrackId, offset: f64) {
+        let _ = self.command_tx.push(Command::SetOffset(track_id, offset));
+    }
+
+    /// Set metatrack pitch shift in semitones (for future use)
+    pub fn set_pitch_shift(&mut self, track_id: TrackId, semitones: f32) {
+        let _ = self.command_tx.push(Command::SetPitchShift(track_id, semitones));
     }
 
     /// Create a new MIDI track

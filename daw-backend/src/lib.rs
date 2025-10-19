@@ -13,7 +13,7 @@ pub mod io;
 // Re-export commonly used types
 pub use audio::{
     AudioPool, AudioTrack, BufferPool, Clip, ClipId, Engine, EngineController,
-    GroupTrack, MidiClip, MidiClipId, MidiEvent, MidiTrack, PoolAudioFile, Project, Track, TrackId, TrackNode,
+    Metatrack, MidiClip, MidiClipId, MidiEvent, MidiTrack, PoolAudioFile, Project, RenderContext, Track, TrackId, TrackNode,
 };
 pub use command::{AudioEvent, Command};
 pub use effects::{Effect, GainEffect, PanEffect, SimpleEQ, SimpleSynth};

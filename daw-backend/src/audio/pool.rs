@@ -1,5 +1,19 @@
 use std::path::PathBuf;
 
+/// Cubic Hermite interpolation for smooth resampling
+/// p0, p1, p2, p3 are four consecutive samples
+/// x is the fractional position between p1 and p2 (0.0 to 1.0)
+#[inline]
+fn hermite_interpolate(p0: f32, p1: f32, p2: f32, p3: f32, x: f32) -> f32 {
+    // Hermite basis functions for smooth interpolation
+    let c0 = p1;
+    let c1 = 0.5 * (p2 - p0);
+    let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+    let c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
+
+    ((c3 * x + c2) * x + c1) * x + c0
+}
+
 /// Audio file stored in the pool
 #[derive(Debug, Clone)]
 pub struct AudioFile {
@@ -103,43 +117,61 @@ impl AudioPool {
                     break;
                 }
 
-                // Linear interpolation for better quality
-                let frac = src_frame_pos - src_frame_idx as f64;
-                let next_frame_idx = src_frame_idx + 1;
-                let next_sample_idx = next_frame_idx * src_channels as usize;
-                let can_interpolate = next_sample_idx + src_channels as usize <= audio_file.data.len() && frac > 0.0;
+                // Cubic Hermite interpolation for high-quality time stretching
+                let frac = (src_frame_pos - src_frame_idx as f64) as f32;
+
+                // We need 4 points for cubic interpolation: p0, p1, p2, p3
+                // where we interpolate between p1 and p2
+                let p1_frame = src_frame_idx;
+                let p0_frame = if p1_frame > 0 { p1_frame - 1 } else { p1_frame };
+                let p2_frame = p1_frame + 1;
+                let p3_frame = p1_frame + 2;
+
+                let p0_idx = p0_frame * src_channels as usize;
+                let p1_idx = p1_frame * src_channels as usize;
+                let p2_idx = p2_frame * src_channels as usize;
+                let p3_idx = p3_frame * src_channels as usize;
+
+                let can_interpolate = p3_idx + src_channels as usize <= audio_file.data.len();
 
                 // Read and convert channels
                 for dst_ch in 0..dst_channels {
                     let sample = if src_channels == dst_channels {
                         // Same number of channels - direct mapping
                         let ch = dst_ch as usize;
-                        let s0 = audio_file.data[src_sample_idx + ch];
-                        if can_interpolate {
-                            let s1 = audio_file.data[next_sample_idx + ch];
-                            s0 + (s1 - s0) * frac as f32
+                        if can_interpolate && frac > 0.0 {
+                            let p0 = audio_file.data[p0_idx + ch];
+                            let p1 = audio_file.data[p1_idx + ch];
+                            let p2 = audio_file.data[p2_idx + ch];
+                            let p3 = audio_file.data[p3_idx + ch];
+                            hermite_interpolate(p0, p1, p2, p3, frac)
                         } else {
-                            s0
+                            audio_file.data[p1_idx + ch]
                         }
                     } else if src_channels == 1 && dst_channels > 1 {
                         // Mono to multi-channel - duplicate to all channels
-                        let s0 = audio_file.data[src_sample_idx];
-                        if can_interpolate {
-                            let s1 = audio_file.data[next_sample_idx];
-                            s0 + (s1 - s0) * frac as f32
+                        if can_interpolate && frac > 0.0 {
+                            let p0 = audio_file.data[p0_idx];
+                            let p1 = audio_file.data[p1_idx];
+                            let p2 = audio_file.data[p2_idx];
+                            let p3 = audio_file.data[p3_idx];
+                            hermite_interpolate(p0, p1, p2, p3, frac)
                         } else {
-                            s0
+                            audio_file.data[p1_idx]
                         }
                     } else if src_channels > 1 && dst_channels == 1 {
                         // Multi-channel to mono - average all source channels
                         let mut sum = 0.0f32;
                         for src_ch in 0..src_channels {
-                            let s0 = audio_file.data[src_sample_idx + src_ch as usize];
-                            let s = if can_interpolate {
-                                let s1 = audio_file.data[next_sample_idx + src_ch as usize];
-                                s0 + (s1 - s0) * frac as f32
+                            let ch = src_ch as usize;
+                            let s = if can_interpolate && frac > 0.0 {
+                                let p0 = audio_file.data[p0_idx + ch];
+                                let p1 = audio_file.data[p1_idx + ch];
+                                let p2 = audio_file.data[p2_idx + ch];
+                                let p3 = audio_file.data[p3_idx + ch];
+                                hermite_interpolate(p0, p1, p2, p3, frac)
                             } else {
-                                s0
+                                audio_file.data[p1_idx + ch]
                             };
                             sum += s;
                         }
@@ -147,12 +179,14 @@ impl AudioPool {
                     } else {
                         // Mismatched channels - use modulo for simple mapping
                         let src_ch = (dst_ch % src_channels) as usize;
-                        let s0 = audio_file.data[src_sample_idx + src_ch];
-                        if can_interpolate {
-                            let s1 = audio_file.data[next_sample_idx + src_ch];
-                            s0 + (s1 - s0) * frac as f32
+                        if can_interpolate && frac > 0.0 {
+                            let p0 = audio_file.data[p0_idx + src_ch];
+                            let p1 = audio_file.data[p1_idx + src_ch];
+                            let p2 = audio_file.data[p2_idx + src_ch];
+                            let p3 = audio_file.data[p3_idx + src_ch];
+                            hermite_interpolate(p0, p1, p2, p3, frac)
                         } else {
-                            s0
+                            audio_file.data[p1_idx + src_ch]
                         }
                     };
 

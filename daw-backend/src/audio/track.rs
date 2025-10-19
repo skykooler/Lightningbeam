@@ -9,11 +9,56 @@ pub type TrackId = u32;
 /// Type alias for backwards compatibility
 pub type Track = AudioTrack;
 
-/// Node in the track hierarchy - can be an audio track, MIDI track, or a group
+/// Rendering context that carries timing information through the track hierarchy
+///
+/// This allows metatracks to transform time for their children (time stretch, offset, etc.)
+#[derive(Debug, Clone, Copy)]
+pub struct RenderContext {
+    /// Current playhead position in seconds (in transformed time)
+    pub playhead_seconds: f64,
+    /// Audio sample rate
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u32,
+    /// Size of the buffer being rendered (in interleaved samples)
+    pub buffer_size: usize,
+    /// Accumulated time stretch factor (1.0 = normal, 0.5 = half speed, 2.0 = double speed)
+    pub time_stretch: f32,
+}
+
+impl RenderContext {
+    /// Create a new render context
+    pub fn new(
+        playhead_seconds: f64,
+        sample_rate: u32,
+        channels: u32,
+        buffer_size: usize,
+    ) -> Self {
+        Self {
+            playhead_seconds,
+            sample_rate,
+            channels,
+            buffer_size,
+            time_stretch: 1.0,
+        }
+    }
+
+    /// Get the duration of the buffer in seconds
+    pub fn buffer_duration(&self) -> f64 {
+        self.buffer_size as f64 / (self.sample_rate as f64 * self.channels as f64)
+    }
+
+    /// Get the end time of the buffer
+    pub fn buffer_end(&self) -> f64 {
+        self.playhead_seconds + self.buffer_duration()
+    }
+}
+
+/// Node in the track hierarchy - can be an audio track, MIDI track, or a metatrack
 pub enum TrackNode {
     Audio(AudioTrack),
     Midi(MidiTrack),
-    Group(GroupTrack),
+    Group(Metatrack),
 }
 
 impl TrackNode {
@@ -81,8 +126,8 @@ impl TrackNode {
     }
 }
 
-/// Group track that contains other tracks (audio or groups)
-pub struct GroupTrack {
+/// Metatrack that contains other tracks with time transformation capabilities
+pub struct Metatrack {
     pub id: TrackId,
     pub name: String,
     pub children: Vec<TrackId>,
@@ -90,10 +135,16 @@ pub struct GroupTrack {
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
+    /// Time stretch factor (0.5 = half speed, 1.0 = normal, 2.0 = double speed)
+    pub time_stretch: f32,
+    /// Pitch shift in semitones (for future implementation)
+    pub pitch_shift: f32,
+    /// Time offset in seconds (shift content forward/backward in time)
+    pub offset: f64,
 }
 
-impl GroupTrack {
-    /// Create a new group track
+impl Metatrack {
+    /// Create a new metatrack
     pub fn new(id: TrackId, name: String) -> Self {
         Self {
             id,
@@ -103,6 +154,9 @@ impl GroupTrack {
             volume: 1.0,
             muted: false,
             solo: false,
+            time_stretch: 1.0,
+            pitch_shift: 0.0,
+            offset: 0.0,
         }
     }
 
@@ -146,6 +200,32 @@ impl GroupTrack {
     /// Check if this group should be audible given the solo state
     pub fn is_active(&self, any_solo: bool) -> bool {
         !self.muted && (!any_solo || self.solo)
+    }
+
+    /// Transform a render context for this metatrack's children
+    ///
+    /// Applies time stretching and offset transformations.
+    /// Time stretch affects how fast content plays: 0.5 = half speed, 2.0 = double speed
+    /// Offset shifts content forward/backward in time
+    pub fn transform_context(&self, ctx: RenderContext) -> RenderContext {
+        let mut transformed = ctx;
+
+        // Apply transformations in order:
+        // 1. First, subtract offset (positive offset = content appears later)
+        //    At parent time 0.0s with offset=2.0s, child sees -2.0s (before content starts)
+        //    At parent time 2.0s with offset=2.0s, child sees 0.0s (content starts)
+        let adjusted_playhead = transformed.playhead_seconds - self.offset;
+
+        // 2. Then apply time stretch (< 1.0 = slower/half speed, > 1.0 = faster/double speed)
+        //    With stretch=0.5, when parent time is 2.0s, child reads from 1.0s (plays slower, pitches down)
+        //    With stretch=2.0, when parent time is 2.0s, child reads from 4.0s (plays faster, pitches up)
+        //    Note: This creates pitch shift as well - true time stretching would require resampling
+        transformed.playhead_seconds = adjusted_playhead * self.time_stretch as f64;
+
+        // Accumulate time stretch for nested metatracks
+        transformed.time_stretch *= self.time_stretch;
+
+        transformed
     }
 }
 
