@@ -5,6 +5,15 @@ use std::f32::consts::PI;
 /// Maximum number of simultaneous voices
 const MAX_VOICES: usize = 16;
 
+/// Envelope state for a voice
+#[derive(Clone, Copy, PartialEq)]
+enum EnvelopeState {
+    Attack,
+    Sustain,
+    Release,
+    Off,
+}
+
 /// A single synthesizer voice
 #[derive(Clone)]
 struct SynthVoice {
@@ -15,6 +24,10 @@ struct SynthVoice {
     phase: f32,
     frequency: f32,
     age: u32, // For voice stealing
+
+    // Envelope
+    envelope_state: EnvelopeState,
+    envelope_level: f32, // 0.0 to 1.0
 }
 
 impl SynthVoice {
@@ -27,6 +40,8 @@ impl SynthVoice {
             phase: 0.0,
             frequency: 0.0,
             age: 0,
+            envelope_state: EnvelopeState::Off,
+            envelope_level: 0.0,
         }
     }
 
@@ -44,17 +59,55 @@ impl SynthVoice {
         self.frequency = Self::note_to_frequency(note);
         self.phase = 0.0;
         self.age = 0;
+        self.envelope_state = EnvelopeState::Attack;
+        self.envelope_level = 0.0; // Start from silence
     }
 
-    /// Stop playing
+    /// Stop playing (start release phase)
     fn note_off(&mut self) {
-        self.active = false;
+        // Don't stop immediately - start release phase
+        if self.envelope_state != EnvelopeState::Off {
+            self.envelope_state = EnvelopeState::Release;
+        }
     }
 
     /// Generate one sample
     fn process_sample(&mut self, sample_rate: f32) -> f32 {
-        if !self.active {
+        if self.envelope_state == EnvelopeState::Off {
             return 0.0;
+        }
+
+        // Envelope timing constants (in seconds)
+        const ATTACK_TIME: f32 = 0.005;   // 5ms attack
+        const RELEASE_TIME: f32 = 0.05;   // 50ms release
+
+        // Update envelope
+        let attack_increment = 1.0 / (ATTACK_TIME * sample_rate);
+        let release_decrement = 1.0 / (RELEASE_TIME * sample_rate);
+
+        match self.envelope_state {
+            EnvelopeState::Attack => {
+                self.envelope_level += attack_increment;
+                if self.envelope_level >= 1.0 {
+                    self.envelope_level = 1.0;
+                    self.envelope_state = EnvelopeState::Sustain;
+                }
+            }
+            EnvelopeState::Sustain => {
+                // Stay at full level
+                self.envelope_level = 1.0;
+            }
+            EnvelopeState::Release => {
+                self.envelope_level -= release_decrement;
+                if self.envelope_level <= 0.0 {
+                    self.envelope_level = 0.0;
+                    self.envelope_state = EnvelopeState::Off;
+                    self.active = false; // Now we can truly stop
+                }
+            }
+            EnvelopeState::Off => {
+                return 0.0;
+            }
         }
 
         // Simple sine wave
@@ -67,7 +120,9 @@ impl SynthVoice {
         }
 
         self.age += 1;
-        sample
+
+        // Apply envelope
+        sample * self.envelope_level
     }
 }
 
@@ -107,10 +162,17 @@ impl SimpleSynth {
     }
 
     /// Find the voice playing a specific note on a specific channel
+    /// Only matches voices in Attack or Sustain state (not already releasing)
     fn find_voice_for_note_off(&mut self, channel: u8, note: u8) -> Option<usize> {
         self.voices
             .iter()
-            .position(|v| v.active && v.channel == channel && v.note == note)
+            .position(|v| {
+                v.active
+                    && v.channel == channel
+                    && v.note == note
+                    && (v.envelope_state == EnvelopeState::Attack
+                        || v.envelope_state == EnvelopeState::Sustain)
+            })
     }
 
     /// Handle a MIDI event
