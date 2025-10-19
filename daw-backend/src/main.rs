@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use daw_backend::{load_midi_file, AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track, TrackNode};
+use daw_backend::{load_midi_file, AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track};
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clip_id_counter = 0u32;
 
     println!("\nCreating tracks and clips:");
-    for (i, (name, path, audio_file)) in audio_files.into_iter().enumerate() {
+    for (name, path, audio_file) in audio_files.into_iter() {
         let duration = audio_file.frames as f64 / audio_file.sample_rate as f64;
         max_duration = max_duration.max(duration);
 
@@ -111,9 +111,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let pool_index = engine.audio_pool_mut().add_file(pool_file);
 
-        // Create track
-        let track_id = i as u32;
-        let mut track = Track::new(track_id, name.clone());
+        // Create track (the ID passed to Track::new is ignored; Project assigns IDs)
+        let mut track = Track::new(0, name.clone());
 
         // Create clip that plays the entire file starting at time 0
         let clip_id = clip_id_counter;
@@ -127,22 +126,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clip_id_counter += 1;
 
         track.add_clip(clip);
-        engine.add_track(track);
-        track_ids.lock().unwrap().push(track_id);
-        clip_info.push((track_id, clip_id, name.clone(), duration));
 
-        println!("  Track {}: {} (clip {} at 0.0s, duration {:.2}s)", i, name, clip_id, duration);
+        // Capture the ACTUAL track ID assigned by the project
+        let actual_track_id = engine.add_track(track);
+        track_ids.lock().unwrap().push(actual_track_id);
+        clip_info.push((actual_track_id, clip_id, name.clone(), duration));
+
+        println!("  Track {}: {} (clip {} at 0.0s, duration {:.2}s)", actual_track_id, name, clip_id, duration);
     }
 
     println!("\nTimeline duration: {:.2}s", max_duration);
 
     let mut controller = engine.get_controller(command_tx);
 
-    // Wrap engine in Arc<Mutex> for thread-safe access
-    let engine = Arc::new(Mutex::new(engine));
-    let engine_for_commands = Arc::clone(&engine);
-
-    // Build the output stream
+    // Build the output stream - Engine moves into the audio thread (no Arc, no Mutex!)
     let stream = match sample_format {
         cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config, engine)?,
         cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config, engine)?,
@@ -370,43 +367,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ids = track_ids.lock().unwrap();
             println!("Available tracks: {:?}", *ids);
         } else if input == "clips" {
-            // Query the actual project state for all clips
-            let engine = engine_for_commands.lock().unwrap();
-            let project = engine.project();
-            let track_ids_list = track_ids.lock().unwrap().clone();
-
+            // Display clips from the tracked clip_info
             println!("Available clips:");
-            let mut clip_count = 0;
-
-            for &track_id in &track_ids_list {
-                if let Some(track_node) = project.get_track(track_id) {
-                    match track_node {
-                        TrackNode::Audio(track) => {
-                            for clip in &track.clips {
-                                println!("  Track {} ({}), Audio Clip {}: start {:.2}s, duration {:.2}s",
-                                        track_id, track.name, clip.id, clip.start_time,
-                                        clip.end_time() - clip.start_time);
-                                clip_count += 1;
-                            }
-                        }
-                        TrackNode::Midi(track) => {
-                            for clip in &track.clips {
-                                let event_count = clip.events.len();
-                                println!("  Track {} ({}), MIDI Clip {}: start {:.2}s, duration {:.2}s, {} events",
-                                        track_id, track.name, clip.id, clip.start_time,
-                                        clip.duration, event_count);
-                                clip_count += 1;
-                            }
-                        }
-                        TrackNode::Group(_) => {
-                            // Groups don't have clips
-                        }
-                    }
-                }
-            }
-
-            if clip_count == 0 {
+            if clip_info.is_empty() {
                 println!("  (no clips)");
+            } else {
+                for (tid, cid, name, dur) in &clip_info {
+                    println!("  Track {}, Clip {} ('{}', duration {:.2}s)", tid, cid, name, dur);
+                }
             }
         } else if input.starts_with("gain ") {
             // Parse: gain <track_id> <gain_db>
@@ -734,7 +702,7 @@ fn print_status(position: f64, duration: f64, track_ids: &[u32]) {
 fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    engine: Arc<Mutex<Engine>>,
+    mut engine: Engine,
 ) -> Result<cpal::Stream, Box<dyn std::error::Error>>
 where
     T: cpal::Sample + cpal::SizedSample + cpal::FromSample<f32>,
@@ -743,28 +711,25 @@ where
 
     // Preallocate a large buffer for format conversion to avoid allocations in audio callback
     // Size it generously to handle typical buffer sizes (up to 8192 samples = 2048 frames * stereo * 2x safety)
-    let conversion_buffer = Arc::new(Mutex::new(vec![0.0f32; 16384]));
+    let mut conversion_buffer = vec![0.0f32; 16384];
 
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            // Lock the engine
-            let mut engine = engine.lock().unwrap();
-
-            // Lock and reuse the conversion buffer (no allocation - buffer is pre-sized)
-            let mut f32_buffer = conversion_buffer.lock().unwrap();
+            // NO MUTEX LOCK! Engine lives entirely on audio thread with ownership
 
             // Safety check - if buffer is too small, we have a problem
-            if f32_buffer.len() < data.len() {
+            if conversion_buffer.len() < data.len() {
                 eprintln!("ERROR: Audio buffer size {} exceeds preallocated buffer size {}",
-                         data.len(), f32_buffer.len());
+                         data.len(), conversion_buffer.len());
                 return;
             }
 
             // Get a slice of the preallocated buffer
-            let buffer_slice = &mut f32_buffer[..data.len()];
+            let buffer_slice = &mut conversion_buffer[..data.len()];
             buffer_slice.fill(0.0);
 
+            // Process audio - completely lock-free!
             engine.process(buffer_slice);
 
             // Convert f32 samples to output format
