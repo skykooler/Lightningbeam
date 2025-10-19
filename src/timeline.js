@@ -418,10 +418,21 @@ class TrackHierarchy {
           }
         }
 
-        // Add shapes
+        // Add shapes (grouped by shapeId for shape tweening)
         if (layer.shapes) {
+          // Group shapes by shapeId
+          const shapesByShapeId = new Map();
           for (let shape of layer.shapes) {
-            this.addShapeTrack(shape, 1)
+            if (!shapesByShapeId.has(shape.shapeId)) {
+              shapesByShapeId.set(shape.shapeId, []);
+            }
+            shapesByShapeId.get(shape.shapeId).push(shape);
+          }
+
+          // Add one track per unique shapeId
+          for (let [shapeId, shapes] of shapesByShapeId) {
+            // Use the first shape as the representative for the track
+            this.addShapeTrack(shapes[0], 1, shapeId, shapes)
           }
         }
       }
@@ -463,8 +474,18 @@ class TrackHierarchy {
             }
           }
           if (layer.shapes) {
+            // Group shapes by shapeId
+            const shapesByShapeId = new Map();
             for (let shape of layer.shapes) {
-              this.addShapeTrack(shape, indent + 2)
+              if (!shapesByShapeId.has(shape.shapeId)) {
+                shapesByShapeId.set(shape.shapeId, []);
+              }
+              shapesByShapeId.get(shape.shapeId).push(shape);
+            }
+
+            // Add one track per unique shapeId
+            for (let [shapeId, shapes] of shapesByShapeId) {
+              this.addShapeTrack(shapes[0], indent + 2, shapeId, shapes)
             }
           }
         }
@@ -473,12 +494,14 @@ class TrackHierarchy {
   }
 
   /**
-   * Add shape track
+   * Add shape track (grouped by shapeId for shape tweening)
    */
-  addShapeTrack(shape, indent) {
+  addShapeTrack(shape, indent, shapeId, shapes) {
     const track = {
       type: 'shape',
-      object: shape,
+      object: shape,  // Representative shape for display
+      shapeId: shapeId,  // The shared shapeId
+      shapes: shapes,  // All shape versions with this shapeId
       name: shape.constructor.name || 'Shape',
       indent: indent
     }
@@ -500,12 +523,9 @@ class TrackHierarchy {
 
     // Calculate additional height needed for curves
     if (obj.curvesMode === 'minimized') {
-      // Count curves for this object/shape
-      // For minimized mode: 15px per curve
-      // This is a simplified calculation - actual curve count would require AnimationData lookup
-      // For now, assume 3-5 curves per object (x, y, rotation, etc)
-      const estimatedCurves = 5
-      return baseHeight + (estimatedCurves * 15) + 10  // +10 for padding
+      // Phase 6: Minimized mode should be compact - no extra height
+      // Keyframes are overlaid on the segment bar
+      return baseHeight
     } else if (obj.curvesMode === 'expanded') {
       // Use the object's curvesHeight property
       return baseHeight + (obj.curvesHeight || 150) + 10  // +10 for padding

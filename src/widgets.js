@@ -554,6 +554,18 @@ class TimelineWindowV2 extends Widget {
 
     // Hover state for showing keyframe values
     this.hoveredKeyframe = null  // {keyframe, x, y} - keyframe being hovered over and its screen position
+
+    // Phase 6: Segment dragging state
+    this.draggingSegment = null  // {track, initialMouseTime, segmentStartTime, animationData}
+
+    // Phase 6: Segment edge dragging state
+    this.draggingEdge = null  // {track, edge: 'left'|'right', keyframe, animationData, curveName, initialTime}
+
+    // Phase 6: Tangent handle dragging state
+    this.draggingTangent = null  // {keyframe, handle: 'in'|'out', curve, track, initialEase}
+
+    // Phase 6: Keyframe clipboard
+    this.keyframeClipboard = null  // {keyframes: [{keyframe, curve, relativeTime}], baseTime}
   }
 
   draw(ctx) {
@@ -680,18 +692,45 @@ class TimelineWindowV2 extends Widget {
         ctx.fill()
       }
 
-      // Draw track name
+      // Draw track name with ellipsis if needed to avoid button overlap
       ctx.fillStyle = labelColor
       ctx.font = '12px sans-serif'
       ctx.textAlign = 'left'
       ctx.textBaseline = 'middle'
-      ctx.fillText(track.name, indent + 20, y + this.trackHierarchy.trackHeight / 2)
 
-      // Draw type indicator
+      // Calculate available width for text (leave space for buttons if present)
+      const textStartX = indent + 20
+      let maxTextWidth = this.trackHeaderWidth - textStartX - 10  // 10px right padding
+
+      // If this track has buttons, reserve space for them
+      if (track.type === 'object' || track.type === 'shape') {
+        const buttonSize = 14
+        const twoButtonsWidth = (buttonSize * 2) + 4 + 10  // Two buttons + gap + padding
+        maxTextWidth = this.trackHeaderWidth - textStartX - twoButtonsWidth
+      }
+
+      // Truncate text with ellipsis if needed
+      let displayName = track.name
+      let nameWidth = ctx.measureText(displayName).width
+      if (nameWidth > maxTextWidth) {
+        // Add ellipsis
+        while (nameWidth > maxTextWidth && displayName.length > 0) {
+          displayName = displayName.slice(0, -1)
+          nameWidth = ctx.measureText(displayName + '...').width
+        }
+        displayName += '...'
+      }
+
+      ctx.fillText(displayName, textStartX, y + this.trackHierarchy.trackHeight / 2)
+
+      // Draw type indicator (only if there's space)
       ctx.fillStyle = foregroundColor
       ctx.font = '10px sans-serif'
       const typeText = track.type === 'layer' ? '[L]' : track.type === 'object' ? '[G]' : '[S]'
-      ctx.fillText(typeText, indent + 20 + ctx.measureText(track.name).width + 8, y + this.trackHierarchy.trackHeight / 2)
+      const typeX = textStartX + ctx.measureText(displayName).width + 8
+      if (typeX + ctx.measureText(typeText).width < this.trackHeaderWidth - (track.type === 'object' || track.type === 'shape' ? 50 : 10)) {
+        ctx.fillText(typeText, typeX, y + this.trackHierarchy.trackHeight / 2)
+      }
 
       // Draw toggle buttons for object/shape tracks (Phase 3)
       if (track.type === 'object' || track.type === 'shape') {
@@ -923,8 +962,8 @@ class TimelineWindowV2 extends Widget {
 
         if (!shapeLayer || !shapeLayer.animationData) continue
 
-        // Get the exists curve for this shape
-        const existsCurveKey = `shape.${shape.idx}.exists`
+        // Get the exists curve for this shape (using shapeId, not idx)
+        const existsCurveKey = `shape.${shape.shapeId}.exists`
         const existsCurve = shapeLayer.animationData.curves[existsCurveKey]
 
         if (!existsCurve || !existsCurve.keyframes || existsCurve.keyframes.length === 0) continue
@@ -1071,7 +1110,7 @@ class TimelineWindowV2 extends Widget {
         // Filter to only curves for this specific object/shape
         if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
           curves.push(curve)
-        } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.idx}.`)) {
+        } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
           curves.push(curve)
         }
       }
@@ -1090,29 +1129,26 @@ class TimelineWindowV2 extends Widget {
   }
 
   /**
-   * Draw minimized curves (keyframe dots only)
+   * Draw minimized curves (keyframe dots only) - Phase 6: Compact overlay mode
+   * All keyframes are overlaid at the same vertical position (on the segment bar)
    */
   drawMinimizedCurves(ctx, curves, trackY) {
     const dotRadius = 3
-    const rowHeight = 15  // Height per curve in minimized mode
-    const startY = trackY + 10  // Start below segment area
+    const yPosition = trackY + (this.trackHierarchy.trackHeight / 2)  // Center vertically in track
 
-    for (let i = 0; i < curves.length; i++) {
-      const curve = curves[i]
-      const curveY = startY + (i * rowHeight)
+    // Draw keyframe dots for each curve, color-coded but overlaid
+    for (let curve of curves) {
+      ctx.fillStyle = curve.displayColor
+      ctx.strokeStyle = shadow
+      ctx.lineWidth = 1
 
-      // Draw keyframe dots
       for (let keyframe of curve.keyframes) {
         const x = this.timelineState.timeToPixel(keyframe.time)
 
-        ctx.fillStyle = curve.displayColor
+        // Draw with outline for better visibility when overlapping
         ctx.beginPath()
-        ctx.arc(x, curveY, dotRadius, 0, 2 * Math.PI)
+        ctx.arc(x, yPosition, dotRadius, 0, 2 * Math.PI)
         ctx.fill()
-
-        // Draw outline for visibility
-        ctx.strokeStyle = shadow
-        ctx.lineWidth = 1
         ctx.stroke()
       }
     }
@@ -1165,6 +1201,45 @@ class TimelineWindowV2 extends Widget {
       const normalizedValue = (value - minValue) / (maxValue - minValue)
       return startY + curveHeight - padding - (normalizedValue * (curveHeight - 2 * padding))
     }
+
+    // Draw legend showing which color is which parameter
+    // Position it below the track name area, top-right of the curve area
+    ctx.save()
+    ctx.fillStyle = backgroundColor
+    ctx.strokeStyle = shadow
+    ctx.lineWidth = 1
+
+    // Calculate legend size
+    const legendPadding = 4
+    const legendLineHeight = 14
+    const legendHeight = curves.length * legendLineHeight + legendPadding * 2
+    const legendWidth = 100
+    const legendX = 5  // Small left margin
+    const legendY = startY + 40  // Below track name area
+
+    // Draw legend background
+    ctx.fillRect(legendX, legendY, legendWidth, legendHeight)
+    ctx.strokeRect(legendX, legendY, legendWidth, legendHeight)
+
+    // Draw legend items
+    ctx.font = '10px sans-serif'
+    ctx.textBaseline = 'top'
+    for (let i = 0; i < curves.length; i++) {
+      const curve = curves[i]
+      const y = legendY + legendPadding + i * legendLineHeight
+
+      // Draw color dot
+      ctx.fillStyle = curve.displayColor
+      ctx.beginPath()
+      ctx.arc(legendX + legendPadding + 4, y + 6, 3, 0, 2 * Math.PI)
+      ctx.fill()
+
+      // Draw parameter name (extract last part after last dot)
+      ctx.fillStyle = labelColor
+      const paramName = curve.parameter.split('.').pop()
+      ctx.fillText(paramName, legendX + legendPadding + 12, y + 2)
+    }
+    ctx.restore()
 
     // Draw each curve
     for (let curve of curves) {
@@ -1255,36 +1330,68 @@ class TimelineWindowV2 extends Widget {
 
           case 'bezier':
           default:
-            // Calculate control points for Bezier curve
-            const cpOffset = (x2 - x1) / 3  // Control points at 1/3 and 2/3 of time range
+            // Calculate control points for Bezier curve using easeIn/easeOut
+            // easeIn/easeOut are like CSS cubic-bezier: {x: 0-1, y: 0-1}
+            const dx = x2 - x1
+            const dy = y2 - y1
 
-            const cp1x = x1 + cpOffset
-            const cp1y = y1 + (kf1.outTangent || 0) * cpOffset
-            const cp2x = x2 - cpOffset
-            const cp2y = y2 - (kf2.inTangent || 0) * cpOffset
+            // Use default ease if not specified
+            const easeOut = kf1.easeOut || { x: 0.42, y: 0 }
+            const easeIn = kf2.easeIn || { x: 0.58, y: 1 }
+
+            // Calculate control points
+            // easeOut.x controls horizontal offset from kf1, easeOut.y controls vertical
+            const cp1x = x1 + (easeOut.x * dx)
+            const cp1y = y1 + (easeOut.y * dy)
+
+            // easeIn.x controls horizontal offset from kf2, easeIn.y controls vertical
+            // Note: easeIn is relative to the end point, so we subtract from x2
+            const cp2x = x1 + (easeIn.x * dx)
+            const cp2y = y1 + (easeIn.y * dy)
 
             ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2)
             ctx.stroke()
 
-            // Draw tangent handles for bezier mode only
-            ctx.strokeStyle = curve.displayColor + '80'  // Semi-transparent
-            ctx.lineWidth = 1
+            // Phase 6: Draw tangent handles only for selected keyframes
+            const kf1Selected = this.selectedKeyframes.has(kf1)
+            const kf2Selected = this.selectedKeyframes.has(kf2)
 
-            // Out tangent handle
-            ctx.beginPath()
-            ctx.moveTo(x1, y1)
-            ctx.lineTo(cp1x, cp1y)
-            ctx.stroke()
+            if (kf1Selected || kf2Selected) {
+              ctx.strokeStyle = curve.displayColor + '80'  // Semi-transparent
+              ctx.lineWidth = 1
 
-            // In tangent handle
-            ctx.beginPath()
-            ctx.moveTo(x2, y2)
-            ctx.lineTo(cp2x, cp2y)
-            ctx.stroke()
+              // Out tangent handle (from kf1)
+              if (kf1Selected) {
+                ctx.beginPath()
+                ctx.moveTo(x1, y1)
+                ctx.lineTo(cp1x, cp1y)
+                ctx.stroke()
 
-            // Reset for next curve segment
-            ctx.strokeStyle = curve.displayColor
-            ctx.lineWidth = 2
+                // Draw handle point
+                ctx.fillStyle = curve.displayColor
+                ctx.beginPath()
+                ctx.arc(cp1x, cp1y, 4, 0, 2 * Math.PI)
+                ctx.fill()
+              }
+
+              // In tangent handle (to kf2)
+              if (kf2Selected) {
+                ctx.beginPath()
+                ctx.moveTo(x2, y2)
+                ctx.lineTo(cp2x, cp2y)
+                ctx.stroke()
+
+                // Draw handle point
+                ctx.fillStyle = curve.displayColor
+                ctx.beginPath()
+                ctx.arc(cp2x, cp2y, 4, 0, 2 * Math.PI)
+                ctx.fill()
+              }
+
+              // Reset for next curve segment
+              ctx.strokeStyle = curve.displayColor
+              ctx.lineWidth = 2
+            }
             break
         }
       }
@@ -1465,6 +1572,34 @@ class TimelineWindowV2 extends Widget {
       const track = this.trackHierarchy.getTrackAtY(adjustedY)
 
       if (track) {
+        // Phase 6: Check if clicking on tangent handle (highest priority for curves)
+        if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
+          const tangentInfo = this.getTangentHandleAtPoint(track, adjustedX, adjustedY)
+          if (tangentInfo) {
+            // Start tangent dragging
+            this.draggingTangent = {
+              keyframe: tangentInfo.keyframe,
+              handle: tangentInfo.handle,
+              curve: tangentInfo.curve,
+              track: track,
+              initialEase: tangentInfo.handle === 'out'
+                ? { ...tangentInfo.keyframe.easeOut }
+                : { ...tangentInfo.keyframe.easeIn },
+              adjacentKeyframe: tangentInfo.handle === 'out'
+                ? tangentInfo.nextKeyframe
+                : tangentInfo.prevKeyframe
+            }
+
+            // Enable global mouse events for dragging
+            this._globalEvents.add("mousemove")
+            this._globalEvents.add("mouseup")
+
+            console.log('Started dragging', tangentInfo.handle, 'tangent handle')
+            if (this.requestRedraw) this.requestRedraw()
+            return true
+          }
+        }
+
         // Phase 5: Check if clicking on expanded curves
         if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
           const curveClickResult = this.handleCurveClick(track, adjustedX, adjustedY)
@@ -1473,9 +1608,54 @@ class TimelineWindowV2 extends Widget {
           }
         }
 
-        // Check if clicking on segment
-        if (this.isPointInSegment(track, adjustedX, adjustedY)) {
+        // Phase 6: Check if clicking on segment edge to start edge dragging (priority over segment dragging)
+        const edgeInfo = this.getSegmentEdgeAtPoint(track, adjustedX, adjustedY)
+        if (edgeInfo && edgeInfo.keyframe) {
+          // Select the track
           this.selectTrack(track)
+
+          // Start edge dragging
+          this.draggingEdge = {
+            track: track,
+            edge: edgeInfo.edge,
+            keyframe: edgeInfo.keyframe,
+            animationData: edgeInfo.animationData,
+            curveName: edgeInfo.curveName,
+            initialTime: edgeInfo.keyframe.time,
+            otherEdgeTime: edgeInfo.edge === 'left' ? edgeInfo.endTime : edgeInfo.startTime
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging', edgeInfo.edge, 'edge at time', edgeInfo.keyframe.time)
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
+        // Phase 6: Check if clicking on segment to start dragging
+        const segmentInfo = this.getSegmentAtPoint(track, adjustedX, adjustedY)
+        if (segmentInfo) {
+          // Select the track
+          this.selectTrack(track)
+
+          // Start segment dragging
+          const clickTime = this.timelineState.pixelToTime(adjustedX)
+          this.draggingSegment = {
+            track: track,
+            initialMouseTime: clickTime,
+            segmentStartTime: segmentInfo.startTime,
+            segmentEndTime: segmentInfo.endTime,
+            animationData: segmentInfo.animationData,
+            objectIdx: track.object.idx
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging segment at time', segmentInfo.startTime)
           if (this.requestRedraw) this.requestRedraw()
           return true
         }
@@ -1539,7 +1719,7 @@ class TimelineWindowV2 extends Widget {
       const curve = animationData.curves[curveName]
       if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
         curves.push(curve)
-      } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.idx}.`)) {
+      } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
         curves.push(curve)
       }
     }
@@ -1762,7 +1942,7 @@ class TimelineWindowV2 extends Widget {
 
       if (!shapeLayer || !shapeLayer.animationData) return false
 
-      const existsCurveKey = `shape.${shape.idx}.exists`
+      const existsCurveKey = `shape.${shape.shapeId}.exists`
       const existsCurve = shapeLayer.animationData.curves[existsCurveKey]
 
       if (!existsCurve || !existsCurve.keyframes) return false
@@ -1793,6 +1973,346 @@ class TimelineWindowV2 extends Widget {
     }
 
     return false
+  }
+
+  /**
+   * Get segment information at a point (Phase 6)
+   * Returns {startTime, endTime, animationData} if point is in a segment, null otherwise
+   */
+  getSegmentAtPoint(track, x, y) {
+    const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+    if (trackIndex === -1) return null
+
+    const trackY = this.trackHierarchy.getTrackY(trackIndex)
+    const trackHeight = this.trackHierarchy.trackHeight
+    const segmentTop = trackY + 5
+    const segmentBottom = trackY + trackHeight - 5
+
+    // Check if y is within segment bounds
+    if (y < segmentTop || y > segmentBottom) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const frameDuration = 1 / this.timelineState.framerate
+    const minSegmentDuration = frameDuration
+
+    if (track.type === 'object') {
+      // Check frameNumber curve for objects
+      const obj = track.object
+      let parentLayer = null
+      for (let layer of this.context.activeObject.allLayers) {
+        if (layer.children && layer.children.includes(obj)) {
+          parentLayer = layer
+          break
+        }
+      }
+
+      if (!parentLayer || !parentLayer.animationData) return null
+
+      const frameNumberKey = `child.${obj.idx}.frameNumber`
+      const frameNumberCurve = parentLayer.animationData.curves[frameNumberKey]
+
+      if (!frameNumberCurve || !frameNumberCurve.keyframes) return null
+
+      // Check if clickTime is within any segment
+      let segmentStart = null
+      for (let j = 0; j < frameNumberCurve.keyframes.length; j++) {
+        const keyframe = frameNumberCurve.keyframes[j]
+
+        if (keyframe.value > 0) {
+          if (segmentStart === null) {
+            segmentStart = keyframe.time
+          }
+
+          const isLast = (j === frameNumberCurve.keyframes.length - 1)
+          const nextEndsSegment = !isLast && frameNumberCurve.keyframes[j + 1].value === 0
+
+          if (isLast || nextEndsSegment) {
+            const segmentEnd = nextEndsSegment ? frameNumberCurve.keyframes[j + 1].time : keyframe.time + minSegmentDuration
+
+            if (clickTime >= segmentStart && clickTime <= segmentEnd) {
+              return {
+                startTime: segmentStart,
+                endTime: segmentEnd,
+                animationData: parentLayer.animationData
+              }
+            }
+            segmentStart = null
+          }
+        }
+      }
+    } else if (track.type === 'shape') {
+      // Check exists curve for shapes
+      const shape = track.object
+      let shapeLayer = null
+      const findShapeLayer = (obj) => {
+        for (let layer of obj.children) {
+          if (layer.shapes && layer.shapes.includes(shape)) {
+            shapeLayer = layer
+            return true
+          }
+          if (layer.children) {
+            for (let child of layer.children) {
+              if (findShapeLayer(child)) return true
+            }
+          }
+        }
+        return false
+      }
+      findShapeLayer(this.context.activeObject)
+
+      if (!shapeLayer || !shapeLayer.animationData) return null
+
+      const existsCurveKey = `shape.${shape.shapeId}.exists`
+      const existsCurve = shapeLayer.animationData.curves[existsCurveKey]
+
+      if (!existsCurve || !existsCurve.keyframes) return null
+
+      // Check if clickTime is within any segment
+      let segmentStart = null
+      for (let j = 0; j < existsCurve.keyframes.length; j++) {
+        const keyframe = existsCurve.keyframes[j]
+
+        if (keyframe.value > 0) {
+          if (segmentStart === null) {
+            segmentStart = keyframe.time
+          }
+
+          const isLast = (j === existsCurve.keyframes.length - 1)
+          const nextEndsSegment = !isLast && existsCurve.keyframes[j + 1].value === 0
+
+          if (isLast || nextEndsSegment) {
+            const segmentEnd = nextEndsSegment ? existsCurve.keyframes[j + 1].time : keyframe.time + minSegmentDuration
+
+            if (clickTime >= segmentStart && clickTime <= segmentEnd) {
+              return {
+                startTime: segmentStart,
+                endTime: segmentEnd,
+                animationData: shapeLayer.animationData
+              }
+            }
+            segmentStart = null
+          }
+        }
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Get segment edge at a point (Phase 6)
+   * Returns {edge: 'left'|'right', startTime, endTime, keyframe, animationData, curveName} if near an edge
+   */
+  getSegmentEdgeAtPoint(track, x, y) {
+    const segmentInfo = this.getSegmentAtPoint(track, x, y)
+    if (!segmentInfo) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const edgeThreshold = 8 / this.timelineState.pixelsPerSecond  // 8 pixels in time units
+
+    // Determine which curve to look at
+    let curveName
+    if (track.type === 'object') {
+      curveName = `child.${track.object.idx}.frameNumber`
+    } else if (track.type === 'shape') {
+      curveName = `shape.${track.object.shapeId}.exists`
+    } else {
+      return null
+    }
+
+    const curve = segmentInfo.animationData.curves[curveName]
+    if (!curve || !curve.keyframes) return null
+
+    // Find the keyframes that define this segment's edges
+    let startKeyframe = null
+    let endKeyframe = null
+
+    for (let keyframe of curve.keyframes) {
+      if (Math.abs(keyframe.time - segmentInfo.startTime) < 0.0001 && keyframe.value > 0) {
+        startKeyframe = keyframe
+      }
+      // For end keyframe, check both at exact endTime AND just before it (for natural segment ends)
+      if (Math.abs(keyframe.time - segmentInfo.endTime) < 0.0001) {
+        endKeyframe = keyframe
+      } else if (keyframe.value > 0 && keyframe.time < segmentInfo.endTime && keyframe.time >= segmentInfo.startTime) {
+        // Track the last positive keyframe in case segment ends naturally
+        if (!endKeyframe || keyframe.time > endKeyframe.time) {
+          endKeyframe = keyframe
+        }
+      }
+    }
+
+    // Check if click is near left edge
+    if (Math.abs(clickTime - segmentInfo.startTime) <= edgeThreshold) {
+      return {
+        edge: 'left',
+        startTime: segmentInfo.startTime,
+        endTime: segmentInfo.endTime,
+        keyframe: startKeyframe,
+        animationData: segmentInfo.animationData,
+        curveName: curveName
+      }
+    }
+
+    // Check if click is near right edge
+    // For natural segment ends, the endKeyframe is at an earlier time than segmentInfo.endTime
+    const rightEdgeTime = endKeyframe ? endKeyframe.time : segmentInfo.endTime
+    if (Math.abs(clickTime - rightEdgeTime) <= edgeThreshold) {
+      return {
+        edge: 'right',
+        startTime: segmentInfo.startTime,
+        endTime: segmentInfo.endTime,
+        keyframe: endKeyframe,
+        animationData: segmentInfo.animationData,
+        curveName: curveName
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Check if clicking on a tangent handle (Phase 6)
+   * Returns {keyframe, handle: 'in'|'out', curve, nextKeyframe|prevKeyframe} if hitting a handle
+   */
+  getTangentHandleAtPoint(track, x, y) {
+    if (track.type !== 'object' && track.type !== 'shape') return null
+    if (track.object.curvesMode !== 'expanded') return null
+
+    const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+    const trackY = this.trackHierarchy.getTrackY(trackIndex)
+
+    const curveHeight = 80
+    const startY = trackY + 10
+    const padding = 5
+
+    // Check if y is within curve area
+    if (y < startY || y > startY + curveHeight) return null
+
+    // Get all curves for this track
+    const obj = track.object
+    let animationData = null
+
+    if (track.type === 'object') {
+      for (let layer of this.context.activeObject.allLayers) {
+        if (layer.children && layer.children.includes(obj)) {
+          animationData = layer.animationData
+          break
+        }
+      }
+    } else if (track.type === 'shape') {
+      const findShapeLayer = (searchObj) => {
+        for (let layer of searchObj.children) {
+          if (layer.shapes && layer.shapes.includes(obj)) {
+            animationData = layer.animationData
+            return true
+          }
+          if (layer.children) {
+            for (let child of layer.children) {
+              if (findShapeLayer(child)) return true
+            }
+          }
+        }
+        return false
+      }
+      findShapeLayer(this.context.activeObject)
+    }
+
+    if (!animationData) return null
+
+    // Get all curves
+    const curves = []
+    for (let curveName in animationData.curves) {
+      const curve = animationData.curves[curveName]
+      if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
+        curves.push(curve)
+      } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
+        curves.push(curve)
+      }
+    }
+
+    // Calculate value range
+    let minValue = Infinity
+    let maxValue = -Infinity
+    for (let curve of curves) {
+      for (let keyframe of curve.keyframes) {
+        minValue = Math.min(minValue, keyframe.value)
+        maxValue = Math.max(maxValue, keyframe.value)
+      }
+    }
+    const valueRange = maxValue - minValue
+    const rangePadding = valueRange * 0.1 || 1
+    minValue -= rangePadding
+    maxValue += rangePadding
+
+    const valueToY = (value) => {
+      const normalizedValue = (value - minValue) / (maxValue - minValue)
+      return startY + curveHeight - padding - (normalizedValue * (curveHeight - 2 * padding))
+    }
+
+    // Check each curve for tangent handles
+    for (let curve of curves) {
+      // Only check bezier keyframes that are selected
+      for (let i = 0; i < curve.keyframes.length; i++) {
+        const kf = curve.keyframes[i]
+
+        // Only show handles for selected keyframes with bezier interpolation
+        if (!this.selectedKeyframes.has(kf) || kf.interpolation !== 'bezier') continue
+
+        const kfX = this.timelineState.timeToPixel(kf.time)
+        const kfY = valueToY(kf.value)
+
+        // Check out handle (if there's a next keyframe)
+        if (i < curve.keyframes.length - 1) {
+          const nextKf = curve.keyframes[i + 1]
+          const nextX = this.timelineState.timeToPixel(nextKf.time)
+          const nextY = valueToY(nextKf.value)
+
+          const dx = nextX - kfX
+          const dy = nextY - kfY
+
+          const easeOut = kf.easeOut || { x: 0.42, y: 0 }
+          const handleX = kfX + (easeOut.x * dx)
+          const handleY = kfY + (easeOut.y * dy)
+
+          const distance = Math.sqrt((x - handleX) ** 2 + (y - handleY) ** 2)
+          if (distance < 8) {  // 8px hit radius
+            return {
+              keyframe: kf,
+              handle: 'out',
+              curve: curve,
+              nextKeyframe: nextKf
+            }
+          }
+        }
+
+        // Check in handle (if there's a previous keyframe)
+        if (i > 0) {
+          const prevKf = curve.keyframes[i - 1]
+          const prevX = this.timelineState.timeToPixel(prevKf.time)
+          const prevY = valueToY(prevKf.value)
+
+          const dx = kfX - prevX
+          const dy = kfY - prevY
+
+          const easeIn = kf.easeIn || { x: 0.58, y: 1 }
+          const handleX = prevX + (easeIn.x * dx)
+          const handleY = prevY + (easeIn.y * dy)
+
+          const distance = Math.sqrt((x - handleX) ** 2 + (y - handleY) ** 2)
+          if (distance < 8) {  // 8px hit radius
+            return {
+              keyframe: kf,
+              handle: 'in',
+              curve: curve,
+              prevKeyframe: prevKf
+            }
+          }
+        }
+      }
+    }
+
+    return null
   }
 
   /**
@@ -1917,7 +2437,7 @@ class TimelineWindowV2 extends Widget {
                 const curve = animationData.curves[curveName]
                 if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
                   curves.push(curve)
-                } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.idx}.`)) {
+                } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
                   curves.push(curve)
                 }
               }
@@ -2102,6 +2622,253 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Phase 6: Handle tangent handle dragging
+    if (this.draggingTangent) {
+      const trackY = y - this.ruler.height
+      const adjustedX = x - this.trackHeaderWidth
+      const adjustedY = trackY - this.trackScrollOffset
+
+      // Get curve visualization parameters
+      const trackIndex = this.trackHierarchy.tracks.indexOf(this.draggingTangent.track)
+      const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
+      const curveHeight = 80
+      const startY = trackYPos + 10
+      const padding = 5
+
+      // Calculate value range (need to get all curves for this track)
+      const obj = this.draggingTangent.track.object
+      let animationData = null
+
+      if (this.draggingTangent.track.type === 'object') {
+        for (let layer of this.context.activeObject.allLayers) {
+          if (layer.children && layer.children.includes(obj)) {
+            animationData = layer.animationData
+            break
+          }
+        }
+      } else if (this.draggingTangent.track.type === 'shape') {
+        const findShapeLayer = (searchObj) => {
+          for (let layer of searchObj.children) {
+            if (layer.shapes && layer.shapes.includes(obj)) {
+              animationData = layer.animationData
+              return true
+            }
+            if (layer.children) {
+              for (let child of layer.children) {
+                if (findShapeLayer(child)) return true
+              }
+            }
+          }
+          return false
+        }
+        findShapeLayer(this.context.activeObject)
+      }
+
+      if (animationData) {
+        // Get all curves for value range calculation
+        const curves = []
+        for (let curveName in animationData.curves) {
+          const curve = animationData.curves[curveName]
+          if (this.draggingTangent.track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
+            curves.push(curve)
+          } else if (this.draggingTangent.track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
+            curves.push(curve)
+          }
+        }
+
+        // Calculate value range
+        let minValue = Infinity
+        let maxValue = -Infinity
+        for (let curve of curves) {
+          for (let keyframe of curve.keyframes) {
+            minValue = Math.min(minValue, keyframe.value)
+            maxValue = Math.max(maxValue, keyframe.value)
+          }
+        }
+        const valueRange = maxValue - minValue
+        const rangePadding = valueRange * 0.1 || 1
+        minValue -= rangePadding
+        maxValue += rangePadding
+
+        // Get keyframe and adjacent keyframe positions
+        const kf = this.draggingTangent.keyframe
+        const adj = this.draggingTangent.adjacentKeyframe
+
+        const kfX = this.timelineState.timeToPixel(kf.time)
+        const adjX = this.timelineState.timeToPixel(adj.time)
+
+        const valueToY = (value) => {
+          const normalizedValue = (value - minValue) / (maxValue - minValue)
+          return startY + curveHeight - padding - (normalizedValue * (curveHeight - 2 * padding))
+        }
+
+        const kfY = valueToY(kf.value)
+        const adjY = valueToY(adj.value)
+
+        // Calculate the new ease values based on mouse position
+        const dx = adjX - kfX
+        const dy = adjY - kfY
+
+        // Prevent division by zero
+        if (Math.abs(dx) > 1 && Math.abs(dy) > 1) {
+          let newEaseX, newEaseY
+
+          if (this.draggingTangent.handle === 'out') {
+            // Out handle: relative to the keyframe
+            newEaseX = (adjustedX - kfX) / dx
+            newEaseY = (adjustedY - kfY) / dy
+          } else {
+            // In handle: relative to the start of the segment (previous keyframe)
+            newEaseX = (adjustedX - kfX) / dx
+            newEaseY = (adjustedY - kfY) / dy
+          }
+
+          // Clamp ease values to reasonable ranges
+          // X should be between 0 and 1 (time must be between the two keyframes)
+          newEaseX = Math.max(0, Math.min(1, newEaseX))
+          // Y can be outside 0-1 for overshoot/undershoot effects
+          newEaseY = Math.max(-2, Math.min(3, newEaseY))
+
+          // Update the keyframe's ease
+          if (this.draggingTangent.handle === 'out') {
+            kf.easeOut = { x: newEaseX, y: newEaseY }
+          } else {
+            kf.easeIn = { x: newEaseX, y: newEaseY }
+          }
+        }
+      }
+
+      // Trigger redraws
+      if (this.context.updateUI) {
+        this.context.updateUI()
+      }
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Phase 6: Handle segment edge dragging
+    if (this.draggingEdge) {
+      // Convert mouse position to time
+      const adjustedX = x - this.trackHeaderWidth
+      let newTime = this.timelineState.pixelToTime(adjustedX)
+
+      // Apply snapping
+      newTime = this.timelineState.snapTime(newTime)
+
+      // Ensure time doesn't go negative
+      newTime = Math.max(0, newTime)
+
+      // Get the curve to find adjacent segments
+      const curve = this.draggingEdge.animationData.curves[this.draggingEdge.curveName]
+      if (curve) {
+        const frameDuration = 1 / this.timelineState.framerate
+        const minGap = frameDuration
+
+        // Find the index of the keyframe we're dragging
+        const keyframeIndex = curve.keyframes.indexOf(this.draggingEdge.keyframe)
+
+        if (this.draggingEdge.edge === 'left') {
+          // Left edge constraints:
+          // 1. Can't go past the right edge of this segment (leave at least 1 frame gap)
+          newTime = Math.min(newTime, this.draggingEdge.otherEdgeTime - minGap)
+
+          // 2. Can't go before the end of the previous segment (no gap needed)
+          // The previous keyframe (if it has value === 0) is the end of the previous segment
+          if (keyframeIndex > 0) {
+            const prevKeyframe = curve.keyframes[keyframeIndex - 1]
+            if (prevKeyframe.value === 0) {
+              newTime = Math.max(newTime, prevKeyframe.time)
+            }
+          }
+        } else {
+          // Right edge constraints:
+          // 1. Can't go before the left edge of this segment (leave at least 1 frame gap)
+          newTime = Math.max(newTime, this.draggingEdge.otherEdgeTime + minGap)
+
+          // 2. Can't go past the start of the next segment (no gap needed)
+          // The next keyframe (if it has value > 0) is the start of the next segment
+          if (keyframeIndex < curve.keyframes.length - 1) {
+            const nextKeyframe = curve.keyframes[keyframeIndex + 1]
+            if (nextKeyframe.value > 0) {
+              newTime = Math.min(newTime, nextKeyframe.time)
+            }
+          }
+        }
+
+        // Update the keyframe time
+        this.draggingEdge.keyframe.time = newTime
+
+        // Resort keyframes in the curve
+        curve.keyframes.sort((a, b) => a.time - b.time)
+      }
+
+      // Sync with animation playhead
+      if (this.context.activeObject) {
+        this.context.activeObject.currentTime = this.timelineState.currentTime
+      }
+
+      // Trigger stage redraw
+      if (this.context.updateUI) {
+        this.context.updateUI()
+      }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Phase 6: Handle segment dragging
+    if (this.draggingSegment) {
+      // Adjust coordinates to timeline area
+      const trackY = y - this.ruler.height
+      const adjustedX = x - this.trackHeaderWidth
+
+      // Convert mouse position to time
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+
+      // Calculate time delta
+      const timeDelta = newTime - this.draggingSegment.initialMouseTime
+
+      // Get all curves for this object/shape from the animationData
+      const prefix = this.draggingSegment.track.type === 'object'
+        ? `child.${this.draggingSegment.objectIdx}.`
+        : `shape.${this.draggingSegment.objectIdx}.`
+
+      // Shift all keyframes by the time delta
+      for (let curveName in this.draggingSegment.animationData.curves) {
+        if (curveName.startsWith(prefix)) {
+          const curve = this.draggingSegment.animationData.curves[curveName]
+
+          for (let keyframe of curve.keyframes) {
+            // Store initial time if not already stored
+            if (!keyframe.initialSegmentDragTime) {
+              keyframe.initialSegmentDragTime = keyframe.time
+            }
+
+            // Apply delta and ensure time doesn't go negative
+            keyframe.time = Math.max(0, keyframe.initialSegmentDragTime + timeDelta)
+          }
+
+          // Resort keyframes after time shift
+          curve.keyframes.sort((a, b) => a.time - b.time)
+        }
+      }
+
+      // Sync with animation playhead
+      if (this.context.activeObject) {
+        this.context.activeObject.currentTime = this.timelineState.currentTime
+      }
+
+      // Trigger stage redraw
+      if (this.context.updateUI) {
+        this.context.updateUI()
+      }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     return false
   }
 
@@ -2136,14 +2903,71 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Phase 6: Complete tangent dragging
+    if (this.draggingTangent) {
+      console.log('Finished dragging', this.draggingTangent.handle, 'tangent handle')
+
+      // Clean up dragging state
+      this.draggingTangent = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Phase 6: Complete edge dragging
+    if (this.draggingEdge) {
+      console.log('Finished dragging', this.draggingEdge.edge, 'edge')
+
+      // Clean up dragging state
+      this.draggingEdge = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Phase 6: Complete segment dragging
+    if (this.draggingSegment) {
+      console.log('Finished dragging segment')
+
+      // Clean up initial drag times from all affected keyframes
+      const prefix = this.draggingSegment.track.type === 'object'
+        ? `child.${this.draggingSegment.objectIdx}.`
+        : `shape.${this.draggingSegment.objectIdx}.`
+
+      for (let curveName in this.draggingSegment.animationData.curves) {
+        if (curveName.startsWith(prefix)) {
+          const curve = this.draggingSegment.animationData.curves[curveName]
+          for (let keyframe of curve.keyframes) {
+            delete keyframe.initialSegmentDragTime
+          }
+        }
+      }
+
+      // Clean up dragging state
+      this.draggingSegment = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     return false
   }
 
   /**
-   * Handle right-click context menu (Phase 5)
-   * Deletes keyframe if right-clicking on one
+   * Handle right-click context menu (Phase 5/6)
+   * Shows menu with interpolation options and delete for keyframes
+   * Shift+right-click for quick delete
    */
-  contextmenu(x, y) {
+  contextmenu(x, y, event) {
     // Check if right-clicking in timeline area with curves
     const trackY = y - this.ruler.height
     if (trackY >= 0 && x >= this.trackHeaderWidth) {
@@ -2199,7 +3023,7 @@ class TimelineWindowV2 extends Widget {
             const curve = animationData.curves[curveName]
             if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
               curves.push(curve)
-            } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.idx}.`)) {
+            } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
               curves.push(curve)
             }
           }
@@ -2229,34 +3053,43 @@ class TimelineWindowV2 extends Widget {
               const distance = Math.sqrt((adjustedX - kfX) ** 2 + (adjustedY - kfY) ** 2)
 
               if (distance < 8) {
-                // Check if this keyframe is in the current selection
-                const isInSelection = this.selectedKeyframes.has(keyframe)
+                // Phase 6: Check if shift key is pressed for quick delete
+                const shiftPressed = event && event.shiftKey
 
-                // Determine what to delete
-                // If there are multiple selected keyframes (regardless of which one we clicked),
-                // show the confirmation menu
-                if (this.selectedKeyframes.size > 1) {
-                  // Delete all selected keyframes
-                  const keyframesToDelete = Array.from(this.selectedKeyframes)
-                  this.showDeleteKeyframesMenu(keyframesToDelete, curves)
+                if (shiftPressed) {
+                  // Shift+right-click: quick delete
+                  if (this.selectedKeyframes.size > 1) {
+                    // Delete all selected keyframes
+                    const keyframesToDelete = Array.from(this.selectedKeyframes)
+                    for (let kf of keyframesToDelete) {
+                      for (let c of curves) {
+                        const idx = c.keyframes.indexOf(kf)
+                        if (idx !== -1 && c.keyframes.length > 1) {
+                          c.keyframes.splice(idx, 1)
+                        }
+                      }
+                      this.selectedKeyframes.delete(kf)
+                    }
+                    console.log(`Deleted ${keyframesToDelete.length} keyframes`)
+                  } else {
+                    // Single keyframe deletion
+                    if (curve.keyframes.length > 1) {
+                      console.log(`Deleting keyframe at time ${keyframe.time}`)
+                      curve.keyframes.splice(i, 1)
+                      this.selectedKeyframes.delete(keyframe)
+                    }
+                  }
+                  if (this.requestRedraw) this.requestRedraw()
+                  return true
+                } else {
+                  // Regular right-click: show context menu
+                  if (this.selectedKeyframes.size > 1) {
+                    this.showKeyframeContextMenu(Array.from(this.selectedKeyframes), curves)
+                  } else {
+                    this.showKeyframeContextMenu([keyframe], curves, curve)
+                  }
                   return true
                 }
-
-                // Single keyframe deletion - check if it's the last one in its curve
-                if (curve.keyframes.length <= 1) {
-                  console.log(`Cannot delete last keyframe in curve ${curve.parameter}`)
-                  return true  // Still return true to indicate event was handled
-                }
-
-                // Delete single keyframe
-                console.log(`Deleting keyframe at time ${keyframe.time} from curve ${curve.parameter}`)
-                curve.keyframes.splice(i, 1)
-
-                // Remove from selection if it was selected
-                this.selectedKeyframes.delete(keyframe)
-
-                if (this.requestRedraw) this.requestRedraw()
-                return true
               }
             }
           }
@@ -2268,17 +3101,72 @@ class TimelineWindowV2 extends Widget {
   }
 
   /**
-   * Show Tauri context menu for deleting multiple selected keyframes (Phase 5)
+   * Show Tauri context menu for keyframe operations (Phase 6)
+   * Includes interpolation type options and delete
    */
-  async showDeleteKeyframesMenu(keyframesToDelete, curves) {
-    const { Menu, MenuItem } = window.__TAURI__.menu
+  async showKeyframeContextMenu(keyframesToDelete, curves, singleCurve = null) {
+    const { Menu, MenuItem, Submenu } = window.__TAURI__.menu
     const { PhysicalPosition, LogicalPosition } = window.__TAURI__.dpi
 
-    // Build menu with delete option
-    const items = [
-      await MenuItem.new({
-        text: `Delete ${keyframesToDelete.length} keyframe${keyframesToDelete.length > 1 ? 's' : ''}`,
-        action: async () => {
+    // Build menu items
+    const items = []
+
+    // Phase 6: Add interpolation type submenu (only for single keyframe)
+    if (keyframesToDelete.length === 1 && singleCurve) {
+      const keyframe = keyframesToDelete[0]
+      const currentType = keyframe.interpolation || 'linear'
+
+      const interpolationSubmenu = await Submenu.new({
+        text: 'Interpolation',
+        items: [
+          await MenuItem.new({
+            text: currentType === 'linear' ? '✓ Linear' : 'Linear',
+            action: async () => {
+              keyframe.interpolation = 'linear'
+              console.log('Changed interpolation to linear')
+              if (this.context.updateUI) this.context.updateUI()
+              if (this.requestRedraw) this.requestRedraw()
+            }
+          }),
+          await MenuItem.new({
+            text: currentType === 'bezier' ? '✓ Bezier' : 'Bezier',
+            action: async () => {
+              keyframe.interpolation = 'bezier'
+              if (!keyframe.easeIn) keyframe.easeIn = { x: 0.42, y: 0 }
+              if (!keyframe.easeOut) keyframe.easeOut = { x: 0.58, y: 1 }
+              console.log('Changed interpolation to bezier')
+              if (this.context.updateUI) this.context.updateUI()
+              if (this.requestRedraw) this.requestRedraw()
+            }
+          }),
+          await MenuItem.new({
+            text: currentType === 'step' || currentType === 'hold' ? '✓ Step (Hold)' : 'Step (Hold)',
+            action: async () => {
+              keyframe.interpolation = 'step'
+              console.log('Changed interpolation to step')
+              if (this.context.updateUI) this.context.updateUI()
+              if (this.requestRedraw) this.requestRedraw()
+            }
+          }),
+          await MenuItem.new({
+            text: currentType === 'zero' ? '✓ Zero' : 'Zero',
+            action: async () => {
+              keyframe.interpolation = 'zero'
+              console.log('Changed interpolation to zero')
+              if (this.context.updateUI) this.context.updateUI()
+              if (this.requestRedraw) this.requestRedraw()
+            }
+          })
+        ]
+      })
+
+      items.push(interpolationSubmenu)
+    }
+
+    // Add delete option
+    items.push(await MenuItem.new({
+      text: `Delete ${keyframesToDelete.length} keyframe${keyframesToDelete.length > 1 ? 's' : ''}`,
+      action: async () => {
           // Perform deletion
           console.log(`Deleting ${keyframesToDelete.length} selected keyframes`)
 
@@ -2306,8 +3194,7 @@ class TimelineWindowV2 extends Widget {
           // Trigger redraw
           if (this.requestRedraw) this.requestRedraw()
         }
-      })
-    ]
+      }))
 
     const menu = await Menu.new({ items })
 
@@ -2318,6 +3205,145 @@ class TimelineWindowV2 extends Widget {
     console.log(position)
     // await menu.popup({ at: position })
     await menu.popup(position)
+  }
+
+  /**
+   * Copy selected keyframes to clipboard (Phase 6)
+   */
+  copySelectedKeyframes() {
+    if (this.selectedKeyframes.size === 0) {
+      return false // No keyframes to copy
+    }
+
+    // Find the earliest time among selected keyframes (this will be the reference point)
+    let minTime = Infinity
+    for (let keyframe of this.selectedKeyframes) {
+      minTime = Math.min(minTime, keyframe.time)
+    }
+
+    // Build clipboard data with relative times
+    const clipboardData = []
+
+    // We need to find which curves these keyframes belong to
+    // Iterate through all tracks to find curves containing selected keyframes
+    for (let track of this.trackHierarchy.tracks) {
+      if (track.type !== 'object' && track.type !== 'shape') continue
+
+      const obj = track.object
+      let animationData = null
+
+      // Find animation data
+      if (track.type === 'object') {
+        for (let layer of this.context.activeObject.allLayers) {
+          if (layer.children && layer.children.includes(obj)) {
+            animationData = layer.animationData
+            break
+          }
+        }
+      } else if (track.type === 'shape') {
+        const findShapeLayer = (searchObj) => {
+          for (let layer of searchObj.children) {
+            if (layer.shapes && layer.shapes.includes(obj)) {
+              animationData = layer.animationData
+              return true
+            }
+            if (layer.children) {
+              for (let child of layer.children) {
+                if (findShapeLayer(child)) return true
+              }
+            }
+          }
+          return false
+        }
+        findShapeLayer(this.context.activeObject)
+      }
+
+      if (!animationData) continue
+
+      // Check all curves
+      for (let curveName in animationData.curves) {
+        const curve = animationData.curves[curveName]
+        const prefix = track.type === 'object' ? `child.${obj.idx}.` : `shape.${obj.shapeId}.`
+
+        if (!curveName.startsWith(prefix)) continue
+
+        // Check which keyframes in this curve are selected
+        for (let keyframe of curve.keyframes) {
+          if (this.selectedKeyframes.has(keyframe)) {
+            // Store keyframe data with relative time
+            clipboardData.push({
+              curve: curve,
+              curveName: curveName,
+              keyframeData: {
+                time: keyframe.time - minTime,  // Relative time
+                value: keyframe.value,
+                interpolation: keyframe.interpolation,
+                easeIn: keyframe.easeIn ? { ...keyframe.easeIn } : undefined,
+                easeOut: keyframe.easeOut ? { ...keyframe.easeOut } : undefined
+              }
+            })
+          }
+        }
+      }
+    }
+
+    this.keyframeClipboard = {
+      keyframes: clipboardData,
+      baseTime: minTime
+    }
+
+    console.log(`Copied ${clipboardData.length} keyframe(s) to clipboard`)
+    return true // Successfully copied keyframes
+  }
+
+  /**
+   * Paste keyframes from clipboard (Phase 6)
+   */
+  pasteKeyframes() {
+    if (!this.keyframeClipboard || this.keyframeClipboard.keyframes.length === 0) {
+      return false // No keyframes in clipboard
+    }
+
+    // Paste at current playhead time
+    const pasteTime = this.timelineState.currentTime
+
+    // Clear current selection
+    this.selectedKeyframes.clear()
+
+    // Paste each keyframe
+    for (let clipboardItem of this.keyframeClipboard.keyframes) {
+      const curve = clipboardItem.curve
+      const kfData = clipboardItem.keyframeData
+
+      // Calculate absolute time for pasted keyframe
+      const absoluteTime = pasteTime + kfData.time
+
+      // Create new keyframe
+      const newKeyframe = {
+        time: absoluteTime,
+        value: kfData.value,
+        interpolation: kfData.interpolation || 'linear',
+        easeIn: kfData.easeIn ? { ...kfData.easeIn } : { x: 0.42, y: 0 },
+        easeOut: kfData.easeOut ? { ...kfData.easeOut } : { x: 0.58, y: 1 },
+        idx: this.generateUUID()
+      }
+
+      // Add to curve
+      curve.addKeyframe(newKeyframe)
+
+      // Select the newly pasted keyframe
+      this.selectedKeyframes.add(newKeyframe)
+    }
+
+    console.log(`Pasted ${this.keyframeClipboard.keyframes.length} keyframe(s) at time ${pasteTime}`)
+
+    // Trigger redraws
+    if (this.context.updateUI) {
+      this.context.updateUI()
+    }
+    if (this.requestRedraw) this.requestRedraw()
+
+    return true // Successfully pasted keyframes
   }
 
   // Zoom controls (can be called from keyboard shortcuts)
