@@ -4783,8 +4783,8 @@ class GraphicsObject extends Widget {
         }
 
         // Find surrounding keyframes using AnimationCurve's built-in method
-        const { prev: prevKf, next: nextKf } = shapeIndexCurve.getBracketingKeyframes(currentTime);
-        console.log(`[Widget.draw] Keyframes: prevKf=${JSON.stringify(prevKf)}, nextKf=${JSON.stringify(nextKf)}`);
+        const { prev: prevKf, next: nextKf, t: interpolationT } = shapeIndexCurve.getBracketingKeyframes(currentTime);
+        console.log(`[Widget.draw] Keyframes: prevKf=${JSON.stringify(prevKf)}, nextKf=${JSON.stringify(nextKf)}, t=${interpolationT}`);
 
         // Get interpolated value
         let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
@@ -4817,8 +4817,10 @@ class GraphicsObject extends Widget {
           const shape2 = shapes.find(s => s.shapeIndex === nextKf.value);
 
           if (shape1 && shape2) {
-            // Calculate t based on time position between keyframes
-            const t = (currentTime - prevKf.time) / (nextKf.time - prevKf.time);
+            // Use the interpolated shapeIndexValue to calculate blend factor
+            // This respects the bezier easing curve
+            const t = (shapeIndexValue - prevKf.value) / (nextKf.value - prevKf.value);
+            console.log(`[Widget.draw] Morphing from shape ${prevKf.value} to ${nextKf.value}, shapeIndexValue=${shapeIndexValue}, t=${t}`);
             const morphedShape = shape1.lerpShape(shape2, t);
             visibleShapes.push({
               shape: morphedShape,
@@ -6285,7 +6287,15 @@ function addKeyframeAtPlayhead() {
         }
 
         const shapeIndexCurve = animationData.getOrCreateCurve(`shape.${obj.shapeId}.shapeIndex`);
-        const shapeIndexKeyframe = new Keyframe(currentTime, newShapeIndex, 'linear');
+        // Check if a keyframe already exists at this time to preserve its interpolation type
+        const framerate = context.config?.framerate || 24;
+        const timeResolution = (1 / framerate) / 2;
+        const existingShapeIndexKf = shapeIndexCurve.getKeyframeAtTime(currentTime, timeResolution);
+        const interpolationType = existingShapeIndexKf ? existingShapeIndexKf.interpolation : 'linear';
+        const shapeIndexKeyframe = new Keyframe(currentTime, newShapeIndex, interpolationType);
+        // Preserve easeIn/easeOut if they exist
+        if (existingShapeIndexKf && existingShapeIndexKf.easeIn) shapeIndexKeyframe.easeIn = existingShapeIndexKf.easeIn;
+        if (existingShapeIndexKf && existingShapeIndexKf.easeOut) shapeIndexKeyframe.easeOut = existingShapeIndexKf.easeOut;
         shapeIndexCurve.addKeyframe(shapeIndexKeyframe);
 
         console.log(`Created new shape version with shapeIndex ${newShapeIndex} at time ${currentTime}`);

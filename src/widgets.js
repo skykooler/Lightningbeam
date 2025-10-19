@@ -555,6 +555,9 @@ class TimelineWindowV2 extends Widget {
     // Hover state for showing keyframe values
     this.hoveredKeyframe = null  // {keyframe, x, y} - keyframe being hovered over and its screen position
 
+    // Hidden curves (Phase 6) - Set of curve parameter names
+    this.hiddenCurves = new Set()
+
     // Phase 6: Segment dragging state
     this.draggingSegment = null  // {track, initialMouseTime, segmentStartTime, animationData}
 
@@ -763,6 +766,83 @@ class TimelineWindowV2 extends Widget {
         if (track.object.showSegment) {
           ctx.fillStyle = foregroundColor
           ctx.fillRect(buttonX + 2, buttonY + 2, buttonSize - 4, buttonSize - 4)
+        }
+
+        // Draw legend for expanded curves (Phase 6)
+        if (track.object.curvesMode === 'expanded') {
+          // Get curves for this track
+          const curves = []
+          const obj = track.object
+          let animationData = null
+
+          // Find the AnimationData for this track
+          if (track.type === 'object') {
+            for (let layer of this.context.activeObject.allLayers) {
+              if (layer.children && layer.children.includes(obj)) {
+                animationData = layer.animationData
+                break
+              }
+            }
+          } else if (track.type === 'shape') {
+            for (let layer of this.context.activeObject.allLayers) {
+              if (layer.shapes && layer.shapes.some(s => s.shapeId === obj.shapeId)) {
+                animationData = layer.animationData
+                break
+              }
+            }
+          }
+
+          if (animationData) {
+            const prefix = track.type === 'object' ? `child.${obj.idx}.` : `shape.${obj.shapeId}.`
+            for (let curveName in animationData.curves) {
+              if (curveName.startsWith(prefix)) {
+                curves.push(animationData.curves[curveName])
+              }
+            }
+          }
+
+          if (curves.length > 0) {
+            ctx.save()
+            const legendPadding = 3
+            const legendLineHeight = 12
+            const legendHeight = curves.length * legendLineHeight + legendPadding * 2
+            const legendY = y + this.trackHierarchy.trackHeight + 5  // Below track name row
+
+            // Draw legend items (no background box)
+            ctx.font = '9px sans-serif'
+            ctx.textAlign = 'left'
+            ctx.textBaseline = 'top'
+
+            for (let i = 0; i < curves.length; i++) {
+              const curve = curves[i]
+              const itemY = legendY + legendPadding + i * legendLineHeight
+              const isHidden = this.hiddenCurves.has(curve.parameter)
+
+              // Draw color dot (grayed out if hidden)
+              ctx.fillStyle = isHidden ? foregroundColor : curve.displayColor
+              ctx.beginPath()
+              ctx.arc(10, itemY + 5, 3, 0, 2 * Math.PI)
+              ctx.fill()
+
+              // Draw parameter name (extract last part after last dot)
+              ctx.fillStyle = isHidden ? foregroundColor : labelColor
+              const paramName = curve.parameter.split('.').pop()
+              const truncatedName = paramName.length > 12 ? paramName.substring(0, 10) + '...' : paramName
+              ctx.fillText(truncatedName, 18, itemY)
+
+              // Draw strikethrough if hidden
+              if (isHidden) {
+                ctx.strokeStyle = foregroundColor
+                ctx.lineWidth = 1
+                ctx.beginPath()
+                const textWidth = ctx.measureText(truncatedName).width
+                ctx.moveTo(18, itemY + 5)
+                ctx.lineTo(18 + textWidth, itemY + 5)
+                ctx.stroke()
+              }
+            }
+            ctx.restore()
+          }
         }
       }
     }
@@ -1202,48 +1282,10 @@ class TimelineWindowV2 extends Widget {
       return startY + curveHeight - padding - (normalizedValue * (curveHeight - 2 * padding))
     }
 
-    // Draw legend showing which color is which parameter
-    // Position it below the track name area, top-right of the curve area
-    ctx.save()
-    ctx.fillStyle = backgroundColor
-    ctx.strokeStyle = shadow
-    ctx.lineWidth = 1
-
-    // Calculate legend size
-    const legendPadding = 4
-    const legendLineHeight = 14
-    const legendHeight = curves.length * legendLineHeight + legendPadding * 2
-    const legendWidth = 100
-    const legendX = 5  // Small left margin
-    const legendY = startY + 40  // Below track name area
-
-    // Draw legend background
-    ctx.fillRect(legendX, legendY, legendWidth, legendHeight)
-    ctx.strokeRect(legendX, legendY, legendWidth, legendHeight)
-
-    // Draw legend items
-    ctx.font = '10px sans-serif'
-    ctx.textBaseline = 'top'
-    for (let i = 0; i < curves.length; i++) {
-      const curve = curves[i]
-      const y = legendY + legendPadding + i * legendLineHeight
-
-      // Draw color dot
-      ctx.fillStyle = curve.displayColor
-      ctx.beginPath()
-      ctx.arc(legendX + legendPadding + 4, y + 6, 3, 0, 2 * Math.PI)
-      ctx.fill()
-
-      // Draw parameter name (extract last part after last dot)
-      ctx.fillStyle = labelColor
-      const paramName = curve.parameter.split('.').pop()
-      ctx.fillText(paramName, legendX + legendPadding + 12, y + 2)
-    }
-    ctx.restore()
-
     // Draw each curve
     for (let curve of curves) {
       if (curve.keyframes.length === 0) continue
+      if (this.hiddenCurves.has(curve.parameter)) continue  // Skip hidden curves
 
       ctx.strokeStyle = curve.displayColor
       ctx.fillStyle = curve.displayColor
@@ -1556,6 +1598,65 @@ class TimelineWindowV2 extends Widget {
             if (this.requestRedraw) this.requestRedraw()
             return true
           }
+
+          // Check if clicking on legend items (Phase 6)
+          if (track.object.curvesMode === 'expanded') {
+            const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+            const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
+            const legendPadding = 3
+            const legendLineHeight = 12
+            const legendY = trackYPos + this.trackHierarchy.trackHeight + 5
+
+            // Get curves for this track
+            const curves = []
+            const obj = track.object
+            let animationData = null
+
+            if (track.type === 'object') {
+              for (let layer of this.context.activeObject.allLayers) {
+                if (layer.children && layer.children.includes(obj)) {
+                  animationData = layer.animationData
+                  break
+                }
+              }
+            } else if (track.type === 'shape') {
+              for (let layer of this.context.activeObject.allLayers) {
+                if (layer.shapes && layer.shapes.some(s => s.shapeId === obj.shapeId)) {
+                  animationData = layer.animationData
+                  break
+                }
+              }
+            }
+
+            if (animationData) {
+              const prefix = track.type === 'object' ? `child.${obj.idx}.` : `shape.${obj.shapeId}.`
+              for (let curveName in animationData.curves) {
+                if (curveName.startsWith(prefix)) {
+                  curves.push(animationData.curves[curveName])
+                }
+              }
+            }
+
+            // Check if clicking on any legend item
+            for (let i = 0; i < curves.length; i++) {
+              const curve = curves[i]
+              const itemY = legendY + legendPadding + i * legendLineHeight
+
+              // Legend items are from x=5 to x=145, height of 12px
+              if (x >= 5 && x <= 145 && adjustedY >= itemY && adjustedY <= itemY + legendLineHeight) {
+                // Toggle visibility of this curve
+                if (this.hiddenCurves.has(curve.parameter)) {
+                  this.hiddenCurves.delete(curve.parameter)
+                  console.log(`Showing curve: ${curve.parameter}`)
+                } else {
+                  this.hiddenCurves.add(curve.parameter)
+                  console.log(`Hiding curve: ${curve.parameter}`)
+                }
+                if (this.requestRedraw) this.requestRedraw()
+                return true
+              }
+            }
+          }
         }
 
         // Clicking elsewhere on track header selects it
@@ -1575,6 +1676,7 @@ class TimelineWindowV2 extends Widget {
         // Phase 6: Check if clicking on tangent handle (highest priority for curves)
         if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
           const tangentInfo = this.getTangentHandleAtPoint(track, adjustedX, adjustedY)
+          console.log(`Tangent handle check result:`, tangentInfo)
           if (tangentInfo) {
             // Start tangent dragging
             this.draggingTangent = {
@@ -1756,6 +1858,9 @@ class TimelineWindowV2 extends Widget {
     // Check if clicking close to an existing keyframe on ANY curve (within 8px)
     // First pass: check all curves for keyframe hits
     for (let curve of curves) {
+      // Skip hidden curves
+      if (this.hiddenCurves.has(curve.parameter)) continue
+
       for (let keyframe of curve.keyframes) {
         const kfX = this.timelineState.timeToPixel(keyframe.time)
         const kfY = startY + curveHeight - padding - ((keyframe.value - minValue) / (maxValue - minValue) * (curveHeight - 2 * padding))
@@ -1786,6 +1891,12 @@ class TimelineWindowV2 extends Widget {
             console.log(`Selected single keyframe`)
           }
 
+          // Don't start dragging if this was a right-click
+          if (this.lastClickEvent?.button === 2) {
+            console.log(`Skipping drag - right-click detected (button=${this.lastClickEvent.button})`)
+            return true
+          }
+
           // Start dragging this keyframe (and all selected keyframes)
           this.draggingKeyframe = {
             curve: curve,  // Use the actual curve we clicked on
@@ -1813,11 +1924,14 @@ class TimelineWindowV2 extends Widget {
     }
 
     // No keyframe was clicked, so add a new one
-    // Find the closest curve to the click position
-    let targetCurve = curves[0]
+    // Find the closest curve to the click position (only visible curves)
+    let targetCurve = null
     let minDistance = Infinity
 
     for (let curve of curves) {
+      // Skip hidden curves
+      if (this.hiddenCurves.has(curve.parameter)) continue
+
       // For each curve, find the value at this time
       const curveValue = curve.interpolate(clickTime)
       if (curveValue !== null) {
@@ -1830,6 +1944,9 @@ class TimelineWindowV2 extends Widget {
         }
       }
     }
+
+    // If all curves are hidden, don't add a keyframe
+    if (!targetCurve) return false
 
     console.log('Adding keyframe at time', clickTime, 'with value', clickValue, 'to curve', targetCurve.parameter)
 
@@ -2252,6 +2369,9 @@ class TimelineWindowV2 extends Widget {
 
     // Check each curve for tangent handles
     for (let curve of curves) {
+      // Skip hidden curves
+      if (this.hiddenCurves.has(curve.parameter)) continue
+
       // Only check bezier keyframes that are selected
       for (let i = 0; i < curve.keyframes.length; i++) {
         const kf = curve.keyframes[i]
@@ -2552,7 +2672,58 @@ class TimelineWindowV2 extends Widget {
 
         // Apply the delta
         selectedKeyframe.time = Math.max(0, selectedKeyframe.initialDragTime + timeDelta)
-        selectedKeyframe.value = selectedKeyframe.initialDragValue + valueDelta
+        let newValue = selectedKeyframe.initialDragValue + valueDelta
+
+        // Special validation for shapeIndex curves: only allow values that correspond to actual shapes
+        if (this.draggingKeyframe.curve.parameter.endsWith('.shapeIndex')) {
+          // Extract shapeId from parameter name: "shape.{shapeId}.shapeIndex"
+          const match = this.draggingKeyframe.curve.parameter.match(/^shape\.([^.]+)\.shapeIndex$/)
+          if (match) {
+            const shapeId = match[1]
+
+            // Find all shapes with this shapeId and get their shapeIndex values
+            const track = this.draggingKeyframe.track
+            let layer = null
+
+            if (track.type === 'shape') {
+              // Find the layer containing this shape
+              for (let l of this.context.activeObject.allLayers) {
+                if (l.shapes && l.shapes.some(s => s.shapeId === shapeId)) {
+                  layer = l
+                  break
+                }
+              }
+            }
+
+            if (layer) {
+              const validIndexes = layer.shapes
+                .filter(s => s.shapeId === shapeId)
+                .map(s => s.shapeIndex)
+                .sort((a, b) => a - b)
+
+              if (validIndexes.length > 0) {
+                // Round to nearest integer first
+                const roundedValue = Math.round(newValue)
+
+                // Find the closest valid index
+                let closestIndex = validIndexes[0]
+                let closestDist = Math.abs(roundedValue - closestIndex)
+
+                for (let validIndex of validIndexes) {
+                  const dist = Math.abs(roundedValue - validIndex)
+                  if (dist < closestDist) {
+                    closestDist = dist
+                    closestIndex = validIndex
+                  }
+                }
+
+                newValue = closestIndex
+              }
+            }
+          }
+        }
+
+        selectedKeyframe.value = newValue
       }
 
       // Resort keyframes in all affected curves
@@ -3045,18 +3216,37 @@ class TimelineWindowV2 extends Widget {
           maxValue += rangePadding
 
           // Check if right-clicking on a keyframe (within 8px)
+          // Find the CLOSEST keyframe, not just the first one (and skip hidden curves)
+          let closestKeyframe = null
+          let closestCurve = null
+          let closestDistance = 8  // Maximum hit distance
+
           for (let curve of curves) {
+            // Skip hidden curves
+            if (this.hiddenCurves.has(curve.parameter)) continue
+
             for (let i = 0; i < curve.keyframes.length; i++) {
               const keyframe = curve.keyframes[i]
               const kfX = this.timelineState.timeToPixel(keyframe.time)
               const kfY = startY + curveHeight - padding - ((keyframe.value - minValue) / (maxValue - minValue) * (curveHeight - 2 * padding))
               const distance = Math.sqrt((adjustedX - kfX) ** 2 + (adjustedY - kfY) ** 2)
 
-              if (distance < 8) {
-                // Phase 6: Check if shift key is pressed for quick delete
-                const shiftPressed = event && event.shiftKey
+              if (distance < closestDistance) {
+                closestDistance = distance
+                closestKeyframe = keyframe
+                closestCurve = curve
+              }
+            }
+          }
 
-                if (shiftPressed) {
+          if (closestKeyframe) {
+            const keyframe = closestKeyframe
+            const curve = closestCurve
+
+            // Phase 6: Check if shift key is pressed for quick delete
+            const shiftPressed = event && event.shiftKey
+
+            if (shiftPressed) {
                   // Shift+right-click: quick delete
                   if (this.selectedKeyframes.size > 1) {
                     // Delete all selected keyframes
@@ -3084,15 +3274,24 @@ class TimelineWindowV2 extends Widget {
                 } else {
                   // Regular right-click: show context menu
                   if (this.selectedKeyframes.size > 1) {
-                    this.showKeyframeContextMenu(Array.from(this.selectedKeyframes), curves)
+                    // If right-clicking on a selected keyframe, show menu for all selected
+                    if (this.selectedKeyframes.has(keyframe)) {
+                      this.showKeyframeContextMenu(Array.from(this.selectedKeyframes), curves)
+                    } else {
+                      // Right-clicking on unselected keyframe: select it and show menu
+                      this.selectedKeyframes.clear()
+                      this.selectedKeyframes.add(keyframe)
+                      this.showKeyframeContextMenu([keyframe], curves, curve)
+                    }
                   } else {
+                    // No multi-selection: select this keyframe and show menu
+                    this.selectedKeyframes.clear()
+                    this.selectedKeyframes.add(keyframe)
                     this.showKeyframeContextMenu([keyframe], curves, curve)
                   }
                   return true
                 }
-              }
-            }
-          }
+          }  // end if (closestKeyframe)
         }
       }
     }
@@ -3124,6 +3323,7 @@ class TimelineWindowV2 extends Widget {
             action: async () => {
               keyframe.interpolation = 'linear'
               console.log('Changed interpolation to linear')
+              // Keep flag set until next mousedown processes it
               if (this.context.updateUI) this.context.updateUI()
               if (this.requestRedraw) this.requestRedraw()
             }
@@ -3134,7 +3334,6 @@ class TimelineWindowV2 extends Widget {
               keyframe.interpolation = 'bezier'
               if (!keyframe.easeIn) keyframe.easeIn = { x: 0.42, y: 0 }
               if (!keyframe.easeOut) keyframe.easeOut = { x: 0.58, y: 1 }
-              console.log('Changed interpolation to bezier')
               if (this.context.updateUI) this.context.updateUI()
               if (this.requestRedraw) this.requestRedraw()
             }
@@ -3144,6 +3343,7 @@ class TimelineWindowV2 extends Widget {
             action: async () => {
               keyframe.interpolation = 'step'
               console.log('Changed interpolation to step')
+              // Keep flag set until next mousedown processes it
               if (this.context.updateUI) this.context.updateUI()
               if (this.requestRedraw) this.requestRedraw()
             }
@@ -3153,6 +3353,7 @@ class TimelineWindowV2 extends Widget {
             action: async () => {
               keyframe.interpolation = 'zero'
               console.log('Changed interpolation to zero')
+              // Keep flag set until next mousedown processes it
               if (this.context.updateUI) this.context.updateUI()
               if (this.requestRedraw) this.requestRedraw()
             }
