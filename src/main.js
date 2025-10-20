@@ -200,52 +200,6 @@ let tools = {
           },
         },
       },
-      goToFrame: {
-        type: "number",
-        label: "Go To Frame",
-        enabled: () => context.selection.length == 1,
-        value: {
-          get: () => {
-            if (context.selection.length != 1) return undefined;
-            const selectedObject = context.selection[0];
-            if (! (selectedObject.idx in context.activeObject.currentFrame.keys)) return undefined;
-            return context.activeObject.currentFrame.keys[selectedObject.idx]
-              .goToFrame;
-          },
-          set: (val) => {
-            if (context.selection.length != 1) return undefined;
-            const selectedObject = context.selection[0];
-            context.activeObject.currentFrame.keys[
-              selectedObject.idx
-            ].goToFrame = val;
-            selectedObject.setFrameNum(val - 1);
-            updateUI();
-          },
-        },
-      },
-      playFromFrame: {
-        type: "boolean",
-        label: "Play From Frame",
-        enabled: () => context.selection.length == 1,
-        value: {
-          get: () => {
-            if (context.selection.length != 1) return undefined;
-            const selectedObject = context.selection[0];
-            if (!(selectedObject.idx in context.activeObject.currentFrame.keys)) return;
-            return context.activeObject.currentFrame.keys[selectedObject.idx]
-              .playFromFrame;
-          },
-          set: (val) => {
-            if (context.selection.length != 1) return undefined;
-            const selectedObject = context.selection[0];
-            context.activeObject.currentFrame.keys[
-              selectedObject.idx
-            ].playFromFrame = val;
-            selectedObject.playing = true;
-            updateUI();
-          },
-        },
-      },
     },
   },
   transform: {
@@ -679,7 +633,10 @@ let actions = {
       imageShape.update();
       imageShape.fillImage = img;
       imageShape.filled = true;
-      imageObject.currentFrame.addShape(imageShape);
+
+      // Add shape to layer using new AnimationData-aware method
+      const time = imageObject.currentTime || 0;
+      imageObject.activeLayer.addShape(imageShape, time);
       let parent = pointerList[action.parent];
       parent.addObject(
         imageObject,
@@ -780,7 +737,8 @@ let actions = {
       let action = {
         items: deepCopyWithIdxMapping(items),
         object: context.activeObject.idx,
-        frame: context.activeObject.currentFrame.idx,
+        layer: context.activeObject.activeLayer.idx,
+        time: context.activeObject.currentTime || 0,
         uuid: uuidv4(),
       };
       undoStack.push({ name: "duplicateObject", action: action });
@@ -789,25 +747,27 @@ let actions = {
     },
     execute: (action) => {
       const object = pointerList[action.object];
-      const frame = pointerList[action.frame];
+      const layer = pointerList[action.layer];
+      const time = action.time;
+
       for (let item of action.items) {
         if (item.type == "shape") {
-          frame.addShape(Shape.fromJSON(item));
+          const shape = Shape.fromJSON(item);
+          layer.addShape(shape, time);
         } else if (item.type == "GraphicsObject") {
           const newObj = GraphicsObject.fromJSON(item);
           object.addObject(newObj);
         }
       }
-      // newObj.idx = action.uuid
-      // context.activeObject.addObject(newObj);
       updateUI();
     },
     rollback: (action) => {
       const object = pointerList[action.object];
-      const frame = pointerList[action.frame];
+      const layer = pointerList[action.layer];
+
       for (let item of action.items) {
         if (item.type == "shape") {
-          frame.removeShape(pointerList[item.idx]);
+          layer.removeShape(pointerList[item.idx]);
         } else if (item.type == "GraphicsObject") {
           object.removeChild(pointerList[item.idx]);
         }
@@ -818,41 +778,77 @@ let actions = {
   deleteObjects: {
     create: (objects, shapes) => {
       redoStack.length = 0;
+      const layer = context.activeObject.activeLayer;
+      const time = context.activeObject.currentTime || 0;
+
       let serializableObjects = [];
-      let serializableShapes = [];
+      let oldObjectExists = {};
       for (let object of objects) {
         serializableObjects.push(object.idx);
+        // Store old exists value for rollback
+        const existsValue = layer.animationData.interpolate(`object.${object.idx}.exists`, time);
+        oldObjectExists[object.idx] = existsValue !== null ? existsValue : 1;
       }
+
+      let serializableShapes = [];
       for (let shape of shapes) {
         serializableShapes.push(shape.idx);
       }
+
       let action = {
         objects: serializableObjects,
         shapes: serializableShapes,
-        frame: context.activeObject.currentFrame.idx,
-        oldState: structuredClone(context.activeObject.currentFrame.keys),
+        layer: layer.idx,
+        time: time,
+        oldObjectExists: oldObjectExists,
       };
       undoStack.push({ name: "deleteObjects", action: action });
       actions.deleteObjects.execute(action);
       updateMenu();
     },
     execute: (action) => {
-      let frame = pointerList[action.frame];
-      for (let object of action.objects) {
-        delete frame.keys[object];
+      const layer = pointerList[action.layer];
+      const time = action.time;
+
+      // For objects: set exists to 0 at this time
+      for (let objectIdx of action.objects) {
+        const existsCurve = layer.animationData.getCurve(`object.${objectIdx}.exists`);
+        const kf = existsCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = 0;
+        } else {
+          layer.animationData.addKeyframe(`object.${objectIdx}.exists`, new Keyframe(time, 0, "hold"));
+        }
       }
-      for (let shape of action.shapes) {
-        frame.shapes.splice(frame.shapes.indexOf(pointerList[shape]), 1);
+
+      // For shapes: remove them (leaves holes that can be filled on undo)
+      for (let shapeIdx of action.shapes) {
+        layer.removeShape(pointerList[shapeIdx]);
       }
       updateUI();
     },
     rollback: (action) => {
-      let frame = pointerList[action.frame];
-      for (let object of action.objects) {
-        frame.keys[object] = action.oldState[object];
+      const layer = pointerList[action.layer];
+      const time = action.time;
+
+      // Restore old exists values for objects
+      for (let objectIdx of action.objects) {
+        const oldExists = action.oldObjectExists[objectIdx];
+        const existsCurve = layer.animationData.getCurve(`object.${objectIdx}.exists`);
+        const kf = existsCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = oldExists;
+        } else {
+          layer.animationData.addKeyframe(`object.${objectIdx}.exists`, new Keyframe(time, oldExists, "hold"));
+        }
       }
-      for (let shape of action.shapes) {
-        frame.shapes.push(pointerList[shape]);
+
+      // For shapes: restore them with their original shapeIndex (fills the holes)
+      for (let shapeIdx of action.shapes) {
+        const shape = pointerList[shapeIdx];
+        if (shape) {
+          layer.addShape(shape, time);
+        }
       }
       updateUI();
     },
@@ -1175,46 +1171,124 @@ let actions = {
       updateUI();
     },
   },
-  editFrame: {
-    initialize: (frame) => {
+  moveObjects: {
+    initialize: (objects, layer, time) => {
+      let oldPositions = {};
+      for (let obj of objects) {
+        const x = layer.animationData.interpolate(`object.${obj.idx}.x`, time);
+        const y = layer.animationData.interpolate(`object.${obj.idx}.y`, time);
+        oldPositions[obj.idx] = { x, y };
+      }
       let action = {
-        type: "editFrame",
-        oldState: structuredClone(frame.keys),
-        frame: frame.idx,
+        type: "moveObjects",
+        objects: objects.map(o => o.idx),
+        layer: layer.idx,
+        time: time,
+        oldPositions: oldPositions,
       };
       return action;
     },
-    finalize: (action, frame) => {
-      action.newState = structuredClone(frame.keys);
-      undoStack.push({ name: "editFrame", action: action });
-      actions.editFrame.execute(action);
+    finalize: (action) => {
+      const layer = pointerList[action.layer];
+      let newPositions = {};
+      for (let objIdx of action.objects) {
+        const obj = pointerList[objIdx];
+        newPositions[objIdx] = { x: obj.x, y: obj.y };
+      }
+      action.newPositions = newPositions;
+      undoStack.push({ name: "moveObjects", action: action });
+      actions.moveObjects.execute(action);
       context.activeAction = undefined;
       updateMenu();
     },
     render: (action, ctx) => {},
-    create: (frame) => {
-      redoStack.length = 0; // Clear redo stack
-      if (!(frame.idx in startProps)) return;
+    create: (objects, layer, time, oldPositions, newPositions) => {
+      redoStack.length = 0;
       let action = {
-        newState: structuredClone(frame.keys),
-        oldState: startProps[frame.idx],
-        frame: frame.idx,
+        objects: objects.map(o => o.idx),
+        layer: layer.idx,
+        time: time,
+        oldPositions: oldPositions,
+        newPositions: newPositions,
       };
-      undoStack.push({ name: "editFrame", action: action });
-      actions.editFrame.execute(action);
+      undoStack.push({ name: "moveObjects", action: action });
+      actions.moveObjects.execute(action);
       updateMenu();
     },
     execute: (action) => {
-      let frame = pointerList[action.frame];
-      if (frame == undefined) return;
-      frame.keys = structuredClone(action.newState);
+      const layer = pointerList[action.layer];
+      const time = action.time;
+
+      for (let objIdx of action.objects) {
+        const obj = pointerList[objIdx];
+        const newPos = action.newPositions[objIdx];
+
+        // Update object properties
+        obj.x = newPos.x;
+        obj.y = newPos.y;
+
+        // Add/update keyframes in AnimationData
+        const xCurve = layer.animationData.getCurve(`object.${objIdx}.x`);
+        const kf = xCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = newPos.x;
+        } else {
+          layer.animationData.addKeyframe(`object.${objIdx}.x`, new Keyframe(time, newPos.x, "linear"));
+        }
+
+        const yCurve = layer.animationData.getCurve(`object.${objIdx}.y`);
+        const kfy = yCurve?.getKeyframeAtTime(time);
+        if (kfy) {
+          kfy.value = newPos.y;
+        } else {
+          layer.animationData.addKeyframe(`object.${objIdx}.y`, new Keyframe(time, newPos.y, "linear"));
+        }
+      }
       updateUI();
     },
     rollback: (action) => {
-      let frame = pointerList[action.frame];
-      frame.keys = structuredClone(action.oldState);
+      const layer = pointerList[action.layer];
+      const time = action.time;
+
+      for (let objIdx of action.objects) {
+        const obj = pointerList[objIdx];
+        const oldPos = action.oldPositions[objIdx];
+
+        // Restore object properties
+        obj.x = oldPos.x;
+        obj.y = oldPos.y;
+
+        // Restore keyframes in AnimationData
+        const xCurve = layer.animationData.getCurve(`object.${objIdx}.x`);
+        const kf = xCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = oldPos.x;
+        } else {
+          layer.animationData.addKeyframe(`object.${objIdx}.x`, new Keyframe(time, oldPos.x, "linear"));
+        }
+
+        const yCurve = layer.animationData.getCurve(`object.${objIdx}.y`);
+        const kfy = yCurve?.getKeyframeAtTime(time);
+        if (kfy) {
+          kfy.value = oldPos.y;
+        } else {
+          layer.animationData.addKeyframe(`object.${objIdx}.y`, new Keyframe(time, oldPos.y, "linear"));
+        }
+      }
       updateUI();
     },
+  },
+  editFrame: {
+    // DEPRECATED: Kept for backwards compatibility
+    initialize: (frame) => {
+      console.warn("editFrame is deprecated, use moveObjects instead");
+      return null;
+    },
+    finalize: (action, frame) => {},
+    render: (action, ctx) => {},
+    create: (frame) => {},
+    execute: (action) => {},
+    rollback: (action) => {},
   },
   addFrame: {
     create: () => {
@@ -1530,10 +1604,10 @@ let actions = {
         }
       }
 
-      // For objects - check legacy frame system if available
-      const frame = context.activeObject.currentFrame;
+      // For objects - check if they exist at current time
       for (let object of context.selection) {
-        if (frame && object.idx in frame.keys) {
+        const existsValue = layer.animationData.interpolate(`object.${object.idx}.exists`, currentTime);
+        if (existsValue > 0) {
           serializableObjects.push(object.idx);
           // TODO: rotated bbox
           if (bbox == undefined) {
@@ -1544,6 +1618,11 @@ let actions = {
         }
       }
 
+      // If nothing was selected, don't create a group
+      if (!bbox) {
+        return;
+      }
+
       context.shapeselection = [];
       context.selection = [];
       let action = {
@@ -1551,7 +1630,6 @@ let actions = {
         objects: serializableObjects,
         groupUuid: uuidv4(),
         parent: context.activeObject.idx,
-        frame: frame?.idx,
         layer: layer.idx,
         currentTime: currentTime,
         position: {
@@ -1606,15 +1684,18 @@ let actions = {
       }
 
       // Move objects (children) to the group
-      // For legacy frame-based children, use frame.keys if available
-      let frame = action.frame ? pointerList[action.frame] : parent.currentFrame;
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
-        if (frame && frame.keys && frame.keys[objectIdx]) {
+
+        // Get object position from AnimationData if available
+        const objX = layer.animationData.interpolate(`object.${objectIdx}.x`, currentTime);
+        const objY = layer.animationData.interpolate(`object.${objectIdx}.y`, currentTime);
+
+        if (objX !== null && objY !== null) {
           group.addObject(
             object,
-            frame.keys[objectIdx].x - action.position.x,
-            frame.keys[objectIdx].y - action.position.y,
+            objX - action.position.x,
+            objY - action.position.y,
             currentTime
           );
         } else {
@@ -1634,18 +1715,18 @@ let actions = {
     rollback: (action) => {
       let group = pointerList[action.groupUuid];
       let parent = pointerList[action.parent];
-      let frame = action.frame
-        ? pointerList[action.frame]
-        : parent.currentFrame;
+      const layer = pointerList[action.layer] || parent.activeLayer;
+      const currentTime = action.currentTime || 0;
+
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
-        frame.addShape(shape);
         shape.translate(action.position.x, action.position.y);
-        group.getFrame(0).removeShape(shape);
+        layer.addShape(shape, currentTime);
+        group.activeLayer.removeShape(shape);
       }
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
-        parent.addObject(object, object.x, object.y);
+        parent.addObject(object, object.x, object.y, currentTime);
         group.removeChild(object);
       }
       parent.removeChild(group);
@@ -1656,24 +1737,32 @@ let actions = {
   sendToBack: {
     create: () => {
       redoStack.length = 0;
+      const currentTime = context.activeObject.currentTime || 0;
+      const layer = context.activeObject.activeLayer;
+
       let serializableShapes = [];
-      let serializableObjects = [];
-      let formerIndices = {};
+      let oldZOrders = {};
+
+      // Store current zOrder for each shape
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
-        formerIndices[shape.idx] =
-          context.activeObject.currentFrame.shapes.indexOf(shape);
+        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, currentTime);
+        oldZOrders[shape.idx] = zOrder !== null ? zOrder : 0;
       }
+
+      let serializableObjects = [];
+      let formerIndices = {};
       for (let object of context.selection) {
         serializableObjects.push(object.idx);
-        formerIndices[object.idx] =
-          context.activeObject.activeLayer.children.indexOf(object);
+        formerIndices[object.idx] = layer.children.indexOf(object);
       }
+
       let action = {
         shapes: serializableShapes,
         objects: serializableObjects,
-        layer: context.activeObject.activeLayer.idx,
-        frame: context.activeObject.currentFrame.idx,
+        layer: layer.idx,
+        time: currentTime,
+        oldZOrders: oldZOrders,
         formerIndices: formerIndices,
       };
       undoStack.push({ name: "sendToBack", action: action });
@@ -1681,13 +1770,41 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      let frame = pointerList[action.frame];
       let layer = pointerList[action.layer];
+      const time = action.time;
+
+      // For shapes: set zOrder to 0, increment all others
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
-        frame.shapes.splice(frame.shapes.indexOf(shape), 1);
-        frame.shapes.unshift(shape);
+
+        // Increment zOrder for all other shapes at this time
+        for (let otherShape of layer.shapes) {
+          if (otherShape.shapeId !== shape.shapeId) {
+            const zOrderCurve = layer.animationData.getCurve(`shape.${otherShape.shapeId}.zOrder`);
+            if (zOrderCurve) {
+              const kf = zOrderCurve.getKeyframeAtTime(time);
+              if (kf) {
+                kf.value += 1;
+              } else {
+                // Add keyframe at current time with incremented value
+                const currentZOrder = layer.animationData.interpolate(`shape.${otherShape.shapeId}.zOrder`, time) || 0;
+                layer.animationData.addKeyframe(`shape.${otherShape.shapeId}.zOrder`, new Keyframe(time, currentZOrder + 1, "hold"));
+              }
+            }
+          }
+        }
+
+        // Set this shape's zOrder to 0
+        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
+        const kf = zOrderCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = 0;
+        } else {
+          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, 0, "hold"));
+        }
       }
+
+      // For objects: move to front of children array
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
         layer.children.splice(layer.children.indexOf(object), 1);
@@ -1696,13 +1813,24 @@ let actions = {
       updateUI();
     },
     rollback: (action) => {
-      let frame = pointerList[action.frame];
       let layer = pointerList[action.layer];
+      const time = action.time;
+
+      // Restore old zOrder values for shapes
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
-        frame.shapes.splice(frame.shapes.indexOf(shape), 1);
-        frame.shapes.splice(action.formerIndices[shapeIdx], 0, shape);
+        const oldZOrder = action.oldZOrders[shapeIdx];
+
+        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
+        const kf = zOrderCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = oldZOrder;
+        } else {
+          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, oldZOrder, "hold"));
+        }
       }
+
+      // Restore old positions for objects
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
         layer.children.splice(layer.children.indexOf(object), 1);
@@ -1714,24 +1842,32 @@ let actions = {
   bringToFront: {
     create: () => {
       redoStack.length = 0;
+      const currentTime = context.activeObject.currentTime || 0;
+      const layer = context.activeObject.activeLayer;
+
       let serializableShapes = [];
-      let serializableObjects = [];
-      let formerIndices = {};
+      let oldZOrders = {};
+
+      // Store current zOrder for each shape
       for (let shape of context.shapeselection) {
         serializableShapes.push(shape.idx);
-        formerIndices[shape.idx] =
-          context.activeObject.currentFrame.shapes.indexOf(shape);
+        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, currentTime);
+        oldZOrders[shape.idx] = zOrder !== null ? zOrder : 0;
       }
+
+      let serializableObjects = [];
+      let formerIndices = {};
       for (let object of context.selection) {
         serializableObjects.push(object.idx);
-        formerIndices[object.idx] =
-          context.activeObject.activeLayer.children.indexOf(object);
+        formerIndices[object.idx] = layer.children.indexOf(object);
       }
+
       let action = {
         shapes: serializableShapes,
         objects: serializableObjects,
-        layer: context.activeObject.activeLayer.idx,
-        frame: context.activeObject.currentFrame.idx,
+        layer: layer.idx,
+        time: currentTime,
+        oldZOrders: oldZOrders,
         formerIndices: formerIndices,
       };
       undoStack.push({ name: "bringToFront", action: action });
@@ -1739,13 +1875,34 @@ let actions = {
       updateMenu();
     },
     execute: (action) => {
-      let frame = pointerList[action.frame];
       let layer = pointerList[action.layer];
+      const time = action.time;
+
+      // Find max zOrder at this time
+      let maxZOrder = -1;
+      for (let shape of layer.shapes) {
+        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, time);
+        if (zOrder !== null && zOrder > maxZOrder) {
+          maxZOrder = zOrder;
+        }
+      }
+
+      // For shapes: set zOrder to max+1, max+2, etc.
+      let newZOrder = maxZOrder + 1;
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
-        frame.shapes.splice(frame.shapes.indexOf(shape), 1);
-        frame.shapes.push(shape);
+
+        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
+        const kf = zOrderCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = newZOrder;
+        } else {
+          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, newZOrder, "hold"));
+        }
+        newZOrder++;
       }
+
+      // For objects: move to end of children array
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
         layer.children.splice(layer.children.indexOf(object), 1);
@@ -1755,13 +1912,24 @@ let actions = {
       updateUI();
     },
     rollback: (action) => {
-      let frame = pointerList[action.frame];
       let layer = pointerList[action.layer];
+      const time = action.time;
+
+      // Restore old zOrder values for shapes
       for (let shapeIdx of action.shapes) {
         let shape = pointerList[shapeIdx];
-        frame.shapes.splice(frame.shapes.indexOf(shape), 1);
-        frame.shapes.splice(action.formerIndices[shapeIdx], 0, shape);
+        const oldZOrder = action.oldZOrders[shapeIdx];
+
+        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
+        const kf = zOrderCurve?.getKeyframeAtTime(time);
+        if (kf) {
+          kf.value = oldZOrder;
+        } else {
+          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, oldZOrder, "hold"));
+        }
       }
+
+      // Restore old positions for objects
       for (let objectIdx of action.objects) {
         let object = pointerList[objectIdx];
         layer.children.splice(layer.children.indexOf(object), 1);
@@ -1798,15 +1966,16 @@ let actions = {
       redoStack.length = 0;
       let selection = [];
       let shapeselection = [];
-      for (let child of context.activeObject.activeLayer.children) {
+      const currentTime = context.activeObject.currentTime || 0;
+      const layer = context.activeObject.activeLayer;
+      for (let child of layer.children) {
         let idx = child.idx;
-        if (idx in context.activeObject.currentFrame.keys) {
+        const existsValue = layer.animationData.interpolate(`object.${idx}.exists`, currentTime);
+        if (existsValue > 0) {
           selection.push(child.idx);
         }
       }
       // Use getVisibleShapes instead of currentFrame.shapes
-      let currentTime = context.activeObject?.currentTime || 0;
-      let layer = context.activeObject?.activeLayer;
       if (layer) {
         for (let shape of layer.getVisibleShapes(currentTime)) {
           shapeselection.push(shape.idx);
@@ -1937,6 +2106,11 @@ let actions = {
     },
   },
 };
+
+// Expose context and actions for UI testing
+window.context = context;
+window.actions = actions;
+window.addKeyframeAtPlayhead = addKeyframeAtPlayhead;
 
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -2935,6 +3109,69 @@ class Layer extends Widget {
     const curve = this.animationData.getCurve(paramKey);
     return curve ? curve.keyframes : [];
   }
+
+  /**
+   * Add a shape to this layer at the given time
+   * Creates AnimationData keyframes for exists, zOrder, and shapeIndex
+   */
+  addShape(shape, time, sendToBack = false) {
+    // Add to shapes array
+    this.shapes.push(shape);
+
+    // Determine zOrder
+    let zOrder;
+    if (sendToBack) {
+      zOrder = 0;
+      // Increment zOrder for all existing shapes at this time
+      for (let existingShape of this.shapes) {
+        if (existingShape !== shape) {
+          let existingZOrderCurve = this.animationData.curves[`shape.${existingShape.shapeId}.zOrder`];
+          if (existingZOrderCurve) {
+            for (let kf of existingZOrderCurve.keyframes) {
+              if (kf.time === time) {
+                kf.value += 1;
+              }
+            }
+          }
+        }
+      }
+    } else {
+      zOrder = this.shapes.length - 1;
+    }
+
+    // Add AnimationData keyframes
+    this.animationData.addKeyframe(`shape.${shape.shapeId}.exists`, new Keyframe(time, 1, "hold"));
+    this.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, zOrder, "hold"));
+    this.animationData.addKeyframe(`shape.${shape.shapeId}.shapeIndex`, new Keyframe(time, shape.shapeIndex, "linear"));
+  }
+
+  /**
+   * Remove a specific shape instance from this layer
+   * Leaves a "hole" in shapeIndex values so the shape can be restored later
+   */
+  removeShape(shape) {
+    const shapeIndex = this.shapes.indexOf(shape);
+    if (shapeIndex < 0) return;
+
+    const shapeId = shape.shapeId;
+    const removedShapeIndex = shape.shapeIndex;
+
+    // Remove from array
+    this.shapes.splice(shapeIndex, 1);
+
+    // Get shapeIndex curve
+    const shapeIndexCurve = this.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
+    if (shapeIndexCurve) {
+      // Remove keyframes that point to this shapeIndex
+      const keyframesToRemove = shapeIndexCurve.keyframes.filter(kf => kf.value === removedShapeIndex);
+      for (let kf of keyframesToRemove) {
+        shapeIndexCurve.removeKeyframe(kf);
+      }
+      // Note: We intentionally leave a "hole" at this shapeIndex value
+      // so the shape can be restored with the same index if undeleted
+    }
+  }
+
   getFrame(num) {
     if (this.frames[num]) {
       if (this.frames[num].frameType == "keyframe") {
@@ -3282,19 +3519,11 @@ class Layer extends Widget {
   draw(ctx) {
     // super.draw(ctx)
     if (!this.visible) return;
-    let frameInfo = this.getFrameValue(this.frameNum);
-    let frame = frameInfo.valueAtN !== undefined ? frameInfo.valueAtN : frameInfo.prev;
-    const keyframe = frameInfo.valueAtN ? true : false
 
-    // let frame = this.getFrame(this.currentFrameNum);
     let cxt = {...context}
     cxt.ctx = ctx
-    let t = null;
-    if (frameInfo.prev && frameInfo.next) {
-      t = (this.frameNum - frameInfo.prevIndex) / (frameInfo.nextIndex - frameInfo.prevIndex);
-    }
 
-    // NEW: Draw shapes using AnimationData curves for exists, zOrder, and shape tweening
+    // Draw shapes using AnimationData curves for exists, zOrder, and shape tweening
     let currentTime = context.activeObject?.currentTime || 0;
 
     // Group shapes by shapeId for tweening support
@@ -3383,86 +3612,44 @@ class Layer extends Widget {
       shape.draw(cxt);
     }
 
-    // LEGACY: Keep old frame-based shape drawing for backwards compatibility
-    if (frame) {
-      // Update shapes and children from legacy Frame system
-      for (let shape of frame.shapes) {
-        // If prev.frameType is "shape", look for a matching shape in next
-        if (frameInfo.prev && frameInfo.prev.keyTypes.has("shape")) {
-          const shape2 = frameInfo.next.shapes.find(s => s.shapeId === shape.shapeId);
+    // Draw children (GraphicsObjects) using AnimationData curves
+    for (let child of this.children) {
+      // Check if child exists at current time using AnimationData
+      const existsValue = this.animationData.interpolate(`object.${child.idx}.exists`, currentTime);
+      if (existsValue === null || existsValue <= 0) continue;
 
-          if (shape2) {
-            // If matching shape is found, interpolate and draw
-            shape.lerpShape(shape2, t).draw(cxt);
-            continue; // Skip to next shape
-          }
+      // Get child properties from AnimationData curves
+      const childX = this.animationData.interpolate(`object.${child.idx}.x`, currentTime);
+      const childY = this.animationData.interpolate(`object.${child.idx}.y`, currentTime);
+      const childRotation = this.animationData.interpolate(`object.${child.idx}.rotation`, currentTime);
+      const childScaleX = this.animationData.interpolate(`object.${child.idx}.scale_x`, currentTime);
+      const childScaleY = this.animationData.interpolate(`object.${child.idx}.scale_y`, currentTime);
+
+      // Apply properties if they exist in AnimationData
+      if (childX !== null) child.x = childX;
+      if (childY !== null) child.y = childY;
+      if (childRotation !== null) child.rotation = childRotation;
+      if (childScaleX !== null) child.scale_x = childScaleX;
+      if (childScaleY !== null) child.scale_y = childScaleY;
+
+      // Draw the child if not in objectStack
+      if (!context.objectStack.includes(child)) {
+        const transform = ctx.getTransform();
+        ctx.translate(child.x, child.y);
+        ctx.scale(child.scale_x, child.scale_y);
+        ctx.rotate(child.rotation);
+        child.draw(ctx);
+
+        // Draw selection outline if selected
+        if (context.selection.includes(child)) {
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = "#00ffff";
+          ctx.beginPath();
+          let bbox = child.bbox();
+          ctx.rect(bbox.x.min - child.x, bbox.y.min - child.y, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min);
+          ctx.stroke();
         }
-
-        // Otherwise, just draw the shape as usual
-        cxt.selected = context.shapeselection.includes(shape);
-        shape.draw(cxt);
-      }
-
-      for (let child of this.children) {
-        if (child.idx in frame.keys) {
-          for (let key in frame.keys[child.idx]) {
-            // If both prev and next exist and prev.frameType is "motion", interpolate child keys
-            if (frameInfo.prev && frameInfo.next && frameInfo.prev.keyTypes.has("motion")) {
-              // Interpolate between prev and next for this key
-              child[key] = lerp(frameInfo.prev.keys[child.idx][key], frameInfo.next.keys[child.idx][key], t);
-            } else {
-              // Otherwise, use the value from the current frame
-              child[key] = frame.keys[child.idx][key];
-            }
-          }
-          if (!context.objectStack.includes(child)) {
-            if (keyframe) {
-              if (child.goToFrame != undefined) {
-                child.setFrameNum(child.goToFrame - 1)
-                if (child.playFromFrame) {
-                  child.playing = true
-                } else {
-                  child.playing = false
-                }
-                child.playing = true
-              }
-            }
-            if (child.playing) {
-              let lastFrame = 0;
-              for (let i = this.frameNum; i >= 0; i--) {
-                if (
-                  this.frames[i] &&
-                  this.frames[i].keys[child.idx] &&
-                  this.frames[i].keys[child.idx].playFromFrame
-                ) {
-                  lastFrame = i;
-                  break;
-                }
-              }
-              child.setFrameNum(this.frameNum - lastFrame);
-            }
-          }
-          const transform = ctx.getTransform()
-          ctx.translate(child.x, child.y)
-          ctx.scale(child.scale_x, child.scale_y)
-          ctx.rotate(child.rotation)
-          child.draw(ctx)
-          if (context.selection.includes(child)) {
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = "#00ffff";
-            ctx.beginPath();
-            let bbox = child.bbox()
-            ctx.rect(bbox.x.min-child.x, bbox.y.min-child.y, bbox.x.max-bbox.x.min, bbox.y.max-bbox.y.min)
-            ctx.stroke()
-          }
-          ctx.setTransform(transform)
-        }
-      }
-      if (context.activeCurve) {
-        if (frame.shapes.indexOf(context.activeCurve.shape) != -1) {
-          cxt.selected = true
-
-        }
+        ctx.setTransform(transform);
       }
     }
     // Draw activeShape regardless of whether frame exists
@@ -3473,18 +3660,19 @@ class Layer extends Widget {
     }
   }
   bbox() {
-    let bbox = super.bbox()
-    const frameInfo = this.getFrameValue(this.frameNum);
-    // TODO: if there are multiple layers we should only be counting valid frames
-    const frame = frameInfo.valueAtN ? frameInfo.valueAtN : frameInfo.prev
-    if (!frame) return bbox;
-    if (frame.shapes.length > 0 && bbox == undefined) {
-      bbox = structuredClone(frame.shapes[0].boundingBox);
+    let bbox = super.bbox();
+    let currentTime = context.activeObject?.currentTime || 0;
+
+    // Get visible shapes at current time using AnimationData
+    const visibleShapes = this.getVisibleShapes(currentTime);
+
+    if (visibleShapes.length > 0 && bbox === undefined) {
+      bbox = structuredClone(visibleShapes[0].boundingBox);
     }
-    for (let shape of frame.shapes) {
+    for (let shape of visibleShapes) {
       growBoundingBox(bbox, shape.boundingBox);
     }
-    return bbox
+    return bbox;
   }
   mousedown(x, y) {
     console.log("Layer.mousedown called - this:", this.name, "activeLayer:", context.activeLayer?.name, "mode:", mode);
@@ -3511,11 +3699,9 @@ class Layer extends Widget {
           let regionPoints;
 
           // First, see if there's an existing shape to change the color of
-          // TODO: get this from self
-          let pointShape = getShapeAtPoint(
-            mouse,
-            context.activeObject.currentFrame.shapes,
-          );
+          let currentTime = context.activeObject?.currentTime || 0;
+          let visibleShapes = this.getVisibleShapes(currentTime);
+          let pointShape = getShapeAtPoint(mouse, visibleShapes);
 
           if (pointShape) {
             actions.colorShape.create(pointShape, context.fillStyle);
@@ -3532,6 +3718,7 @@ class Layer extends Widget {
               context,
               debugPoints,
               debugPaintbucket,
+              visibleShapes,
             );
           } catch (e) {
             updateUI();
@@ -3546,6 +3733,8 @@ class Layer extends Widget {
               config.fileHeight,
               context,
               debugPoints,
+              false,
+              visibleShapes,
             );
           }
           let points = [];
@@ -4593,9 +4782,6 @@ class GraphicsObject extends Widget {
   get allLayers() {
     return [...this.audioLayers, ...this.layers];
   }
-  get currentFrame() {
-    return this.getFrame(this.currentFrameNum);
-  }
   get maxFrame() {
     return (
       Math.max(
@@ -4610,57 +4796,30 @@ class GraphicsObject extends Widget {
   get segmentColor() {
     return uuidToColor(this.idx);
   }
-  advanceFrame() {
-    this.setFrameNum(this.currentFrameNum + 1);
-  }
-  decrementFrame() {
-    this.setFrameNum(this.currentFrameNum - 1);
-  }
-  getFrame(num) {
-    return this.activeLayer?.getFrame(num);
-  }
-  setFrameNum(num) {
-    num = Math.max(0, num);
+  /**
+   * Set the current playback time in seconds
+   */
+  setTime(time) {
+    time = Math.max(0, time);
+    this.currentTime = time;
+
+    // Update legacy currentFrameNum for any remaining code that needs it
+    this.currentFrameNum = Math.floor(time * config.framerate);
+
+    // Update layer frameNum for legacy code
     for (let layer of this.layers) {
-      this.currentFrameNum = num;
-      layer.frameNum = num
-      let frame = layer.getFrame(num);
-      for (let child of this.children) {
-        let idx = child.idx;
-        if (idx in frame.keys) {
-          child.x = frame.keys[idx].x;
-          child.y = frame.keys[idx].y;
-          child.rotation = frame.keys[idx].rotation;
-          child.scale_x = frame.keys[idx].scale_x;
-          child.scale_y = frame.keys[idx].scale_y;
-          child.playFromFrame = frame.keys[idx].playFromFrame;
-          if (
-            frame.frameType == "keyframe" &&
-            frame.keys[idx].goToFrame != undefined
-          ) {
-            // Frames are 1-indexed
-            child.setFrameNum(frame.keys[idx].goToFrame - 1);
-            if (child.playFromFrame) {
-              child.playing = true;
-            } else {
-              child.playing = false;
-            }
-          } else if (child.playing) {
-            let lastFrame = 0;
-            for (let i = num; i >= 0; i--) {
-              if (
-                layer.frames[i].frameType == "keyframe" &&
-                layer.frames[i].keys[idx].playFromFrame
-              ) {
-                lastFrame = i;
-                break;
-              }
-            }
-            child.setFrameNum(num - lastFrame);
-          }
-        }
-      }
+      layer.frameNum = this.currentFrameNum;
     }
+  }
+
+  advanceFrame() {
+    const frameDuration = 1 / config.framerate;
+    this.setTime(this.currentTime + frameDuration);
+  }
+
+  decrementFrame() {
+    const frameDuration = 1 / config.framerate;
+    this.setTime(Math.max(0, this.currentTime - frameDuration));
   }
   bbox() {
     let bbox;
@@ -4751,10 +4910,7 @@ class GraphicsObject extends Widget {
         // Check if this logical shape exists at current time
         const existsCurveKey = `shape.${shapeId}.exists`;
         let existsValue = layer.animationData.interpolate(existsCurveKey, currentTime);
-        console.log(`[Widget.draw] Checking shape ${shapeId} at time ${currentTime}: existsValue=${existsValue}, curve=${layer.animationData.curves[existsCurveKey] ? 'exists' : 'missing'}`);
-        if (layer.animationData.curves[existsCurveKey]) {
-          console.log(`[Widget.draw] Curve keyframes:`, layer.animationData.curves[existsCurveKey].keyframes);
-        }
+        
         if (existsValue === null || existsValue <= 0) {
           console.log(`[Widget.draw] Skipping shape ${shapeId} - not visible`);
           continue;
@@ -4765,14 +4921,10 @@ class GraphicsObject extends Widget {
 
         // Get shapeIndex curve and surrounding keyframes
         const shapeIndexCurve = layer.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
-        console.log(`[Widget.draw] shapeIndexCurve for ${shapeId}:`, shapeIndexCurve ? 'exists' : 'missing', 'keyframes:', shapeIndexCurve?.keyframes?.length);
-        console.log(`[Widget.draw] Available shapes for ${shapeId}:`, shapes.map(s => ({idx: s.idx, shapeIndex: s.shapeIndex})));
         if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
           // No shapeIndex curve, just show shape with index 0
           const shape = shapes.find(s => s.shapeIndex === 0);
-          console.log(`[Widget.draw] No shapeIndex curve - looking for shape with index 0:`, shape ? 'found' : 'NOT FOUND');
           if (shape) {
-            console.log(`[Widget.draw] Adding shape to visibleShapes`);
             visibleShapes.push({
               shape,
               zOrder: zOrder || 0,
@@ -4784,21 +4936,17 @@ class GraphicsObject extends Widget {
 
         // Find surrounding keyframes using AnimationCurve's built-in method
         const { prev: prevKf, next: nextKf, t: interpolationT } = shapeIndexCurve.getBracketingKeyframes(currentTime);
-        console.log(`[Widget.draw] Keyframes: prevKf=${JSON.stringify(prevKf)}, nextKf=${JSON.stringify(nextKf)}, t=${interpolationT}`);
 
         // Get interpolated value
         let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
         if (shapeIndexValue === null) shapeIndexValue = 0;
-        console.log(`[Widget.draw] shapeIndexValue=${shapeIndexValue}`);
 
         // Sort shape versions by shapeIndex
         shapes.sort((a, b) => a.shapeIndex - b.shapeIndex);
-        console.log(`[Widget.draw] Sorted shapes:`, shapes.map(s => `idx=${s.idx.substring(0,8)} shapeIndex=${s.shapeIndex}`));
 
         // Determine whether to morph based on whether interpolated value equals a keyframe value
         const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < 0.001;
         const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < 0.001;
-        console.log(`[Widget.draw] atPrevKeyframe=${atPrevKeyframe}, atNextKeyframe=${atNextKeyframe}`);
 
         if (atPrevKeyframe || atNextKeyframe) {
           // No morphing - display the shape at the keyframe value
@@ -5239,19 +5387,6 @@ class GraphicsObject extends Widget {
     frameNumberCurve.addKeyframe(new Keyframe(endTime, lastFrameNumber, 'zero'));
 
     layer.animationData.setCurve(`child.${idx}.frameNumber`, frameNumberCurve);
-
-    // LEGACY: Also update frame.keys for backwards compatibility
-    let frame = this.currentFrame;
-    if (frame) {
-      frame.keys[idx] = {
-        x: x,
-        y: y,
-        rotation: 0,
-        scale_x: 1,
-        scale_y: 1,
-        goToFrame: 1,
-      };
-    }
   }
   removeChild(childObject) {
     let idx = childObject.idx;
@@ -5469,13 +5604,21 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       break;
     case "ArrowRight":
-      if (context.selection) {
-        context.activeObject.currentFrame.saveState();
+      if (context.selection.length) {
+        const layer = context.activeObject.activeLayer;
+        const time = context.activeObject.currentTime || 0;
+        let oldPositions = {};
+        let newPositions = {};
+
         for (let item of context.selection) {
-          context.activeObject.currentFrame.keys[item.idx].x += 1;
+          const oldX = layer.animationData.interpolate(`object.${item.idx}.x`, time) || item.x;
+          const oldY = layer.animationData.interpolate(`object.${item.idx}.y`, time) || item.y;
+          oldPositions[item.idx] = { x: oldX, y: oldY };
+          item.x = oldX + 1;
+          newPositions[item.idx] = { x: item.x, y: item.y };
         }
-        actions.editFrame.create(context.activeObject.currentFrame);
-        updateUI();
+
+        actions.moveObjects.create(context.selection, layer, time, oldPositions, newPositions);
       }
       e.preventDefault();
       break;
@@ -5483,35 +5626,59 @@ window.addEventListener("keydown", (e) => {
       decrementFrame();
       break;
     case "ArrowLeft":
-      if (context.selection) {
-        context.activeObject.currentFrame.saveState();
+      if (context.selection.length) {
+        const layer = context.activeObject.activeLayer;
+        const time = context.activeObject.currentTime || 0;
+        let oldPositions = {};
+        let newPositions = {};
+
         for (let item of context.selection) {
-          context.activeObject.currentFrame.keys[item.idx].x -= 1;
+          const oldX = layer.animationData.interpolate(`object.${item.idx}.x`, time) || item.x;
+          const oldY = layer.animationData.interpolate(`object.${item.idx}.y`, time) || item.y;
+          oldPositions[item.idx] = { x: oldX, y: oldY };
+          item.x = oldX - 1;
+          newPositions[item.idx] = { x: item.x, y: item.y };
         }
-        actions.editFrame.create(context.activeObject.currentFrame);
-        updateUI();
+
+        actions.moveObjects.create(context.selection, layer, time, oldPositions, newPositions);
       }
       e.preventDefault();
       break;
     case "ArrowUp":
-      if (context.selection) {
-        context.activeObject.currentFrame.saveState();
+      if (context.selection.length) {
+        const layer = context.activeObject.activeLayer;
+        const time = context.activeObject.currentTime || 0;
+        let oldPositions = {};
+        let newPositions = {};
+
         for (let item of context.selection) {
-          context.activeObject.currentFrame.keys[item.idx].y -= 1;
+          const oldX = layer.animationData.interpolate(`object.${item.idx}.x`, time) || item.x;
+          const oldY = layer.animationData.interpolate(`object.${item.idx}.y`, time) || item.y;
+          oldPositions[item.idx] = { x: oldX, y: oldY };
+          item.y = oldY - 1;
+          newPositions[item.idx] = { x: item.x, y: item.y };
         }
-        actions.editFrame.create(context.activeObject.currentFrame);
-        updateUI();
+
+        actions.moveObjects.create(context.selection, layer, time, oldPositions, newPositions);
       }
       e.preventDefault();
       break;
     case "ArrowDown":
-      if (context.selection) {
-        context.activeObject.currentFrame.saveState();
+      if (context.selection.length) {
+        const layer = context.activeObject.activeLayer;
+        const time = context.activeObject.currentTime || 0;
+        let oldPositions = {};
+        let newPositions = {};
+
         for (let item of context.selection) {
-          context.activeObject.currentFrame.keys[item.idx].y += 1;
+          const oldX = layer.animationData.interpolate(`object.${item.idx}.x`, time) || item.x;
+          const oldY = layer.animationData.interpolate(`object.${item.idx}.y`, time) || item.y;
+          oldPositions[item.idx] = { x: oldX, y: oldY };
+          item.y = oldY + 1;
+          newPositions[item.idx] = { x: item.x, y: item.y };
         }
-        actions.editFrame.create(context.activeObject.currentFrame);
-        updateUI();
+
+        actions.moveObjects.create(context.selection, layer, time, oldPositions, newPositions);
       }
       e.preventDefault();
       break;
@@ -6978,8 +7145,12 @@ function stage() {
                 if (hitTest(mouse, child)) {
                   context.dragging = true;
                   context.lastMouse = mouse;
-                  context.activeAction = actions.editFrame.initialize(
-                    context.activeObject.currentFrame,
+                  const layer = context.activeObject.activeLayer;
+                  const time = context.activeObject.currentTime || 0;
+                  context.activeAction = actions.moveObjects.initialize(
+                    context.selection,
+                    layer,
+                    time,
                   );
                   break;
                 }
@@ -7118,94 +7289,7 @@ function stage() {
         }
         break;
       case "paint_bucket":
-        let line = { p1: mouse, p2: { x: mouse.x + 3000, y: mouse.y } };
-        // debugCurves = [];
-        // debugPoints = [];
-        // let epsilon = context.fillGaps;
-        // let min_x = Infinity;
-        // let curveB = undefined;
-        // let point = undefined;
-        // let regionPoints;
-
-        // // First, see if there's an existing shape to change the color of
-        // const startTime = performance.now();
-        // let pointShape = getShapeAtPoint(
-        //   mouse,
-        //   context.activeObject.currentFrame.shapes,
-        // );
-        // const endTime = performance.now();
-
-        // console.log(
-        //   `getShapeAtPoint took ${endTime - startTime} milliseconds.`,
-        // );
-
-        // if (pointShape) {
-        //   actions.colorShape.create(pointShape, context.fillStyle);
-        //   break;
-        // }
-
-        // // We didn't find an existing region to paintbucket, see if we can make one
-        // const offset = context.activeObject.transformMouse({x:0, y:0})
-        // try {
-        //   regionPoints = floodFillRegion(
-        //     mouse,
-        //     epsilon,
-        //     offset,
-        //     config.fileWidth,
-        //     config.fileHeight,
-        //     context,
-        //     debugPoints,
-        //     debugPaintbucket,
-        //   );
-        // } catch (e) {
-        //   updateUI();
-        //   throw e;
-        // }
-        // if (regionPoints.length > 0 && regionPoints.length < 10) {
-        //   // probably a very small area, rerun with minimum epsilon
-        //   regionPoints = floodFillRegion(
-        //     mouse,
-        //     1,
-        //     offset,
-        //     config.fileWidth,
-        //     config.fileHeight,
-        //     context,
-        //     debugPoints,
-        //   );
-        // }
-        // let points = [];
-        // for (let point of regionPoints) {
-        //   points.push([point.x, point.y]);
-        // }
-        // let cxt = {
-        //   ...context,
-        //   fillShape: true,
-        //   strokeShape: false,
-        //   sendToBack: true,
-        // };
-        // let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt);
-        // shape.fromPoints(points, 1);
-        // actions.addShape.create(context.activeObject, shape, cxt);
-        break;
-        // Loop labels in JS!
-        // Iterate in reverse so we paintbucket the frontmost shape
-        shapeLoop: for (
-          let i = context.activeObject.currentFrame.shapes.length - 1;
-          i >= 0;
-          i--
-        ) {
-          let shape = context.activeObject.currentFrame.shapes[i];
-          // for (let region of shape.regions) {
-          let intersect_count = 0;
-          for (let curve of shape.curves) {
-            intersect_count += curve.intersects(line).length;
-          }
-          if (intersect_count % 2 == 1) {
-            actions.colorShape.create(shape, context.fillStyle);
-            break shapeLoop;
-          }
-          // }
-        }
+        // Paint bucket is now handled in Layer.mousedown (line ~3458)
         break;
       case "eyedropper":
         const ctx = stage.getContext("2d")
@@ -8788,7 +8872,9 @@ function renderUI() {
         y: { min: context.mousePos.y - ep, max: context.mousePos.y + ep },
       };
       debugCurves = [];
-      for (let shape of context.activeObject.currentFrame.shapes) {
+      const currentTime = context.activeObject.currentTime || 0;
+      const visibleShapes = context.activeObject.activeLayer.getVisibleShapes(currentTime);
+      for (let shape of visibleShapes) {
         for (let i of shape.quadtree.query(bbox)) {
           debugCurves.push(shape.curves[i]);
         }

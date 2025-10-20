@@ -177,8 +177,9 @@ function floodFillRegion(
   fileHeight,
   context,
   debugPoints,
-  debugPaintbucket) {
-  
+  debugPaintbucket,
+  shapes) {
+
   let halfEpsilon = epsilon/2
 
   // Helper function to check if a point is near any curve in the shape
@@ -201,8 +202,6 @@ function floodFillRegion(
     }
     return false;
   }
-
-  const shapes = context.activeObject.currentFrame.shapes;
   const visited = new Set();
   const stack = [startPoint];
   const regionPoints = [];
