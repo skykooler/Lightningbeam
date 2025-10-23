@@ -1032,9 +1032,18 @@ async function handleAudioEvent(event) {
     case 'PlaybackPosition':
       // Sync frontend time with DAW time
       if (playing) {
-        context.activeObject.currentTime = event.time;
+        // Quantize time to framerate for animation playback
+        const framerate = context.activeObject.frameRate;
+        const frameDuration = 1 / framerate;
+        const quantizedTime = Math.floor(event.time / frameDuration) * frameDuration;
+
+        context.activeObject.currentTime = quantizedTime;
         if (context.timelineWidget?.timelineState) {
-          context.timelineWidget.timelineState.currentTime = event.time;
+          context.timelineWidget.timelineState.currentTime = quantizedTime;
+        }
+        // Update time display
+        if (context.updateTimeDisplay) {
+          context.updateTimeDisplay();
         }
       }
       break;
@@ -2569,7 +2578,7 @@ function stage() {
       "image/jpeg",
       "image/webp", //'image/svg+xml' // Disabling SVG until we can export them nicely
     ];
-    const audioTypes = ["audio/mpeg"]; // TODO: figure out what other audio formats Tone.js accepts
+    const audioTypes = ["audio/mpeg"];
     if (e.dataTransfer.items) {
       let i = 0;
       for (let item of e.dataTransfer.items) {
@@ -3826,16 +3835,111 @@ function timelineV2() {
 
     controls.push(recordGroup);
 
-    // Time format toggle button
-    const toggleButton = document.createElement("button");
-    toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
-    toggleButton.style.marginLeft = '10px';
-    toggleButton.addEventListener("click", () => {
-      timelineWidget.toggleTimeFormat();
-      toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
-      updateCanvasSize(); // Redraw after format change
+    // Time display
+    const timeDisplay = document.createElement("div");
+    timeDisplay.className = "time-display";
+    timeDisplay.style.cursor = "pointer";
+    timeDisplay.title = "Click to change time format";
+
+    // Function to update time display
+    const updateTimeDisplay = () => {
+      const currentTime = context.activeObject?.currentTime || 0;
+      const timeFormat = timelineWidget.timelineState.timeFormat;
+      const framerate = timelineWidget.timelineState.framerate;
+
+      if (timeFormat === 'frames') {
+        // Frames mode: show frame number and framerate
+        const frameNumber = Math.floor(currentTime * framerate);
+
+        timeDisplay.innerHTML = `
+          <div class="time-value time-frame-clickable" data-action="toggle-format">${frameNumber}</div>
+          <div class="time-label">FRAME</div>
+          <div class="time-fps-group time-fps-clickable" data-action="edit-fps">
+            <div class="time-value">${framerate}</div>
+            <div class="time-label">FPS</div>
+          </div>
+        `;
+      } else {
+        // Seconds mode: show MM:SS.mmm or HH:MM:SS.mmm
+        const totalSeconds = Math.floor(currentTime);
+        const milliseconds = Math.floor((currentTime - totalSeconds) * 1000);
+        const seconds = totalSeconds % 60;
+        const minutes = Math.floor(totalSeconds / 60) % 60;
+        const hours = Math.floor(totalSeconds / 3600);
+
+        if (hours > 0) {
+          timeDisplay.innerHTML = `
+            <div class="time-value">${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}</div>
+            <div class="time-label">SEC</div>
+          `;
+        } else {
+          timeDisplay.innerHTML = `
+            <div class="time-value">${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}</div>
+            <div class="time-label">SEC</div>
+          `;
+        }
+      }
+    };
+
+    // Click handler for time display
+    timeDisplay.addEventListener("click", (e) => {
+      const target = e.target.closest('[data-action]');
+
+      if (!target) {
+        // Clicked outside specific elements in frames mode or anywhere in seconds mode
+        // Toggle format
+        timelineWidget.toggleTimeFormat();
+        updateTimeDisplay();
+        updateCanvasSize();
+        return;
+      }
+
+      const action = target.getAttribute('data-action');
+
+      if (action === 'toggle-format') {
+        // Clicked on frame number - toggle format
+        timelineWidget.toggleTimeFormat();
+        updateTimeDisplay();
+        updateCanvasSize();
+      } else if (action === 'edit-fps') {
+        // Clicked on FPS - show input to edit framerate
+        console.log('[FPS Edit] Starting FPS edit');
+        const currentFps = timelineWidget.timelineState.framerate;
+        console.log('[FPS Edit] Current FPS:', currentFps);
+
+        const newFps = prompt('Enter framerate (FPS):', currentFps);
+        console.log('[FPS Edit] Prompt returned:', newFps);
+
+        if (newFps !== null && !isNaN(newFps) && newFps > 0) {
+          const fps = parseFloat(newFps);
+          console.log('[FPS Edit] Parsed FPS:', fps);
+
+          console.log('[FPS Edit] Setting framerate on timeline state');
+          timelineWidget.timelineState.framerate = fps;
+
+          console.log('[FPS Edit] Setting frameRate on activeObject');
+          context.activeObject.frameRate = fps;
+
+          console.log('[FPS Edit] Updating time display');
+          updateTimeDisplay();
+
+          console.log('[FPS Edit] Requesting redraw');
+          if (timelineWidget.requestRedraw) {
+            timelineWidget.requestRedraw();
+          }
+          console.log('[FPS Edit] Done');
+        }
+      }
     });
-    controls.push(toggleButton);
+
+    // Initial update
+    updateTimeDisplay();
+
+    // Store reference for updates
+    context.timeDisplay = timeDisplay;
+    context.updateTimeDisplay = updateTimeDisplay;
+
+    controls.push(timeDisplay);
 
     return controls;
   };
@@ -5689,27 +5793,6 @@ function getMimeType(filePath) {
   }
 }
 
-function startToneOnUserInteraction() {
-  // Function to handle the first interaction (click or key press)
-  const startTone = () => {
-    Tone.start()
-      .then(() => {
-        console.log("Tone.js started!");
-      })
-      .catch((err) => {
-        console.error("Error starting Tone.js:", err);
-      });
-
-    // Remove the event listeners to prevent them from firing again
-    document.removeEventListener("click", startTone);
-    document.removeEventListener("keydown", startTone);
-  };
-
-  // Add event listeners for mouse click and key press
-  document.addEventListener("click", startTone);
-  document.addEventListener("keydown", startTone);
-}
-startToneOnUserInteraction();
 
 function renderAll() {
   try {

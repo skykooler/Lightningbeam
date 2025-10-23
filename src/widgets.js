@@ -578,6 +578,11 @@ class TimelineWindowV2 extends Widget {
   draw(ctx) {
     ctx.save()
 
+    // Update time display if it exists
+    if (this.context.updateTimeDisplay) {
+      this.context.updateTimeDisplay();
+    }
+
     // Draw background
     ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, this.width, this.height)
