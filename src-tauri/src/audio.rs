@@ -40,6 +40,9 @@ impl EventEmitter for TauriEventEmitter {
     fn emit(&self, event: AudioEvent) {
         // Serialize the event to the format expected by the frontend
         let serialized_event = match event {
+            AudioEvent::PlaybackPosition(time) => {
+                SerializedAudioEvent::PlaybackPosition { time }
+            }
             AudioEvent::RecordingStarted(track_id, clip_id) => {
                 SerializedAudioEvent::RecordingStarted { track_id, clip_id }
             }
@@ -348,6 +351,7 @@ pub async fn audio_resume_recording(
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {
+    PlaybackPosition { time: f64 },
     RecordingStarted { track_id: u32, clip_id: u32 },
     RecordingProgress { clip_id: u32, duration: f64 },
     RecordingStopped { clip_id: u32, pool_index: usize, waveform: Vec<WaveformPeak> },

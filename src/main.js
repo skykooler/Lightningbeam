@@ -809,7 +809,7 @@ window.addEventListener("keydown", (e) => {
       break;
     // TODO: put these in shortcuts
     case "<mod>ArrowRight":
-      advanceFrame();
+      advance();
       e.preventDefault();
       break;
     case "ArrowRight":
@@ -832,7 +832,7 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       break;
     case "<mod>ArrowLeft":
-      decrementFrame();
+      rewind();
       break;
     case "ArrowLeft":
       if (context.selection.length) {
@@ -919,8 +919,7 @@ async function playPause() {
       console.error('Failed to start audio playback:', error);
     }
 
-    lastFrameTime = performance.now();
-    advanceFrame();
+    playbackLoop();
   } else {
     // Stop recording if active
     if (context.isRecording) {
@@ -957,20 +956,9 @@ async function playPause() {
   }
 }
 
-function advanceFrame() {
-  // Calculate elapsed time since last frame (in seconds)
-  const now = performance.now();
-  const elapsedTime = (now - lastFrameTime) / 1000;
-  lastFrameTime = now;
-
-  // Advance currentTime
-  context.activeObject.currentTime += elapsedTime;
-
-  // Sync timeline playhead position
-  if (context.timelineWidget?.timelineState) {
-    context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
-  }
-
+// Playback animation loop - redraws UI while playing
+// Note: Time is synchronized from DAW via PlaybackPosition events
+function playbackLoop() {
   // Redraw stage and timeline
   updateUI();
   if (context.timelineWidget?.requestRedraw) {
@@ -982,13 +970,13 @@ function advanceFrame() {
 
     // Debug logging for recording
     if (context.isRecording) {
-      console.log('advanceFrame - recording active, currentTime:', context.activeObject.currentTime, 'duration:', duration, 'isRecording:', context.isRecording);
+      console.log('playbackLoop - recording active, currentTime:', context.activeObject.currentTime, 'duration:', duration, 'isRecording:', context.isRecording);
     }
 
     // Check if we've reached the end (but allow infinite playback when recording)
     if (context.isRecording || (duration > 0 && context.activeObject.currentTime < duration)) {
       // Continue playing
-      requestAnimationFrame(advanceFrame);
+      requestAnimationFrame(playbackLoop);
     } else {
       // Animation finished
       playing = false;
@@ -1014,9 +1002,40 @@ function advanceFrame() {
   }
 }
 
+// Single-step forward by one frame/second
+function advance() {
+  if (context.timelineWidget?.timelineState?.mode === "frames") {
+    context.activeObject.currentTime += 1 / context.activeObject.frameRate;
+  } else {
+    context.activeObject.currentTime += 1;
+  }
+
+  // Sync timeline playhead position
+  if (context.timelineWidget?.timelineState) {
+    context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
+  }
+
+  updateLayers();
+  updateMenu();
+  updateUI();
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+}
+
 // Handle audio events pushed from Rust via Tauri event system
 async function handleAudioEvent(event) {
   switch (event.type) {
+    case 'PlaybackPosition':
+      // Sync frontend time with DAW time
+      if (playing) {
+        context.activeObject.currentTime = event.time;
+        if (context.timelineWidget?.timelineState) {
+          context.timelineWidget.timelineState.currentTime = event.time;
+        }
+      }
+      break;
+
     case 'RecordingStarted':
       console.log('[FRONTEND] RecordingStarted - track:', event.track_id, 'clip:', event.clip_id);
       context.recordingClipId = event.clip_id;
@@ -1123,11 +1142,25 @@ async function finalizeRecording(clipId, poolIndex, waveform) {
   console.error('Could not find clip to finalize:', clipId);
 }
 
-function decrementFrame() {
-  context.activeObject.decrementFrame();
+// Single-step backward by one frame/second
+function rewind() {
+  if (context.timelineWidget?.timelineState?.mode === "frames") {
+    context.activeObject.currentTime -= 1 / context.activeObject.frameRate;
+  } else {
+    context.activeObject.currentTime -= 1;
+  }
+
+  // Sync timeline playhead position
+  if (context.timelineWidget?.timelineState) {
+    context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
+  }
+
   updateLayers();
   updateMenu();
   updateUI();
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
 }
 
 async function goToStart() {
@@ -3745,7 +3778,7 @@ function timelineV2() {
     const rewindButton = document.createElement("button");
     rewindButton.className = "playback-btn playback-btn-rewind";
     rewindButton.title = "Rewind";
-    rewindButton.addEventListener("click", decrementFrame);
+    rewindButton.addEventListener("click", rewind);
     playbackGroup.appendChild(rewindButton);
 
     // Play/Pause button
@@ -3763,7 +3796,7 @@ function timelineV2() {
     const ffButton = document.createElement("button");
     ffButton.className = "playback-btn playback-btn-ff";
     ffButton.title = "Fast Forward";
-    ffButton.addEventListener("click", advanceFrame);
+    ffButton.addEventListener("click", advance);
     playbackGroup.appendChild(ffButton);
 
     // Go to end button

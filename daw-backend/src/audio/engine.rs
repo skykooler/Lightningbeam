@@ -52,7 +52,7 @@ impl Engine {
         command_rx: rtrb::Consumer<Command>,
         event_tx: rtrb::Producer<AudioEvent>,
     ) -> Self {
-        let event_interval_frames = (sample_rate as usize * channels as usize) / 10; // Update 10 times per second
+        let event_interval_frames = (sample_rate as usize * channels as usize) / 60; // Update 60 times per second
 
         // Calculate a reasonable buffer size for the pool (typical audio callback size * channels)
         let buffer_size = 512 * channels as usize;
