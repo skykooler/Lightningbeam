@@ -41,6 +41,7 @@ pub struct Engine {
     // Recording state
     recording_state: Option<RecordingState>,
     input_rx: Option<rtrb::Consumer<f32>>,
+    recording_progress_counter: usize,
 }
 
 impl Engine {
@@ -74,6 +75,7 @@ impl Engine {
             next_clip_id: 0,
             recording_state: None,
             input_rx: None,
+            recording_progress_counter: 0,
         }
     }
 
@@ -217,22 +219,24 @@ impl Engine {
                 // Add samples to recording
                 if !samples.is_empty() {
                     match recording.add_samples(&samples) {
-                        Ok(flushed) => {
-                            if flushed {
-                                // A flush occurred, update clip duration and send progress event
-                                let duration = recording.duration();
-                                let clip_id = recording.clip_id;
-                                let track_id = recording.track_id;
+                        Ok(_flushed) => {
+                            // Update clip duration every callback for sample-accurate timing
+                            let duration = recording.duration();
+                            let clip_id = recording.clip_id;
+                            let track_id = recording.track_id;
 
-                                // Update clip duration in project
-                                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
-                                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                        clip.duration = duration;
-                                    }
+                            // Update clip duration in project
+                            if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                    clip.duration = duration;
                                 }
+                            }
 
-                                // Send progress event
+                            // Send progress event periodically (every ~0.1 seconds)
+                            self.recording_progress_counter += samples.len();
+                            if self.recording_progress_counter >= (self.sample_rate as usize / 10) {
                                 let _ = self.event_tx.push(AudioEvent::RecordingProgress(clip_id, duration));
+                                self.recording_progress_counter = 0;
                             }
                         }
                         Err(e) => {
@@ -708,7 +712,7 @@ impl Engine {
                     }
 
                     // Create recording state
-                    let flush_interval_seconds = 5.0; // Flush every 5 seconds
+                    let flush_interval_seconds = 1.0; // Flush every 1 second (safer than 5 seconds)
                     let recording_state = RecordingState::new(
                         track_id,
                         clip_id,
@@ -720,7 +724,23 @@ impl Engine {
                         flush_interval_seconds,
                     );
 
+                    // Check how many samples are currently in the input buffer and mark them for skipping
+                    let samples_in_buffer = if let Some(input_rx) = &self.input_rx {
+                        input_rx.slots()  // Number of samples currently in the buffer
+                    } else {
+                        0
+                    };
+
                     self.recording_state = Some(recording_state);
+                    self.recording_progress_counter = 0; // Reset progress counter
+
+                    // Set the number of samples to skip on the recording state
+                    if let Some(recording) = &mut self.recording_state {
+                        recording.samples_to_skip = samples_in_buffer;
+                        if samples_in_buffer > 0 {
+                            eprintln!("Will skip {} stale samples from input buffer", samples_in_buffer);
+                        }
+                    }
 
                     // Notify UI that recording has started
                     let _ = self.event_tx.push(AudioEvent::RecordingStarted(track_id, clip_id));
@@ -747,11 +767,19 @@ impl Engine {
             let track_id = recording.track_id;
 
             // Finalize the recording and get temp file path
+            let frames_recorded = recording.frames_written;
             match recording.finalize() {
                 Ok(temp_file_path) => {
+                    eprintln!("Recording finalized: {} frames written to {:?}", frames_recorded, temp_file_path);
+
                     // Load the recorded audio file
                     match crate::io::AudioFile::load(&temp_file_path) {
                         Ok(audio_file) => {
+                            // Generate waveform for UI
+                            let duration = audio_file.duration();
+                            let target_peaks = ((duration * 300.0) as usize).clamp(1000, 20000);
+                            let waveform = audio_file.generate_waveform_overview(target_peaks);
+
                             // Add to pool
                             let pool_file = crate::audio::pool::AudioFile::new(
                                 temp_file_path.clone(),
@@ -772,8 +800,8 @@ impl Engine {
                             // Delete temp file
                             let _ = std::fs::remove_file(&temp_file_path);
 
-                            // Notify UI that recording has stopped
-                            let _ = self.event_tx.push(AudioEvent::RecordingStopped(clip_id, pool_index));
+                            // Notify UI that recording has stopped (with waveform)
+                            let _ = self.event_tx.push(AudioEvent::RecordingStopped(clip_id, pool_index, waveform));
                         }
                         Err(e) => {
                             // Send error event

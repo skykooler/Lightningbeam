@@ -61,6 +61,46 @@ import {
 } from "./styles.js";
 import { Icon } from "./icon.js";
 import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, Widget } from "./widgets.js";
+
+// State management
+import {
+  context,
+  config,
+  pointerList,
+  startProps,
+  getShortcut,
+  loadConfig,
+  saveConfig,
+  addRecentFile
+} from "./state.js";
+
+// Data models
+import {
+  Frame,
+  TempFrame,
+  tempFrame,
+  Keyframe,
+  AnimationCurve,
+  AnimationData
+} from "./models/animation.js";
+import {
+  Layer,
+  AudioTrack,
+  initializeLayerDependencies
+} from "./models/layer.js";
+import {
+  BaseShape,
+  TempShape,
+  Shape,
+  initializeShapeDependencies
+} from "./models/shapes.js";
+import {
+  GraphicsObject,
+  initializeGraphicsObjectDependencies
+} from "./models/graphics-object.js";
+import { createRoot } from "./models/root.js";
+import { actions, initializeActions } from "./actions/index.js";
+
 const {
   writeTextFile: writeTextFile,
   readTextFile: readTextFile,
@@ -79,7 +119,7 @@ const { PhysicalPosition, LogicalPosition } = window.__TAURI__.dpi;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
 
-import init, { CoreInterface } from './pkg/lightningbeam_core.js';
+// import init, { CoreInterface } from './pkg/lightningbeam_core.js';
 
 window.onerror = (message, source, lineno, colno, error) => {
   invoke("error", { msg: `${message} at ${source}:${lineno}:${colno}\n${error?.stack || ''}` });
@@ -136,7 +176,7 @@ let canvases = [];
 let debugCurves = [];
 let debugPoints = [];
 
-let mode = "select";
+// context.mode is now in context.context.mode (defined in state.js)
 
 let minSegmentSize = 5;
 let maxSmoothAngle = 0.6;
@@ -274,1838 +314,11 @@ let tools = {
 
 let mouseEvent;
 
-let context = {
-  mouseDown: false,
-  mousePos: { x: 0, y: 0 },
-  swatches: [
-    "#000000",
-    "#FFFFFF",
-    "#FF0000",
-    "#FFFF00",
-    "#00FF00",
-    "#00FFFF",
-    "#0000FF",
-    "#FF00FF",
-  ],
-  lineWidth: 5,
-  simplifyMode: "smooth",
-  fillShape: false,
-  strokeShape: true,
-  fillGaps: 5,
-  dropperColor: "Fill color",
-  dragging: false,
-  selectionRect: undefined,
-  selection: [],
-  shapeselection: [],
-  oldselection: [],
-  oldshapeselection: [],
-  selectedFrames: [],
-  dragDirection: undefined,
-  zoomLevel: 1,
-  timelineWidget: null, // Reference to TimelineWindowV2 widget for zoom controls
-  config: null, // Reference to config object (set after config is initialized)
-};
-
-let config = {
-  shortcuts: {
-    playAnimation: " ",
-    undo: "<mod>z",
-    redo: "<mod>Z",
-    new: "<mod>n",
-    newWindow: "<mod>N",
-    save: "<mod>s",
-    saveAs: "<mod>S",
-    open: "<mod>o",
-    import: "<mod>i",
-    export: "<mod>e",
-    quit: "<mod>q",
-    copy: "<mod>c",
-    paste: "<mod>v",
-    delete: "Backspace",
-    selectAll: "<mod>a",
-    group: "<mod>g",
-    addLayer: "<mod>l",
-    addKeyframe: "F6",
-    addBlankKeyframe: "F7",
-    zoomIn: "<mod>+",
-    zoomOut: "<mod>-",
-    resetZoom: "<mod>0",
-  },
-  fileWidth: 800,
-  fileHeight: 600,
-  framerate: 24,
-  recentFiles: [],
-  scrollSpeed: 1,
-  debug: false,
-  reopenLastSession: false
-};
-
-function getShortcut(shortcut) {
-  if (!(shortcut in config.shortcuts)) return undefined;
-
-  let shortcutValue = config.shortcuts[shortcut].replace("<mod>", "CmdOrCtrl+");
-  const key = shortcutValue.slice(-1);
-
-  // If the last character is uppercase, prepend "Shift+" to it
-  return key === key.toUpperCase() && key !== key.toLowerCase()
-    ? shortcutValue.replace(key, `Shift+${key}`)
-    : shortcutValue.replace("++", "+Shift+="); // Hardcode uppercase from = to +
-}
-
-// Load the configuration from the file system
-async function loadConfig() {
-  try {
-    // const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
-    // const configData = await readTextFile(configPath);
-    const configData = localStorage.getItem("lightningbeamConfig") || "{}";
-    config = deepMerge({ ...config }, JSON.parse(configData));
-    context.config = config; // Make config accessible to widgets via context
-    updateUI();
-  } catch (error) {
-    console.log("Error loading config, returning default config:", error);
-  }
-}
-
-// Save the configuration to a file
-async function saveConfig() {
-  try {
-    // const configPath = await join(await appLocalDataDir(), CONFIG_FILE_PATH);
-    // await writeTextFile(configPath, JSON.stringify(config, null, 2));
-    localStorage.setItem(
-      "lightningbeamConfig",
-      JSON.stringify(config, null, 2),
-    );
-  } catch (error) {
-    console.error("Error saving config:", error);
-  }
-}
-
-async function addRecentFile(filePath) {
-  config.recentFiles = [filePath, ...config.recentFiles.filter(file => file !== filePath)].slice(0, 10);
-  await saveConfig(config);
-}
-
-// Pointers to all objects
-let pointerList = {};
-// Keeping track of initial values of variables when we edit them continuously
-let startProps = {};
-
-let actions = {
-  addShape: {
-    create: (parent, shape, ctx) => {
-      // parent should be a GraphicsObject
-      if (!parent.activeLayer) return;
-      if (shape.curves.length == 0) return;
-      redoStack.length = 0; // Clear redo stack
-      let serializableCurves = [];
-      for (let curve of shape.curves) {
-        serializableCurves.push({ points: curve.points, color: curve.color });
-      }
-      let c = {
-        ...context,
-        ...ctx,
-      };
-      let action = {
-        parent: parent.idx,
-        layer: parent.activeLayer.idx,
-        curves: serializableCurves,
-        startx: shape.startx,
-        starty: shape.starty,
-        context: {
-          fillShape: c.fillShape,
-          strokeShape: c.strokeShape,
-          fillStyle: c.fillStyle,
-          sendToBack: c.sendToBack,
-          lineWidth: c.lineWidth,
-        },
-        uuid: uuidv4(),
-        time: parent.currentTime, // Use currentTime instead of currentFrame
-      };
-      undoStack.push({ name: "addShape", action: action });
-      actions.addShape.execute(action);
-      updateMenu();
-      updateLayers();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      let curvesList = action.curves;
-      let cxt = {
-        ...context,
-        ...action.context,
-      };
-      let shape = new Shape(action.startx, action.starty, cxt, layer, action.uuid);
-      for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x,
-            curve.points[0].y,
-            curve.points[1].x,
-            curve.points[1].y,
-            curve.points[2].x,
-            curve.points[2].y,
-            curve.points[3].x,
-            curve.points[3].y,
-          ).setColor(curve.color),
-        );
-      }
-      let shapes = shape.update();
-      for (let newShape of shapes) {
-        // Add shape to layer's shapes array
-        layer.shapes.push(newShape);
-
-        // Determine zOrder based on sendToBack
-        let zOrder;
-        if (cxt.sendToBack) {
-          // Insert at back (zOrder 0), shift all other shapes up
-          zOrder = 0;
-          // Increment zOrder for all existing shapes
-          for (let existingShape of layer.shapes) {
-            if (existingShape !== newShape) {
-              let existingZOrderCurve = layer.animationData.curves[`shape.${existingShape.shapeId}.zOrder`];
-              if (existingZOrderCurve) {
-                // Find keyframe at this time and increment it
-                for (let kf of existingZOrderCurve.keyframes) {
-                  if (kf.time === action.time) {
-                    kf.value += 1;
-                  }
-                }
-              }
-            }
-          }
-        } else {
-          // Insert at front (max zOrder + 1)
-          zOrder = layer.shapes.length - 1;
-        }
-
-        // Add keyframes to AnimationData for this shape
-        // Use shapeId (not idx) so that multiple versions share curves
-        let existsKeyframe = new Keyframe(action.time, 1, "hold");
-        layer.animationData.addKeyframe(`shape.${newShape.shapeId}.exists`, existsKeyframe);
-
-        let zOrderKeyframe = new Keyframe(action.time, zOrder, "hold");
-        layer.animationData.addKeyframe(`shape.${newShape.shapeId}.zOrder`, zOrderKeyframe);
-
-        let shapeIndexKeyframe = new Keyframe(action.time, 0, "linear");
-        layer.animationData.addKeyframe(`shape.${newShape.shapeId}.shapeIndex`, shapeIndexKeyframe);
-      }
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      let shape = pointerList[action.uuid];
-
-      // Remove shape from layer's shapes array
-      let shapeIndex = layer.shapes.indexOf(shape);
-      if (shapeIndex !== -1) {
-        layer.shapes.splice(shapeIndex, 1);
-      }
-
-      // Remove keyframes from AnimationData (use shapeId not idx)
-      delete layer.animationData.curves[`shape.${shape.shapeId}.exists`];
-      delete layer.animationData.curves[`shape.${shape.shapeId}.zOrder`];
-      delete layer.animationData.curves[`shape.${shape.shapeId}.shapeIndex`];
-
-      delete pointerList[action.uuid];
-    },
-  },
-  editShape: {
-    create: (shape, newCurves) => {
-      redoStack.length = 0; // Clear redo stack
-      let serializableNewCurves = [];
-      for (let curve of newCurves) {
-        serializableNewCurves.push({
-          points: curve.points,
-          color: curve.color,
-        });
-      }
-      let serializableOldCurves = [];
-      for (let curve of shape.curves) {
-        serializableOldCurves.push({ points: curve.points });
-      }
-      let action = {
-        shape: shape.idx,
-        oldCurves: serializableOldCurves,
-        newCurves: serializableNewCurves,
-      };
-      undoStack.push({ name: "editShape", action: action });
-      actions.editShape.execute(action);
-    },
-    execute: (action) => {
-      let shape = pointerList[action.shape];
-      let curvesList = action.newCurves;
-      shape.curves = [];
-      for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x,
-            curve.points[0].y,
-            curve.points[1].x,
-            curve.points[1].y,
-            curve.points[2].x,
-            curve.points[2].y,
-            curve.points[3].x,
-            curve.points[3].y,
-          ).setColor(curve.color),
-        );
-      }
-      shape.update();
-      updateUI();
-    },
-    rollback: (action) => {
-      let shape = pointerList[action.shape];
-      let curvesList = action.oldCurves;
-      shape.curves = [];
-      for (let curve of curvesList) {
-        shape.addCurve(
-          new Bezier(
-            curve.points[0].x,
-            curve.points[0].y,
-            curve.points[1].x,
-            curve.points[1].y,
-            curve.points[2].x,
-            curve.points[2].y,
-            curve.points[3].x,
-            curve.points[3].y,
-          ).setColor(curve.color),
-        );
-      }
-      shape.update();
-    },
-  },
-  colorShape: {
-    create: (shape, color) => {
-      redoStack.length = 0; // Clear redo stack
-      let action = {
-        shape: shape.idx,
-        oldColor: shape.fillStyle,
-        newColor: color,
-      };
-      undoStack.push({ name: "colorShape", action: action });
-      actions.colorShape.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let shape = pointerList[action.shape];
-      shape.fillStyle = action.newColor;
-    },
-    rollback: (action) => {
-      let shape = pointerList[action.shape];
-      shape.fillStyle = action.oldColor;
-    },
-  },
-  addImageObject: {
-    create: (x, y, imgsrc, ix, parent) => {
-      redoStack.length = 0; // Clear redo stack
-      let action = {
-        shapeUuid: uuidv4(),
-        objectUuid: uuidv4(),
-        x: x,
-        y: y,
-        src: imgsrc,
-        ix: ix,
-        parent: parent.idx,
-      };
-      undoStack.push({ name: "addImageObject", action: action });
-      actions.addImageObject.execute(action);
-      updateMenu();
-    },
-    execute: async (action) => {
-      let imageObject = new GraphicsObject(action.objectUuid);
-      function loadImage(src) {
-        return new Promise((resolve, reject) => {
-          let img = new Image();
-          img.onload = () => resolve(img); // Resolve the promise with the image once loaded
-          img.onerror = (err) => reject(err); // Reject the promise if there's an error loading the image
-          img.src = src; // Start loading the image
-        });
-      }
-      let img = await loadImage(action.src);
-      // img.onload = function() {
-      let ct = {
-        ...context,
-        fillImage: img,
-        strokeShape: false,
-      };
-      let imageShape = new Shape(0, 0, ct, imageObject.activeLayer, action.shapeUuid);
-      imageShape.addLine(img.width, 0);
-      imageShape.addLine(img.width, img.height);
-      imageShape.addLine(0, img.height);
-      imageShape.addLine(0, 0);
-      imageShape.update();
-      imageShape.fillImage = img;
-      imageShape.filled = true;
-
-      // Add shape to layer using new AnimationData-aware method
-      const time = imageObject.currentTime || 0;
-      imageObject.activeLayer.addShape(imageShape, time);
-      let parent = pointerList[action.parent];
-      parent.addObject(
-        imageObject,
-        action.x - img.width / 2 + 20 * action.ix,
-        action.y - img.height / 2 + 20 * action.ix,
-      );
-      updateUI();
-      // }
-      // img.src = action.src
-    },
-    rollback: (action) => {
-      let shape = pointerList[action.shapeUuid];
-      let object = pointerList[action.objectUuid];
-      let parent = pointerList[action.parent];
-      object.getFrame(0).removeShape(shape);
-      delete pointerList[action.shapeUuid];
-      parent.removeChild(object);
-      delete pointerList[action.objectUuid];
-      let selectIndex = context.selection.indexOf(object);
-      if (selectIndex >= 0) {
-        context.selection.splice(selectIndex, 1);
-      }
-    },
-  },
-  addAudio: {
-    create: (audiosrc, object, audioname) => {
-      redoStack.length = 0;
-      let action = {
-        audiosrc: audiosrc,
-        audioname: audioname,
-        uuid: uuidv4(),
-        layeruuid: uuidv4(),
-        frameNum: object.currentFrameNum,
-        object: object.idx,
-      };
-      undoStack.push({ name: "addAudio", action: action });
-      actions.addAudio.execute(action);
-      updateMenu();
-    },
-    execute: async (action) => {
-      const player = new Tone.Player().toDestination();
-      await player.load(action.audiosrc);
-      // player.autostart = true;
-      let newAudioLayer = new AudioLayer(action.layeruuid, action.audioname);
-      let object = pointerList[action.object];
-      const img = new Image();
-      img.className = "audioWaveform";
-      let soundObj = {
-        player: player,
-        start: action.frameNum,
-        img: img,
-        src: action.audiosrc,
-        uuid: action.uuid
-      };
-      pointerList[action.uuid] = soundObj;
-      newAudioLayer.sounds[action.uuid] = soundObj;
-      // TODO: change start time
-      newAudioLayer.track.add(0, action.uuid);
-      object.audioLayers.push(newAudioLayer);
-      // TODO: compute image height better
-      generateWaveform(img, player.buffer, 50, 25, config.framerate);
-      updateLayers();
-    },
-    rollback: (action) => {
-      let object = pointerList[action.object];
-      let layer = pointerList[action.layeruuid];
-      object.audioLayers.splice(object.audioLayers.indexOf(layer), 1);
-      updateLayers();
-    },
-  },
-  duplicateObject: {
-    create: (items) => {
-      redoStack.length = 0;
-      function deepCopyWithIdxMapping(obj, dictionary = {}) {
-        if (Array.isArray(obj)) {
-          return obj.map(item => deepCopyWithIdxMapping(item, dictionary));
-        }
-        if (obj === null || typeof obj !== 'object') {
-          return obj;
-        }
-      
-        const newObj = {};
-        for (const key in obj) {
-          let value = obj[key];
-          
-          if (key === 'idx' && !(value in dictionary)) {
-            dictionary[value] = uuidv4();
-          }
-          
-          newObj[key] = value in dictionary ? dictionary[value] : value;
-          if (typeof newObj[key] === 'object' && newObj[key] !== null) {
-            newObj[key] = deepCopyWithIdxMapping(newObj[key], dictionary);
-          }
-        }
-
-        return newObj;
-      }
-      let action = {
-        items: deepCopyWithIdxMapping(items),
-        object: context.activeObject.idx,
-        layer: context.activeObject.activeLayer.idx,
-        time: context.activeObject.currentTime || 0,
-        uuid: uuidv4(),
-      };
-      undoStack.push({ name: "duplicateObject", action: action });
-      actions.duplicateObject.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      const object = pointerList[action.object];
-      const layer = pointerList[action.layer];
-      const time = action.time;
-
-      for (let item of action.items) {
-        if (item.type == "shape") {
-          const shape = Shape.fromJSON(item);
-          layer.addShape(shape, time);
-        } else if (item.type == "GraphicsObject") {
-          const newObj = GraphicsObject.fromJSON(item);
-          object.addObject(newObj);
-        }
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      const object = pointerList[action.object];
-      const layer = pointerList[action.layer];
-
-      for (let item of action.items) {
-        if (item.type == "shape") {
-          layer.removeShape(pointerList[item.idx]);
-        } else if (item.type == "GraphicsObject") {
-          object.removeChild(pointerList[item.idx]);
-        }
-      }
-      updateUI();
-    },
-  },
-  deleteObjects: {
-    create: (objects, shapes) => {
-      redoStack.length = 0;
-      const layer = context.activeObject.activeLayer;
-      const time = context.activeObject.currentTime || 0;
-
-      let serializableObjects = [];
-      let oldObjectExists = {};
-      for (let object of objects) {
-        serializableObjects.push(object.idx);
-        // Store old exists value for rollback
-        const existsValue = layer.animationData.interpolate(`object.${object.idx}.exists`, time);
-        oldObjectExists[object.idx] = existsValue !== null ? existsValue : 1;
-      }
-
-      let serializableShapes = [];
-      for (let shape of shapes) {
-        serializableShapes.push(shape.idx);
-      }
-
-      let action = {
-        objects: serializableObjects,
-        shapes: serializableShapes,
-        layer: layer.idx,
-        time: time,
-        oldObjectExists: oldObjectExists,
-      };
-      undoStack.push({ name: "deleteObjects", action: action });
-      actions.deleteObjects.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      const layer = pointerList[action.layer];
-      const time = action.time;
-
-      // For objects: set exists to 0 at this time
-      for (let objectIdx of action.objects) {
-        const existsCurve = layer.animationData.getCurve(`object.${objectIdx}.exists`);
-        const kf = existsCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = 0;
-        } else {
-          layer.animationData.addKeyframe(`object.${objectIdx}.exists`, new Keyframe(time, 0, "hold"));
-        }
-      }
-
-      // For shapes: remove them (leaves holes that can be filled on undo)
-      for (let shapeIdx of action.shapes) {
-        layer.removeShape(pointerList[shapeIdx]);
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      const layer = pointerList[action.layer];
-      const time = action.time;
-
-      // Restore old exists values for objects
-      for (let objectIdx of action.objects) {
-        const oldExists = action.oldObjectExists[objectIdx];
-        const existsCurve = layer.animationData.getCurve(`object.${objectIdx}.exists`);
-        const kf = existsCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = oldExists;
-        } else {
-          layer.animationData.addKeyframe(`object.${objectIdx}.exists`, new Keyframe(time, oldExists, "hold"));
-        }
-      }
-
-      // For shapes: restore them with their original shapeIndex (fills the holes)
-      for (let shapeIdx of action.shapes) {
-        const shape = pointerList[shapeIdx];
-        if (shape) {
-          layer.addShape(shape, time);
-        }
-      }
-      updateUI();
-    },
-  },
-  addLayer: {
-    create: () => {
-      redoStack.length = 0;
-      let action = {
-        object: context.activeObject.idx,
-        uuid: uuidv4(),
-      };
-      undoStack.push({ name: "addLayer", action: action });
-      actions.addLayer.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let object = pointerList[action.object];
-      let layer = new Layer(action.uuid);
-      layer.name = `Layer ${object.layers.length + 1}`;
-      object.layers.push(layer);
-      object.currentLayer = object.layers.indexOf(layer);
-      updateLayers();
-    },
-    rollback: (action) => {
-      let object = pointerList[action.object];
-      let layer = pointerList[action.uuid];
-      object.layers.splice(object.layers.indexOf(layer), 1);
-      object.currentLayer = Math.min(
-        object.currentLayer,
-        object.layers.length - 1,
-      );
-      updateLayers();
-    },
-  },
-  deleteLayer: {
-    create: (layer) => {
-      redoStack.length = 0;
-      // Don't allow deleting the only layer
-      if (context.activeObject.layers.length == 1) return;
-      if (!(layer instanceof Layer)) {
-        layer = context.activeObject.activeLayer;
-      }
-      let action = {
-        object: context.activeObject.idx,
-        layer: layer.idx,
-        index: context.activeObject.layers.indexOf(layer),
-      };
-      undoStack.push({ name: "deleteLayer", action: action });
-      actions.deleteLayer.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let object = pointerList[action.object];
-      let layer = pointerList[action.layer];
-      let changelayer = false;
-      if (object.activeLayer == layer) {
-        changelayer = true;
-      }
-      object.layers.splice(object.layers.indexOf(layer), 1);
-      if (changelayer) {
-        object.currentLayer = 0;
-      }
-      updateUI();
-      updateLayers();
-    },
-    rollback: (action) => {
-      let object = pointerList[action.object];
-      let layer = pointerList[action.layer];
-      object.layers.splice(action.index, 0, layer);
-      updateUI();
-      updateLayers();
-    },
-  },
-  changeLayerName: {
-    create: (layer, newName) => {
-      redoStack.length = 0;
-      let action = {
-        layer: layer.idx,
-        newName: newName,
-        oldName: layer.name,
-      };
-      undoStack.push({ name: "changeLayerName", action: action });
-      actions.changeLayerName.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      layer.name = action.newName;
-      updateLayers();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      layer.name = action.oldName;
-      updateLayers();
-    },
-  },
-  importObject: {
-    create: (object) => {
-      redoStack.length = 0;
-      let action = {
-        object: object,
-        activeObject: context.activeObject.idx,
-      };
-      undoStack.push({ name: "importObject", action: action });
-      actions.importObject.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      const activeObject = pointerList[action.activeObject];
-      switch (action.object.type) {
-        case "GraphicsObject":
-          let object = GraphicsObject.fromJSON(action.object);
-          activeObject.addObject(object);
-          break;
-        case "Layer":
-          let layer = Layer.fromJSON(action.object);
-          activeObject.addLayer(layer);
-      }
-      updateUI();
-      updateLayers();
-    },
-    rollback: (action) => {
-      const activeObject = pointerList[action.activeObject];
-      switch (action.object.type) {
-        case "GraphicsObject":
-          let object = pointerList[action.object.idx];
-          activeObject.removeChild(object);
-          break;
-        case "Layer":
-          let layer = pointerList[action.object.idx];
-          activeObject.removeLayer(layer);
-      }
-      updateUI();
-      updateLayers();
-    },
-  },
-  transformObjects: {
-    initialize: (
-      frame,
-      _selection,
-      direction,
-      mouse,
-      transform = undefined,
-    ) => {
-      let bbox = undefined;
-      const selection = {};
-      for (let item of _selection) {
-        if (bbox == undefined) {
-          bbox = getRotatedBoundingBox(item);
-        } else {
-          growBoundingBox(bbox, getRotatedBoundingBox(item));
-        }
-        selection[item.idx] = {
-          x: item.x,
-          y: item.y,
-          scale_x: item.scale_x,
-          scale_y: item.scale_y,
-          rotation: item.rotation,
-        };
-      }
-      let action = {
-        type: "transformObjects",
-        oldState: structuredClone(frame.keys),
-        frame: frame.idx,
-        transform: {
-          initial: {
-            x: { min: bbox.x.min, max: bbox.x.max },
-            y: { min: bbox.y.min, max: bbox.y.max },
-            rotation: 0,
-            mouse: { x: mouse.x, y: mouse.y },
-            selection: selection,
-          },
-          current: {
-            x: { min: bbox.x.min, max: bbox.x.max },
-            y: { min: bbox.y.min, max: bbox.y.max },
-            scale_x: 1,
-            scale_y: 1,
-            rotation: 0,
-            mouse: { x: mouse.x, y: mouse.y },
-            selection: structuredClone(selection),
-          },
-        },
-        selection: selection,
-        direction: direction,
-      };
-      if (transform) {
-        action.transform = transform;
-      }
-      return action;
-    },
-    update: (action, mouse) => {
-      const initial = action.transform.initial;
-      const current = action.transform.current;
-      if (action.direction.indexOf("n") != -1) {
-        current.y.min = mouse.y;
-      } else if (action.direction.indexOf("s") != -1) {
-        current.y.max = mouse.y;
-      }
-      if (action.direction.indexOf("w") != -1) {
-        current.x.min = mouse.x;
-      } else if (action.direction.indexOf("e") != -1) {
-        current.x.max = mouse.x;
-      }
-      if (context.dragDirection == "r") {
-        const pivot = {
-          x: (initial.x.min + initial.x.max) / 2,
-          y: (initial.y.min + initial.y.max) / 2,
-        };
-        current.rotation = signedAngleBetweenVectors(
-          pivot,
-          initial.mouse,
-          mouse,
-        );
-        const { dx, dy } = rotateAroundPointIncremental(
-          current.x.min,
-          current.y.min,
-          pivot,
-          current.rotation,
-        );
-      }
-
-      // Calculate the scaling factor based on the difference between current and initial values
-      action.transform.current.scale_x =
-        (current.x.max - current.x.min) / (initial.x.max - initial.x.min);
-      action.transform.current.scale_y =
-        (current.y.max - current.y.min) / (initial.y.max - initial.y.min);
-      return action;
-    },
-    render: (action, ctx) => {
-      const initial = action.transform.initial;
-      const current = action.transform.current;
-      ctx.save();
-      ctx.translate(
-        (current.x.max + current.x.min) / 2,
-        (current.y.max - current.y.min) / 2,
-      );
-      ctx.rotate(current.rotation);
-      ctx.translate(
-        -(current.x.max + current.x.min) / 2,
-        -(current.y.max - current.y.min) / 2,
-      );
-      const cxt = {
-        ctx: ctx,
-        selection: [],
-        shapeselection: [],
-      };
-      for (let obj in action.selection) {
-        const object = pointerList[obj];
-        const transform = ctx.getTransform()
-        ctx.translate(object.x, object.y)
-        ctx.scale(object.scale_x, object.scale_y)
-        ctx.rotate(object.rotation)
-        object.draw(ctx)
-        ctx.setTransform(transform)
-      }
-      ctx.strokeStyle = "#00ffff";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.rect(
-        current.x.min,
-        current.y.min,
-        current.x.max - current.x.min,
-        current.y.max - current.y.min,
-      );
-      ctx.stroke();
-      ctx.fillStyle = "#000000";
-      const rectRadius = 5;
-      const xdiff = current.x.max - current.x.min;
-      const ydiff = current.y.max - current.y.min;
-      for (let i of [
-        [0, 0],
-        [0.5, 0],
-        [1, 0],
-        [1, 0.5],
-        [1, 1],
-        [0.5, 1],
-        [0, 1],
-        [0, 0.5],
-      ]) {
-        ctx.beginPath();
-        ctx.rect(
-          current.x.min + xdiff * i[0] - rectRadius,
-          current.y.min + ydiff * i[1] - rectRadius,
-          rectRadius * 2,
-          rectRadius * 2,
-        );
-        ctx.fill();
-      }
-      ctx.restore();
-    },
-    finalize: (action) => {
-      undoStack.push({ name: "transformObjects", action: action });
-      actions.transformObjects.execute(action);
-      context.activeAction = undefined;
-      updateMenu();
-    },
-    execute: (action) => {
-      const frame = pointerList[action.frame];
-      const initial = action.transform.initial;
-      const current = action.transform.current;
-      const delta_x = current.x.min - initial.x.min;
-      const delta_y = current.y.min - initial.y.min;
-      const delta_rot = current.rotation - initial.rotation;
-      // frame.keys = structuredClone(action.newState)
-      for (let idx in action.selection) {
-        const item = frame.keys[idx];
-        const xoffset = action.selection[idx].x - initial.x.min;
-        const yoffset = action.selection[idx].y - initial.y.min;
-        item.x = initial.x.min + delta_x + xoffset * current.scale_x;
-        item.y = initial.y.min + delta_y + yoffset * current.scale_y;
-        item.scale_x = action.selection[idx].scale_x * current.scale_x;
-        item.scale_y = action.selection[idx].scale_y * current.scale_y;
-        item.rotation = action.selection[idx].rotation + delta_rot;
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      let frame = pointerList[action.frame];
-      frame.keys = structuredClone(action.oldState);
-      updateUI();
-    },
-  },
-  moveObjects: {
-    initialize: (objects, layer, time) => {
-      let oldPositions = {};
-      for (let obj of objects) {
-        const x = layer.animationData.interpolate(`object.${obj.idx}.x`, time);
-        const y = layer.animationData.interpolate(`object.${obj.idx}.y`, time);
-        oldPositions[obj.idx] = { x, y };
-      }
-      let action = {
-        type: "moveObjects",
-        objects: objects.map(o => o.idx),
-        layer: layer.idx,
-        time: time,
-        oldPositions: oldPositions,
-      };
-      return action;
-    },
-    finalize: (action) => {
-      const layer = pointerList[action.layer];
-      let newPositions = {};
-      for (let objIdx of action.objects) {
-        const obj = pointerList[objIdx];
-        newPositions[objIdx] = { x: obj.x, y: obj.y };
-      }
-      action.newPositions = newPositions;
-      undoStack.push({ name: "moveObjects", action: action });
-      actions.moveObjects.execute(action);
-      context.activeAction = undefined;
-      updateMenu();
-    },
-    render: (action, ctx) => {},
-    create: (objects, layer, time, oldPositions, newPositions) => {
-      redoStack.length = 0;
-      let action = {
-        objects: objects.map(o => o.idx),
-        layer: layer.idx,
-        time: time,
-        oldPositions: oldPositions,
-        newPositions: newPositions,
-      };
-      undoStack.push({ name: "moveObjects", action: action });
-      actions.moveObjects.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      const layer = pointerList[action.layer];
-      const time = action.time;
-
-      for (let objIdx of action.objects) {
-        const obj = pointerList[objIdx];
-        const newPos = action.newPositions[objIdx];
-
-        // Update object properties
-        obj.x = newPos.x;
-        obj.y = newPos.y;
-
-        // Add/update keyframes in AnimationData
-        const xCurve = layer.animationData.getCurve(`object.${objIdx}.x`);
-        const kf = xCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = newPos.x;
-        } else {
-          layer.animationData.addKeyframe(`object.${objIdx}.x`, new Keyframe(time, newPos.x, "linear"));
-        }
-
-        const yCurve = layer.animationData.getCurve(`object.${objIdx}.y`);
-        const kfy = yCurve?.getKeyframeAtTime(time);
-        if (kfy) {
-          kfy.value = newPos.y;
-        } else {
-          layer.animationData.addKeyframe(`object.${objIdx}.y`, new Keyframe(time, newPos.y, "linear"));
-        }
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      const layer = pointerList[action.layer];
-      const time = action.time;
-
-      for (let objIdx of action.objects) {
-        const obj = pointerList[objIdx];
-        const oldPos = action.oldPositions[objIdx];
-
-        // Restore object properties
-        obj.x = oldPos.x;
-        obj.y = oldPos.y;
-
-        // Restore keyframes in AnimationData
-        const xCurve = layer.animationData.getCurve(`object.${objIdx}.x`);
-        const kf = xCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = oldPos.x;
-        } else {
-          layer.animationData.addKeyframe(`object.${objIdx}.x`, new Keyframe(time, oldPos.x, "linear"));
-        }
-
-        const yCurve = layer.animationData.getCurve(`object.${objIdx}.y`);
-        const kfy = yCurve?.getKeyframeAtTime(time);
-        if (kfy) {
-          kfy.value = oldPos.y;
-        } else {
-          layer.animationData.addKeyframe(`object.${objIdx}.y`, new Keyframe(time, oldPos.y, "linear"));
-        }
-      }
-      updateUI();
-    },
-  },
-  editFrame: {
-    // DEPRECATED: Kept for backwards compatibility
-    initialize: (frame) => {
-      console.warn("editFrame is deprecated, use moveObjects instead");
-      return null;
-    },
-    finalize: (action, frame) => {},
-    render: (action, ctx) => {},
-    create: (frame) => {},
-    execute: (action) => {},
-    rollback: (action) => {},
-  },
-  addFrame: {
-    create: () => {
-      redoStack.length = 0;
-      let frames = [];
-      for (
-        let i = context.activeObject.activeLayer.frames.length;
-        i <= context.activeObject.currentFrameNum;
-        i++
-      ) {
-        frames.push(uuidv4());
-      }
-      let action = {
-        frames: frames,
-        layer: context.activeObject.activeLayer.idx,
-      };
-      undoStack.push({ name: "addFrame", action: action });
-      actions.addFrame.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      for (let frame of action.frames) {
-        layer.frames.push(new Frame("normal", frame));
-      }
-      updateLayers();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      for (let _frame of action.frames) {
-        layer.frames.pop();
-      }
-      updateLayers();
-    },
-  },
-  addKeyframe: {
-    create: () => {
-      let frameNum = context.activeObject.currentFrameNum;
-      let layer = context.activeObject.activeLayer;
-      let formerType;
-      let addedFrames = {};
-      if (frameNum >= layer.frames.length) {
-        formerType = "none";
-        // for (let i = layer.frames.length; i <= frameNum; i++) {
-        //   addedFrames[i] = uuidv4();
-        // }
-      } else if (!layer.frames[frameNum]) {
-        formerType = undefined
-      } else if (layer.frames[frameNum].frameType != "keyframe") {
-        formerType = layer.frames[frameNum].frameType;
-      } else {
-        return; // Already a keyframe, nothing to do
-      }
-      redoStack.length = 0;
-      let action = {
-        frameNum: frameNum,
-        object: context.activeObject.idx,
-        layer: layer.idx,
-        formerType: formerType,
-        addedFrames: addedFrames,
-        uuid: uuidv4(),
-      };
-      undoStack.push({ name: "addKeyframe", action: action });
-      actions.addKeyframe.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let object = pointerList[action.object];
-      let layer = pointerList[action.layer];
-      layer.addOrChangeFrame(
-        action.frameNum,
-        "keyframe",
-        action.uuid,
-        action.addedFrames,
-      );
-      updateLayers();
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      if (action.formerType == "none") {
-        for (let i in action.addedFrames) {
-          layer.frames.pop();
-        }
-      } else {
-        let layer = pointerList[action.layer];
-        if (action.formerType) {
-          layer.frames[action.frameNum].frameType = action.formerType;
-        } else {
-          layer.frames[action.frameNum = undefined]
-        }
-      }
-      updateLayers();
-      updateUI();
-    },
-  },
-  deleteFrame: {
-    create: (frame, layer) => {
-      redoStack.length = 0;
-      let action = {
-        frame: frame.idx,
-        layer: layer.idx,
-        replacementUuid: uuidv4(),
-      };
-      undoStack.push({ name: "deleteFrame", action: action });
-      actions.deleteFrame.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      layer.deleteFrame(
-        action.frame,
-        undefined,
-        action.replacementUuid ? action.replacementUuid : uuidv4(),
-      );
-      updateLayers();
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      let frame = pointerList[action.frame];
-      layer.addFrame(action.frameNum, frame, {});
-      updateLayers();
-      updateUI();
-    },
-  },
-  moveFrames: {
-    create: (offset) => {
-      redoStack.length = 0;
-      const selectedFrames = structuredClone(context.selectedFrames);
-      for (let frame of selectedFrames) {
-        frame.replacementUuid = uuidv4();
-        frame.layer = context.activeObject.layers.length - frame.layer - 1;
-      }
-      // const fillFrames = []
-      // for (let i=0; i<context.activeObject.layers.length;i++) {
-      //   const fillLayer = []
-      //   for (let j=0; j<Math.abs(offset.frames); j++) {
-      //     fillLayer.push(uuidv4())
-      //   }
-      //   fillFrames.push(fillLayer)
-      // }
-      let action = {
-        selectedFrames: selectedFrames,
-        offset: offset,
-        object: context.activeObject.idx,
-        // fillFrames: fillFrames
-      };
-      undoStack.push({ name: "moveFrames", action: action });
-      actions.moveFrames.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      const object = pointerList[action.object];
-      const frameBuffer = [];
-      for (let frameObj of action.selectedFrames) {
-        let layer = object.layers[frameObj.layer];
-        let frame = layer.frames[frameObj.frameNum];
-        if (frameObj) {
-          frameBuffer.push({
-            frame: frame,
-            frameNum: frameObj.frameNum,
-            layer: frameObj.layer,
-          });
-          layer.deleteFrame(frame.idx, undefined, frameObj.replacementUuid);
-        }
-      }
-      for (let frameObj of frameBuffer) {
-        // TODO: figure out object tracking when moving frames between layers
-        const layer_idx = frameObj.layer// + action.offset.layers;
-        let layer = object.layers[layer_idx];
-        let frame = frameObj.frame;
-        layer.addFrame(frameObj.frameNum + action.offset.frames, frame, []); //fillFrames[layer_idx])
-      }
-      updateLayers();
-      updateUI();
-    },
-    rollback: (action) => {
-      const object = pointerList[action.object];
-      const frameBuffer = [];
-      for (let frameObj of action.selectedFrames) {
-        let layer = object.layers[frameObj.layer];
-        let frame = layer.frames[frameObj.frameNum + action.offset.frames];
-        if (frameObj) {
-          frameBuffer.push({
-            frame: frame,
-            frameNum: frameObj.frameNum,
-            layer: frameObj.layer,
-          });
-          layer.deleteFrame(frame.idx, "none")
-        }
-      }
-      for (let frameObj of frameBuffer) {
-        let layer = object.layers[frameObj.layer];
-        let frame = frameObj.frame;
-        if (frameObj) {
-          layer.addFrame(frameObj.frameNum, frame, [])
-        }
-      }
-    },
-  },
-  addMotionTween: {
-    create: () => {
-      redoStack.length = 0;
-      let frameNum = context.activeObject.currentFrameNum;
-      let layer = context.activeObject.activeLayer;
-
-      const frameInfo = layer.getFrameValue(frameNum)
-      let lastKeyframeBefore, firstKeyframeAfter
-      if (frameInfo.valueAtN) {
-        lastKeyframeBefore = frameNum
-      } else if (frameInfo.prev) {
-        lastKeyframeBefore = frameInfo.prevIndex
-      } else {
-        return
-      }
-      firstKeyframeAfter = frameInfo.nextIndex
-
-      let action = {
-        frameNum: frameNum,
-        layer: layer.idx,
-        lastBefore: lastKeyframeBefore,
-        firstAfter: firstKeyframeAfter,
-      };
-      undoStack.push({ name: "addMotionTween", action: action });
-      actions.addMotionTween.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      let frames = layer.frames;
-      if (action.lastBefore != undefined) {
-        console.log("adding motion")
-        frames[action.lastBefore].keyTypes.add("motion")
-      }
-      updateLayers();
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      let frames = layer.frames;
-      if (action.lastBefore != undefined) {
-        frames[action.lastBefore].keyTypes.delete("motion")
-      }
-      updateLayers();
-      updateUI();
-    },
-  },
-  addShapeTween: {
-    create: () => {
-      redoStack.length = 0;
-      let frameNum = context.activeObject.currentFrameNum;
-      let layer = context.activeObject.activeLayer;
-      
-      const frameInfo = layer.getFrameValue(frameNum)
-      let lastKeyframeBefore, firstKeyframeAfter
-      if (frameInfo.valueAtN) {
-        lastKeyframeBefore = frameNum
-      } else if (frameInfo.prev) {
-        lastKeyframeBefore = frameInfo.prevIndex
-      } else {
-        return
-      }
-      firstKeyframeAfter = frameInfo.nextIndex
-
-
-      let action = {
-        frameNum: frameNum,
-        layer: layer.idx,
-        lastBefore: lastKeyframeBefore,
-        firstAfter: firstKeyframeAfter,
-      };
-      console.log(action)
-      undoStack.push({ name: "addShapeTween", action: action });
-      actions.addShapeTween.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      let frames = layer.frames;
-      if (action.lastBefore != undefined) {
-        frames[action.lastBefore].keyTypes.add("shape")
-      }
-      updateLayers();
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      let frames = layer.frames;
-      if (action.lastBefore != undefined) {
-        frames[action.lastBefore].keyTypes.delete("shape")
-      }
-      updateLayers();
-      updateUI();
-    },
-  },
-  group: {
-    create: () => {
-      redoStack.length = 0;
-      let serializableShapes = [];
-      let serializableObjects = [];
-      let bbox;
-      const currentTime = context.activeObject?.currentTime || 0;
-      const layer = context.activeObject.activeLayer;
-
-      // For shapes - use AnimationData system
-      for (let shape of context.shapeselection) {
-        serializableShapes.push(shape.idx);
-        if (bbox == undefined) {
-          bbox = shape.bbox();
-        } else {
-          growBoundingBox(bbox, shape.bbox());
-        }
-      }
-
-      // For objects - check if they exist at current time
-      for (let object of context.selection) {
-        const existsValue = layer.animationData.interpolate(`object.${object.idx}.exists`, currentTime);
-        if (existsValue > 0) {
-          serializableObjects.push(object.idx);
-          // TODO: rotated bbox
-          if (bbox == undefined) {
-            bbox = object.bbox();
-          } else {
-            growBoundingBox(bbox, object.bbox());
-          }
-        }
-      }
-
-      // If nothing was selected, don't create a group
-      if (!bbox) {
-        return;
-      }
-
-      context.shapeselection = [];
-      context.selection = [];
-      let action = {
-        shapes: serializableShapes,
-        objects: serializableObjects,
-        groupUuid: uuidv4(),
-        parent: context.activeObject.idx,
-        layer: layer.idx,
-        currentTime: currentTime,
-        position: {
-          x: (bbox.x.min + bbox.x.max) / 2,
-          y: (bbox.y.min + bbox.y.max) / 2,
-        },
-      };
-      undoStack.push({ name: "group", action: action });
-      actions.group.execute(action);
-      updateMenu();
-      updateLayers();
-    },
-    execute: (action) => {
-      let group = new GraphicsObject(action.groupUuid);
-      let parent = pointerList[action.parent];
-      let layer = pointerList[action.layer] || parent.activeLayer;
-      const currentTime = action.currentTime || 0;
-
-      // Move shapes from parent layer to group's first layer
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-        shape.translate(-action.position.x, -action.position.y);
-
-        // Remove shape from parent layer's shapes array
-        let shapeIndex = layer.shapes.indexOf(shape);
-        if (shapeIndex !== -1) {
-          layer.shapes.splice(shapeIndex, 1);
-        }
-
-        // Remove animation curves for this shape from parent layer
-        layer.animationData.removeCurve(`shape.${shape.shapeId}.exists`);
-        layer.animationData.removeCurve(`shape.${shape.shapeId}.zOrder`);
-        layer.animationData.removeCurve(`shape.${shape.shapeId}.shapeIndex`);
-
-        // Add shape to group's first layer
-        let groupLayer = group.activeLayer;
-        shape.parent = groupLayer;
-        groupLayer.shapes.push(shape);
-
-        // Add animation curves for this shape in group's layer
-        let existsCurve = new AnimationCurve(`shape.${shape.shapeId}.exists`);
-        existsCurve.addKeyframe(new Keyframe(0, 1, 'linear'));
-        groupLayer.animationData.setCurve(`shape.${shape.shapeId}.exists`, existsCurve);
-
-        let zOrderCurve = new AnimationCurve(`shape.${shape.shapeId}.zOrder`);
-        zOrderCurve.addKeyframe(new Keyframe(0, groupLayer.shapes.length - 1, 'linear'));
-        groupLayer.animationData.setCurve(`shape.${shape.shapeId}.zOrder`, zOrderCurve);
-
-        let shapeIndexCurve = new AnimationCurve(`shape.${shape.shapeId}.shapeIndex`);
-        shapeIndexCurve.addKeyframe(new Keyframe(0, 0, 'linear'));
-        groupLayer.animationData.setCurve(`shape.${shape.shapeId}.shapeIndex`, shapeIndexCurve);
-      }
-
-      // Move objects (children) to the group
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-
-        // Get object position from AnimationData if available
-        const objX = layer.animationData.interpolate(`object.${objectIdx}.x`, currentTime);
-        const objY = layer.animationData.interpolate(`object.${objectIdx}.y`, currentTime);
-
-        if (objX !== null && objY !== null) {
-          group.addObject(
-            object,
-            objX - action.position.x,
-            objY - action.position.y,
-            currentTime
-          );
-        } else {
-          group.addObject(object, 0, 0, currentTime);
-        }
-        parent.removeChild(object);
-      }
-
-      // Add group to parent using time-based API
-      parent.addObject(group, action.position.x, action.position.y, currentTime);
-      context.selection = [group];
-      context.activeCurve = undefined;
-      context.activeVertex = undefined;
-      updateUI();
-      updateInfopanel();
-    },
-    rollback: (action) => {
-      let group = pointerList[action.groupUuid];
-      let parent = pointerList[action.parent];
-      const layer = pointerList[action.layer] || parent.activeLayer;
-      const currentTime = action.currentTime || 0;
-
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-        shape.translate(action.position.x, action.position.y);
-        layer.addShape(shape, currentTime);
-        group.activeLayer.removeShape(shape);
-      }
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-        parent.addObject(object, object.x, object.y, currentTime);
-        group.removeChild(object);
-      }
-      parent.removeChild(group);
-      updateUI();
-      updateInfopanel();
-    },
-  },
-  sendToBack: {
-    create: () => {
-      redoStack.length = 0;
-      const currentTime = context.activeObject.currentTime || 0;
-      const layer = context.activeObject.activeLayer;
-
-      let serializableShapes = [];
-      let oldZOrders = {};
-
-      // Store current zOrder for each shape
-      for (let shape of context.shapeselection) {
-        serializableShapes.push(shape.idx);
-        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, currentTime);
-        oldZOrders[shape.idx] = zOrder !== null ? zOrder : 0;
-      }
-
-      let serializableObjects = [];
-      let formerIndices = {};
-      for (let object of context.selection) {
-        serializableObjects.push(object.idx);
-        formerIndices[object.idx] = layer.children.indexOf(object);
-      }
-
-      let action = {
-        shapes: serializableShapes,
-        objects: serializableObjects,
-        layer: layer.idx,
-        time: currentTime,
-        oldZOrders: oldZOrders,
-        formerIndices: formerIndices,
-      };
-      undoStack.push({ name: "sendToBack", action: action });
-      actions.sendToBack.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      const time = action.time;
-
-      // For shapes: set zOrder to 0, increment all others
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-
-        // Increment zOrder for all other shapes at this time
-        for (let otherShape of layer.shapes) {
-          if (otherShape.shapeId !== shape.shapeId) {
-            const zOrderCurve = layer.animationData.getCurve(`shape.${otherShape.shapeId}.zOrder`);
-            if (zOrderCurve) {
-              const kf = zOrderCurve.getKeyframeAtTime(time);
-              if (kf) {
-                kf.value += 1;
-              } else {
-                // Add keyframe at current time with incremented value
-                const currentZOrder = layer.animationData.interpolate(`shape.${otherShape.shapeId}.zOrder`, time) || 0;
-                layer.animationData.addKeyframe(`shape.${otherShape.shapeId}.zOrder`, new Keyframe(time, currentZOrder + 1, "hold"));
-              }
-            }
-          }
-        }
-
-        // Set this shape's zOrder to 0
-        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
-        const kf = zOrderCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = 0;
-        } else {
-          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, 0, "hold"));
-        }
-      }
-
-      // For objects: move to front of children array
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-        layer.children.splice(layer.children.indexOf(object), 1);
-        layer.children.unshift(object);
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      const time = action.time;
-
-      // Restore old zOrder values for shapes
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-        const oldZOrder = action.oldZOrders[shapeIdx];
-
-        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
-        const kf = zOrderCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = oldZOrder;
-        } else {
-          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, oldZOrder, "hold"));
-        }
-      }
-
-      // Restore old positions for objects
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-        layer.children.splice(layer.children.indexOf(object), 1);
-        layer.children.splice(action.formerIndices[objectIdx], 0, object);
-      }
-      updateUI();
-    },
-  },
-  bringToFront: {
-    create: () => {
-      redoStack.length = 0;
-      const currentTime = context.activeObject.currentTime || 0;
-      const layer = context.activeObject.activeLayer;
-
-      let serializableShapes = [];
-      let oldZOrders = {};
-
-      // Store current zOrder for each shape
-      for (let shape of context.shapeselection) {
-        serializableShapes.push(shape.idx);
-        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, currentTime);
-        oldZOrders[shape.idx] = zOrder !== null ? zOrder : 0;
-      }
-
-      let serializableObjects = [];
-      let formerIndices = {};
-      for (let object of context.selection) {
-        serializableObjects.push(object.idx);
-        formerIndices[object.idx] = layer.children.indexOf(object);
-      }
-
-      let action = {
-        shapes: serializableShapes,
-        objects: serializableObjects,
-        layer: layer.idx,
-        time: currentTime,
-        oldZOrders: oldZOrders,
-        formerIndices: formerIndices,
-      };
-      undoStack.push({ name: "bringToFront", action: action });
-      actions.bringToFront.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let layer = pointerList[action.layer];
-      const time = action.time;
-
-      // Find max zOrder at this time
-      let maxZOrder = -1;
-      for (let shape of layer.shapes) {
-        const zOrder = layer.animationData.interpolate(`shape.${shape.shapeId}.zOrder`, time);
-        if (zOrder !== null && zOrder > maxZOrder) {
-          maxZOrder = zOrder;
-        }
-      }
-
-      // For shapes: set zOrder to max+1, max+2, etc.
-      let newZOrder = maxZOrder + 1;
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-
-        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
-        const kf = zOrderCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = newZOrder;
-        } else {
-          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, newZOrder, "hold"));
-        }
-        newZOrder++;
-      }
-
-      // For objects: move to end of children array
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-        layer.children.splice(layer.children.indexOf(object), 1);
-        object.parentLayer = layer;
-        layer.children.push(object);
-      }
-      updateUI();
-    },
-    rollback: (action) => {
-      let layer = pointerList[action.layer];
-      const time = action.time;
-
-      // Restore old zOrder values for shapes
-      for (let shapeIdx of action.shapes) {
-        let shape = pointerList[shapeIdx];
-        const oldZOrder = action.oldZOrders[shapeIdx];
-
-        const zOrderCurve = layer.animationData.getCurve(`shape.${shape.shapeId}.zOrder`);
-        const kf = zOrderCurve?.getKeyframeAtTime(time);
-        if (kf) {
-          kf.value = oldZOrder;
-        } else {
-          layer.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, oldZOrder, "hold"));
-        }
-      }
-
-      // Restore old positions for objects
-      for (let objectIdx of action.objects) {
-        let object = pointerList[objectIdx];
-        layer.children.splice(layer.children.indexOf(object), 1);
-        layer.children.splice(action.formerIndices[objectIdx], 0, object);
-      }
-      updateUI();
-    },
-  },
-  setName: {
-    create: (object, name) => {
-      redoStack.length = 0;
-      let action = {
-        object: object.idx,
-        newName: name,
-        oldName: object.name,
-      };
-      undoStack.push({ name: "setName", action: action });
-      actions.setName.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      let object = pointerList[action.object];
-      object.name = action.newName;
-      updateInfopanel();
-    },
-    rollback: (action) => {
-      let object = pointerList[action.object];
-      object.name = action.oldName;
-      updateInfopanel();
-    },
-  },
-  selectAll: {
-    create: () => {
-      redoStack.length = 0;
-      let selection = [];
-      let shapeselection = [];
-      const currentTime = context.activeObject.currentTime || 0;
-      const layer = context.activeObject.activeLayer;
-      for (let child of layer.children) {
-        let idx = child.idx;
-        const existsValue = layer.animationData.interpolate(`object.${idx}.exists`, currentTime);
-        if (existsValue > 0) {
-          selection.push(child.idx);
-        }
-      }
-      // Use getVisibleShapes instead of currentFrame.shapes
-      if (layer) {
-        for (let shape of layer.getVisibleShapes(currentTime)) {
-          shapeselection.push(shape.idx);
-        }
-      }
-      let action = {
-        selection: selection,
-        shapeselection: shapeselection,
-      };
-      undoStack.push({ name: "selectAll", action: action });
-      actions.selectAll.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      for (let item of action.selection) {
-        context.selection.push(pointerList[item]);
-      }
-      for (let shape of action.shapeselection) {
-        context.shapeselection.push(pointerList[shape]);
-      }
-      updateUI();
-      updateMenu();
-    },
-    rollback: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      updateUI();
-      updateMenu();
-    },
-  },
-  selectNone: {
-    create: () => {
-      redoStack.length = 0;
-      let selection = [];
-      let shapeselection = [];
-      for (let item of context.selection) {
-        selection.push(item.idx);
-      }
-      for (let shape of context.shapeselection) {
-        shapeselection.push(shape.idx);
-      }
-      let action = {
-        selection: selection,
-        shapeselection: shapeselection,
-      };
-      undoStack.push({ name: "selectNone", action: action });
-      actions.selectNone.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      updateUI();
-      updateMenu();
-    },
-    rollback: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      for (let item of action.selection) {
-        context.selection.push(pointerList[item]);
-      }
-      for (let shape of action.shapeselection) {
-        context.shapeselection.push(pointerList[shape]);
-      }
-      updateUI();
-      updateMenu();
-    },
-  },
-  select: {
-    create: () => {
-      redoStack.length = 0;
-      if (
-        arraysAreEqual(context.oldselection, context.selection) &&
-        arraysAreEqual(context.oldshapeselection, context.shapeselection)
-      )
-        return;
-      let oldselection = [];
-      let oldshapeselection = [];
-      for (let item of context.oldselection) {
-        oldselection.push(item.idx);
-      }
-      for (let shape of context.oldshapeselection) {
-        oldshapeselection.push(shape.idx);
-      }
-      let selection = [];
-      let shapeselection = [];
-      for (let item of context.selection) {
-        selection.push(item.idx);
-      }
-      for (let shape of context.shapeselection) {
-        shapeselection.push(shape.idx);
-      }
-      let action = {
-        selection: selection,
-        shapeselection: shapeselection,
-        oldselection: oldselection,
-        oldshapeselection: oldshapeselection,
-      };
-      undoStack.push({ name: "select", action: action });
-      actions.select.execute(action);
-      updateMenu();
-    },
-    execute: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      for (let item of action.selection) {
-        context.selection.push(pointerList[item]);
-      }
-      for (let shape of action.shapeselection) {
-        context.shapeselection.push(pointerList[shape]);
-      }
-      updateUI();
-      updateMenu();
-    },
-    rollback: (action) => {
-      context.selection = [];
-      context.shapeselection = [];
-      for (let item of action.oldselection) {
-        context.selection.push(pointerList[item]);
-      }
-      for (let shape of action.oldshapeselection) {
-        context.shapeselection.push(pointerList[shape]);
-      }
-      updateUI();
-      updateMenu();
-    },
-  },
-};
+// Note: context, config, pointerList, startProps, getShortcut, loadConfig, saveConfig, addRecentFile
+// are now imported from state.js
+
+// Note: actions object is now imported from ./actions/index.js
+// The actions will be initialized later with dependencies via initializeActions()
 
 // Expose context and actions for UI testing
 window.context = context;
@@ -2190,6 +403,9 @@ function selectCurve(context, mouse) {
   let layer = context.activeObject?.activeLayer;
   if (!layer) return undefined;
 
+  // AudioTracks don't have shapes, so return early
+  if (!layer.getVisibleShapes) return undefined;
+
   for (let shape of layer.getVisibleShapes(currentTime)) {
     if (
       mouse.x > shape.boundingBox.x.min - mouseTolerance &&
@@ -2223,6 +439,9 @@ function selectVertex(context, mouse) {
   let currentTime = context.activeObject?.currentTime || 0;
   let layer = context.activeObject?.activeLayer;
   if (!layer) return undefined;
+
+  // AudioTracks don't have shapes, so return early
+  if (!layer.getVisibleShapes) return undefined;
 
   for (let shape of layer.getVisibleShapes(currentTime)) {
     if (
@@ -2394,3128 +613,66 @@ function redo() {
   }
 }
 
-// LEGACY: Frame class - being phased out in favor of AnimationData
-// TODO: Remove once all code is migrated to AnimationData system
-class Frame {
-  constructor(frameType = "normal", uuid = undefined) {
-    this.keys = {};
-    this.shapes = [];
-    this.frameType = frameType;
-    this.keyTypes = new Set()
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-    pointerList[this.idx] = this;
-  }
-  get exists() {
-    return true;
-  }
-  saveState() {
-    startProps[this.idx] = structuredClone(this.keys);
-  }
-  copy(idx) {
-    let newFrame = new Frame(
-      this.frameType,
-      idx.slice(0, 8) + this.idx.slice(8),
-    );
-    newFrame.keys = structuredClone(this.keys);
-    newFrame.shapes = [];
-    for (let shape of this.shapes) {
-      newFrame.shapes.push(shape.copy(idx));
-    }
-    return newFrame;
-  }
-  static fromJSON(json) {
-    if (!json) {
-      return undefined
-    }
-    const frame = new Frame(json.frameType, json.idx);
-    frame.keyTypes = new Set(json.keyTypes)
-    frame.keys = json.keys;
-    for (let i in json.shapes) {
-      const shape = json.shapes[i];
-      frame.shapes.push(Shape.fromJSON(shape));
-    }
-
-    return frame;
-  }
-  toJSON(randomizeUuid = false) {
-    const json = {};
-    json.type = "Frame";
-    json.frameType = this.frameType;
-    json.keyTypes = Array.from(this.keyTypes)
-    if (randomizeUuid) {
-      json.idx = uuidv4();
-    } else {
-      json.idx = this.idx;
-    }
-    json.keys = structuredClone(this.keys);
-    json.shapes = [];
-    for (let shape of this.shapes) {
-      json.shapes.push(shape.toJSON(randomizeUuid));
-    }
-    return json;
-  }
-  addShape(shape, sendToBack) {
-    if (sendToBack) {
-      this.shapes.unshift(shape);
-    } else {
-      this.shapes.push(shape);
-    }
-  }
-  removeShape(shape) {
-    let shapeIndex = this.shapes.indexOf(shape);
-    if (shapeIndex >= 0) {
-      this.shapes.splice(shapeIndex, 1);
-    }
-  }
-}
-
-class TempFrame {
-  constructor() {}
-  get exists() {
-    return false;
-  }
-  get idx() {
-    return "tempFrame";
-  }
-  get keys() {
-    return {};
-  }
-  get shapes() {
-    return [];
-  }
-  get frameType() {
-    return "temp";
-  }
-  copy() {
-    return this;
-  }
-  addShape() {}
-  removeShape() {}
-}
-
-const tempFrame = new TempFrame();
-
-// Animation system classes
-class Keyframe {
-  constructor(time, value, interpolation = "linear", uuid = undefined) {
-    this.time = time;
-    this.value = value;
-    this.interpolation = interpolation; // 'linear', 'bezier', 'step', 'hold'
-    // For bezier interpolation
-    this.easeIn = { x: 0.42, y: 0 };  // Default ease-in control point
-    this.easeOut = { x: 0.58, y: 1 }; // Default ease-out control point
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-  }
-
-  static fromJSON(json) {
-    const keyframe = new Keyframe(json.time, json.value, json.interpolation, json.idx);
-    if (json.easeIn) keyframe.easeIn = json.easeIn;
-    if (json.easeOut) keyframe.easeOut = json.easeOut;
-    return keyframe;
-  }
-
-  toJSON() {
-    return {
-      idx: this.idx,
-      time: this.time,
-      value: this.value,
-      interpolation: this.interpolation,
-      easeIn: this.easeIn,
-      easeOut: this.easeOut
-    };
-  }
-}
-
-class AnimationCurve {
-  constructor(parameter, uuid = undefined, parentAnimationData = null) {
-    this.parameter = parameter; // e.g., "x", "y", "rotation", "scale_x", "exists"
-    this.keyframes = []; // Always kept sorted by time
-    this.parentAnimationData = parentAnimationData; // Reference to parent AnimationData for duration updates
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-  }
-
-  addKeyframe(keyframe) {
-    // Time resolution based on framerate - half a frame's duration
-    // This can be exposed via UI later
-    const framerate = context.config?.framerate || 24;
-    const timeResolution = (1 / framerate) / 2;
-
-    // Check if there's already a keyframe within the time resolution
-    const existingKeyframe = this.getKeyframeAtTime(keyframe.time, timeResolution);
-
-    if (existingKeyframe) {
-      // Update the existing keyframe's value instead of adding a new one
-      existingKeyframe.value = keyframe.value;
-      existingKeyframe.interpolation = keyframe.interpolation;
-      if (keyframe.easeIn) existingKeyframe.easeIn = keyframe.easeIn;
-      if (keyframe.easeOut) existingKeyframe.easeOut = keyframe.easeOut;
-    } else {
-      // Add new keyframe
-      this.keyframes.push(keyframe);
-      // Keep sorted by time
-      this.keyframes.sort((a, b) => a.time - b.time);
-    }
-
-    // Update animation duration after adding keyframe
-    if (this.parentAnimationData) {
-      this.parentAnimationData.updateDuration();
-    }
-  }
-
-  removeKeyframe(keyframe) {
-    const index = this.keyframes.indexOf(keyframe);
-    if (index >= 0) {
-      this.keyframes.splice(index, 1);
-
-      // Update animation duration after removing keyframe
-      if (this.parentAnimationData) {
-        this.parentAnimationData.updateDuration();
-      }
-    }
-  }
-
-  getKeyframeAtTime(time, timeResolution = 0) {
-    if (this.keyframes.length === 0) return null;
-
-    // If no tolerance, use exact match with binary search
-    if (timeResolution === 0) {
-      let left = 0;
-      let right = this.keyframes.length - 1;
-
-      while (left <= right) {
-        const mid = Math.floor((left + right) / 2);
-        if (this.keyframes[mid].time === time) {
-          return this.keyframes[mid];
-        } else if (this.keyframes[mid].time < time) {
-          left = mid + 1;
-        } else {
-          right = mid - 1;
-        }
-      }
-      return null;
-    }
-
-    // With tolerance, find the closest keyframe within timeResolution
-    let left = 0;
-    let right = this.keyframes.length - 1;
-    let closest = null;
-    let closestDist = Infinity;
-
-    // Binary search to find the insertion point
-    while (left <= right) {
-      const mid = Math.floor((left + right) / 2);
-      const dist = Math.abs(this.keyframes[mid].time - time);
-
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = this.keyframes[mid];
-      }
-
-      if (this.keyframes[mid].time < time) {
-        left = mid + 1;
-      } else {
-        right = mid - 1;
-      }
-    }
-
-    // Also check adjacent keyframes for closest match
-    if (left < this.keyframes.length) {
-      const dist = Math.abs(this.keyframes[left].time - time);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = this.keyframes[left];
-      }
-    }
-    if (right >= 0) {
-      const dist = Math.abs(this.keyframes[right].time - time);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = this.keyframes[right];
-      }
-    }
-
-    return closestDist < timeResolution ? closest : null;
-  }
-
-  // Find the two keyframes that bracket the given time
-  getBracketingKeyframes(time) {
-    if (this.keyframes.length === 0) return { prev: null, next: null };
-    if (this.keyframes.length === 1) return { prev: this.keyframes[0], next: this.keyframes[0] };
-
-    // Binary search to find the last keyframe at or before time
-    let left = 0;
-    let right = this.keyframes.length - 1;
-    let prevIndex = -1;
-
-    while (left <= right) {
-      const mid = Math.floor((left + right) / 2);
-      if (this.keyframes[mid].time <= time) {
-        prevIndex = mid;  // This could be our answer
-        left = mid + 1;   // But check if there's a better one to the right
-      } else {
-        right = mid - 1;  // Time is too large, search left
-      }
-    }
-
-    // If time is before all keyframes
-    if (prevIndex === -1) {
-      return { prev: this.keyframes[0], next: this.keyframes[0], t: 0 };
-    }
-
-    // If time is after all keyframes
-    if (prevIndex === this.keyframes.length - 1) {
-      return { prev: this.keyframes[prevIndex], next: this.keyframes[prevIndex], t: 1 };
-    }
-
-    const prev = this.keyframes[prevIndex];
-    const next = this.keyframes[prevIndex + 1];
-    const t = (time - prev.time) / (next.time - prev.time);
-
-    return { prev, next, t };
-  }
-
-  interpolate(time) {
-    if (this.keyframes.length === 0) {
-      return null;
-    }
-
-    const { prev, next, t } = this.getBracketingKeyframes(time);
-
-    if (!prev || !next) {
-      return null;
-    }
-    if (prev === next) {
-      return prev.value;
-    }
-
-    // Handle different interpolation types
-    switch (prev.interpolation) {
-      case "step":
-      case "hold":
-        return prev.value;
-
-      case "linear":
-        // Simple linear interpolation
-        if (typeof prev.value === "number" && typeof next.value === "number") {
-          return prev.value + (next.value - prev.value) * t;
-        }
-        return prev.value;
-
-      case "bezier":
-        // Cubic bezier interpolation using control points
-        if (typeof prev.value === "number" && typeof next.value === "number") {
-          // Use ease-in/ease-out control points
-          const easedT = this.cubicBezierEase(t, prev.easeOut, next.easeIn);
-          return prev.value + (next.value - prev.value) * easedT;
-        }
-        return prev.value;
-
-      case "zero":
-        // Return 0 for the entire interval (used for inactive segments)
-        return 0;
-
-      default:
-        return prev.value;
-    }
-  }
-
-  // Cubic bezier easing function
-  cubicBezierEase(t, easeOut, easeIn) {
-    // Simplified cubic bezier for 0,0 -> easeOut -> easeIn -> 1,1
-    const u = 1 - t;
-    return 3 * u * u * t * easeOut.y +
-           3 * u * t * t * easeIn.y +
-           t * t * t;
-  }
-
-  // Display color for this curve in timeline (based on parameter type) - Phase 4
-  get displayColor() {
-    // Auto-determined from parameter name
-    if (this.parameter.endsWith('.x')) return '#7a00b3'  // purple
-    if (this.parameter.endsWith('.y')) return '#ff00ff'  // magenta
-    if (this.parameter.endsWith('.rotation')) return '#5555ff'  // blue
-    if (this.parameter.endsWith('.scale_x')) return '#ffaa00'  // orange
-    if (this.parameter.endsWith('.scale_y')) return '#ffff55'  // yellow
-    if (this.parameter.endsWith('.exists')) return '#55ff55'  // green
-    if (this.parameter.endsWith('.zOrder')) return '#55ffff'  // cyan
-    if (this.parameter.endsWith('.frameNumber')) return '#ff5555'  // red
-    return '#ffffff'  // default white
-  }
-
-  static fromJSON(json) {
-    const curve = new AnimationCurve(json.parameter, json.idx);
-    for (let kfJson of json.keyframes || []) {
-      curve.keyframes.push(Keyframe.fromJSON(kfJson));
-    }
-    return curve;
-  }
-
-  toJSON() {
-    return {
-      idx: this.idx,
-      parameter: this.parameter,
-      keyframes: this.keyframes.map(kf => kf.toJSON())
-    };
-  }
-}
-
-class AnimationData {
-  constructor(parentLayer = null, uuid = undefined) {
-    this.curves = {}; // parameter name -> AnimationCurve
-    this.duration = 0; // Duration in seconds (max time of all keyframes)
-    this.parentLayer = parentLayer; // Reference to parent Layer for updating segment keyframes
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-  }
-
-  getCurve(parameter) {
-    return this.curves[parameter];
-  }
-
-  getOrCreateCurve(parameter) {
-    if (!this.curves[parameter]) {
-      this.curves[parameter] = new AnimationCurve(parameter, undefined, this);
-    }
-    return this.curves[parameter];
-  }
-
-  addKeyframe(parameter, keyframe) {
-    const curve = this.getOrCreateCurve(parameter);
-    curve.addKeyframe(keyframe);
-  }
-
-  removeKeyframe(parameter, keyframe) {
-    const curve = this.curves[parameter];
-    if (curve) {
-      curve.removeKeyframe(keyframe);
-    }
-  }
-
-  removeCurve(parameter) {
-    delete this.curves[parameter];
-  }
-
-  setCurve(parameter, curve) {
-    // Set parent reference for duration tracking
-    curve.parentAnimationData = this;
-    this.curves[parameter] = curve;
-    // Update duration after adding curve with keyframes
-    this.updateDuration();
-  }
-
-  interpolate(parameter, time) {
-    const curve = this.curves[parameter];
-    if (!curve) return null;
-    return curve.interpolate(time);
-  }
-
-  // Get all animated values at a given time
-  getValuesAtTime(time) {
-    const values = {};
-    for (let parameter in this.curves) {
-      values[parameter] = this.curves[parameter].interpolate(time);
-    }
-    return values;
-  }
-
-  /**
-   * Update the duration based on all keyframes
-   * Called automatically when keyframes are added/removed
-   */
-  updateDuration() {
-    // Calculate max time from all keyframes in all curves
-    let maxTime = 0;
-    for (let parameter in this.curves) {
-      const curve = this.curves[parameter];
-      if (curve.keyframes && curve.keyframes.length > 0) {
-        const lastKeyframe = curve.keyframes[curve.keyframes.length - 1];
-        maxTime = Math.max(maxTime, lastKeyframe.time);
-      }
-    }
-
-    // Update this AnimationData's duration
-    this.duration = maxTime;
-
-    // If this layer belongs to a nested group, update the segment keyframes in the parent
-    if (this.parentLayer && this.parentLayer.parentObject) {
-      this.updateParentSegmentKeyframes();
-    }
-  }
-
-  /**
-   * Update segment keyframes in parent layer when this layer's duration changes
-   * This ensures that nested group segments automatically resize when internal animation is added
-   */
-  updateParentSegmentKeyframes() {
-    const parentObject = this.parentLayer.parentObject;
-
-    // Get the layer that contains this nested object (parentObject.parentLayer)
-    if (!parentObject.parentLayer || !parentObject.parentLayer.animationData) {
-      return;
-    }
-
-    const parentLayer = parentObject.parentLayer;
-
-    // Get the frameNumber curve for this nested object using the correct naming convention
-    const curveName = `child.${parentObject.idx}.frameNumber`;
-    const frameNumberCurve = parentLayer.animationData.getCurve(curveName);
-
-    if (!frameNumberCurve || frameNumberCurve.keyframes.length < 2) {
-      return;
-    }
-
-    // Update the last keyframe to match the new duration
-    const lastKeyframe = frameNumberCurve.keyframes[frameNumberCurve.keyframes.length - 1];
-    const newFrameValue = Math.ceil(this.duration * config.framerate) + 1; // +1 because frameNumber is 1-indexed
-    const newTime = this.duration;
-
-    // Only update if the time or value actually changed
-    if (lastKeyframe.value !== newFrameValue || lastKeyframe.time !== newTime) {
-      lastKeyframe.value = newFrameValue;
-      lastKeyframe.time = newTime;
-
-      // Re-sort keyframes in case the time change affects order
-      frameNumberCurve.keyframes.sort((a, b) => a.time - b.time);
-
-      // Don't recursively call updateDuration to avoid infinite loop
-    }
-  }
-
-  static fromJSON(json, parentLayer = null) {
-    const animData = new AnimationData(parentLayer, json.idx);
-    for (let param in json.curves || {}) {
-      const curve = AnimationCurve.fromJSON(json.curves[param]);
-      curve.parentAnimationData = animData; // Restore parent reference
-      animData.curves[param] = curve;
-    }
-    // Recalculate duration after loading all curves
-    animData.updateDuration();
-    return animData;
-  }
-
-  toJSON() {
-    const curves = {};
-    for (let param in this.curves) {
-      curves[param] = this.curves[param].toJSON();
-    }
-    return {
-      idx: this.idx,
-      curves: curves
-    };
-  }
-}
-
-class Layer extends Widget {
-  constructor(uuid, parentObject = null) {
-    super(0,0)
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-    this.name = "Layer";
-    // LEGACY: Keep frames array for backwards compatibility during migration
-    this.frames = [new Frame("keyframe", this.idx + "-F1")];
-    this.animationData = new AnimationData(this);
-    this.parentObject = parentObject; // Reference to parent GraphicsObject (for nested objects)
-    // this.frameNum = 0;
-    this.visible = true;
-    this.audible = true;
-    pointerList[this.idx] = this;
-    this.children = []
-    this.shapes = []
-  }
-  static fromJSON(json, parentObject = null) {
-    const layer = new Layer(json.idx, parentObject);
-    for (let i in json.children) {
-      const child = json.children[i];
-      const childObject = GraphicsObject.fromJSON(child);
-      childObject.parentLayer = layer;
-      layer.children.push(childObject);
-    }
-    layer.name = json.name;
-
-    // Load animation data if present (new system)
-    if (json.animationData) {
-      layer.animationData = AnimationData.fromJSON(json.animationData, layer);
-    }
-
-    // Load shapes if present
-    if (json.shapes) {
-      layer.shapes = json.shapes.map(shape => Shape.fromJSON(shape, layer));
-    }
-
-    // Load frames if present (old system - for backwards compatibility)
-    if (json.frames) {
-      layer.frames = [];
-      for (let i in json.frames) {
-        const frame = json.frames[i];
-        if (!frame) {
-          layer.frames.push(undefined)
-          continue;
-        }
-        if (frame.frameType=="keyframe") {
-          layer.frames.push(Frame.fromJSON(frame));
-        } else {
-          if (layer.frames[layer.frames.length-1]) {
-            if (frame.frameType == "motion") {
-              layer.frames[layer.frames.length-1].keyTypes.add("motion")
-            } else if (frame.frameType == "shape") {
-              layer.frames[layer.frames.length-1].keyTypes.add("shape")
-            }
-          }
-          layer.frames.push(undefined)
-        }
-      }
-    }
-
-    layer.visible = json.visible;
-    layer.audible = json.audible;
-
-    return layer;
-  }
-  toJSON(randomizeUuid = false) {
-    const json = {};
-    json.type = "Layer";
-    if (randomizeUuid) {
-      json.idx = uuidv4();
-      json.name = this.name + " copy";
-    } else {
-      json.idx = this.idx;
-      json.name = this.name;
-    }
-    json.children = [];
-    let idMap = {}
-    for (let child of this.children) {
-      let childJson = child.toJSON(randomizeUuid)
-      idMap[child.idx] = childJson.idx
-      json.children.push(childJson);
-    }
-
-    // Serialize animation data (new system)
-    json.animationData = this.animationData.toJSON();
-
-    // If randomizing UUIDs, update the curve parameter keys to use new child IDs
-    if (randomizeUuid && json.animationData.curves) {
-      const newCurves = {};
-      for (let paramKey in json.animationData.curves) {
-        // paramKey format: "childId.property"
-        const parts = paramKey.split('.');
-        if (parts.length >= 2) {
-          const oldChildId = parts[0];
-          const property = parts.slice(1).join('.');
-          if (oldChildId in idMap) {
-            const newParamKey = `${idMap[oldChildId]}.${property}`;
-            newCurves[newParamKey] = json.animationData.curves[paramKey];
-            newCurves[newParamKey].parameter = newParamKey;
-          } else {
-            newCurves[paramKey] = json.animationData.curves[paramKey];
-          }
-        } else {
-          newCurves[paramKey] = json.animationData.curves[paramKey];
-        }
-      }
-      json.animationData.curves = newCurves;
-    }
-
-    // Serialize shapes
-    json.shapes = this.shapes.map(shape => shape.toJSON(randomizeUuid));
-
-    // Serialize frames (old system - for backwards compatibility)
-    if (this.frames) {
-      json.frames = [];
-      for (let frame of this.frames) {
-        if (frame) {
-          let frameJson = frame.toJSON(randomizeUuid)
-          for (let key in frameJson.keys) {
-            if (key in idMap) {
-              frameJson.keys[idMap[key]] = frameJson.keys[key]
-            }
-          }
-          json.frames.push(frameJson);
-        } else {
-          json.frames.push(undefined)
-        }
-      }
-    }
-
-    json.visible = this.visible;
-    json.audible = this.audible;
-    return json;
-  }
-  // Get all animated property values for all children at a given time
-  getAnimatedState(time) {
-    const state = {
-      shapes: [...this.shapes],  // Base shapes from layer
-      childStates: {}            // Animated states for each child GraphicsObject
-    };
-
-    // For each child, get its animated properties at this time
-    for (let child of this.children) {
-      const childState = {};
-
-      // Animatable properties for GraphicsObjects
-      const properties = ['x', 'y', 'rotation', 'scale_x', 'scale_y', 'exists', 'shapeIndex'];
-
-      for (let prop of properties) {
-        const paramKey = `${child.idx}.${prop}`;
-        const value = this.animationData.interpolate(paramKey, time);
-
-        if (value !== null) {
-          childState[prop] = value;
-        }
-      }
-
-      if (Object.keys(childState).length > 0) {
-        state.childStates[child.idx] = childState;
-      }
-    }
-
-    return state;
-  }
-
-  // Helper method to add a keyframe for a child's property
-  addKeyframeForChild(childId, property, time, value, interpolation = "linear") {
-    const paramKey = `${childId}.${property}`;
-    const keyframe = new Keyframe(time, value, interpolation);
-    this.animationData.addKeyframe(paramKey, keyframe);
-    return keyframe;
-  }
-
-  // Helper method to remove a keyframe
-  removeKeyframeForChild(childId, property, keyframe) {
-    const paramKey = `${childId}.${property}`;
-    this.animationData.removeKeyframe(paramKey, keyframe);
-  }
-
-  // Helper method to get all keyframes for a child's property
-  getKeyframesForChild(childId, property) {
-    const paramKey = `${childId}.${property}`;
-    const curve = this.animationData.getCurve(paramKey);
-    return curve ? curve.keyframes : [];
-  }
-
-  /**
-   * Add a shape to this layer at the given time
-   * Creates AnimationData keyframes for exists, zOrder, and shapeIndex
-   */
-  addShape(shape, time, sendToBack = false) {
-    // Add to shapes array
-    this.shapes.push(shape);
-
-    // Determine zOrder
-    let zOrder;
-    if (sendToBack) {
-      zOrder = 0;
-      // Increment zOrder for all existing shapes at this time
-      for (let existingShape of this.shapes) {
-        if (existingShape !== shape) {
-          let existingZOrderCurve = this.animationData.curves[`shape.${existingShape.shapeId}.zOrder`];
-          if (existingZOrderCurve) {
-            for (let kf of existingZOrderCurve.keyframes) {
-              if (kf.time === time) {
-                kf.value += 1;
-              }
-            }
-          }
-        }
-      }
-    } else {
-      zOrder = this.shapes.length - 1;
-    }
-
-    // Add AnimationData keyframes
-    this.animationData.addKeyframe(`shape.${shape.shapeId}.exists`, new Keyframe(time, 1, "hold"));
-    this.animationData.addKeyframe(`shape.${shape.shapeId}.zOrder`, new Keyframe(time, zOrder, "hold"));
-    this.animationData.addKeyframe(`shape.${shape.shapeId}.shapeIndex`, new Keyframe(time, shape.shapeIndex, "linear"));
-  }
-
-  /**
-   * Remove a specific shape instance from this layer
-   * Leaves a "hole" in shapeIndex values so the shape can be restored later
-   */
-  removeShape(shape) {
-    const shapeIndex = this.shapes.indexOf(shape);
-    if (shapeIndex < 0) return;
-
-    const shapeId = shape.shapeId;
-    const removedShapeIndex = shape.shapeIndex;
-
-    // Remove from array
-    this.shapes.splice(shapeIndex, 1);
-
-    // Get shapeIndex curve
-    const shapeIndexCurve = this.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
-    if (shapeIndexCurve) {
-      // Remove keyframes that point to this shapeIndex
-      const keyframesToRemove = shapeIndexCurve.keyframes.filter(kf => kf.value === removedShapeIndex);
-      for (let kf of keyframesToRemove) {
-        shapeIndexCurve.removeKeyframe(kf);
-      }
-      // Note: We intentionally leave a "hole" at this shapeIndex value
-      // so the shape can be restored with the same index if undeleted
-    }
-  }
-
-  getFrame(num) {
-    if (this.frames[num]) {
-      if (this.frames[num].frameType == "keyframe") {
-        return this.frames[num];
-      } else if (this.frames[num].frameType == "motion") {
-        let frameKeys = {};
-        let prevFrame = this.frames[num].prev;
-        let nextFrame = this.frames[num].next;
-        const t =
-          (num - this.frames[num].prevIndex) /
-          (this.frames[num].nextIndex - this.frames[num].prevIndex);
-        for (let key in prevFrame?.keys) {
-          frameKeys[key] = {};
-          let prevKeyDict = prevFrame.keys[key];
-          let nextKeyDict = nextFrame.keys[key];
-          for (let prop in prevKeyDict) {
-            frameKeys[key][prop] =
-              (1 - t) * prevKeyDict[prop] + t * nextKeyDict[prop];
-          }
-        }
-        let frame = new Frame("motion", "temp");
-        frame.keys = frameKeys;
-        return frame;
-      } else if (this.frames[num].frameType == "shape") {
-        let prevFrame = this.frames[num].prev;
-        let nextFrame = this.frames[num].next;
-        const t =
-          (num - this.frames[num].prevIndex) /
-          (this.frames[num].nextIndex - this.frames[num].prevIndex);
-        let shapes = [];
-        for (let shape1 of prevFrame?.shapes) {
-          if (shape1.curves.length == 0) continue;
-          let shape2 = undefined;
-          for (let i of nextFrame.shapes) {
-            if (shape1.shapeId == i.shapeId) {
-              shape2 = i;
-            }
-          }
-          if (shape2 != undefined) {
-            let path1 = [
-              {
-                type: "M",
-                x: shape1.curves[0].points[0].x,
-                y: shape1.curves[0].points[0].y,
-              },
-            ];
-            for (let curve of shape1.curves) {
-              path1.push({
-                type: "C",
-                x1: curve.points[1].x,
-                y1: curve.points[1].y,
-                x2: curve.points[2].x,
-                y2: curve.points[2].y,
-                x: curve.points[3].x,
-                y: curve.points[3].y,
-              });
-            }
-            let path2 = [];
-            if (shape2.curves.length > 0) {
-              path2.push({
-                type: "M",
-                x: shape2.curves[0].points[0].x,
-                y: shape2.curves[0].points[0].y,
-              });
-              for (let curve of shape2.curves) {
-                path2.push({
-                  type: "C",
-                  x1: curve.points[1].x,
-                  y1: curve.points[1].y,
-                  x2: curve.points[2].x,
-                  y2: curve.points[2].y,
-                  x: curve.points[3].x,
-                  y: curve.points[3].y,
-                });
-              }
-            }
-            const interpolator = d3.interpolatePathCommands(path1, path2);
-            let current = interpolator(t);
-            let curves = [];
-            let start = current.shift();
-            let { x, y } = start;
-            for (let curve of current) {
-              curves.push(
-                new Bezier(
-                  x,
-                  y,
-                  curve.x1,
-                  curve.y1,
-                  curve.x2,
-                  curve.y2,
-                  curve.x,
-                  curve.y,
-                ),
-              );
-              x = curve.x;
-              y = curve.y;
-            }
-            let lineWidth = lerp(shape1.lineWidth, shape2.lineWidth, t);
-            let strokeStyle = lerpColor(
-              shape1.strokeStyle,
-              shape2.strokeStyle,
-              t,
-            );
-            let fillStyle;
-            if (!shape1.fillImage) {
-              fillStyle = lerpColor(shape1.fillStyle, shape2.fillStyle, t);
-            }
-            shapes.push(
-              new TempShape(
-                start.x,
-                start.y,
-                curves,
-                shape1.lineWidth,
-                shape1.stroked,
-                shape1.filled,
-                strokeStyle,
-                fillStyle,
-              ),
-            );
-          }
-        }
-        let frame = new Frame("shape", "temp");
-        frame.shapes = shapes;
-        return frame;
-      } else {
-        for (let i = Math.min(num, this.frames.length - 1); i >= 0; i--) {
-          if (this.frames[i]?.frameType == "keyframe") {
-            let tempFrame = this.frames[i].copy("tempFrame");
-            tempFrame.frameType = "normal";
-            return tempFrame;
-          }
-        }
-      }
-    } else {
-      for (let i = Math.min(num, this.frames.length - 1); i >= 0; i--) {
-        // if (this.frames[i].frameType == "keyframe") {
-        //   let tempFrame = this.frames[i].copy("tempFrame")
-        //   tempFrame.frameType = "normal"
-        return tempFrame;
-        // }
-      }
-    }
-  }
-  getLatestFrame(num) {
-    for (let i = num; i >= 0; i--) {
-      if (this.frames[i]?.exists) {
-        return this.getFrame(i);
-      }
-    }
-  }
-  copy(idx) {
-    let newLayer = new Layer(idx.slice(0, 8) + this.idx.slice(8));
-    let idxMapping = {};
-    for (let child of this.children) {
-      let newChild = child.copy(idx);
-      idxMapping[child.idx] = newChild.idx;
-      newLayer.children.push(newChild);
-    }
-    newLayer.frames = [];
-    for (let frame of this.frames) {
-      let newFrame = frame.copy(idx);
-      newFrame.keys = {};
-      for (let key in frame.keys) {
-        newFrame.keys[idxMapping[key]] = structuredClone(frame.keys[key]);
-      }
-      newLayer.frames.push(newFrame);
-    }
-    return newLayer;
-  }
-  addFrame(num, frame, addedFrames) {
-    // let updateDest = undefined;
-    // if (!this.frames[num]) {
-    //   for (const [index, idx] of Object.entries(addedFrames)) {
-    //     if (!this.frames[index]) {
-    //       this.frames[index] = new Frame("normal", idx);
-    //     }
-    //   }
-    // } else {
-    //   if (this.frames[num].frameType == "motion") {
-    //     updateDest = "motion";
-    //   } else if (this.frames[num].frameType == "shape") {
-    //     updateDest = "shape";
-    //   }
-    // }
-    this.frames[num] = frame;
-    // if (updateDest) {
-    //   this.updateFrameNextAndPrev(num - 1, updateDest);
-    //   this.updateFrameNextAndPrev(num + 1, updateDest);
-    // }
-  }
-  addOrChangeFrame(num, frameType, uuid, addedFrames) {
-    let latestFrame = this.getLatestFrame(num);
-    let newKeyframe = new Frame(frameType, uuid);
-    for (let key in latestFrame.keys) {
-      newKeyframe.keys[key] = structuredClone(latestFrame.keys[key]);
-    }
-    for (let shape of latestFrame.shapes) {
-      newKeyframe.shapes.push(shape.copy(uuid));
-    }
-    this.addFrame(num, newKeyframe, addedFrames);
-  }
-  deleteFrame(uuid, destinationType, replacementUuid) {
-    let frame = pointerList[uuid];
-    let i = this.frames.indexOf(frame);
-    if (i != -1) {
-      if (destinationType == undefined) {
-        // Determine destination type from surrounding frames
-        const prevFrame = this.frames[i - 1];
-        const nextFrame = this.frames[i + 1];
-        const prevType = prevFrame ? prevFrame.frameType : null;
-        const nextType = nextFrame ? nextFrame.frameType : null;
-        if (prevType === "motion" || nextType === "motion") {
-          destinationType = "motion";
-        } else if (prevType === "shape" || nextType === "shape") {
-          destinationType = "shape";
-        } else if (prevType !== null && nextType !== null) {
-          destinationType = "normal";
-        } else {
-          destinationType = "none";
-        }
-      }
-      if (destinationType == "none") {
-        delete this.frames[i];
-      } else {
-        this.frames[i] = this.frames[i].copy(replacementUuid);
-        this.frames[i].frameType = destinationType;
-        this.updateFrameNextAndPrev(i, destinationType);
-      }
-    }
-  }
-  updateFrameNextAndPrev(num, frameType, lastBefore, firstAfter) {
-    if (!this.frames[num] || this.frames[num].frameType == "keyframe") return;
-    if (lastBefore == undefined || firstAfter == undefined) {
-      let { lastKeyframeBefore, firstKeyframeAfter } = getKeyframesSurrounding(
-        this.frames,
-        num,
-      );
-      lastBefore = lastKeyframeBefore;
-      firstAfter = firstKeyframeAfter;
-    }
-    for (let i = lastBefore + 1; i < firstAfter; i++) {
-      this.frames[i].frameType = frameType;
-      this.frames[i].prev = this.frames[lastBefore];
-      this.frames[i].next = this.frames[firstAfter];
-      this.frames[i].prevIndex = lastBefore;
-      this.frames[i].nextIndex = firstAfter;
-    }
-  }
-  toggleVisibility() {
-    this.visible = !this.visible;
-    updateUI();
-    updateMenu();
-    updateLayers();
-  }
-  getFrameValue(n) {
-    const valueAtN = this.frames[n];
-    if (valueAtN !== undefined) {
-        return { valueAtN, prev: null, next: null, prevIndex: null, nextIndex: null };
-    }
-    let prev = n - 1;
-    let next = n + 1;
-
-    while (prev >= 0 && this.frames[prev] === undefined) {
-        prev--;
-    }
-    while (next < this.frames.length && this.frames[next] === undefined) {
-        next++;
-    }
-
-    return {
-        valueAtN: undefined,
-        prev: prev >= 0 ? this.frames[prev] : null,
-        next: next < this.frames.length ? this.frames[next] : null,
-        prevIndex: prev >= 0 ? prev : null,
-        nextIndex: next < this.frames.length ? next : null
-    };
-  }
-
-  // Get all shapes that exist at the given time
-  getVisibleShapes(time) {
-    const visibleShapes = [];
-
-    // Calculate tolerance based on framerate (half a frame)
-    const halfFrameDuration = 0.5 / config.framerate;
-
-    // Group shapes by shapeId
-    const shapesByShapeId = new Map();
-    for (let shape of this.shapes) {
-      if (shape instanceof TempShape) continue;
-      if (!shapesByShapeId.has(shape.shapeId)) {
-        shapesByShapeId.set(shape.shapeId, []);
-      }
-      shapesByShapeId.get(shape.shapeId).push(shape);
-    }
-
-    // For each logical shape (shapeId), determine which version to return for EDITING
-    for (let [shapeId, shapes] of shapesByShapeId) {
-      // Check if this logical shape exists at current time
-      let existsValue = this.animationData.interpolate(`shape.${shapeId}.exists`, time);
-      if (existsValue === null || existsValue <= 0) continue;
-
-      // Get shapeIndex curve
-      const shapeIndexCurve = this.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
-
-      if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
-        // No shapeIndex curve, return shape with index 0
-        const shape = shapes.find(s => s.shapeIndex === 0);
-        if (shape) {
-          visibleShapes.push(shape);
-        }
-        continue;
-      }
-
-      // Find bracketing keyframes
-      const { prev: prevKf, next: nextKf } = shapeIndexCurve.getBracketingKeyframes(time);
-
-      // Get interpolated shapeIndex value
-      let shapeIndexValue = shapeIndexCurve.interpolate(time);
-      if (shapeIndexValue === null) shapeIndexValue = 0;
-
-      // Check if we're at a keyframe (within half a frame)
-      const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < halfFrameDuration;
-      const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < halfFrameDuration;
-
-      if (atPrevKeyframe) {
-        // At previous keyframe - return that version for editing
-        const shape = shapes.find(s => s.shapeIndex === prevKf.value);
-        if (shape) visibleShapes.push(shape);
-      } else if (atNextKeyframe) {
-        // At next keyframe - return that version for editing
-        const shape = shapes.find(s => s.shapeIndex === nextKf.value);
-        if (shape) visibleShapes.push(shape);
-      } else if (prevKf && prevKf.interpolation === 'hold') {
-        // Between keyframes but using "hold" interpolation - no morphing
-        // Return the previous keyframe's shape since that's what's shown
-        const shape = shapes.find(s => s.shapeIndex === prevKf.value);
-        if (shape) visibleShapes.push(shape);
-      }
-      // Otherwise: between keyframes with morphing, return nothing (can't edit a morph)
-    }
-
-    return visibleShapes;
-  }
-
-  draw(ctx) {
-    // super.draw(ctx)
-    if (!this.visible) return;
-
-    let cxt = {...context}
-    cxt.ctx = ctx
-
-    // Draw shapes using AnimationData curves for exists, zOrder, and shape tweening
-    let currentTime = context.activeObject?.currentTime || 0;
-
-    // Group shapes by shapeId for tweening support
-    const shapesByShapeId = new Map();
-    for (let shape of this.shapes) {
-      if (shape instanceof TempShape) continue;
-      if (!shapesByShapeId.has(shape.shapeId)) {
-        shapesByShapeId.set(shape.shapeId, []);
-      }
-      shapesByShapeId.get(shape.shapeId).push(shape);
-    }
-
-    // Process each logical shape (shapeId)
-    let visibleShapes = [];
-    for (let [shapeId, shapes] of shapesByShapeId) {
-      // Check if this logical shape exists at current time
-      let existsValue = this.animationData.interpolate(`shape.${shapeId}.exists`, currentTime);
-      if (existsValue === null || existsValue <= 0) continue;
-
-      // Get z-order
-      let zOrder = this.animationData.interpolate(`shape.${shapeId}.zOrder`, currentTime);
-
-      // Get shapeIndex curve and surrounding keyframes
-      const shapeIndexCurve = this.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
-      if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
-        // No shapeIndex curve, just show shape with index 0
-        const shape = shapes.find(s => s.shapeIndex === 0);
-        if (shape) {
-          visibleShapes.push({ shape, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape) });
-        }
-        continue;
-      }
-
-      // Find surrounding keyframes
-      const { prev: prevKf, next: nextKf } = getKeyframesSurrounding(shapeIndexCurve.keyframes, currentTime);
-
-      // Get interpolated value
-      let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
-      if (shapeIndexValue === null) shapeIndexValue = 0;
-
-      // Sort shape versions by shapeIndex
-      shapes.sort((a, b) => a.shapeIndex - b.shapeIndex);
-
-      // Determine whether to morph based on whether interpolated value equals a keyframe value
-      // Check if we're at either the previous or next keyframe value (no morphing needed)
-      const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < 0.001;
-      const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < 0.001;
-
-      if (atPrevKeyframe || atNextKeyframe) {
-        // No morphing - display the shape at the keyframe value
-        const targetValue = atNextKeyframe ? nextKf.value : prevKf.value;
-        const shape = shapes.find(s => s.shapeIndex === targetValue);
-        if (shape) {
-          visibleShapes.push({ shape, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape) });
-        }
-      } else if (prevKf && nextKf && prevKf.value !== nextKf.value) {
-        // Morph between shapes specified by surrounding keyframes
-        const shape1 = shapes.find(s => s.shapeIndex === prevKf.value);
-        const shape2 = shapes.find(s => s.shapeIndex === nextKf.value);
-
-        if (shape1 && shape2) {
-          // Calculate t based on time position between keyframes
-          const t = (currentTime - prevKf.time) / (nextKf.time - prevKf.time);
-          const morphedShape = shape1.lerpShape(shape2, t);
-          visibleShapes.push({ shape: morphedShape, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape1) || context.shapeselection.includes(shape2) });
-        } else if (shape1) {
-          visibleShapes.push({ shape: shape1, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape1) });
-        } else if (shape2) {
-          visibleShapes.push({ shape: shape2, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape2) });
-        }
-      } else if (nextKf) {
-        // Only next keyframe exists, show that shape
-        const shape = shapes.find(s => s.shapeIndex === nextKf.value);
-        if (shape) {
-          visibleShapes.push({ shape, zOrder: zOrder || 0, selected: context.shapeselection.includes(shape) });
-        }
-      }
-    }
-
-    // Sort by zOrder (lowest first = back, highest last = front)
-    visibleShapes.sort((a, b) => a.zOrder - b.zOrder);
-
-    // Draw sorted shapes
-    for (let { shape, selected } of visibleShapes) {
-      cxt.selected = selected;
-      shape.draw(cxt);
-    }
-
-    // Draw children (GraphicsObjects) using AnimationData curves
-    for (let child of this.children) {
-      // Check if child exists at current time using AnimationData
-      const existsValue = this.animationData.interpolate(`object.${child.idx}.exists`, currentTime);
-      if (existsValue === null || existsValue <= 0) continue;
-
-      // Get child properties from AnimationData curves
-      const childX = this.animationData.interpolate(`object.${child.idx}.x`, currentTime);
-      const childY = this.animationData.interpolate(`object.${child.idx}.y`, currentTime);
-      const childRotation = this.animationData.interpolate(`object.${child.idx}.rotation`, currentTime);
-      const childScaleX = this.animationData.interpolate(`object.${child.idx}.scale_x`, currentTime);
-      const childScaleY = this.animationData.interpolate(`object.${child.idx}.scale_y`, currentTime);
-
-      // Apply properties if they exist in AnimationData
-      if (childX !== null) child.x = childX;
-      if (childY !== null) child.y = childY;
-      if (childRotation !== null) child.rotation = childRotation;
-      if (childScaleX !== null) child.scale_x = childScaleX;
-      if (childScaleY !== null) child.scale_y = childScaleY;
-
-      // Draw the child if not in objectStack
-      if (!context.objectStack.includes(child)) {
-        const transform = ctx.getTransform();
-        ctx.translate(child.x, child.y);
-        ctx.scale(child.scale_x, child.scale_y);
-        ctx.rotate(child.rotation);
-        child.draw(ctx);
-
-        // Draw selection outline if selected
-        if (context.selection.includes(child)) {
-          ctx.lineWidth = 1;
-          ctx.strokeStyle = "#00ffff";
-          ctx.beginPath();
-          let bbox = child.bbox();
-          ctx.rect(bbox.x.min - child.x, bbox.y.min - child.y, bbox.x.max - bbox.x.min, bbox.y.max - bbox.y.min);
-          ctx.stroke();
-        }
-        ctx.setTransform(transform);
-      }
-    }
-    // Draw activeShape regardless of whether frame exists
-    if (this.activeShape) {
-      console.log("Layer.draw: Drawing activeShape", this.activeShape);
-      this.activeShape.draw(cxt)
-      console.log("Layer.draw: Drew activeShape");
-    }
-  }
-  bbox() {
-    let bbox = super.bbox();
-    let currentTime = context.activeObject?.currentTime || 0;
-
-    // Get visible shapes at current time using AnimationData
-    const visibleShapes = this.getVisibleShapes(currentTime);
-
-    if (visibleShapes.length > 0 && bbox === undefined) {
-      bbox = structuredClone(visibleShapes[0].boundingBox);
-    }
-    for (let shape of visibleShapes) {
-      growBoundingBox(bbox, shape.boundingBox);
-    }
-    return bbox;
-  }
-  mousedown(x, y) {
-    console.log("Layer.mousedown called - this:", this.name, "activeLayer:", context.activeLayer?.name, "mode:", mode);
-    const mouse = {x: x, y: y}
-    if (this==context.activeLayer) {
-      console.log("This IS the active layer");
-      switch(mode) {
-        case "rectangle":
-        case "ellipse":
-        case "draw":
-          console.log("Creating shape for mode:", mode);
-          this.clicked = true
-          this.activeShape = new Shape(x, y, context, this, uuidv4())
-          this.lastMouse = mouse;
-          console.log("Shape created:", this.activeShape);
-          break;
-        case "select":
-        case "transform":
-          break;
-        case "paint_bucket":
-          debugCurves = [];
-          debugPoints = [];
-          let epsilon = context.fillGaps;
-          let regionPoints;
-
-          // First, see if there's an existing shape to change the color of
-          let currentTime = context.activeObject?.currentTime || 0;
-          let visibleShapes = this.getVisibleShapes(currentTime);
-          let pointShape = getShapeAtPoint(mouse, visibleShapes);
-
-          if (pointShape) {
-            actions.colorShape.create(pointShape, context.fillStyle);
-            break;
-          }
-
-          // We didn't find an existing region to paintbucket, see if we can make one
-          try {
-            regionPoints = floodFillRegion(
-              mouse,
-              epsilon,
-              config.fileWidth,
-              config.fileHeight,
-              context,
-              debugPoints,
-              debugPaintbucket,
-              visibleShapes,
-            );
-          } catch (e) {
-            updateUI();
-            throw e;
-          }
-          if (regionPoints.length > 0 && regionPoints.length < 10) {
-            // probably a very small area, rerun with minimum epsilon
-            regionPoints = floodFillRegion(
-              mouse,
-              1,
-              config.fileWidth,
-              config.fileHeight,
-              context,
-              debugPoints,
-              false,
-              visibleShapes,
-            );
-          }
-          let points = [];
-          for (let point of regionPoints) {
-            points.push([point.x, point.y]);
-          }
-          let cxt = {
-            ...context,
-            fillShape: true,
-            strokeShape: false,
-            sendToBack: true,
-          };
-          let shape = new Shape(regionPoints[0].x, regionPoints[0].y, cxt, this);
-          shape.fromPoints(points, 1);
-          actions.addShape.create(context.activeObject, shape, cxt);
-          break;
-      }
-    }
-  }
-  mousemove(x, y) {
-    const mouse = {x: x, y: y}
-    if (this==context.activeLayer) {
-      switch (mode) {
-        case "draw":
-          if (this.activeShape) {
-            if (vectorDist(mouse, context.lastMouse) > minSegmentSize) {
-              this.activeShape.addLine(x, y);
-              this.lastMouse = mouse;
-            }
-          }
-          break;
-        case "rectangle":
-          if (this.activeShape) {
-            this.activeShape.clear();
-            this.activeShape.addLine(x, this.activeShape.starty);
-            this.activeShape.addLine(x, y);
-            this.activeShape.addLine(this.activeShape.startx, y);
-            this.activeShape.addLine(
-              this.activeShape.startx,
-              this.activeShape.starty,
-            );
-            this.activeShape.update();
-          }
-          break;
-        case "ellipse":
-          if (this.activeShape) {
-            let midX = (mouse.x + this.activeShape.startx) / 2;
-            let midY = (mouse.y + this.activeShape.starty) / 2;
-            let xDiff = (mouse.x - this.activeShape.startx) / 2;
-            let yDiff = (mouse.y - this.activeShape.starty) / 2;
-            let ellipseConst = 0.552284749831; // (4/3)*tan(pi/(2n)) where n=4
-            this.activeShape.clear();
-            this.activeShape.addCurve(
-              new Bezier(
-                midX,
-                this.activeShape.starty,
-                midX + ellipseConst * xDiff,
-                this.activeShape.starty,
-                mouse.x,
-                midY - ellipseConst * yDiff,
-                mouse.x,
-                midY,
-              ),
-            );
-            this.activeShape.addCurve(
-              new Bezier(
-                mouse.x,
-                midY,
-                mouse.x,
-                midY + ellipseConst * yDiff,
-                midX + ellipseConst * xDiff,
-                mouse.y,
-                midX,
-                mouse.y,
-              ),
-            );
-            this.activeShape.addCurve(
-              new Bezier(
-                midX,
-                mouse.y,
-                midX - ellipseConst * xDiff,
-                mouse.y,
-                this.activeShape.startx,
-                midY + ellipseConst * yDiff,
-                this.activeShape.startx,
-                midY,
-              ),
-            );
-            this.activeShape.addCurve(
-              new Bezier(
-                this.activeShape.startx,
-                midY,
-                this.activeShape.startx,
-                midY - ellipseConst * yDiff,
-                midX - ellipseConst * xDiff,
-                this.activeShape.starty,
-                midX,
-                this.activeShape.starty,
-              ),
-            );
-          }
-          break;
-      }
-    }
-  }
-  mouseup(x, y) {
-    console.log("Layer.mouseup called - mode:", mode, "activeShape:", this.activeShape);
-    this.clicked = false
-    if (this==context.activeLayer) {
-      switch (mode) {
-        case "draw":
-          if (this.activeShape) {
-            this.activeShape.addLine(x, y);
-            this.activeShape.simplify(context.simplifyMode);
-          }
-        case "rectangle":
-        case "ellipse":
-          if (this.activeShape) {
-            console.log("Adding shape via actions.addShape.create");
-            actions.addShape.create(context.activeObject, this.activeShape);
-            console.log("Shape added, clearing activeShape");
-            this.activeShape = undefined;
-          }
-          break;
-      }
-    }
-  }
-}
-
-class AudioLayer {
-  constructor(uuid, name) {
-    this.sounds = {};
-    this.track = new Tone.Part((time, sound) => {
-      console.log(this.sounds[sound]);
-      this.sounds[sound].player.start(time);
-    });
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-    if (!name) {
-      this.name = "Audio";
-    } else {
-      this.name = name;
-    }
-    this.audible = true;
-  }
-  static fromJSON(json) {
-    const audioLayer = new AudioLayer(json.idx, json.name);
-    // TODO: load audiolayer from json
-    audioLayer.sounds = {};
-    for (let id in json.sounds) {
-      const jsonSound = json.sounds[id]
-      const img = new Image();
-      img.className = "audioWaveform";
-      const player = new Tone.Player().toDestination();
-      player.load(jsonSound.src)
-      .then(() => {
-        generateWaveform(img, player.buffer, 50, 25, config.framerate);
-      })
-      .catch(error => {
-        // Handle any errors that occur during the load or waveform generation
-        console.error(error);
-      });
-
-      let soundObj = {
-        player: player,
-        start: jsonSound.start,
-        img: img,
-        src: jsonSound.src,
-        uuid: jsonSound.uuid
-      };
-      pointerList[jsonSound.uuid] = soundObj;
-      audioLayer.sounds[jsonSound.uuid] = soundObj;
-      // TODO: change start time
-      audioLayer.track.add(0, jsonSound.uuid);
-    }
-    audioLayer.audible = json.audible;
-    return audioLayer;
-  }
-  toJSON(randomizeUuid = false) {
-    console.log(this.sounds)
-    const json = {};
-    json.type = "AudioLayer";
-    // TODO: build json from audiolayer
-    json.sounds = {};
-    for (let id in this.sounds) {
-      const sound = this.sounds[id]
-      json.sounds[id] = {
-        start: sound.start,
-        src: sound.src,
-        uuid: sound.uuid
-      }
-    }
-    json.audible = this.audible;
-    if (randomizeUuid) {
-      json.idx = uuidv4();
-      json.name = this.name + " copy";
-    } else {
-      json.idx = this.idx;
-      json.name = this.name;
-    }
-    return json;
-  }
-  copy(idx) {
-    let newAudioLayer = new AudioLayer(
-      idx.slice(0, 8) + this.idx.slice(8),
-      this.name,
-    );
-    for (let soundIdx in this.sounds) {
-      let sound = this.sounds[soundIdx];
-      let newPlayer = new Tone.Player(sound.buffer()).toDestination();
-      let idx = this.idx.slice(0, 8) + soundIdx.slice(8);
-      let soundObj = {
-        player: newPlayer,
-        start: sound.start,
-      };
-      pointerList[idx] = soundObj;
-      newAudioLayer.sounds[idx] = soundObj;
-    }
-  }
-}
-
-class BaseShape {
-  constructor(startx, starty) {
-    this.startx = startx;
-    this.starty = starty;
-    this.curves = [];
-    this.regions = [];
-    this.boundingBox = {
-      x: { min: startx, max: starty },
-      y: { min: starty, max: starty },
-    };
-  }
-  recalculateBoundingBox() {
-    this.boundingBox = undefined;
-    for (let curve of this.curves) {
-      if (!this.boundingBox) {
-        this.boundingBox = curve.bbox();
-      }
-      growBoundingBox(this.boundingBox, curve.bbox());
-    }
-  }
-  draw(context) {
-    let ctx = context.ctx;
-    ctx.lineWidth = this.lineWidth;
-    ctx.lineCap = "round";
-
-    // Create a repeating pattern for indicating selected shapes
-    if (!this.patternCanvas) {
-      this.patternCanvas = document.createElement('canvas');
-      this.patternCanvas.width = 2;
-      this.patternCanvas.height = 2;
-      let patternCtx = this.patternCanvas.getContext('2d');
-      // Draw the pattern:
-      // black,       transparent,
-      // transparent, white
-      patternCtx.fillStyle = 'black';
-      patternCtx.fillRect(0, 0, 1, 1);
-      patternCtx.clearRect(1, 0, 1, 1);
-      patternCtx.clearRect(0, 1, 1, 1);
-      patternCtx.fillStyle = 'white';
-      patternCtx.fillRect(1, 1, 1, 1);
-    }
-    let pattern = ctx.createPattern(this.patternCanvas, 'repeat'); // repeat the pattern across the canvas
-
-    if (this.filled) {
-      ctx.beginPath();
-      if (this.fillImage && this.fillImage instanceof Element) {
-        let pat;
-        if (this.fillImage instanceof Element ||
-          Object.keys(this.fillImage).length !== 0) {
-          pat = ctx.createPattern(this.fillImage, "no-repeat");
-        } else {
-          pat = createMissingTexturePattern(ctx)
-        }
-        ctx.fillStyle = pat;
-      } else {
-        ctx.fillStyle = this.fillStyle;
-      }
-      if (context.debugColor) {
-        ctx.fillStyle = context.debugColor;
-      }
-      if (this.curves.length > 0) {
-        ctx.moveTo(this.curves[0].points[0].x, this.curves[0].points[0].y);
-        for (let curve of this.curves) {
-          ctx.bezierCurveTo(
-            curve.points[1].x,
-            curve.points[1].y,
-            curve.points[2].x,
-            curve.points[2].y,
-            curve.points[3].x,
-            curve.points[3].y,
-          );
-        }
-      }
-      ctx.fill();
-      if (context.selected) {
-        ctx.fillStyle = pattern
-        ctx.fill()
-      }
-    }
-    function drawCurve(curve, selected) {
-      ctx.strokeStyle = curve.color;
-      ctx.beginPath();
-      ctx.moveTo(curve.points[0].x, curve.points[0].y);
-      ctx.bezierCurveTo(
-        curve.points[1].x,
-        curve.points[1].y,
-        curve.points[2].x,
-        curve.points[2].y,
-        curve.points[3].x,
-        curve.points[3].y,
-      );
-      ctx.stroke();
-      if (selected) {
-        ctx.strokeStyle = pattern
-        ctx.stroke()
-      }
-    }
-    if (this.stroked && !context.debugColor) {
-      for (let curve of this.curves) {
-        drawCurve(curve, context.selected)
-
-        // // Debug, show curve control points
-        // ctx.beginPath()
-        // ctx.arc(curve.points[1].x,curve.points[1].y, 5, 0, 2*Math.PI)
-        // ctx.arc(curve.points[2].x,curve.points[2].y, 5, 0, 2*Math.PI)
-        // ctx.arc(curve.points[3].x,curve.points[3].y, 5, 0, 2*Math.PI)
-        // ctx.fill()
-      }
-    }
-    if (context.activeCurve && this==context.activeCurve.shape) {
-      drawCurve(context.activeCurve.current, true)
-    }
-    if (context.activeVertex && this==context.activeVertex.shape) {
-      const curves = {
-        ...context.activeVertex.current.startCurves,
-        ...context.activeVertex.current.endCurves
-      }
-      for (let i in curves) {
-        let curve = curves[i]
-        drawCurve(curve, true)
-      }
-      ctx.fillStyle = "#000000aa";
-        ctx.beginPath();
-        let vertexSize = 15 / context.zoomLevel;
-        ctx.rect(
-          context.activeVertex.current.point.x - vertexSize / 2,
-          context.activeVertex.current.point.y - vertexSize / 2,
-          vertexSize,
-          vertexSize,
-        );
-        ctx.fill();
-    }
-    // Debug, show quadtree
-    if (debugQuadtree && this.quadtree && !context.debugColor) {
-      this.quadtree.draw(ctx);
-    }
-  }
-  lerpShape(shape2, t) {
-    if (this.curves.length == 0) return this;
-    let path1 = [
-      {
-        type: "M",
-        x: this.curves[0].points[0].x,
-        y: this.curves[0].points[0].y,
-      },
-    ];
-    for (let curve of this.curves) {
-      path1.push({
-        type: "C",
-        x1: curve.points[1].x,
-        y1: curve.points[1].y,
-        x2: curve.points[2].x,
-        y2: curve.points[2].y,
-        x: curve.points[3].x,
-        y: curve.points[3].y,
-      });
-    }
-    let path2 = [];
-    if (shape2.curves.length > 0) {
-      path2.push({
-        type: "M",
-        x: shape2.curves[0].points[0].x,
-        y: shape2.curves[0].points[0].y,
-      });
-      for (let curve of shape2.curves) {
-        path2.push({
-          type: "C",
-          x1: curve.points[1].x,
-          y1: curve.points[1].y,
-          x2: curve.points[2].x,
-          y2: curve.points[2].y,
-          x: curve.points[3].x,
-          y: curve.points[3].y,
-        });
-      }
-    }
-    const interpolator = d3.interpolatePathCommands(path1, path2);
-    let current = interpolator(t);
-    let curves = [];
-    let start = current.shift();
-    let { x, y } = start;
-    let bezier;
-    for (let curve of current) {
-      bezier = new Bezier(
-        x,
-        y,
-        curve.x1,
-        curve.y1,
-        curve.x2,
-        curve.y2,
-        curve.x,
-        curve.y,
-      )
-      bezier.color = lerpColor(this.strokeStyle, shape2.strokeStyle)
-      curves.push(bezier);
-      x = curve.x;
-      y = curve.y;
-    }
-    let lineWidth = lerp(this.lineWidth, shape2.lineWidth, t);
-    let strokeStyle = lerpColor(
-      this.strokeStyle,
-      shape2.strokeStyle,
-      t,
-    );
-    let fillStyle;
-    if (!this.fillImage) {
-      fillStyle = lerpColor(this.fillStyle, shape2.fillStyle, t);
-    }
-    return new TempShape(
-      start.x,
-      start.y,
-      curves,
-      lineWidth,
-      this.stroked,
-      this.filled,
-      strokeStyle,
-      fillStyle,
-    )
-  }
-}
-
-class TempShape extends BaseShape {
-  constructor(
-    startx,
-    starty,
-    curves,
-    lineWidth,
-    stroked,
-    filled,
-    strokeStyle,
-    fillStyle,
-  ) {
-    super(startx, starty);
-    this.curves = curves;
-    this.lineWidth = lineWidth;
-    this.stroked = stroked;
-    this.filled = filled;
-    this.strokeStyle = strokeStyle;
-    this.fillStyle = fillStyle;
-    this.inProgress = false;
-    this.recalculateBoundingBox();
-  }
-}
-
-class Shape extends BaseShape {
-  constructor(startx, starty, context, parent, uuid = undefined, shapeId = undefined) {
-    super(startx, starty);
-    this.parent = parent; // Reference to parent Layer (required)
-    this.vertices = [];
-    this.triangles = [];
-    this.fillStyle = context.fillStyle;
-    this.fillImage = context.fillImage;
-    this.strokeStyle = context.strokeStyle;
-    this.lineWidth = context.lineWidth;
-    this.filled = context.fillShape;
-    this.stroked = context.strokeShape;
-    this.quadtree = new Quadtree(
-      { x: { min: 0, max: 500 }, y: { min: 0, max: 500 } },
-      4,
-    );
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-    if (!shapeId) {
-      this.shapeId = uuidv4();
-    } else {
-      this.shapeId = shapeId;
-    }
-    this.shapeIndex = 0;  // Default shape version index for tweening
-    pointerList[this.idx] = this;
-    this.regionIdx = 0;
-    this.inProgress = true;
-
-    // Timeline display settings (Phase 3)
-    this.showSegment = true  // Show segment bar in timeline
-    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
-    this.curvesHeight = 150  // Height in pixels when curves are expanded
-  }
-  static fromJSON(json, parent) {
-    let fillImage = undefined;
-    if (json.fillImage && Object.keys(json.fillImage).length !== 0) {
-      let img = new Image();
-      img.src = json.fillImage.src
-      fillImage = img
-    } else {
-      fillImage = {}
-    }
-    const shape = new Shape(
-      json.startx,
-      json.starty,
-      {
-        fillStyle: json.fillStyle,
-        fillImage: fillImage,
-        strokeStyle: json.strokeStyle,
-        lineWidth: json.lineWidth,
-        fillShape: json.filled,
-        strokeShape: json.stroked,
-      },
-      parent,
-      json.idx,
-      json.shapeId,
-    );
-    for (let curve of json.curves) {
-      shape.addCurve(Bezier.fromJSON(curve));
-    }
-    for (let region of json.regions) {
-      const curves = [];
-      for (let curve of region.curves) {
-        curves.push(Bezier.fromJSON(curve));
-      }
-      shape.regions.push({
-        idx: region.idx,
-        curves: curves,
-        fillStyle: region.fillStyle,
-        filled: region.filled,
-      });
-    }
-    // Load shapeIndex if present (for shape tweening)
-    if (json.shapeIndex !== undefined) {
-      shape.shapeIndex = json.shapeIndex;
-    }
-    return shape;
-  }
-  toJSON(randomizeUuid = false) {
-    const json = {};
-    json.type = "Shape";
-    json.startx = this.startx;
-    json.starty = this.starty;
-    json.fillStyle = this.fillStyle;
-    if (this.fillImage instanceof Element) {
-      json.fillImage = {
-        src: this.fillImage.src
-      }
-    }
-    json.strokeStyle = this.fillStyle;
-    json.lineWidth = this.lineWidth;
-    json.filled = this.filled;
-    json.stroked = this.stroked;
-    if (randomizeUuid) {
-      json.idx = uuidv4();
-    } else {
-      json.idx = this.idx;
-    }
-    json.shapeId = this.shapeId;
-    json.shapeIndex = this.shapeIndex;  // For shape tweening
-    json.curves = [];
-    for (let curve of this.curves) {
-      json.curves.push(curve.toJSON(randomizeUuid));
-    }
-    json.regions = [];
-    for (let region of this.regions) {
-      const curves = [];
-      for (let curve of region.curves) {
-        curves.push(curve.toJSON(randomizeUuid));
-      }
-      json.regions.push({
-        idx: region.idx,
-        curves: curves,
-        fillStyle: region.fillStyle,
-        filled: region.filled,
-      });
-    }
-    return json;
-  }
-  get segmentColor() {
-    return uuidToColor(this.idx);
-  }
-  addCurve(curve) {
-    if (curve.color == undefined) {
-      curve.color = context.strokeStyle;
-    }
-    this.curves.push(curve);
-    this.quadtree.insert(curve, this.curves.length - 1);
-    growBoundingBox(this.boundingBox, curve.bbox());
-  }
-  addLine(x, y) {
-    let lastpoint;
-    if (this.curves.length) {
-      lastpoint = this.curves[this.curves.length - 1].points[3];
-    } else {
-      lastpoint = { x: this.startx, y: this.starty };
-    }
-    let midpoint = { x: (x + lastpoint.x) / 2, y: (y + lastpoint.y) / 2 };
-    let curve = new Bezier(
-      lastpoint.x,
-      lastpoint.y,
-      midpoint.x,
-      midpoint.y,
-      midpoint.x,
-      midpoint.y,
-      x,
-      y,
-    );
-    curve.color = context.strokeStyle;
-    this.quadtree.insert(curve, this.curves.length - 1);
-    this.curves.push(curve);
-  }
-  bbox() {
-    return this.boundingBox;
-  }
-  clear() {
-    this.curves = [];
-    this.quadtree.clear();
-  }
-  copy(idx) {
-    let newShape = new Shape(
-      this.startx,
-      this.starty,
-      {},
-      this.parent,
-      idx.slice(0, 8) + this.idx.slice(8),
-      this.shapeId,
-    );
-    newShape.startx = this.startx;
-    newShape.starty = this.starty;
-    for (let curve of this.curves) {
-      let newCurve = new Bezier(
-        curve.points[0].x,
-        curve.points[0].y,
-        curve.points[1].x,
-        curve.points[1].y,
-        curve.points[2].x,
-        curve.points[2].y,
-        curve.points[3].x,
-        curve.points[3].y,
-      );
-      newCurve.color = curve.color;
-      newShape.addCurve(newCurve);
-    }
-    // TODO
-    // for (let vertex of this.vertices) {
-
-    // }
-    newShape.updateVertices();
-    newShape.fillStyle = this.fillStyle;
-    if (this.fillImage instanceof Element) {
-      newShape.fillImage = this.fillImage.cloneNode(true)
-    } else {
-      newShape.fillImage = this.fillImage;
-    }
-    newShape.strokeStyle = this.strokeStyle;
-    newShape.lineWidth = this.lineWidth;
-    newShape.filled = this.filled;
-    newShape.stroked = this.stroked;
-
-    return newShape;
-  }
-  fromPoints(points, error = 30) {
-    console.log(error);
-    this.curves = [];
-    let curves = fitCurve.fitCurve(points, error);
-    for (let curve of curves) {
-      let bezier = new Bezier(
-        curve[0][0],
-        curve[0][1],
-        curve[1][0],
-        curve[1][1],
-        curve[2][0],
-        curve[2][1],
-        curve[3][0],
-        curve[3][1],
-      );
-      this.curves.push(bezier);
-      this.quadtree.insert(bezier, this.curves.length - 1);
-    }
-    return this;
-  }
-  simplify(mode = "corners") {
-    this.quadtree.clear();
-    this.inProgress = false;
-    // Mode can be corners, smooth or auto
-    if (mode == "corners") {
-      let points = [{ x: this.startx, y: this.starty }];
-      for (let curve of this.curves) {
-        points.push(curve.points[3]);
-      }
-      // points = points.concat(this.curves)
-      let newpoints = simplifyPolyline(points, 10, false);
-      this.curves = [];
-      let lastpoint = newpoints.shift();
-      let midpoint;
-      for (let point of newpoints) {
-        midpoint = {
-          x: (lastpoint.x + point.x) / 2,
-          y: (lastpoint.y + point.y) / 2,
-        };
-        let bezier = new Bezier(
-          lastpoint.x,
-          lastpoint.y,
-          midpoint.x,
-          midpoint.y,
-          midpoint.x,
-          midpoint.y,
-          point.x,
-          point.y,
-        );
-        this.curves.push(bezier);
-        this.quadtree.insert(bezier, this.curves.length - 1);
-        lastpoint = point;
-      }
-    } else if (mode == "smooth") {
-      let error = 30;
-      let points = [[this.startx, this.starty]];
-      for (let curve of this.curves) {
-        points.push([curve.points[3].x, curve.points[3].y]);
-      }
-      this.fromPoints(points, error);
-    } else if (mode == "verbatim") {
-      // Just keep existing shape
-    }
-    let epsilon = 0.01;
-    let newCurves = [];
-    let intersectMap = {};
-    for (let i = 0; i < this.curves.length - 1; i++) {
-      // for (let j=i+1; j<this.curves.length; j++) {
-      for (let j of this.quadtree.query(this.curves[i].bbox())) {
-        if (i >= j) continue;
-        let intersects = this.curves[i].intersects(this.curves[j]);
-        if (intersects.length) {
-          intersectMap[i] ||= [];
-          intersectMap[j] ||= [];
-          for (let intersect of intersects) {
-            let [t1, t2] = intersect.split("/");
-            intersectMap[i].push(parseFloat(t1));
-            intersectMap[j].push(parseFloat(t2));
-          }
-        }
-      }
-    }
-    for (let lst in intersectMap) {
-      for (let i = 1; i < intersectMap[lst].length; i++) {
-        if (
-          Math.abs(intersectMap[lst][i] - intersectMap[lst][i - 1]) < epsilon
-        ) {
-          intersectMap[lst].splice(i, 1);
-          i--;
-        }
-      }
-    }
-    for (let i = this.curves.length - 1; i >= 0; i--) {
-      if (i in intersectMap) {
-        intersectMap[i].sort().reverse();
-        let remainingFraction = 1;
-        let remainingCurve = this.curves[i];
-        for (let t of intersectMap[i]) {
-          let split = remainingCurve.split(t / remainingFraction);
-          remainingFraction = t;
-          newCurves.push(split.right);
-          remainingCurve = split.left;
-        }
-        newCurves.push(remainingCurve);
-      } else {
-        newCurves.push(this.curves[i]);
-      }
-    }
-    for (let curve of newCurves) {
-      curve.color = context.strokeStyle;
-    }
-    newCurves.reverse();
-    this.curves = newCurves;
-  }
-  update() {
-    this.recalculateBoundingBox();
-    this.updateVertices();
-    if (this.curves.length) {
-      this.startx = this.curves[0].points[0].x;
-      this.starty = this.curves[0].points[0].y;
-    }
-    return [this];
-  }
-  getClockwiseCurves(point, otherPoints) {
-    // Returns array of {x, y, idx, angle}
-
-    let points = [];
-    for (let point of otherPoints) {
-      points.push({ ...this.vertices[point].point, idx: point });
-    }
-    // Add an angle property to each point using tan(angle) = y/x
-    const angles = points.map(({ x, y, idx }) => {
-      return {
-        x,
-        y,
-        idx,
-        angle: (Math.atan2(y - point.y, x - point.x) * 180) / Math.PI,
-      };
-    });
-    // Sort your points by angle
-    const pointsSorted = angles.sort((a, b) => a.angle - b.angle);
-    return pointsSorted;
-  }
-  translate(x, y) {
-    this.quadtree.clear()
-    let j=0;
-    for (let curve of this.curves) {
-      for (let i in curve.points) {
-        const point = curve.points[i];
-        curve.points[i] = { x: point.x + x, y: point.y + y };
-      }
-      this.quadtree.insert(curve, j)
-      j++;
-    }
-    this.update();
-  }
-  updateVertices() {
-    this.vertices = [];
-    let utils = Bezier.getUtils();
-    let epsilon = 1.5; // big epsilon whoa
-    let tooClose;
-    let i = 0;
-
-    let region = {
-      idx: `${this.idx}-r${this.regionIdx++}`,
-      curves: [],
-      fillStyle: context.fillStyle,
-      filled: context.fillShape,
-    };
-    pointerList[region.idx] = region;
-    this.regions = [region];
-    for (let curve of this.curves) {
-      this.regions[0].curves.push(curve);
-    }
-    if (this.regions[0].curves.length) {
-      if (
-        utils.dist(
-          this.regions[0].curves[0].points[0],
-          this.regions[0].curves[this.regions[0].curves.length - 1].points[3],
-        ) < epsilon
-      ) {
-        this.regions[0].filled = true;
-      }
-    }
-
-    // Generate vertices
-    for (let curve of this.curves) {
-      for (let index of [0, 3]) {
-        tooClose = false;
-        for (let vertex of this.vertices) {
-          if (utils.dist(curve.points[index], vertex.point) < epsilon) {
-            tooClose = true;
-            vertex[["startCurves", , , "endCurves"][index]][i] = curve;
-            break;
-          }
-        }
-        if (!tooClose) {
-          if (index == 0) {
-            this.vertices.push({
-              point: curve.points[index],
-              startCurves: { [i]: curve },
-              endCurves: {},
-            });
-          } else {
-            this.vertices.push({
-              point: curve.points[index],
-              startCurves: {},
-              endCurves: { [i]: curve },
-            });
-          }
-        }
-      }
-      i++;
-    }
-
-    let shapes = [this];
-    this.vertices.forEach((vertex, i) => {
-      for (let i = 0; i < Math.min(10, this.regions.length); i++) {
-        let region = this.regions[i];
-        let regionVertexCurves = [];
-        let vertexCurves = { ...vertex.startCurves, ...vertex.endCurves };
-        if (Object.keys(vertexCurves).length == 1) {
-          // endpoint
-          continue;
-        } else if (Object.keys(vertexCurves).length == 2) {
-          // path vertex, don't need to do anything
-          continue;
-        } else if (Object.keys(vertexCurves).length == 3) {
-          // T junction. Region doesn't change but might need to update curves?
-          // Skip for now.
-          continue;
-        } else if (Object.keys(vertexCurves).length == 4) {
-          // Intersection, split region in 2
-          for (let i in vertexCurves) {
-            let curve = vertexCurves[i];
-            if (region.curves.includes(curve)) {
-              regionVertexCurves.push(curve);
-            }
-          }
-          let start = region.curves.indexOf(regionVertexCurves[1]);
-          let end = region.curves.indexOf(regionVertexCurves[3]);
-          if (end > start) {
-            let newRegion = {
-              idx: `${this.idx}-r${this.regionIdx++}`, // TODO: generate this deterministically so that undo/redo works
-              curves: region.curves.splice(start, end - start),
-              fillStyle: region.fillStyle,
-              filled: true,
-            };
-            pointerList[newRegion.idx] = newRegion;
-            this.regions.push(newRegion);
-          }
-        } else {
-          // not sure how to handle vertices with more than 4 curves
-          console.log(
-            `Unexpected vertex with ${Object.keys(vertexCurves).length} curves!`,
-          );
-        }
-      }
-    });
-  }
-}
-
-class GraphicsObject extends Widget {
-  constructor(uuid) {
-    super(0, 0)
-    this.rotation = 0; // in radians
-    this.scale_x = 1;
-    this.scale_y = 1;
-    if (!uuid) {
-      this.idx = uuidv4();
-    } else {
-      this.idx = uuid;
-    }
-    pointerList[this.idx] = this;
-    this.name = this.idx;
-
-    this.currentFrameNum = 0; // LEGACY: kept for backwards compatibility
-    this.currentTime = 0; // New: continuous time for AnimationData curves
-    this.currentLayer = 0;
-    this.children = [new Layer(uuid + "-L1", this)];
-    // this.layers = [new Layer(uuid + "-L1")];
-    this.audioLayers = [];
-    // this.children = []
-
-    this.shapes = [];
-
-    // Parent reference for nested objects (set when added to a layer)
-    this.parentLayer = null
-
-    // Timeline display settings (Phase 3)
-    this.showSegment = true  // Show segment bar in timeline
-    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
-    this.curvesHeight = 150  // Height in pixels when curves are expanded
-
-    this._globalEvents.add("mousedown")
-    this._globalEvents.add("mousemove")
-    this._globalEvents.add("mouseup")
-  }
-  static fromJSON(json) {
-    const graphicsObject = new GraphicsObject(json.idx);
-    graphicsObject.x = json.x;
-    graphicsObject.y = json.y;
-    graphicsObject.rotation = json.rotation;
-    graphicsObject.scale_x = json.scale_x;
-    graphicsObject.scale_y = json.scale_y;
-    graphicsObject.name = json.name;
-    graphicsObject.currentFrameNum = json.currentFrameNum;
-    graphicsObject.currentLayer = json.currentLayer;
-    graphicsObject.children = [];
-    if (json.parent in pointerList) {
-      graphicsObject.parent = pointerList[json.parent]
-    }
-    for (let layer of json.layers) {
-      graphicsObject.layers.push(Layer.fromJSON(layer, graphicsObject));
-    }
-    for (let audioLayer of json.audioLayers) {
-      graphicsObject.audioLayers.push(AudioLayer.fromJSON(audioLayer));
-    }
-    return graphicsObject;
-  }
-  toJSON(randomizeUuid = false) {
-    const json = {};
-    json.type = "GraphicsObject";
-    json.x = this.x;
-    json.y = this.y;
-    json.rotation = this.rotation;
-    json.scale_x = this.scale_x;
-    json.scale_y = this.scale_y;
-    if (randomizeUuid) {
-      json.idx = uuidv4();
-      json.name = this.name + " copy";
-    } else {
-      json.idx = this.idx;
-      json.name = this.name;
-    }
-    json.currentFrameNum = this.currentFrameNum;
-    json.currentLayer = this.currentLayer;
-    json.layers = [];
-    json.parent = this.parent?.idx
-    for (let layer of this.layers) {
-      json.layers.push(layer.toJSON(randomizeUuid));
-    }
-    json.audioLayers = [];
-    for (let audioLayer of this.audioLayers) {
-      json.audioLayers.push(audioLayer.toJSON(randomizeUuid));
-    }
-    return json;
-  }
-  get activeLayer() {
-    return this.layers[this.currentLayer];
-  }
-  // get children() {
-  //   return this.activeLayer.children;
-  // }
-  get layers() {
-    return this.children
-  }
-
-  /**
-   * Get the total duration of this GraphicsObject's animation
-   * Returns the maximum duration across all layers
-   */
-  get duration() {
-    let maxDuration = 0;
-    for (let layer of this.layers) {
-      if (layer.animationData && layer.animationData.duration > maxDuration) {
-        maxDuration = layer.animationData.duration;
-      }
-    }
-    return maxDuration;
-  }
-  get allLayers() {
-    return [...this.audioLayers, ...this.layers];
-  }
-  get maxFrame() {
-    return (
-      Math.max(
-        ...this.layers.map((layer) => {
-          return (
-            layer.frames.findLastIndex((frame) => frame !== undefined) || -1
-          );
-        }),
-      ) + 1
-    );
-  }
-  get segmentColor() {
-    return uuidToColor(this.idx);
-  }
-  /**
-   * Set the current playback time in seconds
-   */
-  setTime(time) {
-    time = Math.max(0, time);
-    this.currentTime = time;
-
-    // Update legacy currentFrameNum for any remaining code that needs it
-    this.currentFrameNum = Math.floor(time * config.framerate);
-
-    // Update layer frameNum for legacy code
-    for (let layer of this.layers) {
-      layer.frameNum = this.currentFrameNum;
-    }
-  }
-
-  advanceFrame() {
-    const frameDuration = 1 / config.framerate;
-    this.setTime(this.currentTime + frameDuration);
-  }
-
-  decrementFrame() {
-    const frameDuration = 1 / config.framerate;
-    this.setTime(Math.max(0, this.currentTime - frameDuration));
-  }
-  bbox() {
-    let bbox;
-
-    // NEW: Include shapes from AnimationData system
-    let currentTime = this.currentTime || 0;
-    for (let layer of this.layers) {
-      for (let shape of layer.shapes) {
-        // Check if shape exists at current time
-        let existsValue = layer.animationData.interpolate(`shape.${shape.shapeId}.exists`, currentTime);
-        if (existsValue !== null && existsValue > 0) {
-          if (!bbox) {
-            bbox = structuredClone(shape.boundingBox);
-          } else {
-            growBoundingBox(bbox, shape.boundingBox);
-          }
-        }
-      }
-    }
-
-    // Include children
-    if (this.children.length > 0) {
-      if (!bbox) {
-        bbox = structuredClone(this.children[0].bbox());
-      }
-      for (let child of this.children) {
-        growBoundingBox(bbox, child.bbox());
-      }
-    }
-
-    if (bbox == undefined) {
-      bbox = { x: { min: 0, max: 0 }, y: { min: 0, max: 0 } };
-    }
-    bbox.x.max *= this.scale_x;
-    bbox.y.max *= this.scale_y;
-    bbox.x.min += this.x;
-    bbox.x.max += this.x;
-    bbox.y.min += this.y;
-    bbox.y.max += this.y;
-    return bbox;
-  }
-
-  draw(context, calculateTransform=false) {
-    let ctx = context.ctx;
-    ctx.save();
-    if (calculateTransform) {
-      this.transformCanvas(ctx)
-    } else {
-      ctx.translate(this.x, this.y);
-      ctx.rotate(this.rotation);
-      ctx.scale(this.scale_x, this.scale_y);
-    }
-    // if (this.currentFrameNum>=this.maxFrame) {
-    //   this.currentFrameNum = 0;
-    // }
-    if (
-      context.activeAction &&
-      context.activeAction.selection &&
-      this.idx in context.activeAction.selection
-    )
-      return;
-
-    for (let layer of this.layers) {
-      if (context.activeObject == this && !layer.visible) continue;
-
-      // Draw activeShape (shape being drawn in progress) for active layer only
-      if (layer === context.activeLayer && layer.activeShape) {
-        let cxt = {...context};
-        layer.activeShape.draw(cxt);
-      }
-
-      // NEW: Use AnimationData system to draw shapes with shape tweening/morphing
-      let currentTime = this.currentTime || 0;
-
-      // Group shapes by shapeId (multiple Shape objects can share a shapeId for tweening)
-      const shapesByShapeId = new Map();
-      for (let shape of layer.shapes) {
-        if (shape instanceof TempShape) continue;
-        if (!shapesByShapeId.has(shape.shapeId)) {
-          shapesByShapeId.set(shape.shapeId, []);
-        }
-        shapesByShapeId.get(shape.shapeId).push(shape);
-      }
-
-      // Process each logical shape (shapeId) and determine what to draw
-      let visibleShapes = [];
-      for (let [shapeId, shapes] of shapesByShapeId) {
-        // Check if this logical shape exists at current time
-        const existsCurveKey = `shape.${shapeId}.exists`;
-        let existsValue = layer.animationData.interpolate(existsCurveKey, currentTime);
-        
-        if (existsValue === null || existsValue <= 0) {
-          console.log(`[Widget.draw] Skipping shape ${shapeId} - not visible`);
-          continue;
-        }
-
-        // Get z-order
-        let zOrder = layer.animationData.interpolate(`shape.${shapeId}.zOrder`, currentTime);
-
-        // Get shapeIndex curve and surrounding keyframes
-        const shapeIndexCurve = layer.animationData.getCurve(`shape.${shapeId}.shapeIndex`);
-        if (!shapeIndexCurve || !shapeIndexCurve.keyframes || shapeIndexCurve.keyframes.length === 0) {
-          // No shapeIndex curve, just show shape with index 0
-          const shape = shapes.find(s => s.shapeIndex === 0);
-          if (shape) {
-            visibleShapes.push({
-              shape,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape)
-            });
-          }
-          continue;
-        }
-
-        // Find surrounding keyframes using AnimationCurve's built-in method
-        const { prev: prevKf, next: nextKf, t: interpolationT } = shapeIndexCurve.getBracketingKeyframes(currentTime);
-
-        // Get interpolated value
-        let shapeIndexValue = shapeIndexCurve.interpolate(currentTime);
-        if (shapeIndexValue === null) shapeIndexValue = 0;
-
-        // Sort shape versions by shapeIndex
-        shapes.sort((a, b) => a.shapeIndex - b.shapeIndex);
-
-        // Determine whether to morph based on whether interpolated value equals a keyframe value
-        const atPrevKeyframe = prevKf && Math.abs(shapeIndexValue - prevKf.value) < 0.001;
-        const atNextKeyframe = nextKf && Math.abs(shapeIndexValue - nextKf.value) < 0.001;
-
-        if (atPrevKeyframe || atNextKeyframe) {
-          // No morphing - display the shape at the keyframe value
-          const targetValue = atNextKeyframe ? nextKf.value : prevKf.value;
-          const shape = shapes.find(s => s.shapeIndex === targetValue);
-          if (shape) {
-            visibleShapes.push({
-              shape,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape)
-            });
-          }
-        } else if (prevKf && nextKf && prevKf.value !== nextKf.value) {
-          // Morph between shapes specified by surrounding keyframes
-          const shape1 = shapes.find(s => s.shapeIndex === prevKf.value);
-          const shape2 = shapes.find(s => s.shapeIndex === nextKf.value);
-
-          if (shape1 && shape2) {
-            // Use the interpolated shapeIndexValue to calculate blend factor
-            // This respects the bezier easing curve
-            const t = (shapeIndexValue - prevKf.value) / (nextKf.value - prevKf.value);
-            console.log(`[Widget.draw] Morphing from shape ${prevKf.value} to ${nextKf.value}, shapeIndexValue=${shapeIndexValue}, t=${t}`);
-            const morphedShape = shape1.lerpShape(shape2, t);
-            visibleShapes.push({
-              shape: morphedShape,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape1) || context.shapeselection.includes(shape2)
-            });
-          } else if (shape1) {
-            visibleShapes.push({
-              shape: shape1,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape1)
-            });
-          } else if (shape2) {
-            visibleShapes.push({
-              shape: shape2,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape2)
-            });
-          }
-        } else if (nextKf) {
-          // Only next keyframe exists, show that shape
-          const shape = shapes.find(s => s.shapeIndex === nextKf.value);
-          if (shape) {
-            visibleShapes.push({
-              shape,
-              zOrder: zOrder || 0,
-              selected: context.shapeselection.includes(shape)
-            });
-          }
-        }
-      }
-
-      // Sort by zOrder
-      visibleShapes.sort((a, b) => a.zOrder - b.zOrder);
-
-      // Draw sorted shapes
-      for (let { shape, selected } of visibleShapes) {
-        let cxt = {...context}
-        if (selected) {
-          cxt.selected = true
-        }
-        shape.draw(cxt);
-      }
-
-      // Draw child objects using AnimationData curves
-      for (let child of layer.children) {
-        if (child == context.activeObject) continue;
-        let idx = child.idx;
-
-        // Use AnimationData to get child's transform
-        let childX = layer.animationData.interpolate(`child.${idx}.x`, currentTime);
-        let childY = layer.animationData.interpolate(`child.${idx}.y`, currentTime);
-        let childRotation = layer.animationData.interpolate(`child.${idx}.rotation`, currentTime);
-        let childScaleX = layer.animationData.interpolate(`child.${idx}.scale_x`, currentTime);
-        let childScaleY = layer.animationData.interpolate(`child.${idx}.scale_y`, currentTime);
-        let childFrameNumber = layer.animationData.interpolate(`child.${idx}.frameNumber`, currentTime);
-
-        if (childX !== null && childY !== null) {
-          child.x = childX;
-          child.y = childY;
-          child.rotation = childRotation || 0;
-          child.scale_x = childScaleX || 1;
-          child.scale_y = childScaleY || 1;
-
-          // Set child's currentTime based on its frameNumber
-          // frameNumber 1 = time 0, frameNumber 2 = time 1/framerate, etc.
-          if (childFrameNumber !== null) {
-            child.currentTime = (childFrameNumber - 1) / config.framerate;
-          }
-
-          ctx.save();
-          child.draw(context);
-          ctx.restore();
-        }
-      }
-    }
-    if (this == context.activeObject) {
-      // Draw selection rectangles for selected items
-      if (mode == "select") {
-        for (let item of context.selection) {
-          if (!item) continue;
-          ctx.save();
-          ctx.strokeStyle = "#00ffff";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          let bbox = getRotatedBoundingBox(item);
-          ctx.rect(
-            bbox.x.min,
-            bbox.y.min,
-            bbox.x.max - bbox.x.min,
-            bbox.y.max - bbox.y.min,
-          );
-          ctx.stroke();
-          ctx.restore();
-        }
-        // Draw drag selection rectangle
-        if (context.selectionRect) {
-          ctx.save();
-          ctx.strokeStyle = "#00ffff";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.rect(
-            context.selectionRect.x1,
-            context.selectionRect.y1,
-            context.selectionRect.x2 - context.selectionRect.x1,
-            context.selectionRect.y2 - context.selectionRect.y1,
-          );
-          ctx.stroke();
-          ctx.restore();
-        }
-      } else if (mode == "transform") {
-        let bbox = undefined;
-        for (let item of context.selection) {
-          if (bbox == undefined) {
-            bbox = getRotatedBoundingBox(item);
-          } else {
-            growBoundingBox(bbox, getRotatedBoundingBox(item));
-          }
-        }
-        if (bbox != undefined) {
-          ctx.save();
-          ctx.strokeStyle = "#00ffff";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          let xdiff = bbox.x.max - bbox.x.min;
-          let ydiff = bbox.y.max - bbox.y.min;
-          ctx.rect(bbox.x.min, bbox.y.min, xdiff, ydiff);
-          ctx.stroke();
-          ctx.fillStyle = "#000000";
-          let rectRadius = 5;
-          for (let i of [
-            [0, 0],
-            [0.5, 0],
-            [1, 0],
-            [1, 0.5],
-            [1, 1],
-            [0.5, 1],
-            [0, 1],
-            [0, 0.5],
-          ]) {
-            ctx.beginPath();
-            ctx.rect(
-              bbox.x.min + xdiff * i[0] - rectRadius,
-              bbox.y.min + ydiff * i[1] - rectRadius,
-              rectRadius * 2,
-              rectRadius * 2,
-            );
-            ctx.fill();
-          }
-          ctx.restore();
-        }
-      }
-
-      if (context.activeCurve) {
-        ctx.strokeStyle = "magenta";
-        ctx.beginPath();
-        ctx.moveTo(
-          context.activeCurve.current.points[0].x,
-          context.activeCurve.current.points[0].y,
-        );
-        ctx.bezierCurveTo(
-          context.activeCurve.current.points[1].x,
-          context.activeCurve.current.points[1].y,
-          context.activeCurve.current.points[2].x,
-          context.activeCurve.current.points[2].y,
-          context.activeCurve.current.points[3].x,
-          context.activeCurve.current.points[3].y,
-        );
-        ctx.stroke();
-      }
-      if (context.activeVertex) {
-        ctx.save();
-        ctx.strokeStyle = "#00ffff";
-        let curves = {
-          ...context.activeVertex.current.startCurves,
-          ...context.activeVertex.current.endCurves,
-        };
-        // I don't understand why I can't use a for...of loop here
-        for (let idx in curves) {
-          let curve = curves[idx];
-          ctx.beginPath();
-          ctx.moveTo(curve.points[0].x, curve.points[0].y);
-          ctx.bezierCurveTo(
-            curve.points[1].x,
-            curve.points[1].y,
-            curve.points[2].x,
-            curve.points[2].y,
-            curve.points[3].x,
-            curve.points[3].y,
-          );
-          ctx.stroke();
-        }
-        ctx.fillStyle = "#000000aa";
-        ctx.beginPath();
-        let vertexSize = 15 / context.zoomLevel;
-        ctx.rect(
-          context.activeVertex.current.point.x - vertexSize / 2,
-          context.activeVertex.current.point.y - vertexSize / 2,
-          vertexSize,
-          vertexSize,
-        );
-        ctx.fill();
-        ctx.restore();
-      }
-    }
-    ctx.restore();
-  }
-  /*
-  draw(ctx) {
-    super.draw(ctx)
-    if (this==context.activeObject) {
-      if (mode == "select") {
-        for (let item of context.selection) {
-          if (!item) continue;
-          if (item.idx in this.currentFrame.keys) {
-            ctx.save();
-            ctx.strokeStyle = "#00ffff";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            let bbox = getRotatedBoundingBox(item);
-            ctx.rect(
-              bbox.x.min,
-              bbox.y.min,
-              bbox.x.max - bbox.x.min,
-              bbox.y.max - bbox.y.min,
-            );
-            ctx.stroke();
-            ctx.restore();
-          }
-        }
-        if (context.selectionRect) {
-          ctx.save();
-          ctx.strokeStyle = "#00ffff";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.rect(
-            context.selectionRect.x1,
-            context.selectionRect.y1,
-            context.selectionRect.x2 - context.selectionRect.x1,
-            context.selectionRect.y2 - context.selectionRect.y1,
-          );
-          ctx.stroke();
-          ctx.restore();
-        }
-      } else if (mode == "transform") {
-        let bbox = undefined;
-        for (let item of context.selection) {
-          if (bbox == undefined) {
-            bbox = getRotatedBoundingBox(item);
-          } else {
-            growBoundingBox(bbox, getRotatedBoundingBox(item));
-          }
-        }
-        if (bbox != undefined) {
-          ctx.save();
-          ctx.strokeStyle = "#00ffff";
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          let xdiff = bbox.x.max - bbox.x.min;
-          let ydiff = bbox.y.max - bbox.y.min;
-          ctx.rect(bbox.x.min, bbox.y.min, xdiff, ydiff);
-          ctx.stroke();
-          ctx.fillStyle = "#000000";
-          let rectRadius = 5;
-          for (let i of [
-            [0, 0],
-            [0.5, 0],
-            [1, 0],
-            [1, 0.5],
-            [1, 1],
-            [0.5, 1],
-            [0, 1],
-            [0, 0.5],
-          ]) {
-            ctx.beginPath();
-            ctx.rect(
-              bbox.x.min + xdiff * i[0] - rectRadius,
-              bbox.y.min + ydiff * i[1] - rectRadius,
-              rectRadius * 2,
-              rectRadius * 2,
-            );
-            ctx.fill();
-          }
-
-          ctx.restore();
-        }
-      }
-    }
-  }
-  */
-  transformCanvas(ctx) {
-    if (this.parent) {
-      this.parent.transformCanvas(ctx)
-    }
-    ctx.translate(this.x, this.y);
-    ctx.scale(this.scale_x, this.scale_y);
-    ctx.rotate(this.rotation);
-  }
-  transformMouse(mouse) {
-    // Apply the transformation matrix to the mouse position
-    let matrix = this.generateTransformMatrix();
-    let { x, y } = mouse;
-  
-    return {
-      x: matrix[0][0] * x + matrix[0][1] * y + matrix[0][2],
-      y: matrix[1][0] * x + matrix[1][1] * y + matrix[1][2]
-    };
-  }
-  generateTransformMatrix() {
-    // Start with the parent's transform matrix if it exists
-    let parentMatrix = this.parent ? this.parent.generateTransformMatrix() : [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-  
-    // Calculate the rotation matrix components
-    const cos = Math.cos(this.rotation);
-    const sin = Math.sin(this.rotation);
-  
-    // Scaling matrix
-    const scaleMatrix = [
-      [1/this.scale_x, 0, 0],
-      [0, 1/this.scale_y, 0],
-      [0, 0, 1]
-    ];
-  
-    // Rotation matrix (inverse rotation for transforming back)
-    const rotationMatrix = [
-      [cos, -sin, 0],
-      [sin, cos, 0],
-      [0, 0, 1]
-    ];
-  
-    // Translation matrix (inverse translation to adjust for object's position)
-    const translationMatrix = [
-      [1, 0, -this.x],
-      [0, 1, -this.y],
-      [0, 0, 1]
-    ];
-  
-    // Multiply translation * rotation * scaling to get the current object's final transformation matrix
-    let tempMatrix = multiplyMatrices(translationMatrix, rotationMatrix);
-    let objectMatrix = multiplyMatrices(tempMatrix, scaleMatrix);
-  
-    // Now combine with the parent's matrix (parent * object)
-    let finalMatrix = multiplyMatrices(parentMatrix, objectMatrix);
-  
-    return finalMatrix;
-  }
-  handleMouseEvent(eventType, x, y) {
-    for (let i in this.layers) {
-      if (i==this.currentLayer) {
-        this.layers[i]._globalEvents.add("mousedown")
-        this.layers[i]._globalEvents.add("mousemove")
-        this.layers[i]._globalEvents.add("mouseup")
-      } else {
-        this.layers[i]._globalEvents.delete("mousedown")
-        this.layers[i]._globalEvents.delete("mousemove")
-        this.layers[i]._globalEvents.delete("mouseup")
-      }
-    }
-    super.handleMouseEvent(eventType, x, y)
-  }
-  addObject(object, x = 0, y = 0, time = undefined, layer=undefined) {
-    if (time == undefined) {
-      time = this.currentTime || 0;
-    }
-    if (layer==undefined) {
-      layer = this.activeLayer
-    }
-
-    layer.children.push(object)
-    object.parent = this;
-    object.parentLayer = layer;
-    object.x = x;
-    object.y = y;
-    let idx = object.idx;
-
-    // Add animation curves for the object's position/transform in the layer
-    let xCurve = new AnimationCurve(`child.${idx}.x`);
-    xCurve.addKeyframe(new Keyframe(time, x, 'linear'));
-    layer.animationData.setCurve(`child.${idx}.x`, xCurve);
-
-    let yCurve = new AnimationCurve(`child.${idx}.y`);
-    yCurve.addKeyframe(new Keyframe(time, y, 'linear'));
-    layer.animationData.setCurve(`child.${idx}.y`, yCurve);
-
-    let rotationCurve = new AnimationCurve(`child.${idx}.rotation`);
-    rotationCurve.addKeyframe(new Keyframe(time, 0, 'linear'));
-    layer.animationData.setCurve(`child.${idx}.rotation`, rotationCurve);
-
-    let scaleXCurve = new AnimationCurve(`child.${idx}.scale_x`);
-    scaleXCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
-    layer.animationData.setCurve(`child.${idx}.scale_x`, scaleXCurve);
-
-    let scaleYCurve = new AnimationCurve(`child.${idx}.scale_y`);
-    scaleYCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
-    layer.animationData.setCurve(`child.${idx}.scale_y`, scaleYCurve);
-
-    // Initialize frameNumber curve with two keyframes defining the segment
-    // The segment length is based on the object's internal animation duration
-    let frameNumberCurve = new AnimationCurve(`child.${idx}.frameNumber`);
-
-    // Get the object's animation duration (max time across all its layers)
-    const objectDuration = object.duration || 0;
-    const framerate = config.framerate;
-
-    // Calculate the last frame number (frameNumber 1 = time 0, so add 1)
-    const lastFrameNumber = Math.max(1, Math.ceil(objectDuration * framerate) + 1);
-
-    // Calculate the end time for the segment (minimum 1 frame duration)
-    const segmentDuration = Math.max(objectDuration, 1 / framerate);
-    const endTime = time + segmentDuration;
-
-    // Start keyframe: frameNumber 1 at the current time, linear interpolation
-    frameNumberCurve.addKeyframe(new Keyframe(time, 1, 'linear'));
-
-    // End keyframe: last frame at end time, zero interpolation (inactive after this)
-    frameNumberCurve.addKeyframe(new Keyframe(endTime, lastFrameNumber, 'zero'));
-
-    layer.animationData.setCurve(`child.${idx}.frameNumber`, frameNumberCurve);
-  }
-  removeChild(childObject) {
-    let idx = childObject.idx;
-    for (let layer of this.layers) {
-      layer.children = layer.children.filter(child => child.idx !== idx);
-      for (let frame of layer.frames) {
-        if (frame) {
-          delete frame[idx];
-        }
-      }
-    }
-    // this.children.splice(this.children.indexOf(childObject), 1);
-  }
-
-  /**
-   * Update this object's frameNumber curve in its parent layer based on child content
-   * This is called when shapes/children are added/modified within this object
-   */
-  updateFrameNumberCurve() {
-    // Find parent layer that contains this object
-    if (!this.parent || !this.parent.animationData) return;
-
-    const parentLayer = this.parent;
-    const frameNumberKey = `child.${this.idx}.frameNumber`;
-
-    // Collect all keyframe times from this object's content
-    let allKeyframeTimes = new Set();
-
-    // Check all layers in this object
-    for (let layer of this.layers) {
-      if (!layer.animationData) continue;
-
-      // Get keyframes from all shape curves
-      for (let shape of layer.shapes) {
-        const existsKey = `shape.${shape.shapeId}.exists`;
-        const existsCurve = layer.animationData.curves[existsKey];
-        if (existsCurve && existsCurve.keyframes) {
-          for (let kf of existsCurve.keyframes) {
-            allKeyframeTimes.add(kf.time);
-          }
-        }
-      }
-
-      // Get keyframes from all child object curves
-      for (let child of layer.children) {
-        const childFrameNumberKey = `child.${child.idx}.frameNumber`;
-        const childFrameNumberCurve = layer.animationData.curves[childFrameNumberKey];
-        if (childFrameNumberCurve && childFrameNumberCurve.keyframes) {
-          for (let kf of childFrameNumberCurve.keyframes) {
-            allKeyframeTimes.add(kf.time);
-          }
-        }
-      }
-    }
-
-    if (allKeyframeTimes.size === 0) return;
-
-    // Sort times
-    const times = Array.from(allKeyframeTimes).sort((a, b) => a - b);
-    const firstTime = times[0];
-    const lastTime = times[times.length - 1];
-
-    // Calculate frame numbers (1-based)
-    const framerate = this.framerate || 24;
-    const firstFrame = Math.floor(firstTime * framerate) + 1;
-    const lastFrame = Math.floor(lastTime * framerate) + 1;
-
-    // Update or create frameNumber curve in parent layer
-    let frameNumberCurve = parentLayer.animationData.curves[frameNumberKey];
-    if (!frameNumberCurve) {
-      frameNumberCurve = new AnimationCurve(frameNumberKey);
-      parentLayer.animationData.setCurve(frameNumberKey, frameNumberCurve);
-    }
-
-    // Clear existing keyframes and add new ones
-    frameNumberCurve.keyframes = [];
-    frameNumberCurve.addKeyframe(new Keyframe(firstTime, firstFrame, 'hold'));
-    frameNumberCurve.addKeyframe(new Keyframe(lastTime, lastFrame, 'hold'));
-  }
-
-  addLayer(layer) {
-    this.children.push(layer);
-  }
-  removeLayer(layer) {
-    this.children.splice(this.children.indexOf(layer), 1);
-  }
-  saveState() {
-    startProps[this.idx] = {
-      x: this.x,
-      y: this.y,
-      rotation: this.rotation,
-      scale_x: this.scale_x,
-      scale_y: this.scale_y,
-    };
-  }
-  copy(idx) {
-    let newGO = new GraphicsObject(idx.slice(0, 8) + this.idx.slice(8));
-    newGO.x = this.x;
-    newGO.y = this.y;
-    newGO.rotation = this.rotation;
-    newGO.scale_x = this.scale_x;
-    newGO.scale_y = this.scale_y;
-    newGO.parent = this.parent;
-    pointerList[this.idx] = this;
-
-    newGO.layers = [];
-    for (let layer of this.layers) {
-      newGO.layers.push(layer.copy(idx));
-    }
-    for (let audioLayer of this.audioLayers) {
-      newGO.audioLayers.push(audioLayer.copy(idx));
-    }
-
-    return newGO;
-  }
-}
-
-let root = new GraphicsObject("root");
-Object.defineProperty(context, "activeObject", {
-  get: function () {
-    return this.objectStack.at(-1);
-  },
+// ============================================================================
+// Animation system classes (Frame, TempFrame, Keyframe, AnimationCurve, AnimationData)
+// have been moved to src/models/animation.js and are imported at the top of this file
+// ============================================================================
+
+// ============================================================================
+// Layer system classes (Layer, AudioTrack)
+// have been moved to src/models/layer.js and are imported at the top of this file
+// ============================================================================
+
+// ============================================================================
+// Shape classes (BaseShape, TempShape, Shape)
+// have been moved to src/models/shapes.js and are imported at the top of this file
+// ============================================================================
+
+// ============================================================================
+// GraphicsObject class
+// has been moved to src/models/graphics-object.js and is imported at the top of this file
+// ============================================================================
+
+// Initialize layer and shape dependencies now that all classes are loaded
+initializeLayerDependencies({
+  GraphicsObject,
+  Shape,
+  TempShape,
+  updateUI,
+  updateMenu,
+  updateLayers,
+  vectorDist,
+  minSegmentSize,
+  debugQuadtree,
+  debugCurves,
+  debugPoints,
+  debugPaintbucket,
+  d3: window.d3,
+  actions,
 });
-Object.defineProperty(context, "activeLayer", {
-  get: function () {
-    return this.objectStack.at(-1).activeLayer
-  }
-})
-context.objectStack = [root];
+
+initializeShapeDependencies({
+  growBoundingBox,
+  lerp,
+  lerpColor,
+  uuidToColor,
+  simplifyPolyline,
+  fitCurve,
+  createMissingTexturePattern,
+  debugQuadtree,
+  d3: window.d3,
+});
+
+initializeGraphicsObjectDependencies({
+  growBoundingBox,
+  getRotatedBoundingBox,
+  multiplyMatrices,
+  uuidToColor,
+});
+
+// ============ ROOT OBJECT INITIALIZATION ============
+// Extracted to: models/root.js
+let root = createRoot();
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -5546,6 +703,57 @@ window.addEventListener("DOMContentLoaded", () => {
     false,
     createPane(panes.stage),
   );
+
+  // Add audio test button (temporary for Phase 0)
+  const testBtn = document.createElement('button');
+  testBtn.textContent = 'Test Audio';
+  testBtn.style.position = 'fixed';
+  testBtn.style.top = '10px';
+  testBtn.style.right = '10px';
+  testBtn.style.zIndex = '10000';
+  testBtn.style.padding = '10px';
+  testBtn.style.backgroundColor = '#4CAF50';
+  testBtn.style.color = 'white';
+  testBtn.style.border = 'none';
+  testBtn.style.borderRadius = '4px';
+  testBtn.style.cursor = 'pointer';
+  testBtn.onclick = async () => {
+    try {
+      console.log('Initializing audio...');
+      const result = await invoke('audio_init');
+      console.log(result);
+
+      console.log('Creating MIDI beep...');
+      await invoke('audio_test_beep');
+
+      console.log('Playing...');
+      await invoke('audio_play');
+
+      setTimeout(async () => {
+        await invoke('audio_stop');
+        console.log('Stopped');
+      }, 3000);
+    } catch (error) {
+      console.error('Audio test failed:', error);
+      alert('Audio test failed: ' + error);
+    }
+  };
+  document.body.appendChild(testBtn);
+
+  // Initialize audio system on startup
+  (async () => {
+    try {
+      console.log('Initializing audio system...');
+      const result = await invoke('audio_init');
+      console.log('Audio system initialized:', result);
+    } catch (error) {
+      if (error === 'Audio already initialized') {
+        console.log('Audio system already initialized');
+      } else {
+        console.error('Failed to initialize audio system:', error);
+      }
+    }
+  })();
 });
 
 window.addEventListener("resize", () => {
@@ -5687,7 +895,7 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-function playPause() {
+async function playPause() {
   playing = !playing;
   if (playing) {
     // Reset to start if we're at the end
@@ -5696,25 +904,54 @@ function playPause() {
       context.activeObject.currentTime = 0;
     }
 
-    // Start audio from current time
-    for (let audioLayer of context.activeObject.audioLayers) {
-      if (audioLayer.audible) {
-        for (let i in audioLayer.sounds) {
-          let sound = audioLayer.sounds[i];
-          sound.player.start(0, context.activeObject.currentTime);
-        }
-      }
+    // Sync playhead position with DAW backend before starting
+    try {
+      await invoke('audio_seek', { seconds: context.activeObject.currentTime });
+    } catch (error) {
+      console.error('Failed to seek audio:', error);
     }
+
+    // Start DAW backend audio playback
+    try {
+      await invoke('audio_play');
+    } catch (error) {
+      console.error('Failed to start audio playback:', error);
+    }
+
     lastFrameTime = performance.now();
     advanceFrame();
   } else {
-    // Stop audio
-    for (let audioLayer of context.activeObject.audioLayers) {
-      for (let i in audioLayer.sounds) {
-        let sound = audioLayer.sounds[i];
-        sound.player.stop();
+    // Stop recording if active
+    if (context.isRecording) {
+      try {
+        await invoke('audio_stop_recording');
+        context.isRecording = false;
+        context.recordingTrackId = null;
+        context.recordingClipId = null;
+        console.log('Recording stopped by play/pause');
+
+        // Update record button appearance if it exists
+        if (context.recordButton) {
+          context.recordButton.className = "playback-btn playback-btn-record";
+          context.recordButton.title = "Record";
+        }
+      } catch (error) {
+        console.error('Failed to stop recording:', error);
       }
     }
+
+    // Stop DAW backend audio playback
+    try {
+      await invoke('audio_stop');
+    } catch (error) {
+      console.error('Failed to stop audio playback:', error);
+    }
+  }
+
+  // Update play/pause button appearance if it exists
+  if (context.playPauseButton) {
+    context.playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    context.playPauseButton.title = playing ? "Pause" : "Play";
   }
 }
 
@@ -5732,6 +969,9 @@ function advanceFrame() {
     context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
   }
 
+  // Poll for audio events (recording progress, etc.)
+  pollAudioEvents();
+
   // Redraw stage and timeline
   updateUI();
   if (context.timelineWidget?.requestRedraw) {
@@ -5741,16 +981,16 @@ function advanceFrame() {
   if (playing) {
     const duration = context.activeObject.duration;
 
-    // Check if we've reached the end
-    if (duration > 0 && context.activeObject.currentTime < duration) {
+    // Check if we've reached the end (but allow infinite playback when recording)
+    if (context.isRecording || (duration > 0 && context.activeObject.currentTime < duration)) {
       // Continue playing
       requestAnimationFrame(advanceFrame);
     } else {
       // Animation finished
       playing = false;
-      for (let audioLayer of context.activeObject.audioLayers) {
-        for (let i in audioLayer.sounds) {
-          let sound = audioLayer.sounds[i];
+      for (let audioTrack of context.activeObject.audioTracks) {
+        for (let i in audioTrack.sounds) {
+          let sound = audioTrack.sounds[i];
           sound.player.stop();
         }
       }
@@ -5758,11 +998,206 @@ function advanceFrame() {
   }
 }
 
+async function pollAudioEvents() {
+  const { invoke } = window.__TAURI__.core;
+
+  try {
+    const events = await invoke('audio_get_events');
+
+    for (const event of events) {
+      switch (event.type) {
+        case 'RecordingStarted':
+          console.log('Recording started - track:', event.track_id, 'clip:', event.clip_id);
+          context.recordingClipId = event.clip_id;
+
+          // Create the clip object in the audio track
+          const recordingTrack = context.activeObject.audioTracks.find(t => t.audioTrackId === event.track_id);
+          if (recordingTrack) {
+            const startTime = context.activeObject.currentTime || 0;
+            recordingTrack.clips.push({
+              clipId: event.clip_id,
+              poolIndex: null,  // Will be set when recording stops
+              startTime: startTime,
+              duration: 0,  // Will grow as recording progresses
+              offset: 0,
+              loading: true,
+              waveform: []
+            });
+
+            updateLayers();
+            if (context.timelineWidget?.requestRedraw) {
+              context.timelineWidget.requestRedraw();
+            }
+          }
+          break;
+
+        case 'RecordingProgress':
+          // Update clip duration in UI
+          console.log('Recording progress - clip:', event.clip_id, 'duration:', event.duration);
+          updateRecordingClipDuration(event.clip_id, event.duration);
+          break;
+
+        case 'RecordingStopped':
+          console.log('Recording stopped - clip:', event.clip_id, 'pool_index:', event.pool_index, 'waveform peaks:', event.waveform?.length);
+          await finalizeRecording(event.clip_id, event.pool_index, event.waveform);
+          context.isRecording = false;
+          context.recordingTrackId = null;
+          context.recordingClipId = null;
+          break;
+
+        case 'RecordingError':
+          console.error('Recording error:', event.message);
+          alert('Recording error: ' + event.message);
+          context.isRecording = false;
+          context.recordingTrackId = null;
+          context.recordingClipId = null;
+          break;
+      }
+    }
+  } catch (error) {
+    // Silently ignore errors - polling happens frequently
+  }
+}
+
+function updateRecordingClipDuration(clipId, duration) {
+  // Find the clip in the active object's audio tracks and update its duration
+  for (const audioTrack of context.activeObject.audioTracks) {
+    const clip = audioTrack.clips.find(c => c.clipId === clipId);
+    if (clip) {
+      clip.duration = duration;
+      updateLayers();
+      if (context.timelineWidget?.requestRedraw) {
+        context.timelineWidget.requestRedraw();
+      }
+      return;
+    }
+  }
+}
+
+async function finalizeRecording(clipId, poolIndex, waveform) {
+  console.log('Finalizing recording - clipId:', clipId, 'poolIndex:', poolIndex, 'waveform length:', waveform?.length);
+
+  // Find the clip and update it with the pool index and waveform
+  for (const audioTrack of context.activeObject.audioTracks) {
+    const clip = audioTrack.clips.find(c => c.clipId === clipId);
+    if (clip) {
+      console.log('Found clip to finalize:', clip);
+      clip.poolIndex = poolIndex;
+      clip.loading = false;
+      clip.waveform = waveform;
+      console.log('Clip after update:', clip);
+      console.log('Waveform sample:', waveform?.slice(0, 5));
+
+      updateLayers();
+      if (context.timelineWidget?.requestRedraw) {
+        context.timelineWidget.requestRedraw();
+      }
+      return;
+    }
+  }
+  console.error('Could not find clip to finalize:', clipId);
+}
+
 function decrementFrame() {
   context.activeObject.decrementFrame();
   updateLayers();
   updateMenu();
   updateUI();
+}
+
+async function goToStart() {
+  context.activeObject.currentTime = 0;
+
+  // Sync timeline playhead position
+  if (context.timelineWidget?.timelineState) {
+    context.timelineWidget.timelineState.currentTime = 0;
+  }
+
+  // Sync with DAW backend
+  try {
+    await invoke('audio_seek', { seconds: 0 });
+  } catch (error) {
+    console.error('Failed to seek audio:', error);
+  }
+
+  updateLayers();
+  updateUI();
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+}
+
+async function goToEnd() {
+  const duration = context.activeObject.duration;
+  context.activeObject.currentTime = duration;
+
+  // Sync timeline playhead position
+  if (context.timelineWidget?.timelineState) {
+    context.timelineWidget.timelineState.currentTime = duration;
+  }
+
+  // Sync with DAW backend
+  try {
+    await invoke('audio_seek', { seconds: duration });
+  } catch (error) {
+    console.error('Failed to seek audio:', error);
+  }
+
+  updateLayers();
+  updateUI();
+  if (context.timelineWidget?.requestRedraw) {
+    context.timelineWidget.requestRedraw();
+  }
+}
+
+async function toggleRecording() {
+  const { invoke } = window.__TAURI__.core;
+
+  if (context.isRecording) {
+    // Stop recording
+    try {
+      await invoke('audio_stop_recording');
+      context.isRecording = false;
+      context.recordingTrackId = null;
+      context.recordingClipId = null;
+      console.log('Recording stopped');
+    } catch (error) {
+      console.error('Failed to stop recording:', error);
+    }
+  } else {
+    // Start recording - check if activeLayer is an audio track
+    const audioTrack = context.activeObject.activeLayer;
+    if (!audioTrack || !(audioTrack instanceof AudioTrack)) {
+      alert('Please select an audio track to record to');
+      return;
+    }
+
+    if (audioTrack.audioTrackId === null) {
+      alert('Audio track not properly initialized');
+      return;
+    }
+
+    // Start recording at current playhead position
+    const startTime = context.activeObject.currentTime || 0;
+
+    try {
+      await invoke('audio_start_recording', {
+        trackId: audioTrack.audioTrackId,
+        startTime: startTime
+      });
+      context.isRecording = true;
+      context.recordingTrackId = audioTrack.audioTrackId;
+      console.log('Recording started on track', audioTrack.audioTrackId, 'at time', startTime);
+
+      // Start playback so the timeline moves (if not already playing)
+      if (!playing) {
+        await playPause();
+      }
+    } catch (error) {
+      console.error('Failed to start recording:', error);
+      alert('Failed to start recording: ' + error);
+    }
+  }
 }
 
 function newWindow(path) {
@@ -5779,8 +1214,8 @@ function _newFile(width, height, fps) {
   config.framerate = fps;
   filePath = undefined;
   saveConfig();
-  undoStack = [];
-  redoStack = [];
+  undoStack.length = 0;  // Clear without breaking reference
+  redoStack.length = 0;  // Clear without breaking reference
   updateUI();
   updateLayers();
   updateMenu();
@@ -6037,7 +1472,7 @@ async function _open(path, returnJson = false) {
                 }, {});
             
                 function recurse(item) {
-                    if (item.type=="AudioLayer" && audioSrcMapping[item.idx]) {
+                    if (item.type=="AudioTrack" && audioSrcMapping[item.idx]) {
                         const action = audioSrcMapping[item.idx]
                         item.sounds[action.uuid] = {
                           start: action.frameNum,
@@ -6134,23 +1569,38 @@ function revert() {
 }
 
 async function importFile() {
+  // Define supported extensions
+  const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
+  const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
+  const beamExtensions = ["beam"];
+
+  // Define filters in consistent order
+  const allFilters = [
+    {
+      name: "Image files",
+      extensions: imageExtensions,
+    },
+    {
+      name: "Audio files",
+      extensions: audioExtensions,
+    },
+    {
+      name: "Lightningbeam files",
+      extensions: beamExtensions,
+    },
+  ];
+
+  // Reorder filters to put last used filter first
+  const filterIndex = config.lastImportFilterIndex || 0;
+  const reorderedFilters = [
+    allFilters[filterIndex],
+    ...allFilters.filter((_, i) => i !== filterIndex)
+  ];
+
   const path = await openFileDialog({
     multiple: false,
     directory: false,
-    filters: [
-      {
-        name: "Image files",
-        extensions: ["png", "gif", "avif", "jpg", "jpeg"],
-      },
-      {
-        name: "Audio files",
-        extensions: ["mp3"],
-      },
-      {
-        name: "Lightningbeam files",
-        extensions: ["beam"],
-      },
-    ],
+    filters: reorderedFilters,
     defaultPath: await documentDir(),
     title: "Import File",
   });
@@ -6179,7 +1629,23 @@ async function importFile() {
   ];
   if (path) {
     const filename = await basename(path);
-    if (getFileExtension(filename) == "beam") {
+    const ext = getFileExtension(filename);
+
+    // Detect and save which filter was used based on file extension
+    let usedFilterIndex = 0;
+    if (audioExtensions.includes(ext)) {
+      usedFilterIndex = 1; // Audio
+    } else if (beamExtensions.includes(ext)) {
+      usedFilterIndex = 2; // Lightningbeam
+    } else {
+      usedFilterIndex = 0; // Image (default)
+    }
+
+    // Save to config for next time
+    config.lastImportFilterIndex = usedFilterIndex;
+    saveConfig();
+
+    if (ext == "beam") {
       function reassignIdxs(json) {
         if (json.idx in pointerList) {
           json.idx = uuidv4();
@@ -6234,15 +1700,17 @@ async function importFile() {
         actions.importObject.create(object);
       });
       updateOutliner();
+    } else if (audioExtensions.includes(ext)) {
+      // Handle audio files - pass file path directly to backend
+      actions.addAudio.create(path, context.activeObject, filename);
     } else {
+      // Handle image files - convert to data URL
       const { dataURL, mimeType } = await convertToDataURL(
         path,
-        imageMimeTypes.concat(audioMimeTypes),
+        imageMimeTypes,
       );
       if (imageMimeTypes.indexOf(mimeType) != -1) {
         actions.addImageObject.create(50, 50, dataURL, 0, context.activeObject);
-      } else {
-        actions.addAudio.create(dataURL, context.activeObject, filename);
       }
     }
   }
@@ -7091,13 +2559,13 @@ function stage() {
   // stageWrapper.appendChild(selectionRect)
   // scroller.appendChild(stageWrapper)
   stage.addEventListener("pointerdown", (e) => {
-    console.log("POINTERDOWN EVENT - mode:", mode);
+    console.log("POINTERDOWN EVENT - context.mode:", context.mode);
     let mouse = getMousePos(stage, e);
     console.log("Mouse position:", mouse);
     root.handleMouseEvent("mousedown", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
     let selection;
-    switch (mode) {
+    switch (context.mode) {
       case "rectangle":
       case "ellipse":
       case "draw":
@@ -7321,7 +2789,7 @@ function stage() {
     let mouse = getMousePos(stage, e);
     root.handleMouseEvent("mouseup", mouse.x, mouse.y)
     mouse = context.activeObject.transformMouse(mouse);
-    switch (mode) {
+    switch (context.mode) {
       case "draw":
         // if (context.activeShape) {
         //   context.activeShape.addLine(mouse.x, mouse.y);
@@ -7414,7 +2882,7 @@ function stage() {
       stage.mouseup(e);
       return;
     }
-    switch (mode) {
+    switch (context.mode) {
       case "draw":
         stage.style.cursor = "default";
         context.activeCurve = undefined;
@@ -7716,11 +3184,17 @@ function stage() {
     context.selectionRect = undefined;
     let mouse = getMousePos(stage, e);
     mouse = context.activeObject.transformMouse(mouse);
-    modeswitcher: switch (mode) {
+    modeswitcher: switch (context.mode) {
       case "select":
         for (let i = context.activeObject.activeLayer.children.length - 1; i >= 0; i--) {
           let child = context.activeObject.activeLayer.children[i];
-          if (!(child.idx in context.activeObject.currentFrame.keys)) continue;
+          // Check if child exists at current time using AnimationData
+          // null means no exists curve (defaults to visible)
+          const existsValue = context.activeObject.activeLayer.animationData.interpolate(
+            `object.${child.idx}.exists`,
+            context.activeObject.currentTime
+          );
+          if (existsValue !== null && existsValue <= 0) continue;
           if (hitTest(mouse, child)) {
             context.objectStack.push(child);
             context.selection = [];
@@ -7735,7 +3209,7 @@ function stage() {
         // we didn't click on a child, go up a level
         if (context.activeObject.parent) {
           context.selection = [context.activeObject];
-          context.activeObject.setFrameNum(0);
+          context.activeObject.setTime(0);
           context.shapeselection = [];
           context.objectStack.pop();
           updateUI();
@@ -7764,7 +3238,7 @@ function toolbar() {
     toolbtn.appendChild(icon);
     tools_scroller.appendChild(toolbtn);
     toolbtn.addEventListener("click", () => {
-      mode = tool;
+      context.mode = tool;
       updateInfopanel();
       updateUI();
       console.log(`Switched tool to ${tool}`);
@@ -7980,7 +3454,7 @@ function timeline() {
 
     let maxScroll =
       context.activeObject.layers.length * layerHeight +
-      context.activeObject.audioLayers.length * layerHeight +
+      context.activeObject.audioTracks.length * layerHeight +
       gutterHeight -
       timeline_cvs.height;
 
@@ -8125,7 +3599,7 @@ function timeline() {
           updateUI();
           updateMenu();
         } else {
-          context.activeObject.currentLayer = i - context.activeObject.audioLayers.length;
+          context.activeObject.currentLayer = i - context.activeObject.audioTracks.length;
         }
       }
     }
@@ -8227,6 +3701,66 @@ function timelineV2() {
   // Add custom property to store the time format toggle button
   // so createPane can add it to the header
   canvas.headerControls = () => {
+    const controls = [];
+
+    // Playback controls group
+    const playbackGroup = document.createElement("div");
+    playbackGroup.className = "playback-controls-group";
+
+    // Go to start button
+    const startButton = document.createElement("button");
+    startButton.className = "playback-btn playback-btn-start";
+    startButton.title = "Go to Start";
+    startButton.addEventListener("click", goToStart);
+    playbackGroup.appendChild(startButton);
+
+    // Rewind button
+    const rewindButton = document.createElement("button");
+    rewindButton.className = "playback-btn playback-btn-rewind";
+    rewindButton.title = "Rewind";
+    rewindButton.addEventListener("click", decrementFrame);
+    playbackGroup.appendChild(rewindButton);
+
+    // Play/Pause button
+    const playPauseButton = document.createElement("button");
+    playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    playPauseButton.title = playing ? "Pause" : "Play";
+    playPauseButton.addEventListener("click", playPause);
+
+    // Store reference so playPause() can update it
+    context.playPauseButton = playPauseButton;
+
+    playbackGroup.appendChild(playPauseButton);
+
+    // Fast-forward button
+    const ffButton = document.createElement("button");
+    ffButton.className = "playback-btn playback-btn-ff";
+    ffButton.title = "Fast Forward";
+    ffButton.addEventListener("click", advanceFrame);
+    playbackGroup.appendChild(ffButton);
+
+    // Go to end button
+    const endButton = document.createElement("button");
+    endButton.className = "playback-btn playback-btn-end";
+    endButton.title = "Go to End";
+    endButton.addEventListener("click", goToEnd);
+    playbackGroup.appendChild(endButton);
+
+    controls.push(playbackGroup);
+
+    // Record button (separate group)
+    const recordGroup = document.createElement("div");
+    recordGroup.className = "playback-controls-group";
+
+    const recordButton = document.createElement("button");
+    recordButton.className = context.isRecording ? "playback-btn playback-btn-record recording" : "playback-btn playback-btn-record";
+    recordButton.title = context.isRecording ? "Stop Recording" : "Record";
+    recordButton.addEventListener("click", toggleRecording);
+    recordGroup.appendChild(recordButton);
+
+    controls.push(recordGroup);
+
+    // Time format toggle button
     const toggleButton = document.createElement("button");
     toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
     toggleButton.style.marginLeft = '10px';
@@ -8235,7 +3769,9 @@ function timelineV2() {
       toggleButton.textContent = timelineWidget.timelineState.timeFormat === 'frames' ? 'Frames' : 'Seconds';
       updateCanvasSize(); // Redraw after format change
     });
-    return [toggleButton];
+    controls.push(toggleButton);
+
+    return controls;
   };
 
   // Set up ResizeObserver
@@ -8925,7 +4461,7 @@ function renderUI() {
   for (let selectionRect of document.querySelectorAll(".selectionRect")) {
     selectionRect.style.display = "none";
   }
-  if (mode == "transform") {
+  if (context.mode == "transform") {
     if (context.selection.length > 0) {
       for (let selectionRect of document.querySelectorAll(".selectionRect")) {
         let bbox = undefined;
@@ -9206,7 +4742,7 @@ function renderLayers() {
       //   //       break;
       //   //   }
       //   // });
-      // } else if (layer instanceof AudioLayer) {
+      // } else if (layer instanceof AudioTrack) {
       //   // TODO: split waveform into chunks
       //   for (let i in layer.sounds) {
       //     let sound = layer.sounds[i];
@@ -9355,7 +4891,7 @@ function renderLayers() {
         layerTrack.appendChild(highlightObj);
       }
     }
-    for (let audioLayer of context.activeObject.audioLayers) {
+    for (let audioTrack of context.activeObject.audioTracks) {
       let layerHeader = document.createElement("div");
       layerHeader.className = "layer-header";
       layerHeader.classList.add("audio");
@@ -9364,8 +4900,8 @@ function renderLayers() {
       layerTrack.className = "layer-track";
       layerTrack.classList.add("audio");
       framescontainer.appendChild(layerTrack);
-      for (let i in audioLayer.sounds) {
-        let sound = audioLayer.sounds[i];
+      for (let i in audioTrack.sounds) {
+        let sound = audioTrack.sounds[i];
         layerTrack.appendChild(sound.img);
       }
       let layerName = document.createElement("div");
@@ -9377,7 +4913,7 @@ function renderLayers() {
       layerName.addEventListener("blur", (e) => {
         actions.changeLayerName.create(audioLayer, layerName.innerText);
       });
-      layerName.innerText = audioLayer.name;
+      layerName.innerText = audioTrack.name;
       layerHeader.appendChild(layerName);
     }
   }
@@ -9441,8 +4977,8 @@ function renderInfopanel() {
       }
     });
     panel.appendChild(breadcrumbs);
-    for (let property in tools[mode].properties) {
-      let prop = tools[mode].properties[property];
+    for (let property in tools[context.mode].properties) {
+      let prop = tools[context.mode].properties[property];
       label = document.createElement("label");
       label.className = "infopanel-field";
       span = document.createElement("span");
@@ -9665,19 +5201,9 @@ async function renderMenu() {
     });
   });
 
-  const frameInfo = context.activeObject.activeLayer.getFrameValue(
-    context.activeObject.currentFrameNum
-  )
-  if (frameInfo.valueAtN) {
-    activeFrame = true;
-    activeKeyframe = true;
-  } else if (frameInfo.prev && frameInfo.next) {
-    activeFrame = true;
-    activeKeyframe = false;
-  } else {
-    activeFrame = false;
-    activeKeyframe = false;
-  }
+  // Legacy frame system removed - these are always false now
+  activeFrame = false;
+  activeKeyframe = false;
   const appSubmenu = await Submenu.new({
     text: "Lightningbeam",
     items: [
@@ -9862,6 +5388,11 @@ async function renderMenu() {
         enabled: true,
         action: actions.addLayer.create,
         accelerator: getShortcut("addLayer"),
+      },
+      {
+        text: "Add Audio Track",
+        enabled: true,
+        action: addEmptyAudioTrack,
       },
       {
         text: "Delete Layer",
@@ -10154,6 +5685,18 @@ function renderAll() {
   }
 }
 
+// Initialize actions module with dependencies
+initializeActions({
+  undoStack,
+  redoStack,
+  updateMenu,
+  updateLayers,
+  updateUI,
+  updateInfopanel,
+  invoke,
+  config
+});
+
 renderAll();
 
 if (window.openedFiles?.length>0) {
@@ -10161,6 +5704,35 @@ if (window.openedFiles?.length>0) {
   setTimeout(()=>_open(window.openedFiles[0]),10)
   for (let i=1; i<window.openedFiles.length; i++) {
     newWindow(window.openedFiles[i])
+  }
+}
+
+async function addEmptyAudioTrack() {
+  const trackName = `Audio Track ${context.activeObject.audioTracks.length + 1}`;
+  const trackUuid = uuidv4();
+
+  try {
+    // Create new AudioTrack with DAW backend
+    const newAudioTrack = new AudioTrack(trackUuid, trackName);
+
+    // Initialize track in backend (creates empty audio track)
+    await newAudioTrack.initializeTrack();
+
+    // Add track to active object
+    context.activeObject.audioTracks.push(newAudioTrack);
+
+    // Select the newly created track
+    context.activeObject.activeLayer = newAudioTrack;
+
+    // Update UI
+    updateLayers();
+    if (context.timelineWidget) {
+      context.timelineWidget.requestRedraw();
+    }
+
+    console.log('Empty audio track created:', trackName, 'with ID:', newAudioTrack.audioTrackId);
+  } catch (error) {
+    console.error('Failed to create empty audio track:', error);
   }
 }
 
@@ -10194,4 +5766,4 @@ async function testAudio() {
   document.addEventListener("click", startCoreInterfaceAudio);
   document.addEventListener("keydown", startCoreInterfaceAudio);
 }
-testAudio()
+// testAudio()

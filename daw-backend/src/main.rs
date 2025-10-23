@@ -254,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print!("Recording clip {}: {:.2}s", clip_id, duration);
                         io::stdout().flush().ok();
                     }
-                    AudioEvent::RecordingStopped(clip_id, pool_index) => {
+                    AudioEvent::RecordingStopped(clip_id, pool_index, _waveform) => {
                         print!("\r\x1b[K");
                         println!("Recording stopped (clip {}, pool index {})", clip_id, pool_index);
                         print!("> ");

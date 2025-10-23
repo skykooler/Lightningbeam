@@ -27,6 +27,8 @@ pub struct RecordingState {
     pub flush_interval_frames: usize,
     /// Whether recording is currently paused
     pub paused: bool,
+    /// Number of samples remaining to skip (to discard stale buffer data)
+    pub samples_to_skip: usize,
 }
 
 impl RecordingState {
@@ -55,6 +57,7 @@ impl RecordingState {
             buffer: Vec::new(),
             flush_interval_frames,
             paused: false,
+            samples_to_skip: 0, // Will be set by engine when it knows buffer size
         }
     }
 
@@ -65,7 +68,21 @@ impl RecordingState {
             return Ok(false);
         }
 
-        self.buffer.extend_from_slice(samples);
+        // Skip stale samples from the buffer
+        if self.samples_to_skip > 0 {
+            let to_skip = self.samples_to_skip.min(samples.len());
+            self.samples_to_skip -= to_skip;
+
+            if to_skip == samples.len() {
+                // Skip entire batch
+                return Ok(false);
+            }
+
+            // Skip partial batch and process the rest
+            self.buffer.extend_from_slice(&samples[to_skip..]);
+        } else {
+            self.buffer.extend_from_slice(samples);
+        }
 
         // Check if we should flush
         let frames_in_buffer = self.buffer.len() / self.channels as usize;
@@ -97,8 +114,11 @@ impl RecordingState {
     }
 
     /// Get current recording duration in seconds
+    /// Includes both flushed frames and buffered frames
     pub fn duration(&self) -> f64 {
-        self.frames_written as f64 / self.sample_rate as f64
+        let buffered_frames = self.buffer.len() / self.channels as usize;
+        let total_frames = self.frames_written + buffered_frames;
+        total_frames as f64 / self.sample_rate as f64
     }
 
     /// Finalize the recording and return the temp file path

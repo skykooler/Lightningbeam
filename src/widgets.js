@@ -502,7 +502,7 @@ class TimelineWindow extends ScrollableWindow {
             }
           }
         }
-      // } else if (layer instanceof AudioLayer) {
+      // } else if (layer instanceof AudioTrack) {
       } else if (layer.sounds) {
         // TODO: split waveform into chunks
         for (let i in layer.sounds) {
@@ -569,6 +569,9 @@ class TimelineWindowV2 extends Widget {
 
     // Phase 6: Keyframe clipboard
     this.keyframeClipboard = null  // {keyframes: [{keyframe, curve, relativeTime}], baseTime}
+
+    // Selected audio track (for recording)
+    this.selectedTrack = null
   }
 
   draw(ctx) {
@@ -710,6 +713,10 @@ class TimelineWindowV2 extends Widget {
         const buttonSize = 14
         const twoButtonsWidth = (buttonSize * 2) + 4 + 10  // Two buttons + gap + padding
         maxTextWidth = this.trackHeaderWidth - textStartX - twoButtonsWidth
+      } else if (track.type === 'audio') {
+        const buttonSize = 14
+        const oneButtonWidth = buttonSize + 10  // One button (curves mode) + padding
+        maxTextWidth = this.trackHeaderWidth - textStartX - oneButtonWidth
       }
 
       // Truncate text with ellipsis if needed
@@ -729,14 +736,18 @@ class TimelineWindowV2 extends Widget {
       // Draw type indicator (only if there's space)
       ctx.fillStyle = foregroundColor
       ctx.font = '10px sans-serif'
-      const typeText = track.type === 'layer' ? '[L]' : track.type === 'object' ? '[G]' : '[S]'
+      const typeText = track.type === 'layer' ? '[L]' :
+                       track.type === 'object' ? '[G]' :
+                       track.type === 'audio' ? '[A]' : '[S]'
       const typeX = textStartX + ctx.measureText(displayName).width + 8
-      if (typeX + ctx.measureText(typeText).width < this.trackHeaderWidth - (track.type === 'object' || track.type === 'shape' ? 50 : 10)) {
+      const buttonSpaceNeeded = (track.type === 'object' || track.type === 'shape') ? 50 :
+                                 (track.type === 'audio') ? 25 : 10
+      if (typeX + ctx.measureText(typeText).width < this.trackHeaderWidth - buttonSpaceNeeded) {
         ctx.fillText(typeText, typeX, y + this.trackHierarchy.trackHeight / 2)
       }
 
-      // Draw toggle buttons for object/shape tracks (Phase 3)
-      if (track.type === 'object' || track.type === 'shape') {
+      // Draw toggle buttons for object/shape/audio tracks (Phase 3)
+      if (track.type === 'object' || track.type === 'shape' || track.type === 'audio') {
         const buttonSize = 14
         const buttonY = y + (this.trackHierarchy.trackHeight - buttonSize) / 2  // Use base height for button position
         let buttonX = this.trackHeaderWidth - 10  // Start from right edge
@@ -756,16 +767,18 @@ class TimelineWindowV2 extends Widget {
                            track.object.curvesMode === 'minimized' ? '≈' : '-'
         ctx.fillText(curveSymbol, buttonX + buttonSize / 2, buttonY + buttonSize / 2)
 
-        // Segment visibility button
-        buttonX -= (buttonSize + 4)
-        ctx.strokeStyle = foregroundColor
-        ctx.lineWidth = 1
-        ctx.strokeRect(buttonX, buttonY, buttonSize, buttonSize)
+        // Segment visibility button (only for object/shape tracks, not audio)
+        if (track.type !== 'audio') {
+          buttonX -= (buttonSize + 4)
+          ctx.strokeStyle = foregroundColor
+          ctx.lineWidth = 1
+          ctx.strokeRect(buttonX, buttonY, buttonSize, buttonSize)
 
-        // Fill if segment is visible
-        if (track.object.showSegment) {
-          ctx.fillStyle = foregroundColor
-          ctx.fillRect(buttonX + 2, buttonY + 2, buttonSize - 4, buttonSize - 4)
+          // Fill if segment is visible
+          if (track.object.showSegment) {
+            ctx.fillStyle = foregroundColor
+            ctx.fillRect(buttonX + 2, buttonY + 2, buttonSize - 4, buttonSize - 4)
+          }
         }
 
         // Draw legend for expanded curves (Phase 6)
@@ -1113,6 +1126,105 @@ class TimelineWindowV2 extends Widget {
             }
           }
         }
+      } else if (track.type === 'audio') {
+        // Draw audio clips for AudioTrack
+        const audioTrack = track.object
+        const y = this.trackHierarchy.getTrackY(i)
+        const trackHeight = this.trackHierarchy.trackHeight  // Use base height for clips
+
+        // Draw each clip
+        for (let clip of audioTrack.clips) {
+          const startX = this.timelineState.timeToPixel(clip.startTime)
+          const endX = this.timelineState.timeToPixel(clip.startTime + clip.duration)
+          const clipWidth = endX - startX
+
+          // Draw clip rectangle with audio-specific color
+          // Use gray color for loading clips, blue for loaded clips
+          ctx.fillStyle = clip.loading ? '#666666' : '#4a90e2'
+          ctx.fillRect(
+            startX,
+            y + 5,
+            clipWidth,
+            trackHeight - 10
+          )
+
+          // Draw border
+          ctx.strokeStyle = shadow
+          ctx.lineWidth = 1
+          ctx.strokeRect(
+            startX,
+            y + 5,
+            clipWidth,
+            trackHeight - 10
+          )
+
+          // Draw clip name if there's enough space
+          const minWidthForLabel = 40
+          if (clipWidth >= minWidthForLabel) {
+            ctx.fillStyle = labelColor
+            ctx.font = '11px sans-serif'
+            ctx.textAlign = 'left'
+            ctx.textBaseline = 'middle'
+
+            // Clip text to clip bounds
+            ctx.save()
+            ctx.beginPath()
+            ctx.rect(startX + 2, y + 5, clipWidth - 4, trackHeight - 10)
+            ctx.clip()
+
+            ctx.fillText(clip.name, startX + 4, y + trackHeight / 2)
+            ctx.restore()
+          }
+
+          // Draw waveform only for loaded clips
+          if (!clip.loading && clip.waveform && clip.waveform.length > 0) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.3)'
+
+            // Only draw waveform within visible area
+            const visibleStart = Math.max(startX + 2, 0)
+            const visibleEnd = Math.min(startX + clipWidth - 2, this.width - this.trackHeaderWidth)
+
+            if (visibleEnd > visibleStart) {
+              const centerY = y + trackHeight / 2
+              const waveformHeight = trackHeight - 14  // Leave padding at top/bottom
+              const waveformData = clip.waveform
+
+              // Calculate how many pixels each waveform peak represents
+              const pixelsPerPeak = clipWidth / waveformData.length
+
+              // Calculate the range of visible peaks
+              const firstVisiblePeak = Math.max(0, Math.floor((visibleStart - startX) / pixelsPerPeak))
+              const lastVisiblePeak = Math.min(waveformData.length - 1, Math.ceil((visibleEnd - startX) / pixelsPerPeak))
+
+              // Draw waveform as a filled path
+              ctx.beginPath()
+
+              // Trace along the max values (left to right)
+              for (let i = firstVisiblePeak; i <= lastVisiblePeak; i++) {
+                const peakX = startX + (i * pixelsPerPeak)
+                const peak = waveformData[i]
+                const maxY = centerY + (peak.max * waveformHeight * 0.5)
+
+                if (i === firstVisiblePeak) {
+                  ctx.moveTo(peakX, maxY)
+                } else {
+                  ctx.lineTo(peakX, maxY)
+                }
+              }
+
+              // Trace back along the min values (right to left)
+              for (let i = lastVisiblePeak; i >= firstVisiblePeak; i--) {
+                const peakX = startX + (i * pixelsPerPeak)
+                const peak = waveformData[i]
+                const minY = centerY + (peak.min * waveformHeight * 0.5)
+                ctx.lineTo(peakX, minY)
+              }
+
+              ctx.closePath()
+              ctx.fill()
+            }
+          }
+        }
       }
     }
 
@@ -1141,8 +1253,8 @@ class TimelineWindowV2 extends Widget {
     for (let i = 0; i < this.trackHierarchy.tracks.length; i++) {
       const track = this.trackHierarchy.tracks[i]
 
-      // Only draw curves for objects and shapes
-      if (track.type !== 'object' && track.type !== 'shape') continue
+      // Only draw curves for objects, shapes, and audio tracks
+      if (track.type !== 'object' && track.type !== 'shape' && track.type !== 'audio') continue
 
       const obj = track.object
 
@@ -1153,7 +1265,10 @@ class TimelineWindowV2 extends Widget {
 
       // Find the layer containing this object/shape to get AnimationData
       let animationData = null
-      if (track.type === 'object') {
+      if (track.type === 'audio') {
+        // For audio tracks, animation data is directly on the track object
+        animationData = obj.animationData
+      } else if (track.type === 'object') {
         // For objects, get curves from parent layer
         for (let layer of this.context.activeObject.allLayers) {
           if (layer.children && layer.children.includes(obj)) {
@@ -1182,13 +1297,16 @@ class TimelineWindowV2 extends Widget {
 
       if (!animationData) continue
 
-      // Get all curves for this object/shape
+      // Get all curves for this object/shape/audio
       const curves = []
       for (let curveName in animationData.curves) {
         const curve = animationData.curves[curveName]
 
-        // Filter to only curves for this specific object/shape
-        if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
+        // Filter to only curves for this specific object/shape/audio
+        if (track.type === 'audio') {
+          // Audio tracks: include all curves (they're prefixed with 'track.' or 'clip.')
+          curves.push(curve)
+        } else if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
           curves.push(curve)
         } else if (track.type === 'shape' && curveName.startsWith(`shape.${obj.shapeId}.`)) {
           curves.push(curve)
@@ -1736,6 +1854,32 @@ class TimelineWindowV2 extends Widget {
           return true
         }
 
+        // Check if clicking on audio clip to start dragging
+        const audioClipInfo = this.getAudioClipAtPoint(track, adjustedX, adjustedY)
+        if (audioClipInfo) {
+          // Select the track
+          this.selectTrack(track)
+
+          // Start audio clip dragging
+          const clickTime = this.timelineState.pixelToTime(adjustedX)
+          this.draggingAudioClip = {
+            track: track,
+            clip: audioClipInfo.clip,
+            clipIndex: audioClipInfo.clipIndex,
+            audioTrack: audioClipInfo.audioTrack,
+            initialMouseTime: clickTime,
+            initialClipStartTime: audioClipInfo.clip.startTime
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging audio clip at time', audioClipInfo.clip.startTime)
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
         // Phase 6: Check if clicking on segment to start dragging
         const segmentInfo = this.getSegmentAtPoint(track, adjustedX, adjustedY)
         if (segmentInfo) {
@@ -1761,6 +1905,12 @@ class TimelineWindowV2 extends Widget {
           if (this.requestRedraw) this.requestRedraw()
           return true
         }
+
+        // Fallback: clicking anywhere on track in timeline area selects it
+        // This is especially important for audio tracks that may not have clips yet
+        this.selectTrack(track)
+        if (this.requestRedraw) this.requestRedraw()
+        return true
       }
     }
 
@@ -2217,6 +2367,45 @@ class TimelineWindowV2 extends Widget {
   }
 
   /**
+   * Get audio clip at a point
+   * Returns {clip, clipIndex, audioTrack} if clicking on an audio clip
+   */
+  getAudioClipAtPoint(track, x, y) {
+    if (track.type !== 'audio') return null
+
+    const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+    if (trackIndex === -1) return null
+
+    const trackY = this.trackHierarchy.getTrackY(trackIndex)
+    const trackHeight = this.trackHierarchy.trackHeight
+    const clipTop = trackY + 5
+    const clipBottom = trackY + trackHeight - 5
+
+    // Check if y is within clip bounds
+    if (y < clipTop || y > clipBottom) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const audioTrack = track.object
+
+    // Check each clip
+    for (let i = 0; i < audioTrack.clips.length; i++) {
+      const clip = audioTrack.clips[i]
+      const clipStart = clip.startTime
+      const clipEnd = clip.startTime + clip.duration
+
+      if (clickTime >= clipStart && clickTime <= clipEnd) {
+        return {
+          clip: clip,
+          clipIndex: i,
+          audioTrack: audioTrack
+        }
+      }
+    }
+
+    return null
+  }
+
+  /**
    * Get segment edge at a point (Phase 6)
    * Returns {edge: 'left'|'right', startTime, endTime, keyframe, animationData, curveName} if near an edge
    */
@@ -2440,11 +2629,14 @@ class TimelineWindowV2 extends Widget {
    */
   isTrackSelected(track) {
     if (track.type === 'layer') {
-      return this.context.activeLayer === track.object
+      return this.context.activeObject.activeLayer === track.object
     } else if (track.type === 'shape') {
       return this.context.shapeselection?.includes(track.object)
     } else if (track.type === 'object') {
       return this.context.selection?.includes(track.object)
+    } else if (track.type === 'audio') {
+      // Audio tracks use activeLayer like regular layers
+      return this.context.activeObject.activeLayer === track.object
     }
     return false
   }
@@ -2458,11 +2650,8 @@ class TimelineWindowV2 extends Widget {
     this.context.oldshapeselection = this.context.shapeselection
 
     if (track.type === 'layer') {
-      // Find the index of this layer in the activeObject
-      const layerIndex = this.context.activeObject.children.indexOf(track.object)
-      if (layerIndex !== -1) {
-        this.context.activeObject.currentLayer = layerIndex
-      }
+      // Set the layer as active (this will clear _activeAudioTrack)
+      this.context.activeObject.activeLayer = track.object
       // Clear selections when selecting layer
       this.context.selection = []
       this.context.shapeselection = []
@@ -2471,11 +2660,8 @@ class TimelineWindowV2 extends Widget {
       for (let i = 0; i < this.context.activeObject.allLayers.length; i++) {
         const layer = this.context.activeObject.allLayers[i]
         if (layer.shapes && layer.shapes.includes(track.object)) {
-          // Find index in children array
-          const layerIndex = this.context.activeObject.children.indexOf(layer)
-          if (layerIndex !== -1) {
-            this.context.activeObject.currentLayer = layerIndex
-          }
+          // Set the layer as active (this will clear _activeAudioTrack)
+          this.context.activeObject.activeLayer = layer
           // Set shape selection
           this.context.shapeselection = [track.object]
           this.context.selection = []
@@ -2485,6 +2671,12 @@ class TimelineWindowV2 extends Widget {
     } else if (track.type === 'object') {
       // Select the GraphicsObject
       this.context.selection = [track.object]
+      this.context.shapeselection = []
+    } else if (track.type === 'audio') {
+      // Audio track selected - set as active layer and clear other selections
+      // Audio tracks can act as layers (they have animationData, shapes=[], children=[])
+      this.context.activeObject.activeLayer = track.object
+      this.context.selection = []
       this.context.shapeselection = []
     }
 
@@ -2988,6 +3180,25 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Handle audio clip dragging
+    if (this.draggingAudioClip) {
+      // Adjust coordinates to timeline area
+      const adjustedX = x - this.trackHeaderWidth
+
+      // Convert mouse position to time
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+
+      // Calculate time delta
+      const timeDelta = newTime - this.draggingAudioClip.initialMouseTime
+
+      // Update clip's start time (ensure it doesn't go negative)
+      this.draggingAudioClip.clip.startTime = Math.max(0, this.draggingAudioClip.initialClipStartTime + timeDelta)
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     // Phase 6: Handle segment dragging
     if (this.draggingSegment) {
       // Adjust coordinates to timeline area
@@ -3094,6 +3305,30 @@ class TimelineWindowV2 extends Widget {
 
       // Clean up dragging state
       this.draggingEdge = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Complete audio clip dragging
+    if (this.draggingAudioClip) {
+      console.log('Finished dragging audio clip')
+
+      // Update backend with new clip position
+      const { invoke } = window.__TAURI__.core
+      invoke('audio_move_clip', {
+        trackId: this.draggingAudioClip.audioTrack.audioTrackId,
+        clipId: this.draggingAudioClip.clip.clipId,
+        newStartTime: this.draggingAudioClip.clip.startTime
+      }).catch(error => {
+        console.error('Failed to move clip in backend:', error)
+      })
+
+      // Clean up dragging state
+      this.draggingAudioClip = null
       this._globalEvents.delete("mousemove")
       this._globalEvents.delete("mouseup")
 

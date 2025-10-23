@@ -32,48 +32,115 @@ pub struct AudioSystem {
 }
 
 impl AudioSystem {
-    /// Initialize the audio system with default device
+    /// Initialize the audio system with default input and output devices
     pub fn new() -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
+
+        // Get output device
+        let output_device = host
             .default_output_device()
             .ok_or("No output device available")?;
 
-        let default_config = device.default_output_config().map_err(|e| e.to_string())?;
-        let sample_rate = default_config.sample_rate().0;
-        let channels = default_config.channels() as u32;
+        let default_output_config = output_device.default_output_config().map_err(|e| e.to_string())?;
+        let sample_rate = default_output_config.sample_rate().0;
+        let channels = default_output_config.channels() as u32;
 
         // Create queues
         let (command_tx, command_rx) = rtrb::RingBuffer::new(256);
         let (event_tx, event_rx) = rtrb::RingBuffer::new(256);
 
+        // Create input ringbuffer for recording (large buffer for audio samples)
+        // Buffer size: 10 seconds of audio at 48kHz stereo = 48000 * 2 * 10 = 960000 samples
+        let input_buffer_size = (sample_rate * channels * 10) as usize;
+        let (mut input_tx, input_rx) = rtrb::RingBuffer::new(input_buffer_size);
+
         // Create engine
         let mut engine = Engine::new(sample_rate, channels, command_rx, event_tx);
+        engine.set_input_rx(input_rx);
         let controller = engine.get_controller(command_tx);
 
-        // Build stream
-        let config: cpal::StreamConfig = default_config.clone().into();
-        let mut buffer = vec![0.0f32; 16384];
+        // Build output stream
+        let output_config: cpal::StreamConfig = default_output_config.clone().into();
+        let mut output_buffer = vec![0.0f32; 16384];
 
-        let stream = device
+        let output_stream = output_device
             .build_output_stream(
-                &config,
+                &output_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let buf = &mut buffer[..data.len()];
+                    let buf = &mut output_buffer[..data.len()];
                     buf.fill(0.0);
                     engine.process(buf);
                     data.copy_from_slice(buf);
                 },
-                |err| eprintln!("Stream error: {}", err),
+                |err| eprintln!("Output stream error: {}", err),
                 None,
             )
             .map_err(|e| e.to_string())?;
 
-        stream.play().map_err(|e| e.to_string())?;
+        // Get input device
+        let input_device = match host.default_input_device() {
+            Some(device) => device,
+            None => {
+                eprintln!("Warning: No input device available, recording will be disabled");
+                // Start output stream and return without input
+                output_stream.play().map_err(|e| e.to_string())?;
+                return Ok(Self {
+                    controller,
+                    stream: output_stream,
+                    event_rx,
+                    sample_rate,
+                    channels,
+                });
+            }
+        };
+
+        // Get input config matching output sample rate and channels if possible
+        let input_config = match input_device.default_input_config() {
+            Ok(config) => {
+                let mut cfg: cpal::StreamConfig = config.into();
+                // Try to match output sample rate and channels
+                cfg.sample_rate = cpal::SampleRate(sample_rate);
+                cfg.channels = channels as u16;
+                cfg
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not get input config: {}, recording will be disabled", e);
+                output_stream.play().map_err(|e| e.to_string())?;
+                return Ok(Self {
+                    controller,
+                    stream: output_stream,
+                    event_rx,
+                    sample_rate,
+                    channels,
+                });
+            }
+        };
+
+        // Build input stream that feeds into the ringbuffer
+        let input_stream = input_device
+            .build_input_stream(
+                &input_config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    // Push input samples to ringbuffer for recording
+                    for &sample in data {
+                        let _ = input_tx.push(sample);
+                    }
+                },
+                |err| eprintln!("Input stream error: {}", err),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Start both streams
+        output_stream.play().map_err(|e| e.to_string())?;
+        input_stream.play().map_err(|e| e.to_string())?;
+
+        // Leak the input stream to keep it alive
+        Box::leak(Box::new(input_stream));
 
         Ok(Self {
             controller,
-            stream,
+            stream: output_stream,
             event_rx,
             sample_rate,
             channels,

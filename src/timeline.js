@@ -437,6 +437,21 @@ class TrackHierarchy {
         }
       }
     }
+
+    // Add audio tracks (after visual layers)
+    if (graphicsObject.audioTracks) {
+      for (let audioTrack of graphicsObject.audioTracks) {
+        const audioTrackItem = {
+          type: 'audio',
+          object: audioTrack,
+          name: audioTrack.name || 'Audio',
+          indent: 0,
+          collapsed: audioTrack.collapsed || false,
+          visible: audioTrack.audible !== false
+        }
+        this.tracks.push(audioTrackItem)
+      }
+    }
   }
 
   /**
@@ -514,8 +529,8 @@ class TrackHierarchy {
   getTrackHeight(track) {
     const baseHeight = this.trackHeight
 
-    // Only objects and shapes can have curves
-    if (track.type !== 'object' && track.type !== 'shape') {
+    // Only objects, shapes, and audio tracks can have curves
+    if (track.type !== 'object' && track.type !== 'shape' && track.type !== 'audio') {
       return baseHeight
     }
 

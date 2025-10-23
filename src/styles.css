@@ -119,6 +119,8 @@ button {
   background-color: #ccc;
   text-align: left;
   z-index: 1;
+  display: flex;
+  align-items: center;
 }
 
 .icon {
@@ -728,5 +730,220 @@ button {
   }
   .visibility-icon {
     filter: invert(1);
+  }
+}
+
+/* Playback Controls */
+.playback-controls-group {
+  display: inline-flex;
+  gap: 0;
+  margin: 5px;
+  align-items: center;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.playback-btn {
+  width: 40px;
+  height: 36px;
+  padding: 0;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  border-right: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.playback-btn:last-child {
+  border-right: none;
+}
+
+/* Play Button - Triangle */
+.playback-btn-play::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 8px 0 8px 14px;
+  border-color: transparent transparent transparent #0f0f0f;
+  margin-left: 2px;
+}
+
+/* Pause Button - Two Bars */
+.playback-btn-pause::before,
+.playback-btn-pause::after {
+  content: "";
+  width: 4px;
+  height: 16px;
+  background-color: #0f0f0f;
+  position: absolute;
+}
+
+.playback-btn-pause::before {
+  left: 10px;
+}
+
+.playback-btn-pause::after {
+  right: 10px;
+}
+
+/* Rewind Button - Double Left Triangle */
+.playback-btn-rewind::before,
+.playback-btn-rewind::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 7px 10px 7px 0;
+  border-color: transparent #0f0f0f transparent transparent;
+  position: absolute;
+}
+
+.playback-btn-rewind::before {
+  left: 10px;
+}
+
+.playback-btn-rewind::after {
+  left: 20px;
+}
+
+/* Fast Forward Button - Double Right Triangle */
+.playback-btn-ff::before,
+.playback-btn-ff::after {
+  content: "";
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 7px 0 7px 10px;
+  border-color: transparent transparent transparent #0f0f0f;
+  position: absolute;
+}
+
+.playback-btn-ff::before {
+  left: 10px;
+}
+
+.playback-btn-ff::after {
+  left: 20px;
+}
+
+/* Go to Start - Bar + Left Triangle */
+.playback-btn-start::before,
+.playback-btn-start::after {
+  content: "";
+  position: absolute;
+}
+
+.playback-btn-start::before {
+  width: 2px;
+  height: 14px;
+  background-color: #0f0f0f;
+  left: 13px;
+}
+
+.playback-btn-start::after {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 7px 12px 7px 0;
+  border-color: transparent #0f0f0f transparent transparent;
+  left: 15px;
+}
+
+/* Go to End - Right Triangle + Bar */
+.playback-btn-end::before,
+.playback-btn-end::after {
+  content: "";
+  position: absolute;
+}
+
+.playback-btn-end::before {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 7px 0 7px 12px;
+  border-color: transparent transparent transparent #0f0f0f;
+  left: 13px;
+}
+
+.playback-btn-end::after {
+  width: 2px;
+  height: 14px;
+  background-color: #0f0f0f;
+  left: 25px;
+}
+
+/* Record Button - Circle */
+.playback-btn-record::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background-color: #cc0000;
+}
+
+.playback-btn-record:disabled::before {
+  background-color: #666;
+}
+
+/* Recording animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.playback-btn-record.recording::before {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+/* Dark mode playback button adjustments */
+@media (prefers-color-scheme: dark) {
+  .playback-btn {
+    border-right: 1px solid rgba(255, 255, 255, 0.15);
+  }
+
+  .playback-btn-play::before {
+    border-color: transparent transparent transparent #f6f6f6;
+  }
+
+  .playback-btn-pause::before,
+  .playback-btn-pause::after {
+    background-color: #f6f6f6;
+  }
+
+  .playback-btn-rewind::before,
+  .playback-btn-rewind::after {
+    border-color: transparent #f6f6f6 transparent transparent;
+  }
+
+  .playback-btn-ff::before,
+  .playback-btn-ff::after {
+    border-color: transparent transparent transparent #f6f6f6;
+  }
+
+  .playback-btn-start::before {
+    background-color: #f6f6f6;
+  }
+
+  .playback-btn-start::after {
+    border-color: transparent #f6f6f6 transparent transparent;
+  }
+
+  .playback-btn-end::before {
+    border-color: transparent transparent transparent #f6f6f6;
+  }
+
+  .playback-btn-end::after {
+    background-color: #f6f6f6;
+  }
+
+  .playback-btn-record:disabled::before {
+    background-color: #444;
   }
 }

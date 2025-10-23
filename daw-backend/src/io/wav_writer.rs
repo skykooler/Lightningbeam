@@ -64,17 +64,26 @@ impl WavWriter {
 
         // Calculate total data size
         let data_size = self.frames_written * self.channels as usize * 2; // 2 bytes per sample (16-bit)
-        let file_size = 36 + data_size; // 36 = size of header before data
+
+        // WAV file structure:
+        // RIFF header (12 bytes): "RIFF" + size + "WAVE"
+        // fmt chunk (24 bytes): "fmt " + size + format data
+        // data chunk header (8 bytes): "data" + size
+        // Total header = 44 bytes
+        // RIFF chunk size = everything after offset 8 = 4 (WAVE) + 24 (fmt) + 8 (data header) + data_size
+        let riff_chunk_size = 36 + data_size; // 36 = size from "WAVE" to end of data chunk header
 
         // Seek to RIFF chunk size (offset 4)
         self.file.seek(SeekFrom::Start(4))?;
-        self.file.write_all(&((file_size - 8) as u32).to_le_bytes())?;
+        self.file.write_all(&(riff_chunk_size as u32).to_le_bytes())?;
 
         // Seek to data chunk size (offset 40)
         self.file.seek(SeekFrom::Start(40))?;
         self.file.write_all(&(data_size as u32).to_le_bytes())?;
 
+        // Flush and sync to ensure all data is written to disk before file is closed
         self.file.flush()?;
+        self.file.sync_all()?;
 
         Ok(())
     }
@@ -84,11 +93,14 @@ impl WavWriter {
 fn write_wav_header(file: &mut File, sample_rate: u32, channels: u32, frames: usize) -> io::Result<()> {
     let bytes_per_sample = 2u16; // 16-bit PCM
     let data_size = (frames * channels as usize * bytes_per_sample as usize) as u32;
-    let file_size = 36 + data_size;
+
+    // RIFF chunk size = everything after offset 8
+    // = 4 (WAVE) + 24 (fmt chunk) + 8 (data chunk header) + data_size
+    let riff_chunk_size = 36 + data_size;
 
     // RIFF header
     file.write_all(b"RIFF")?;
-    file.write_all(&(file_size - 8).to_le_bytes())?;
+    file.write_all(&riff_chunk_size.to_le_bytes())?;
     file.write_all(b"WAVE")?;
 
     // fmt chunk

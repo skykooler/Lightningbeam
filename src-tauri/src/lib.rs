@@ -1,10 +1,12 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 
 use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+
+mod audio;
 
 
 #[derive(Default)]
@@ -127,6 +129,7 @@ pub fn run() {
     let pkg_name = env!("CARGO_PKG_NAME").to_string();
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
+      .manage(Arc::new(Mutex::new(audio::AudioState::default())))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -188,7 +191,24 @@ pub fn run() {
       .plugin(tauri_plugin_dialog::init())
       .plugin(tauri_plugin_fs::init())
       .plugin(tauri_plugin_shell::init())
-      .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error, create_window])
+      .invoke_handler(tauri::generate_handler![
+        greet, trace, debug, info, warn, error, create_window,
+        audio::audio_init,
+        audio::audio_play,
+        audio::audio_stop,
+        audio::audio_seek,
+        audio::audio_test_beep,
+        audio::audio_set_track_parameter,
+        audio::audio_create_track,
+        audio::audio_load_file,
+        audio::audio_add_clip,
+        audio::audio_move_clip,
+        audio::audio_start_recording,
+        audio::audio_stop_recording,
+        audio::audio_pause_recording,
+        audio::audio_resume_recording,
+        audio::audio_get_events,
+      ])
       // .manage(window_counter)
       .build(tauri::generate_context!())
       .expect("error while running tauri application")

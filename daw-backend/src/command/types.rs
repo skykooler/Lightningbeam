@@ -3,6 +3,7 @@ use crate::audio::{
     TrackId,
 };
 use crate::audio::buffer_pool::BufferPoolStats;
+use crate::io::WaveformPeak;
 
 /// Commands sent from UI/control thread to audio thread
 #[derive(Debug, Clone)]
@@ -132,8 +133,8 @@ pub enum AudioEvent {
     RecordingStarted(TrackId, ClipId),
     /// Recording progress update (clip_id, current_duration)
     RecordingProgress(ClipId, f64),
-    /// Recording stopped (clip_id, pool_index)
-    RecordingStopped(ClipId, usize),
+    /// Recording stopped (clip_id, pool_index, waveform)
+    RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
     /// Recording error (error_message)
     RecordingError(String),
     /// Project has been reset

@@ -31,3 +31,15 @@ tracing-subscriber = {version = "0.3.19", features = ["env-filter"] }
 log = "0.4"
 chrono = "0.4"
 
+# DAW backend integration
+daw-backend = { path = "../daw-backend" }
+cpal = "0.15"
+rtrb = "0.3"
+
+[profile.dev]
+opt-level = 1  # Enable basic optimizations in debug mode for audio decoding performance
+
+[profile.release]
+opt-level = 3
+lto = true
+
