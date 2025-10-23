@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use daw_backend::{load_midi_file, AudioEvent, AudioFile, Clip, Engine, PoolAudioFile, Track};
+use daw_backend::{load_midi_file, AudioEvent, AudioFile, Clip, CurveType, Engine, ParameterId, PoolAudioFile, Track};
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -221,6 +221,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("  Recommendation: Increase initial buffer pool capacity to {}", stats.peak_usage + 2);
                         }
                         println!();
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::AutomationLaneCreated(track_id, lane_id, parameter_id) => {
+                        print!("\r\x1b[K");
+                        println!("Automation lane {} created on track {} for parameter {:?}",
+                                lane_id, track_id, parameter_id);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::AudioFileAdded(pool_index, path) => {
+                        print!("\r\x1b[K");
+                        println!("Audio file added to pool at index {}: '{}'", pool_index, path);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::ClipAdded(track_id, clip_id) => {
+                        print!("\r\x1b[K");
+                        println!("Clip {} added to track {}", clip_id, track_id);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::RecordingStarted(track_id, clip_id) => {
+                        print!("\r\x1b[K");
+                        println!("Recording started on track {} (clip {})", track_id, clip_id);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::RecordingProgress(clip_id, duration) => {
+                        print!("\r\x1b[K");
+                        print!("Recording clip {}: {:.2}s", clip_id, duration);
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::RecordingStopped(clip_id, pool_index) => {
+                        print!("\r\x1b[K");
+                        println!("Recording stopped (clip {}, pool index {})", clip_id, pool_index);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::RecordingError(error) => {
+                        print!("\r\x1b[K");
+                        println!("Recording error: {}", error);
+                        print!("> ");
+                        io::stdout().flush().ok();
+                    }
+                    AudioEvent::ProjectReset => {
+                        print!("\r\x1b[K");
+                        println!("Project reset - all tracks and audio cleared");
+                        // Clear the local track list
+                        track_ids_clone.lock().unwrap().clear();
                         print!("> ");
                         io::stdout().flush().ok();
                     }
@@ -633,6 +683,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else if input == "stats" || input == "buffers" {
             controller.request_buffer_pool_stats();
+        } else if input.starts_with("autovolume ") {
+            // Parse: autovolume <track_id> <time> <value>
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            if parts.len() == 4 {
+                if let (Ok(track_id), Ok(time), Ok(value)) =
+                    (parts[1].parse::<u32>(), parts[2].parse::<f64>(), parts[3].parse::<f32>()) {
+                    let ids = track_ids.lock().unwrap();
+                    if ids.contains(&track_id) {
+                        drop(ids);
+                        // Create automation lane (if not exists, will be reused)
+                        controller.create_automation_lane(track_id, ParameterId::TrackVolume);
+                        // Add automation point (note: lane_id=0 is assumed, real app would track this)
+                        controller.add_automation_point(track_id, 0, time, value, CurveType::Linear);
+                        println!("Added volume automation point on track {} at {:.2}s: {:.2}", track_id, time, value);
+                    } else {
+                        println!("Invalid track ID. Available tracks: {:?}", *ids);
+                    }
+                } else {
+                    println!("Invalid format. Usage: autovolume <track_id> <time> <value>");
+                }
+            } else {
+                println!("Usage: autovolume <track_id> <time> <value>");
+                println!("  Example: autovolume 0 2.0 0.5 (set volume to 0.5 at 2 seconds)");
+            }
+        } else if input == "reset" {
+            controller.reset();
+            // Clear local clip info tracking
+            clip_info.clear();
+            println!("Resetting project...");
         } else if input == "help" || input == "h" {
             print_help();
         } else {
@@ -688,6 +767,8 @@ fn print_help() {
     println!("                    (e.g. 'loadmidi 0 song.mid 0.0')");
     println!("\nDiagnostics:");
     println!("  stats, buffers  - Show buffer pool statistics");
+    println!("\nProject Commands:");
+    println!("  reset           - Clear all tracks and audio (reset to empty project)");
     println!("\nOther:");
     println!("  h, help         - Show this help");
     println!("  q, quit         - Quit");

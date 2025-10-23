@@ -1,7 +1,9 @@
+use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
 use super::clip::Clip;
 use super::midi::MidiClip;
 use super::pool::AudioPool;
 use crate::effects::{Effect, SimpleSynth};
+use std::collections::HashMap;
 
 /// Track ID type
 pub type TrackId = u32;
@@ -141,6 +143,9 @@ pub struct Metatrack {
     pub pitch_shift: f32,
     /// Time offset in seconds (shift content forward/backward in time)
     pub offset: f64,
+    /// Automation lanes for this metatrack
+    pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
+    next_automation_id: AutomationLaneId,
 }
 
 impl Metatrack {
@@ -157,7 +162,69 @@ impl Metatrack {
             time_stretch: 1.0,
             pitch_shift: 0.0,
             offset: 0.0,
+            automation_lanes: HashMap::new(),
+            next_automation_id: 0,
         }
+    }
+
+    /// Add an automation lane to this metatrack
+    pub fn add_automation_lane(&mut self, parameter_id: ParameterId) -> AutomationLaneId {
+        let lane_id = self.next_automation_id;
+        self.next_automation_id += 1;
+
+        let lane = AutomationLane::new(lane_id, parameter_id);
+        self.automation_lanes.insert(lane_id, lane);
+        lane_id
+    }
+
+    /// Get an automation lane by ID
+    pub fn get_automation_lane(&self, lane_id: AutomationLaneId) -> Option<&AutomationLane> {
+        self.automation_lanes.get(&lane_id)
+    }
+
+    /// Get a mutable automation lane by ID
+    pub fn get_automation_lane_mut(&mut self, lane_id: AutomationLaneId) -> Option<&mut AutomationLane> {
+        self.automation_lanes.get_mut(&lane_id)
+    }
+
+    /// Remove an automation lane
+    pub fn remove_automation_lane(&mut self, lane_id: AutomationLaneId) -> bool {
+        self.automation_lanes.remove(&lane_id).is_some()
+    }
+
+    /// Evaluate automation at a specific time and return effective parameters
+    pub fn evaluate_automation_at_time(&self, time: f64) -> (f32, f32, f64) {
+        let mut volume = self.volume;
+        let mut time_stretch = self.time_stretch;
+        let mut offset = self.offset;
+
+        // Check for automation
+        for lane in self.automation_lanes.values() {
+            if !lane.enabled {
+                continue;
+            }
+
+            match lane.parameter_id {
+                ParameterId::TrackVolume => {
+                    if let Some(automated_value) = lane.evaluate(time) {
+                        volume = automated_value;
+                    }
+                }
+                ParameterId::TimeStretch => {
+                    if let Some(automated_value) = lane.evaluate(time) {
+                        time_stretch = automated_value;
+                    }
+                }
+                ParameterId::TimeOffset => {
+                    if let Some(automated_value) = lane.evaluate(time) {
+                        offset = automated_value as f64;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (volume, time_stretch, offset)
     }
 
     /// Add a child track to this group
@@ -239,6 +306,9 @@ pub struct MidiTrack {
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
+    /// Automation lanes for this track
+    pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
+    next_automation_id: AutomationLaneId,
 }
 
 impl MidiTrack {
@@ -253,7 +323,34 @@ impl MidiTrack {
             volume: 1.0,
             muted: false,
             solo: false,
+            automation_lanes: HashMap::new(),
+            next_automation_id: 0,
         }
+    }
+
+    /// Add an automation lane to this track
+    pub fn add_automation_lane(&mut self, parameter_id: ParameterId) -> AutomationLaneId {
+        let lane_id = self.next_automation_id;
+        self.next_automation_id += 1;
+
+        let lane = AutomationLane::new(lane_id, parameter_id);
+        self.automation_lanes.insert(lane_id, lane);
+        lane_id
+    }
+
+    /// Get an automation lane by ID
+    pub fn get_automation_lane(&self, lane_id: AutomationLaneId) -> Option<&AutomationLane> {
+        self.automation_lanes.get(&lane_id)
+    }
+
+    /// Get a mutable automation lane by ID
+    pub fn get_automation_lane_mut(&mut self, lane_id: AutomationLaneId) -> Option<&mut AutomationLane> {
+        self.automation_lanes.get_mut(&lane_id)
+    }
+
+    /// Remove an automation lane
+    pub fn remove_automation_lane(&mut self, lane_id: AutomationLaneId) -> bool {
+        self.automation_lanes.remove(&lane_id).is_some()
     }
 
     /// Add an effect to the track's effect chain
@@ -324,10 +421,36 @@ impl MidiTrack {
             effect.process(output, channels as usize, sample_rate);
         }
 
+        // Evaluate and apply automation
+        let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
+
         // Apply track volume
         for sample in output.iter_mut() {
-            *sample *= self.volume;
+            *sample *= effective_volume;
         }
+    }
+
+    /// Evaluate automation at a specific time and return the effective volume
+    fn evaluate_automation_at_time(&self, time: f64) -> f32 {
+        let mut volume = self.volume;
+
+        // Check for volume automation
+        for lane in self.automation_lanes.values() {
+            if !lane.enabled {
+                continue;
+            }
+
+            match lane.parameter_id {
+                ParameterId::TrackVolume => {
+                    if let Some(automated_value) = lane.evaluate(time) {
+                        volume = automated_value;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        volume
     }
 }
 
@@ -340,6 +463,9 @@ pub struct AudioTrack {
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
+    /// Automation lanes for this track
+    pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
+    next_automation_id: AutomationLaneId,
 }
 
 impl AudioTrack {
@@ -353,7 +479,34 @@ impl AudioTrack {
             volume: 1.0,
             muted: false,
             solo: false,
+            automation_lanes: HashMap::new(),
+            next_automation_id: 0,
         }
+    }
+
+    /// Add an automation lane to this track
+    pub fn add_automation_lane(&mut self, parameter_id: ParameterId) -> AutomationLaneId {
+        let lane_id = self.next_automation_id;
+        self.next_automation_id += 1;
+
+        let lane = AutomationLane::new(lane_id, parameter_id);
+        self.automation_lanes.insert(lane_id, lane);
+        lane_id
+    }
+
+    /// Get an automation lane by ID
+    pub fn get_automation_lane(&self, lane_id: AutomationLaneId) -> Option<&AutomationLane> {
+        self.automation_lanes.get(&lane_id)
+    }
+
+    /// Get a mutable automation lane by ID
+    pub fn get_automation_lane_mut(&mut self, lane_id: AutomationLaneId) -> Option<&mut AutomationLane> {
+        self.automation_lanes.get_mut(&lane_id)
+    }
+
+    /// Remove an automation lane
+    pub fn remove_automation_lane(&mut self, lane_id: AutomationLaneId) -> bool {
+        self.automation_lanes.remove(&lane_id).is_some()
     }
 
     /// Add an effect to the track's effect chain
@@ -435,12 +588,38 @@ impl AudioTrack {
             effect.process(output, channels as usize, sample_rate);
         }
 
+        // Evaluate and apply automation
+        let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
+
         // Apply track volume
         for sample in output.iter_mut() {
-            *sample *= self.volume;
+            *sample *= effective_volume;
         }
 
         rendered
+    }
+
+    /// Evaluate automation at a specific time and return the effective volume
+    fn evaluate_automation_at_time(&self, time: f64) -> f32 {
+        let mut volume = self.volume;
+
+        // Check for volume automation
+        for lane in self.automation_lanes.values() {
+            if !lane.enabled {
+                continue;
+            }
+
+            match lane.parameter_id {
+                ParameterId::TrackVolume => {
+                    if let Some(automated_value) = lane.evaluate(time) {
+                        volume = automated_value;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        volume
     }
 
     /// Render a single clip into the output buffer

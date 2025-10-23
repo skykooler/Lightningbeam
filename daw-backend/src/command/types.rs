@@ -1,4 +1,7 @@
-use crate::audio::{ClipId, MidiClip, MidiClipId, TrackId};
+use crate::audio::{
+    AutomationLaneId, ClipId, CurveType, MidiClip, MidiClipId, ParameterId,
+    TrackId,
+};
 use crate::audio::buffer_pool::BufferPoolStats;
 
 /// Commands sent from UI/control thread to audio thread
@@ -54,6 +57,15 @@ pub enum Command {
     /// Set metatrack pitch shift in semitones (track_id, semitones) - for future use
     SetPitchShift(TrackId, f32),
 
+    // Audio track commands
+    /// Create a new audio track with a name
+    CreateAudioTrack(String),
+    /// Add an audio file to the pool (path, data, channels, sample_rate)
+    /// Returns the pool index via an AudioEvent
+    AddAudioFile(String, Vec<f32>, u32, u32),
+    /// Add a clip to an audio track (track_id, pool_index, start_time, duration, offset)
+    AddAudioClip(TrackId, usize, f64, f64, f64),
+
     // MIDI commands
     /// Create a new MIDI track with a name
     CreateMidiTrack(String),
@@ -67,6 +79,34 @@ pub enum Command {
     // Diagnostics commands
     /// Request buffer pool statistics
     RequestBufferPoolStats,
+
+    // Automation commands
+    /// Create a new automation lane on a track (track_id, parameter_id)
+    CreateAutomationLane(TrackId, ParameterId),
+    /// Add an automation point to a lane (track_id, lane_id, time, value, curve)
+    AddAutomationPoint(TrackId, AutomationLaneId, f64, f32, CurveType),
+    /// Remove an automation point at a specific time (track_id, lane_id, time, tolerance)
+    RemoveAutomationPoint(TrackId, AutomationLaneId, f64, f64),
+    /// Clear all automation points from a lane (track_id, lane_id)
+    ClearAutomationLane(TrackId, AutomationLaneId),
+    /// Remove an automation lane (track_id, lane_id)
+    RemoveAutomationLane(TrackId, AutomationLaneId),
+    /// Enable/disable an automation lane (track_id, lane_id, enabled)
+    SetAutomationLaneEnabled(TrackId, AutomationLaneId, bool),
+
+    // Recording commands
+    /// Start recording on a track (track_id, start_time)
+    StartRecording(TrackId, f64),
+    /// Stop the current recording
+    StopRecording,
+    /// Pause the current recording
+    PauseRecording,
+    /// Resume the current recording
+    ResumeRecording,
+
+    // Project commands
+    /// Reset the entire project (remove all tracks, clear audio pool, reset state)
+    Reset,
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -80,6 +120,22 @@ pub enum AudioEvent {
     BufferUnderrun,
     /// A new track was created (track_id, is_metatrack, name)
     TrackCreated(TrackId, bool, String),
+    /// An audio file was added to the pool (pool_index, path)
+    AudioFileAdded(usize, String),
+    /// A clip was added to a track (track_id, clip_id)
+    ClipAdded(TrackId, ClipId),
     /// Buffer pool statistics response
     BufferPoolStats(BufferPoolStats),
+    /// Automation lane created (track_id, lane_id, parameter_id)
+    AutomationLaneCreated(TrackId, AutomationLaneId, ParameterId),
+    /// Recording started (track_id, clip_id)
+    RecordingStarted(TrackId, ClipId),
+    /// Recording progress update (clip_id, current_duration)
+    RecordingProgress(ClipId, f64),
+    /// Recording stopped (clip_id, pool_index)
+    RecordingStopped(ClipId, usize),
+    /// Recording error (error_message)
+    RecordingError(String),
+    /// Project has been reset
+    ProjectReset,
 }

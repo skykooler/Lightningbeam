@@ -3,6 +3,7 @@ use crate::audio::clip::ClipId;
 use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
 use crate::audio::pool::AudioPool;
 use crate::audio::project::Project;
+use crate::audio::recording::RecordingState;
 use crate::audio::track::{Track, TrackId};
 use crate::command::{AudioEvent, Command};
 use crate::effects::{Effect, GainEffect, PanEffect, SimpleEQ};
@@ -35,6 +36,11 @@ pub struct Engine {
 
     // ID counters
     next_midi_clip_id: MidiClipId,
+    next_clip_id: ClipId,
+
+    // Recording state
+    recording_state: Option<RecordingState>,
+    input_rx: Option<rtrb::Consumer<f32>>,
 }
 
 impl Engine {
@@ -65,7 +71,15 @@ impl Engine {
             event_interval_frames,
             mix_buffer: Vec::new(),
             next_midi_clip_id: 0,
+            next_clip_id: 0,
+            recording_state: None,
+            input_rx: None,
         }
+    }
+
+    /// Set the input ringbuffer consumer for recording
+    pub fn set_input_rx(&mut self, input_rx: rtrb::Consumer<f32>) {
+        self.input_rx = Some(input_rx);
     }
 
     /// Add an audio track to the engine
@@ -189,6 +203,49 @@ impl Engine {
         } else {
             // Not playing, output silence
             output.fill(0.0);
+        }
+
+        // Process recording if active (independent of playback state)
+        if let Some(recording) = &mut self.recording_state {
+            if let Some(input_rx) = &mut self.input_rx {
+                // Pull samples from input ringbuffer
+                let mut samples = Vec::new();
+                while let Ok(sample) = input_rx.pop() {
+                    samples.push(sample);
+                }
+
+                // Add samples to recording
+                if !samples.is_empty() {
+                    match recording.add_samples(&samples) {
+                        Ok(flushed) => {
+                            if flushed {
+                                // A flush occurred, update clip duration and send progress event
+                                let duration = recording.duration();
+                                let clip_id = recording.clip_id;
+                                let track_id = recording.track_id;
+
+                                // Update clip duration in project
+                                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                        clip.duration = duration;
+                                    }
+                                }
+
+                                // Send progress event
+                                let _ = self.event_tx.push(AudioEvent::RecordingProgress(clip_id, duration));
+                            }
+                        }
+                        Err(e) => {
+                            // Recording error occurred
+                            let _ = self.event_tx.push(AudioEvent::RecordingError(
+                                format!("Recording write error: {}", e)
+                            ));
+                            // Stop recording on error
+                            self.recording_state = None;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -362,6 +419,42 @@ impl Engine {
                     metatrack.pitch_shift = semitones;
                 }
             }
+            Command::CreateAudioTrack(name) => {
+                let track_id = self.project.add_audio_track(name.clone(), None);
+                // Notify UI about the new audio track
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
+            }
+            Command::AddAudioFile(path, data, channels, sample_rate) => {
+                // Create AudioFile and add to pool
+                let audio_file = crate::audio::pool::AudioFile::new(
+                    std::path::PathBuf::from(path.clone()),
+                    data,
+                    channels,
+                    sample_rate,
+                );
+                let pool_index = self.audio_pool.add_file(audio_file);
+                // Notify UI about the new audio file
+                let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
+            }
+            Command::AddAudioClip(track_id, pool_index, start_time, duration, offset) => {
+                // Create a new clip with unique ID
+                let clip_id = self.next_clip_id;
+                self.next_clip_id += 1;
+                let clip = crate::audio::clip::Clip::new(
+                    clip_id,
+                    pool_index,
+                    start_time,
+                    duration,
+                    offset,
+                );
+
+                // Add clip to track
+                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                    track.clips.push(clip);
+                    // Notify UI about the new clip
+                    let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
+                }
+            }
             Command::CreateMidiTrack(name) => {
                 let track_id = self.project.add_midi_track(name.clone(), None);
                 // Notify UI about the new MIDI track
@@ -402,6 +495,301 @@ impl Engine {
                 let stats = self.buffer_pool.stats();
                 let _ = self.event_tx.push(AudioEvent::BufferPoolStats(stats));
             }
+            Command::CreateAutomationLane(track_id, parameter_id) => {
+                // Create a new automation lane on the specified track
+                let lane_id = match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        Some(track.add_automation_lane(parameter_id))
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        Some(track.add_automation_lane(parameter_id))
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        Some(group.add_automation_lane(parameter_id))
+                    }
+                    None => None,
+                };
+
+                if let Some(lane_id) = lane_id {
+                    let _ = self.event_tx.push(AudioEvent::AutomationLaneCreated(
+                        track_id,
+                        lane_id,
+                        parameter_id,
+                    ));
+                }
+            }
+            Command::AddAutomationPoint(track_id, lane_id, time, value, curve) => {
+                // Add an automation point to the specified lane
+                let point = crate::audio::AutomationPoint::new(time, value, curve);
+
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.add_point(point);
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.add_point(point);
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(lane) = group.get_automation_lane_mut(lane_id) {
+                            lane.add_point(point);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::RemoveAutomationPoint(track_id, lane_id, time, tolerance) => {
+                // Remove automation point at specified time
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.remove_point_at_time(time, tolerance);
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.remove_point_at_time(time, tolerance);
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(lane) = group.get_automation_lane_mut(lane_id) {
+                            lane.remove_point_at_time(time, tolerance);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::ClearAutomationLane(track_id, lane_id) => {
+                // Clear all points from the lane
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.clear();
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.clear();
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(lane) = group.get_automation_lane_mut(lane_id) {
+                            lane.clear();
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::RemoveAutomationLane(track_id, lane_id) => {
+                // Remove the automation lane entirely
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        track.remove_automation_lane(lane_id);
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        track.remove_automation_lane(lane_id);
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        group.remove_automation_lane(lane_id);
+                    }
+                    None => {}
+                }
+            }
+            Command::SetAutomationLaneEnabled(track_id, lane_id, enabled) => {
+                // Enable/disable the automation lane
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.enabled = enabled;
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(lane) = track.get_automation_lane_mut(lane_id) {
+                            lane.enabled = enabled;
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Group(group)) => {
+                        if let Some(lane) = group.get_automation_lane_mut(lane_id) {
+                            lane.enabled = enabled;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            Command::StartRecording(track_id, start_time) => {
+                // Start recording on the specified track
+                self.handle_start_recording(track_id, start_time);
+            }
+            Command::StopRecording => {
+                // Stop the current recording
+                self.handle_stop_recording();
+            }
+            Command::PauseRecording => {
+                // Pause the current recording
+                if let Some(recording) = &mut self.recording_state {
+                    recording.pause();
+                }
+            }
+            Command::ResumeRecording => {
+                // Resume the current recording
+                if let Some(recording) = &mut self.recording_state {
+                    recording.resume();
+                }
+            }
+            Command::Reset => {
+                // Reset the entire project to initial state
+                // Stop playback
+                self.playing = false;
+                self.playhead = 0;
+                self.playhead_atomic.store(0, Ordering::Relaxed);
+
+                // Stop any active recording
+                self.recording_state = None;
+
+                // Clear all project data
+                self.project = Project::new();
+
+                // Clear audio pool
+                self.audio_pool = AudioPool::new();
+
+                // Reset buffer pool (recreate with same settings)
+                let buffer_size = 512 * self.channels as usize;
+                self.buffer_pool = BufferPool::new(8, buffer_size);
+
+                // Reset ID counters
+                self.next_midi_clip_id = 0;
+                self.next_clip_id = 0;
+
+                // Clear mix buffer
+                self.mix_buffer.clear();
+
+                // Notify UI that reset is complete
+                let _ = self.event_tx.push(AudioEvent::ProjectReset);
+            }
+        }
+    }
+
+    /// Handle starting a recording
+    fn handle_start_recording(&mut self, track_id: TrackId, start_time: f64) {
+        use crate::io::WavWriter;
+        use std::env;
+
+        // Check if track exists and is an audio track
+        if let Some(crate::audio::track::TrackNode::Audio(_)) = self.project.get_track_mut(track_id) {
+            // Generate a unique temp file path
+            let temp_dir = env::temp_dir();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let temp_file_path = temp_dir.join(format!("daw_recording_{}.wav", timestamp));
+
+            // Create WAV writer
+            match WavWriter::create(&temp_file_path, self.sample_rate, self.channels) {
+                Ok(writer) => {
+                    // Create intermediate clip
+                    let clip_id = self.next_clip_id;
+                    self.next_clip_id += 1;
+
+                    let clip = crate::audio::clip::Clip::new(
+                        clip_id,
+                        0, // Temporary pool index, will be updated on finalization
+                        start_time,
+                        0.0, // Duration starts at 0, will be updated during recording
+                        0.0,
+                    );
+
+                    // Add clip to track
+                    if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                        track.clips.push(clip);
+                    }
+
+                    // Create recording state
+                    let flush_interval_seconds = 5.0; // Flush every 5 seconds
+                    let recording_state = RecordingState::new(
+                        track_id,
+                        clip_id,
+                        temp_file_path,
+                        writer,
+                        self.sample_rate,
+                        self.channels,
+                        start_time,
+                        flush_interval_seconds,
+                    );
+
+                    self.recording_state = Some(recording_state);
+
+                    // Notify UI that recording has started
+                    let _ = self.event_tx.push(AudioEvent::RecordingStarted(track_id, clip_id));
+                }
+                Err(e) => {
+                    // Send error event to UI
+                    let _ = self.event_tx.push(AudioEvent::RecordingError(
+                        format!("Failed to create temp file: {}", e)
+                    ));
+                }
+            }
+        } else {
+            // Send error event if track not found or not an audio track
+            let _ = self.event_tx.push(AudioEvent::RecordingError(
+                format!("Track {} not found or is not an audio track", track_id)
+            ));
+        }
+    }
+
+    /// Handle stopping a recording
+    fn handle_stop_recording(&mut self) {
+        if let Some(recording) = self.recording_state.take() {
+            let clip_id = recording.clip_id;
+            let track_id = recording.track_id;
+
+            // Finalize the recording and get temp file path
+            match recording.finalize() {
+                Ok(temp_file_path) => {
+                    // Load the recorded audio file
+                    match crate::io::AudioFile::load(&temp_file_path) {
+                        Ok(audio_file) => {
+                            // Add to pool
+                            let pool_file = crate::audio::pool::AudioFile::new(
+                                temp_file_path.clone(),
+                                audio_file.data,
+                                audio_file.channels,
+                                audio_file.sample_rate,
+                            );
+                            let pool_index = self.audio_pool.add_file(pool_file);
+
+                            // Update the clip to reference the pool
+                            if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                    clip.audio_pool_index = pool_index;
+                                    // Duration should already be set during recording progress updates
+                                }
+                            }
+
+                            // Delete temp file
+                            let _ = std::fs::remove_file(&temp_file_path);
+
+                            // Notify UI that recording has stopped
+                            let _ = self.event_tx.push(AudioEvent::RecordingStopped(clip_id, pool_index));
+                        }
+                        Err(e) => {
+                            // Send error event
+                            let _ = self.event_tx.push(AudioEvent::RecordingError(
+                                format!("Failed to load recorded audio: {}", e)
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Send error event
+                    let _ = self.event_tx.push(AudioEvent::RecordingError(
+                        format!("Failed to finalize recording: {}", e)
+                    ));
+                }
+            }
         }
     }
 
@@ -428,6 +816,13 @@ pub struct EngineController {
     sample_rate: u32,
     channels: u32,
 }
+
+// Safety: EngineController is safe to Send across threads because:
+// - rtrb::Producer<Command> is Send by design (lock-free queue for cross-thread communication)
+// - Arc<AtomicU64> is Send + Sync (atomic types are inherently thread-safe)
+// - u32 primitives are Send + Sync (Copy types)
+// EngineController is only accessed through Mutex in application state, ensuring no concurrent mutable access.
+unsafe impl Send for EngineController {}
 
 impl EngineController {
     /// Start or resume playback
@@ -535,6 +930,21 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetPitchShift(track_id, semitones));
     }
 
+    /// Create a new audio track
+    pub fn create_audio_track(&mut self, name: String) {
+        let _ = self.command_tx.push(Command::CreateAudioTrack(name));
+    }
+
+    /// Add an audio file to the pool (must be called from non-audio thread with pre-loaded data)
+    pub fn add_audio_file(&mut self, path: String, data: Vec<f32>, channels: u32, sample_rate: u32) {
+        let _ = self.command_tx.push(Command::AddAudioFile(path, data, channels, sample_rate));
+    }
+
+    /// Add a clip to an audio track
+    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: f64, duration: f64, offset: f64) {
+        let _ = self.command_tx.push(Command::AddAudioClip(track_id, pool_index, start_time, duration, offset));
+    }
+
     /// Create a new MIDI track
     pub fn create_midi_track(&mut self, name: String) {
         let _ = self.command_tx.push(Command::CreateMidiTrack(name));
@@ -559,5 +969,93 @@ impl EngineController {
     /// The statistics will be sent via an AudioEvent::BufferPoolStats event
     pub fn request_buffer_pool_stats(&mut self) {
         let _ = self.command_tx.push(Command::RequestBufferPoolStats);
+    }
+
+    /// Create a new automation lane on a track
+    /// Returns an event AutomationLaneCreated with the lane ID
+    pub fn create_automation_lane(&mut self, track_id: TrackId, parameter_id: crate::audio::ParameterId) {
+        let _ = self.command_tx.push(Command::CreateAutomationLane(track_id, parameter_id));
+    }
+
+    /// Add an automation point to a lane
+    pub fn add_automation_point(
+        &mut self,
+        track_id: TrackId,
+        lane_id: crate::audio::AutomationLaneId,
+        time: f64,
+        value: f32,
+        curve: crate::audio::CurveType,
+    ) {
+        let _ = self.command_tx.push(Command::AddAutomationPoint(
+            track_id, lane_id, time, value, curve,
+        ));
+    }
+
+    /// Remove an automation point at a specific time
+    pub fn remove_automation_point(
+        &mut self,
+        track_id: TrackId,
+        lane_id: crate::audio::AutomationLaneId,
+        time: f64,
+        tolerance: f64,
+    ) {
+        let _ = self.command_tx.push(Command::RemoveAutomationPoint(
+            track_id, lane_id, time, tolerance,
+        ));
+    }
+
+    /// Clear all automation points from a lane
+    pub fn clear_automation_lane(
+        &mut self,
+        track_id: TrackId,
+        lane_id: crate::audio::AutomationLaneId,
+    ) {
+        let _ = self.command_tx.push(Command::ClearAutomationLane(track_id, lane_id));
+    }
+
+    /// Remove an automation lane entirely
+    pub fn remove_automation_lane(
+        &mut self,
+        track_id: TrackId,
+        lane_id: crate::audio::AutomationLaneId,
+    ) {
+        let _ = self.command_tx.push(Command::RemoveAutomationLane(track_id, lane_id));
+    }
+
+    /// Enable or disable an automation lane
+    pub fn set_automation_lane_enabled(
+        &mut self,
+        track_id: TrackId,
+        lane_id: crate::audio::AutomationLaneId,
+        enabled: bool,
+    ) {
+        let _ = self.command_tx.push(Command::SetAutomationLaneEnabled(
+            track_id, lane_id, enabled,
+        ));
+    }
+
+    /// Start recording on a track
+    pub fn start_recording(&mut self, track_id: TrackId, start_time: f64) {
+        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
+    }
+
+    /// Stop the current recording
+    pub fn stop_recording(&mut self) {
+        let _ = self.command_tx.push(Command::StopRecording);
+    }
+
+    /// Pause the current recording
+    pub fn pause_recording(&mut self) {
+        let _ = self.command_tx.push(Command::PauseRecording);
+    }
+
+    /// Resume the current recording
+    pub fn resume_recording(&mut self) {
+        let _ = self.command_tx.push(Command::ResumeRecording);
+    }
+
+    /// Reset the entire project (clear all tracks, audio pool, and state)
+    pub fn reset(&mut self) {
+        let _ = self.command_tx.push(Command::Reset);
     }
 }

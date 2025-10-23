@@ -7,6 +7,12 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaveformPeak {
+    pub min: f32,
+    pub max: f32,
+}
+
 pub struct AudioFile {
     pub data: Vec<f32>,
     pub channels: u32,
@@ -120,5 +126,49 @@ impl AudioFile {
             sample_rate,
             frames,
         })
+    }
+
+    /// Calculate the duration of the audio file in seconds
+    pub fn duration(&self) -> f64 {
+        self.frames as f64 / self.sample_rate as f64
+    }
+
+    /// Generate a waveform overview with the specified number of peaks
+    /// This creates a downsampled representation suitable for timeline visualization
+    pub fn generate_waveform_overview(&self, target_peaks: usize) -> Vec<WaveformPeak> {
+        if self.frames == 0 || target_peaks == 0 {
+            return Vec::new();
+        }
+
+        let total_frames = self.frames as usize;
+        let frames_per_peak = (total_frames / target_peaks).max(1);
+        let actual_peaks = (total_frames + frames_per_peak - 1) / frames_per_peak;
+
+        let mut peaks = Vec::with_capacity(actual_peaks);
+
+        for peak_idx in 0..actual_peaks {
+            let start_frame = peak_idx * frames_per_peak;
+            let end_frame = ((peak_idx + 1) * frames_per_peak).min(total_frames);
+
+            let mut min = 0.0f32;
+            let mut max = 0.0f32;
+
+            // Scan all samples in this window
+            for frame_idx in start_frame..end_frame {
+                // For multi-channel audio, combine all channels
+                for ch in 0..self.channels as usize {
+                    let sample_idx = frame_idx * self.channels as usize + ch;
+                    if sample_idx < self.data.len() {
+                        let sample = self.data[sample_idx];
+                        min = min.min(sample);
+                        max = max.max(sample);
+                    }
+                }
+            }
+
+            peaks.push(WaveformPeak { min, max });
+        }
+
+        peaks
     }
 }
