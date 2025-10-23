@@ -1,6 +1,7 @@
 import { backgroundColor, foregroundColor, frameWidth, highlight, layerHeight, shade, shadow, labelColor } from "./styles.js";
 import { clamp, drawBorderedRect, drawCheckerboardBackground, hslToRgb, hsvToRgb, rgbToHex } from "./utils.js"
 import { TimelineState, TimeRuler, TrackHierarchy } from "./timeline.js"
+const { invoke } = window.__TAURI__.core
 
 function growBoundingBox(bboxa, bboxb) {
   bboxa.x.min = Math.min(bboxa.x.min, bboxb.x.min);
@@ -663,7 +664,7 @@ class TimelineWindowV2 extends Widget {
       if (isSelected) {
         ctx.fillStyle = highlight
       } else {
-        ctx.fillStyle = i % 2 === 0 ? backgroundColor : shade
+        ctx.fillStyle = shade
       }
       ctx.fillRect(0, y, this.trackHeaderWidth, trackHeight)
 
@@ -893,9 +894,60 @@ class TimelineWindowV2 extends Widget {
       const y = this.trackHierarchy.getTrackY(i)
       const trackHeight = this.trackHierarchy.getTrackHeight(track)
 
-      // Draw track background (alternating colors only, no selection highlight)
-      ctx.fillStyle = i % 2 === 0 ? backgroundColor : shade
+      // Draw track background (same color for all tracks)
+      ctx.fillStyle = shade
       ctx.fillRect(0, y, trackAreaWidth, trackHeight)
+
+      // Draw interval markings
+      const visibleStartTime = this.timelineState.viewportStartTime
+      const visibleEndTime = visibleStartTime + (trackAreaWidth / this.timelineState.pixelsPerSecond)
+
+      if (this.timelineState.timeFormat === 'frames') {
+        // Frames mode: mark every frame edge, with every 5th frame shaded
+        const frameDuration = 1 / this.timelineState.framerate
+        const startFrame = Math.floor(visibleStartTime / frameDuration)
+        const endFrame = Math.ceil(visibleEndTime / frameDuration)
+
+        for (let frame = startFrame; frame <= endFrame; frame++) {
+          const time = frame * frameDuration
+          const x = this.timelineState.timeToPixel(time)
+          const nextX = this.timelineState.timeToPixel((frame + 1) * frameDuration)
+
+          if (x >= 0 && x <= trackAreaWidth) {
+            if (frame % 5 === 0) {
+              // Every 5th frame: shade the entire frame width
+              ctx.fillStyle = shadow
+              ctx.fillRect(x, y, nextX - x, trackHeight)
+            } else {
+              // Regular frame: draw edge line
+              ctx.strokeStyle = shadow
+              ctx.lineWidth = 1
+              ctx.beginPath()
+              ctx.moveTo(x, y)
+              ctx.lineTo(x, y + trackHeight)
+              ctx.stroke()
+            }
+          }
+        }
+      } else {
+        // Seconds mode: mark every second edge
+        const startSecond = Math.floor(visibleStartTime)
+        const endSecond = Math.ceil(visibleEndTime)
+
+        ctx.strokeStyle = shadow
+        ctx.lineWidth = 1
+
+        for (let second = startSecond; second <= endSecond; second++) {
+          const x = this.timelineState.timeToPixel(second)
+
+          if (x >= 0 && x <= trackAreaWidth) {
+            ctx.beginPath()
+            ctx.moveTo(x, y)
+            ctx.lineTo(x, y + trackHeight)
+            ctx.stroke()
+          }
+        }
+      }
 
       // Draw track border
       ctx.strokeStyle = shadow
@@ -1642,6 +1694,8 @@ class TimelineWindowV2 extends Widget {
         // Sync activeObject currentTime with the new playhead position
         if (this.context.activeObject) {
           this.context.activeObject.currentTime = this.timelineState.currentTime
+          // Sync DAW backend
+          invoke('audio_seek', { seconds: this.timelineState.currentTime });
         }
 
         // Trigger stage redraw to show animation at new time
@@ -2812,6 +2866,8 @@ class TimelineWindowV2 extends Widget {
       // Sync GraphicsObject currentTime with timeline playhead
       if (this.context.activeObject) {
         this.context.activeObject.currentTime = this.timelineState.currentTime
+        // Sync DAW backend
+        invoke('audio_seek', { seconds: this.timelineState.currentTime });
       }
 
       // Trigger stage redraw to update object positions based on new time
@@ -2972,6 +3028,8 @@ class TimelineWindowV2 extends Widget {
       // This ensures the stage shows the animation at the correct time
       if (this.context.activeObject) {
         this.context.activeObject.currentTime = this.timelineState.currentTime
+        // Sync DAW backend
+        invoke('audio_seek', { seconds: this.timelineState.currentTime });
       }
 
       // Trigger stage redraw to update object positions based on new keyframe values
@@ -3168,6 +3226,8 @@ class TimelineWindowV2 extends Widget {
       // Sync with animation playhead
       if (this.context.activeObject) {
         this.context.activeObject.currentTime = this.timelineState.currentTime
+        // Sync DAW backend
+        invoke('audio_seek', { seconds: this.timelineState.currentTime });
       }
 
       // Trigger stage redraw
@@ -3239,6 +3299,8 @@ class TimelineWindowV2 extends Widget {
       // Sync with animation playhead
       if (this.context.activeObject) {
         this.context.activeObject.currentTime = this.timelineState.currentTime
+        // Sync DAW backend
+        invoke('audio_seek', { seconds: this.timelineState.currentTime });
       }
 
       // Trigger stage redraw
@@ -3318,7 +3380,6 @@ class TimelineWindowV2 extends Widget {
       console.log('Finished dragging audio clip')
 
       // Update backend with new clip position
-      const { invoke } = window.__TAURI__.core
       invoke('audio_move_clip', {
         trackId: this.draggingAudioClip.audioTrack.audioTrackId,
         clipId: this.draggingAudioClip.clip.clipId,

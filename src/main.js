@@ -1015,6 +1015,9 @@ function advance() {
     context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
   }
 
+  // Sync DAW backend
+  invoke('audio_seek', { seconds: context.activeObject.currentTime });
+
   updateLayers();
   updateMenu();
   updateUI();
@@ -1154,6 +1157,9 @@ function rewind() {
   if (context.timelineWidget?.timelineState) {
     context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
   }
+
+  // Sync DAW backend
+  invoke('audio_seek', { seconds: context.activeObject.currentTime });
 
   updateLayers();
   updateMenu();
