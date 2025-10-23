@@ -60,8 +60,8 @@ class GraphicsObject extends Widget {
 
     // Timeline display settings (Phase 3)
     this.showSegment = true  // Show segment bar in timeline
-    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
-    this.curvesHeight = 150  // Height in pixels when curves are expanded
+    this.curvesMode = 'keyframe'  // 'segment' | 'keyframe' | 'curve'
+    this.curvesHeight = 150  // Height in pixels when curves are in curve view
 
     this._globalEvents.add("mousedown")
     this._globalEvents.add("mousemove")

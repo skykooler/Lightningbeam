@@ -537,11 +537,11 @@ class TrackHierarchy {
     const obj = track.object
 
     // Calculate additional height needed for curves
-    if (obj.curvesMode === 'minimized') {
+    if (obj.curvesMode === 'keyframe') {
       // Phase 6: Minimized mode should be compact - no extra height
       // Keyframes are overlaid on the segment bar
       return baseHeight
-    } else if (obj.curvesMode === 'expanded') {
+    } else if (obj.curvesMode === 'curve') {
       // Use the object's curvesHeight property
       return baseHeight + (obj.curvesHeight || 150) + 10  // +10 for padding
     }

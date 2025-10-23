@@ -1047,8 +1047,8 @@ class AudioTrack {
 
     // Timeline display settings (for track hierarchy)
     this.collapsed = false
-    this.curvesMode = 'hidden'  // 'hidden' | 'minimized' | 'expanded'
-    this.curvesHeight = 150  // Height in pixels when curves are expanded
+    this.curvesMode = 'segment'  // 'segment' | 'keyframe' | 'curve'
+    this.curvesHeight = 150  // Height in pixels when curves are in curve view
 
     pointerList[this.idx] = this;
   }

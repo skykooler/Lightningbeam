@@ -604,6 +604,46 @@ class TimelineWindowV2 extends Widget {
       this.drawCurves(ctx)
     }
 
+    // Draw curve mode button tooltip if hovering
+    if (this.hoveredCurveModeButton) {
+      const text = this.hoveredCurveModeButton.modeName
+
+      // Measure text to size the tooltip
+      ctx.font = '11px sans-serif'
+      const textMetrics = ctx.measureText(text)
+      const textWidth = textMetrics.width
+      const tooltipPadding = 4
+      const tooltipWidth = textWidth + tooltipPadding * 2
+      const tooltipHeight = 16
+
+      // Position tooltip near mouse
+      let tooltipX = this.hoveredCurveModeButton.x + 10
+      let tooltipY = this.hoveredCurveModeButton.y - tooltipHeight - 5
+
+      // Clamp to stay within bounds
+      if (tooltipX + tooltipWidth > this.width) {
+        tooltipX = this.hoveredCurveModeButton.x - tooltipWidth - 10
+      }
+      if (tooltipY < 0) {
+        tooltipY = this.hoveredCurveModeButton.y + 5
+      }
+
+      // Draw tooltip background
+      ctx.fillStyle = backgroundColor
+      ctx.fillRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight)
+
+      // Draw tooltip border
+      ctx.strokeStyle = foregroundColor
+      ctx.lineWidth = 1
+      ctx.strokeRect(tooltipX, tooltipY, tooltipWidth, tooltipHeight)
+
+      // Draw text
+      ctx.fillStyle = labelColor
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      ctx.fillText(text, tooltipX + tooltipPadding, tooltipY + tooltipHeight / 2)
+    }
+
     ctx.restore()
   }
 
@@ -764,8 +804,8 @@ class TimelineWindowV2 extends Widget {
         ctx.font = '10px sans-serif'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
-        const curveSymbol = track.object.curvesMode === 'expanded' ? '~' :
-                           track.object.curvesMode === 'minimized' ? '≈' : '-'
+        const curveSymbol = track.object.curvesMode === 'curve' ? '~' :
+                           track.object.curvesMode === 'keyframe' ? '≈' : '-'
         ctx.fillText(curveSymbol, buttonX + buttonSize / 2, buttonY + buttonSize / 2)
 
         // Segment visibility button (only for object/shape tracks, not audio)
@@ -783,7 +823,7 @@ class TimelineWindowV2 extends Widget {
         }
 
         // Draw legend for expanded curves (Phase 6)
-        if (track.object.curvesMode === 'expanded') {
+        if (track.object.curvesMode === 'curve') {
           // Get curves for this track
           const curves = []
           const obj = track.object
@@ -1311,7 +1351,7 @@ class TimelineWindowV2 extends Widget {
       const obj = track.object
 
       // Skip if curves are hidden
-      if (obj.curvesMode === 'hidden') continue
+      if (obj.curvesMode === 'segment') continue
 
       const y = this.trackHierarchy.getTrackY(i)
 
@@ -1368,9 +1408,9 @@ class TimelineWindowV2 extends Widget {
       if (curves.length === 0) continue
 
       // Draw based on curves mode
-      if (obj.curvesMode === 'minimized') {
+      if (obj.curvesMode === 'keyframe') {
         this.drawMinimizedCurves(ctx, curves, y)
-      } else if (obj.curvesMode === 'expanded') {
+      } else if (obj.curvesMode === 'curve') {
         this.drawExpandedCurves(ctx, curves, y)
       }
     }
@@ -1749,14 +1789,22 @@ class TimelineWindowV2 extends Widget {
           const curveButtonX = buttonX - buttonSize
           if (x >= curveButtonX && x <= curveButtonX + buttonSize &&
               adjustedY >= buttonY && adjustedY <= buttonY + buttonSize) {
-            // Cycle through curves modes: hidden -> minimized -> expanded -> hidden
-            if (track.object.curvesMode === 'hidden') {
-              track.object.curvesMode = 'minimized'
-            } else if (track.object.curvesMode === 'minimized') {
-              track.object.curvesMode = 'expanded'
+            // Cycle through curves modes: segment -> keyframe -> curve -> segment
+            if (track.object.curvesMode === 'segment') {
+              track.object.curvesMode = 'keyframe'
+            } else if (track.object.curvesMode === 'keyframe') {
+              track.object.curvesMode = 'curve'
             } else {
-              track.object.curvesMode = 'hidden'
+              track.object.curvesMode = 'segment'
             }
+
+            // Update hover tooltip with new mode name
+            if (this.hoveredCurveModeButton) {
+              const modeName = track.object.curvesMode === 'curve' ? 'Curve View' :
+                              track.object.curvesMode === 'keyframe' ? 'Keyframe View' : 'Segment View'
+              this.hoveredCurveModeButton.modeName = modeName
+            }
+
             if (this.requestRedraw) this.requestRedraw()
             return true
           }
@@ -1772,7 +1820,7 @@ class TimelineWindowV2 extends Widget {
           }
 
           // Check if clicking on legend items (Phase 6)
-          if (track.object.curvesMode === 'expanded') {
+          if (track.object.curvesMode === 'curve') {
             const trackIndex = this.trackHierarchy.tracks.indexOf(track)
             const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
             const legendPadding = 3
@@ -1846,7 +1894,7 @@ class TimelineWindowV2 extends Widget {
 
       if (track) {
         // Phase 6: Check if clicking on tangent handle (highest priority for curves)
-        if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
+        if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'curve') {
           const tangentInfo = this.getTangentHandleAtPoint(track, adjustedX, adjustedY)
           console.log(`Tangent handle check result:`, tangentInfo)
           if (tangentInfo) {
@@ -1875,7 +1923,7 @@ class TimelineWindowV2 extends Widget {
         }
 
         // Phase 5: Check if clicking on expanded curves
-        if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
+        if ((track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'curve') {
           const curveClickResult = this.handleCurveClick(track, adjustedX, adjustedY)
           if (curveClickResult) {
             return true
@@ -2537,7 +2585,7 @@ class TimelineWindowV2 extends Widget {
    */
   getTangentHandleAtPoint(track, x, y) {
     if (track.type !== 'object' && track.type !== 'shape') return null
-    if (track.object.curvesMode !== 'expanded') return null
+    if (track.object.curvesMode !== 'curve') return null
 
     const trackIndex = this.trackHierarchy.tracks.indexOf(track)
     const trackY = this.trackHierarchy.getTrackY(trackIndex)
@@ -2746,6 +2794,44 @@ class TimelineWindowV2 extends Widget {
   }
 
   mousemove(x, y) {
+    // Check for curve mode button hover (in track header area)
+    const trackY = y - this.ruler.height
+    if (trackY >= 0 && x < this.trackHeaderWidth) {
+      const adjustedY = trackY - this.trackScrollOffset
+      const track = this.trackHierarchy.getTrackAtY(adjustedY)
+
+      if (track && (track.type === 'object' || track.type === 'shape' || track.type === 'audio')) {
+        const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+        const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
+        const buttonSize = 16
+        const buttonY = trackYPos + (this.trackHierarchy.trackHeight - buttonSize) / 2
+        let buttonX = this.trackHeaderWidth - 10 - buttonSize // Rightmost button
+
+        // Check if hovering over curve mode button
+        if (x >= buttonX && x <= buttonX + buttonSize &&
+            adjustedY >= buttonY && adjustedY <= buttonY + buttonSize) {
+          // Get the mode name for tooltip
+          const modeName = track.object.curvesMode === 'curve' ? 'Curve View' :
+                          track.object.curvesMode === 'keyframe' ? 'Keyframe View' : 'Segment View'
+          this.hoveredCurveModeButton = {
+            x: x,
+            y: y,
+            modeName: modeName
+          }
+          if (this.requestRedraw) this.requestRedraw()
+        } else if (this.hoveredCurveModeButton) {
+          this.hoveredCurveModeButton = null
+          if (this.requestRedraw) this.requestRedraw()
+        }
+      } else if (this.hoveredCurveModeButton) {
+        this.hoveredCurveModeButton = null
+        if (this.requestRedraw) this.requestRedraw()
+      }
+    } else if (this.hoveredCurveModeButton) {
+      this.hoveredCurveModeButton = null
+      if (this.requestRedraw) this.requestRedraw()
+    }
+
     // Update hover state for keyframe tooltips (even when not dragging)
     // Clear hover if mouse is outside timeline curve areas
     let foundHover = false
@@ -2757,7 +2843,7 @@ class TimelineWindowV2 extends Widget {
         const adjustedX = x - this.trackHeaderWidth
         const track = this.trackHierarchy.getTrackAtY(adjustedY)
 
-        if (track && (track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
+        if (track && (track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'curve') {
           const trackIndex = this.trackHierarchy.tracks.indexOf(track)
           const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
 
@@ -3442,7 +3528,7 @@ class TimelineWindowV2 extends Widget {
       const adjustedX = x - this.trackHeaderWidth
       const track = this.trackHierarchy.getTrackAtY(adjustedY)
 
-      if (track && (track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'expanded') {
+      if (track && (track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'curve') {
         // Use similar logic to handleCurveClick to find if we're clicking on a keyframe
         const trackIndex = this.trackHierarchy.tracks.indexOf(track)
         const trackYPos = this.trackHierarchy.getTrackY(trackIndex)
