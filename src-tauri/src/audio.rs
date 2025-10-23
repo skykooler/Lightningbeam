@@ -1,5 +1,6 @@
-use daw_backend::{AudioEvent, AudioSystem, EngineController, WaveformPeak};
+use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
 use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
 
 #[derive(serde::Serialize)]
 pub struct AudioFileMetadata {
@@ -12,7 +13,6 @@ pub struct AudioFileMetadata {
 
 pub struct AudioState {
     controller: Option<EngineController>,
-    event_rx: Option<rtrb::Consumer<AudioEvent>>,
     sample_rate: u32,
     channels: u32,
     next_track_id: u32,
@@ -23,7 +23,6 @@ impl Default for AudioState {
     fn default() -> Self {
         Self {
             controller: None,
-            event_rx: None,
             sample_rate: 0,
             channels: 0,
             next_track_id: 0,
@@ -32,8 +31,42 @@ impl Default for AudioState {
     }
 }
 
+/// Implementation of EventEmitter that uses Tauri's event system
+struct TauriEventEmitter {
+    app_handle: tauri::AppHandle,
+}
+
+impl EventEmitter for TauriEventEmitter {
+    fn emit(&self, event: AudioEvent) {
+        // Serialize the event to the format expected by the frontend
+        let serialized_event = match event {
+            AudioEvent::RecordingStarted(track_id, clip_id) => {
+                SerializedAudioEvent::RecordingStarted { track_id, clip_id }
+            }
+            AudioEvent::RecordingProgress(clip_id, duration) => {
+                SerializedAudioEvent::RecordingProgress { clip_id, duration }
+            }
+            AudioEvent::RecordingStopped(clip_id, pool_index, waveform) => {
+                SerializedAudioEvent::RecordingStopped { clip_id, pool_index, waveform }
+            }
+            AudioEvent::RecordingError(message) => {
+                SerializedAudioEvent::RecordingError { message }
+            }
+            _ => return, // Ignore other event types for now
+        };
+
+        // Emit the event via Tauri
+        if let Err(e) = self.app_handle.emit("audio-event", serialized_event) {
+            eprintln!("Failed to emit audio event: {}", e);
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn audio_init(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<String, String> {
+pub async fn audio_init(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
     let mut audio_state = state.lock().unwrap();
 
     // Check if already initialized - if so, reset DAW state (for hot-reload)
@@ -47,8 +80,11 @@ pub async fn audio_init(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Resu
         ));
     }
 
+    // Create TauriEventEmitter
+    let emitter = Arc::new(TauriEventEmitter { app_handle });
+
     // AudioSystem handles all cpal initialization internally
-    let system = AudioSystem::new()?;
+    let system = AudioSystem::new(Some(emitter))?;
 
     let info = format!(
         "Audio initialized: {} Hz, {} ch",
@@ -60,7 +96,6 @@ pub async fn audio_init(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Resu
     Box::leak(Box::new(system.stream));
 
     audio_state.controller = Some(system.controller);
-    audio_state.event_rx = Some(system.event_rx);
     audio_state.sample_rate = system.sample_rate;
     audio_state.channels = system.channels;
     audio_state.next_track_id = 0;
@@ -310,7 +345,7 @@ pub async fn audio_resume_recording(
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {
     RecordingStarted { track_id: u32, clip_id: u32 },
@@ -319,34 +354,4 @@ pub enum SerializedAudioEvent {
     RecordingError { message: String },
 }
 
-#[tauri::command]
-pub async fn audio_get_events(
-    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
-) -> Result<Vec<SerializedAudioEvent>, String> {
-    let mut audio_state = state.lock().unwrap();
-    let mut events = Vec::new();
-
-    if let Some(event_rx) = &mut audio_state.event_rx {
-        // Poll all available events
-        while let Ok(event) = event_rx.pop() {
-            match event {
-                AudioEvent::RecordingStarted(track_id, clip_id) => {
-                    events.push(SerializedAudioEvent::RecordingStarted { track_id, clip_id });
-                }
-                AudioEvent::RecordingProgress(clip_id, duration) => {
-                    events.push(SerializedAudioEvent::RecordingProgress { clip_id, duration });
-                }
-                AudioEvent::RecordingStopped(clip_id, pool_index, waveform) => {
-                    events.push(SerializedAudioEvent::RecordingStopped { clip_id, pool_index, waveform });
-                }
-                AudioEvent::RecordingError(message) => {
-                    events.push(SerializedAudioEvent::RecordingError { message });
-                }
-                // Ignore other event types for now
-                _ => {}
-            }
-        }
-    }
-
-    Ok(events)
-}
+// audio_get_events command removed - events are now pushed via Tauri event system

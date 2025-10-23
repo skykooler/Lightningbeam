@@ -22,18 +22,27 @@ pub use io::{load_midi_file, AudioFile, WaveformPeak, WavWriter};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+/// Trait for emitting audio events to external systems (UI, logging, etc.)
+/// This allows the DAW backend to remain framework-agnostic
+pub trait EventEmitter: Send + Sync {
+    /// Emit an audio event
+    fn emit(&self, event: AudioEvent);
+}
+
 /// Simple audio system that handles cpal initialization internally
 pub struct AudioSystem {
     pub controller: EngineController,
     pub stream: cpal::Stream,
-    pub event_rx: rtrb::Consumer<AudioEvent>,
     pub sample_rate: u32,
     pub channels: u32,
 }
 
 impl AudioSystem {
     /// Initialize the audio system with default input and output devices
-    pub fn new() -> Result<Self, String> {
+    ///
+    /// # Arguments
+    /// * `event_emitter` - Optional event emitter for pushing events to external systems
+    pub fn new(event_emitter: Option<std::sync::Arc<dyn EventEmitter>>) -> Result<Self, String> {
         let host = cpal::default_host();
 
         // Get output device
@@ -84,10 +93,15 @@ impl AudioSystem {
                 eprintln!("Warning: No input device available, recording will be disabled");
                 // Start output stream and return without input
                 output_stream.play().map_err(|e| e.to_string())?;
+
+                // Spawn emitter thread if provided
+                if let Some(emitter) = event_emitter {
+                    Self::spawn_emitter_thread(event_rx, emitter);
+                }
+
                 return Ok(Self {
                     controller,
                     stream: output_stream,
-                    event_rx,
                     sample_rate,
                     channels,
                 });
@@ -106,10 +120,15 @@ impl AudioSystem {
             Err(e) => {
                 eprintln!("Warning: Could not get input config: {}, recording will be disabled", e);
                 output_stream.play().map_err(|e| e.to_string())?;
+
+                // Spawn emitter thread if provided
+                if let Some(emitter) = event_emitter {
+                    Self::spawn_emitter_thread(event_rx, emitter);
+                }
+
                 return Ok(Self {
                     controller,
                     stream: output_stream,
-                    event_rx,
                     sample_rate,
                     channels,
                 });
@@ -138,12 +157,31 @@ impl AudioSystem {
         // Leak the input stream to keep it alive
         Box::leak(Box::new(input_stream));
 
+        // Spawn emitter thread if provided
+        if let Some(emitter) = event_emitter {
+            Self::spawn_emitter_thread(event_rx, emitter);
+        }
+
         Ok(Self {
             controller,
             stream: output_stream,
-            event_rx,
             sample_rate,
             channels,
         })
+    }
+
+    /// Spawn a background thread to emit events from the ringbuffer
+    fn spawn_emitter_thread(mut event_rx: rtrb::Consumer<AudioEvent>, emitter: std::sync::Arc<dyn EventEmitter>) {
+        std::thread::spawn(move || {
+            loop {
+                // Wait for events and emit them
+                if let Ok(event) = event_rx.pop() {
+                    emitter.emit(event);
+                } else {
+                    // No events available, sleep briefly to avoid busy-waiting
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        });
     }
 }

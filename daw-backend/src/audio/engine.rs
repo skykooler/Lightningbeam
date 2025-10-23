@@ -762,62 +762,59 @@ impl Engine {
 
     /// Handle stopping a recording
     fn handle_stop_recording(&mut self) {
+        eprintln!("[STOP_RECORDING] handle_stop_recording called");
         if let Some(recording) = self.recording_state.take() {
             let clip_id = recording.clip_id;
             let track_id = recording.track_id;
+            let sample_rate = recording.sample_rate;
+            let channels = recording.channels;
 
-            // Finalize the recording and get temp file path
+            eprintln!("[STOP_RECORDING] Stopping recording for clip_id={}, track_id={}", clip_id, track_id);
+
+            // Finalize the recording (flush buffers, close file, get waveform and audio data)
             let frames_recorded = recording.frames_written;
+            eprintln!("[STOP_RECORDING] Calling finalize() - frames_recorded={}", frames_recorded);
             match recording.finalize() {
-                Ok(temp_file_path) => {
-                    eprintln!("Recording finalized: {} frames written to {:?}", frames_recorded, temp_file_path);
+                Ok((temp_file_path, waveform, audio_data)) => {
+                    eprintln!("[STOP_RECORDING] Finalize succeeded: {} frames written to {:?}, {} waveform peaks generated, {} samples in memory",
+                              frames_recorded, temp_file_path, waveform.len(), audio_data.len());
 
-                    // Load the recorded audio file
-                    match crate::io::AudioFile::load(&temp_file_path) {
-                        Ok(audio_file) => {
-                            // Generate waveform for UI
-                            let duration = audio_file.duration();
-                            let target_peaks = ((duration * 300.0) as usize).clamp(1000, 20000);
-                            let waveform = audio_file.generate_waveform_overview(target_peaks);
+                    // Add to pool using the in-memory audio data (no file loading needed!)
+                    let pool_file = crate::audio::pool::AudioFile::new(
+                        temp_file_path.clone(),
+                        audio_data,
+                        channels,
+                        sample_rate,
+                    );
+                    let pool_index = self.audio_pool.add_file(pool_file);
+                    eprintln!("[STOP_RECORDING] Added to pool at index {}", pool_index);
 
-                            // Add to pool
-                            let pool_file = crate::audio::pool::AudioFile::new(
-                                temp_file_path.clone(),
-                                audio_file.data,
-                                audio_file.channels,
-                                audio_file.sample_rate,
-                            );
-                            let pool_index = self.audio_pool.add_file(pool_file);
-
-                            // Update the clip to reference the pool
-                            if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
-                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                    clip.audio_pool_index = pool_index;
-                                    // Duration should already be set during recording progress updates
-                                }
-                            }
-
-                            // Delete temp file
-                            let _ = std::fs::remove_file(&temp_file_path);
-
-                            // Notify UI that recording has stopped (with waveform)
-                            let _ = self.event_tx.push(AudioEvent::RecordingStopped(clip_id, pool_index, waveform));
-                        }
-                        Err(e) => {
-                            // Send error event
-                            let _ = self.event_tx.push(AudioEvent::RecordingError(
-                                format!("Failed to load recorded audio: {}", e)
-                            ));
+                    // Update the clip to reference the pool
+                    if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.audio_pool_index = pool_index;
+                            eprintln!("[STOP_RECORDING] Updated clip {} with pool_index {}", clip_id, pool_index);
                         }
                     }
+
+                    // Delete temp file
+                    let _ = std::fs::remove_file(&temp_file_path);
+
+                    // Send event with the incrementally-generated waveform
+                    eprintln!("[STOP_RECORDING] Pushing RecordingStopped event for clip_id={}, pool_index={}, waveform_peaks={}",
+                              clip_id, pool_index, waveform.len());
+                    let _ = self.event_tx.push(AudioEvent::RecordingStopped(clip_id, pool_index, waveform));
+                    eprintln!("[STOP_RECORDING] RecordingStopped event pushed successfully");
                 }
                 Err(e) => {
-                    // Send error event
+                    eprintln!("[STOP_RECORDING] Finalize failed: {}", e);
                     let _ = self.event_tx.push(AudioEvent::RecordingError(
                         format!("Failed to finalize recording: {}", e)
                     ));
                 }
             }
+        } else {
+            eprintln!("[STOP_RECORDING] No active recording to stop");
         }
     }
 

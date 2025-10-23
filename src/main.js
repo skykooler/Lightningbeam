@@ -1,4 +1,5 @@
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 import * as fitCurve from "/fit-curve.js";
 import { Bezier } from "/bezier.js";
 import { Quadtree } from "./quadtree.js";
@@ -923,12 +924,13 @@ async function playPause() {
   } else {
     // Stop recording if active
     if (context.isRecording) {
+      console.log('playPause - stopping recording for clip:', context.recordingClipId);
       try {
         await invoke('audio_stop_recording');
         context.isRecording = false;
         context.recordingTrackId = null;
         context.recordingClipId = null;
-        console.log('Recording stopped by play/pause');
+        console.log('Recording stopped by play/pause button');
 
         // Update record button appearance if it exists
         if (context.recordButton) {
@@ -969,9 +971,6 @@ function advanceFrame() {
     context.timelineWidget.timelineState.currentTime = context.activeObject.currentTime;
   }
 
-  // Poll for audio events (recording progress, etc.)
-  pollAudioEvents();
-
   // Redraw stage and timeline
   updateUI();
   if (context.timelineWidget?.requestRedraw) {
@@ -981,6 +980,11 @@ function advanceFrame() {
   if (playing) {
     const duration = context.activeObject.duration;
 
+    // Debug logging for recording
+    if (context.isRecording) {
+      console.log('advanceFrame - recording active, currentTime:', context.activeObject.currentTime, 'duration:', duration, 'isRecording:', context.isRecording);
+    }
+
     // Check if we've reached the end (but allow infinite playback when recording)
     if (context.isRecording || (duration > 0 && context.activeObject.currentTime < duration)) {
       // Continue playing
@@ -988,6 +992,18 @@ function advanceFrame() {
     } else {
       // Animation finished
       playing = false;
+
+      // Stop DAW backend audio playback
+      invoke('audio_stop').catch(error => {
+        console.error('Failed to stop audio playback:', error);
+      });
+
+      // Update play/pause button appearance
+      if (context.playPauseButton) {
+        context.playPauseButton.className = "playback-btn playback-btn-play";
+        context.playPauseButton.title = "Play";
+      }
+
       for (let audioTrack of context.activeObject.audioTracks) {
         for (let i in audioTrack.sounds) {
           let sound = audioTrack.sounds[i];
@@ -998,66 +1014,75 @@ function advanceFrame() {
   }
 }
 
-async function pollAudioEvents() {
-  const { invoke } = window.__TAURI__.core;
+// Handle audio events pushed from Rust via Tauri event system
+async function handleAudioEvent(event) {
+  switch (event.type) {
+    case 'RecordingStarted':
+      console.log('[FRONTEND] RecordingStarted - track:', event.track_id, 'clip:', event.clip_id);
+      context.recordingClipId = event.clip_id;
 
-  try {
-    const events = await invoke('audio_get_events');
+      // Create the clip object in the audio track
+      const recordingTrack = context.activeObject.audioTracks.find(t => t.audioTrackId === event.track_id);
+      if (recordingTrack) {
+        const startTime = context.activeObject.currentTime || 0;
+        console.log('[FRONTEND] Creating clip object for clip', event.clip_id, 'on track', event.track_id, 'at time', startTime);
+        recordingTrack.clips.push({
+          clipId: event.clip_id,
+          poolIndex: null,  // Will be set when recording stops
+          startTime: startTime,
+          duration: 0,  // Will grow as recording progresses
+          offset: 0,
+          loading: true,
+          waveform: []
+        });
 
-    for (const event of events) {
-      switch (event.type) {
-        case 'RecordingStarted':
-          console.log('Recording started - track:', event.track_id, 'clip:', event.clip_id);
-          context.recordingClipId = event.clip_id;
-
-          // Create the clip object in the audio track
-          const recordingTrack = context.activeObject.audioTracks.find(t => t.audioTrackId === event.track_id);
-          if (recordingTrack) {
-            const startTime = context.activeObject.currentTime || 0;
-            recordingTrack.clips.push({
-              clipId: event.clip_id,
-              poolIndex: null,  // Will be set when recording stops
-              startTime: startTime,
-              duration: 0,  // Will grow as recording progresses
-              offset: 0,
-              loading: true,
-              waveform: []
-            });
-
-            updateLayers();
-            if (context.timelineWidget?.requestRedraw) {
-              context.timelineWidget.requestRedraw();
-            }
-          }
-          break;
-
-        case 'RecordingProgress':
-          // Update clip duration in UI
-          console.log('Recording progress - clip:', event.clip_id, 'duration:', event.duration);
-          updateRecordingClipDuration(event.clip_id, event.duration);
-          break;
-
-        case 'RecordingStopped':
-          console.log('Recording stopped - clip:', event.clip_id, 'pool_index:', event.pool_index, 'waveform peaks:', event.waveform?.length);
-          await finalizeRecording(event.clip_id, event.pool_index, event.waveform);
-          context.isRecording = false;
-          context.recordingTrackId = null;
-          context.recordingClipId = null;
-          break;
-
-        case 'RecordingError':
-          console.error('Recording error:', event.message);
-          alert('Recording error: ' + event.message);
-          context.isRecording = false;
-          context.recordingTrackId = null;
-          context.recordingClipId = null;
-          break;
+        updateLayers();
+        if (context.timelineWidget?.requestRedraw) {
+          context.timelineWidget.requestRedraw();
+        }
+      } else {
+        console.error('[FRONTEND] Could not find audio track', event.track_id, 'for RecordingStarted event');
       }
-    }
-  } catch (error) {
-    // Silently ignore errors - polling happens frequently
+      break;
+
+    case 'RecordingProgress':
+      // Update clip duration in UI
+      console.log('Recording progress - clip:', event.clip_id, 'duration:', event.duration);
+      updateRecordingClipDuration(event.clip_id, event.duration);
+      break;
+
+    case 'RecordingStopped':
+      console.log('[FRONTEND] RecordingStopped event - clip:', event.clip_id, 'pool_index:', event.pool_index, 'waveform peaks:', event.waveform?.length);
+      console.log('[FRONTEND] Current recording state - isRecording:', context.isRecording, 'recordingClipId:', context.recordingClipId);
+      await finalizeRecording(event.clip_id, event.pool_index, event.waveform);
+
+      // Always clear recording state when we receive RecordingStopped
+      console.log('[FRONTEND] Clearing recording state after RecordingStopped event');
+      context.isRecording = false;
+      context.recordingTrackId = null;
+      context.recordingClipId = null;
+
+      // Update record button appearance
+      if (context.recordButton) {
+        context.recordButton.className = "playback-btn playback-btn-record";
+        context.recordButton.title = "Record";
+      }
+      break;
+
+    case 'RecordingError':
+      console.error('Recording error:', event.message);
+      alert('Recording error: ' + event.message);
+      context.isRecording = false;
+      context.recordingTrackId = null;
+      context.recordingClipId = null;
+      break;
   }
 }
+
+// Set up Tauri event listener for audio events
+listen('audio-event', (tauriEvent) => {
+  handleAudioEvent(tauriEvent.payload);
+});
 
 function updateRecordingClipDuration(clipId, duration) {
   // Find the clip in the active object's audio tracks and update its duration
@@ -1155,14 +1180,15 @@ async function toggleRecording() {
 
   if (context.isRecording) {
     // Stop recording
+    console.log('[FRONTEND] toggleRecording - stopping recording for clip:', context.recordingClipId);
     try {
       await invoke('audio_stop_recording');
       context.isRecording = false;
       context.recordingTrackId = null;
       context.recordingClipId = null;
-      console.log('Recording stopped');
+      console.log('[FRONTEND] Recording stopped via toggle button');
     } catch (error) {
-      console.error('Failed to stop recording:', error);
+      console.error('[FRONTEND] Failed to stop recording:', error);
     }
   } else {
     // Start recording - check if activeLayer is an audio track
@@ -1180,6 +1206,7 @@ async function toggleRecording() {
     // Start recording at current playhead position
     const startTime = context.activeObject.currentTime || 0;
 
+    console.log('[FRONTEND] Starting recording on track', audioTrack.audioTrackId, 'at time', startTime);
     try {
       await invoke('audio_start_recording', {
         trackId: audioTrack.audioTrackId,
@@ -1187,14 +1214,14 @@ async function toggleRecording() {
       });
       context.isRecording = true;
       context.recordingTrackId = audioTrack.audioTrackId;
-      console.log('Recording started on track', audioTrack.audioTrackId, 'at time', startTime);
+      console.log('[FRONTEND] Recording started successfully, waiting for RecordingStarted event');
 
       // Start playback so the timeline moves (if not already playing)
       if (!playing) {
         await playPause();
       }
     } catch (error) {
-      console.error('Failed to start recording:', error);
+      console.error('[FRONTEND] Failed to start recording:', error);
       alert('Failed to start recording: ' + error);
     }
   }

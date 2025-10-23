@@ -207,7 +207,6 @@ pub fn run() {
         audio::audio_stop_recording,
         audio::audio_pause_recording,
         audio::audio_resume_recording,
-        audio::audio_get_events,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())
