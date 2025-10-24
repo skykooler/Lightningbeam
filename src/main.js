@@ -61,7 +61,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
-import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, VirtualPiano, Widget } from "./widgets.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, VirtualPiano, PianoRollEditor, Widget } from "./widgets.js";
 
 // State management
 import {
@@ -746,42 +746,6 @@ window.addEventListener("DOMContentLoaded", () => {
     createPane(panes.stage),
   );
 
-  // Add audio test button (temporary for Phase 0)
-  const testBtn = document.createElement('button');
-  testBtn.textContent = 'Test Audio';
-  testBtn.style.position = 'fixed';
-  testBtn.style.top = '10px';
-  testBtn.style.right = '10px';
-  testBtn.style.zIndex = '10000';
-  testBtn.style.padding = '10px';
-  testBtn.style.backgroundColor = '#4CAF50';
-  testBtn.style.color = 'white';
-  testBtn.style.border = 'none';
-  testBtn.style.borderRadius = '4px';
-  testBtn.style.cursor = 'pointer';
-  testBtn.onclick = async () => {
-    try {
-      console.log('Initializing audio...');
-      const result = await invoke('audio_init');
-      console.log(result);
-
-      console.log('Creating MIDI beep...');
-      await invoke('audio_test_beep');
-
-      console.log('Playing...');
-      await invoke('audio_play');
-
-      setTimeout(async () => {
-        await invoke('audio_stop');
-        console.log('Stopped');
-      }, 3000);
-    } catch (error) {
-      console.error('Audio test failed:', error);
-      alert('Audio test failed: ' + error);
-    }
-  };
-  document.body.appendChild(testBtn);
-
   // Initialize audio system on startup
   (async () => {
     try {
@@ -960,6 +924,11 @@ async function playPause() {
       console.error('Failed to start audio playback:', error);
     }
 
+    // Re-enable auto-scroll when playback starts
+    if (context.pianoRollEditor) {
+      context.pianoRollEditor.autoScrollEnabled = true;
+    }
+
     playbackLoop();
   } else {
     // Stop recording if active
@@ -1134,16 +1103,11 @@ async function handleAudioEvent(event) {
       // Sync frontend time with DAW time
       if (playing) {
         // Quantize time to framerate for animation playback
-        console.log('[PlaybackPosition] context.activeObject:', context.activeObject, 'root:', root, 'same?', context.activeObject === root);
-        console.log('[PlaybackPosition] root.frameRate:', root.frameRate, 'activeObject.frameRate:', context.activeObject.frameRate);
         const framerate = context.activeObject.frameRate;
-        console.log('[PlaybackPosition] framerate:', framerate, 'event.time:', event.time, 'currentTime before:', context.activeObject.currentTime);
         const frameDuration = 1 / framerate;
         const quantizedTime = Math.floor(event.time / frameDuration) * frameDuration;
-        console.log('[PlaybackPosition] frameDuration:', frameDuration, 'quantizedTime:', quantizedTime);
 
         context.activeObject.currentTime = quantizedTime;
-        console.log('[PlaybackPosition] currentTime after:', context.activeObject.currentTime);
         if (context.timelineWidget?.timelineState) {
           context.timelineWidget.timelineState.currentTime = quantizedTime;
         }
@@ -1157,6 +1121,11 @@ async function handleAudioEvent(event) {
           const playingNotes = getPlayingNotesAtTime(quantizedTime);
           context.pianoWidget.setPlayingNotes(playingNotes);
           context.pianoRedraw();
+        }
+
+        // Update piano roll editor to show playhead
+        if (context.pianoRollRedraw) {
+          context.pianoRollRedraw();
         }
       }
       break;
@@ -4474,10 +4443,34 @@ function createPane(paneType = undefined, div = undefined) {
       // Create and append the new menu to the DOM
       popupMenu = createPaneMenu(div);
 
-      // Position the menu below the button
+      // Position the menu intelligently to stay onscreen
       const buttonRect = event.target.getBoundingClientRect();
-      popupMenu.style.left = `${buttonRect.left}px`;
-      popupMenu.style.top = `${buttonRect.bottom + window.scrollY}px`;
+      const menuRect = popupMenu.getBoundingClientRect();
+
+      // Default: position below and to the right of the button
+      let left = buttonRect.left;
+      let top = buttonRect.bottom + window.scrollY;
+
+      // Check if menu goes off the right edge
+      if (left + menuRect.width > window.innerWidth) {
+        // Align right edge of menu with right edge of button
+        left = buttonRect.right - menuRect.width;
+      }
+
+      // Check if menu goes off the bottom edge
+      if (buttonRect.bottom + menuRect.height > window.innerHeight) {
+        // Position above the button instead
+        top = buttonRect.top + window.scrollY - menuRect.height;
+      }
+
+      // Ensure menu doesn't go off the left edge
+      left = Math.max(0, left);
+
+      // Ensure menu doesn't go off the top edge
+      top = Math.max(window.scrollY, top);
+
+      popupMenu.style.left = `${left}px`;
+      popupMenu.style.top = `${top}px`;
     }
 
     // Prevent the click event from propagating to the window click listener
@@ -6024,6 +6017,87 @@ function piano() {
   return piano_cvs;
 }
 
+function pianoRoll() {
+  let canvas = document.createElement("canvas");
+  canvas.className = "piano-roll";
+
+  // Create the piano roll editor widget
+  canvas.pianoRollEditor = new PianoRollEditor(0, 0, 0, 0);
+
+  function updateCanvasSize() {
+    const canvasStyles = window.getComputedStyle(canvas);
+    const width = parseInt(canvasStyles.width);
+    const height = parseInt(canvasStyles.height);
+
+    // Update widget dimensions
+    canvas.pianoRollEditor.width = width;
+    canvas.pianoRollEditor.height = height;
+
+    // Set actual size in memory (scaled for retina displays)
+    canvas.width = width * window.devicePixelRatio;
+    canvas.height = height * window.devicePixelRatio;
+
+    // Normalize coordinate system to use CSS pixels
+    const ctx = canvas.getContext("2d");
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+    // Render the piano roll
+    canvas.pianoRollEditor.draw(ctx);
+  }
+
+  // Store references in context for global access and playback updates
+  context.pianoRollEditor = canvas.pianoRollEditor;
+  context.pianoRollCanvas = canvas;
+  context.pianoRollRedraw = updateCanvasSize;
+
+  const resizeObserver = new ResizeObserver(() => {
+    updateCanvasSize();
+  });
+  resizeObserver.observe(canvas);
+
+  // Pointer event handlers (works with mouse and touch)
+  canvas.addEventListener("pointerdown", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    canvas.pianoRollEditor.handleMouseEvent("mousedown", x, y);
+    updateCanvasSize();
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    canvas.pianoRollEditor.handleMouseEvent("mousemove", x, y);
+
+    // Update cursor based on widget state
+    if (canvas.pianoRollEditor.cursor) {
+      canvas.style.cursor = canvas.pianoRollEditor.cursor;
+    }
+
+    updateCanvasSize();
+  });
+
+  canvas.addEventListener("pointerup", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    canvas.pianoRollEditor.handleMouseEvent("mouseup", x, y);
+    updateCanvasSize();
+  });
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    canvas.pianoRollEditor.wheel(e);
+    updateCanvasSize();
+  });
+
+  // Prevent text selection
+  canvas.addEventListener("selectstart", (e) => e.preventDefault());
+
+  return canvas;
+}
+
 const panes = {
   stage: {
     name: "stage",
@@ -6052,6 +6126,10 @@ const panes = {
   piano: {
     name: "piano",
     func: piano,
+  },
+  pianoRoll: {
+    name: "piano-roll",
+    func: pianoRoll,
   },
 };
 

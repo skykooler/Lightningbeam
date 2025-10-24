@@ -504,6 +504,31 @@ impl Engine {
                 // Add a pre-loaded MIDI clip to the track
                 let _ = self.project.add_midi_clip(track_id, clip);
             }
+            Command::UpdateMidiClipNotes(track_id, clip_id, notes) => {
+                // Update all notes in a MIDI clip
+                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        // Clear existing events
+                        clip.events.clear();
+
+                        // Add new events from the notes array
+                        for (start_time, note, velocity, duration) in notes {
+                            // Convert time to sample timestamp
+                            let timestamp = (start_time * self.sample_rate as f64) as u64;
+                            let note_on = MidiEvent::note_on(timestamp, 0, note, velocity);
+                            clip.events.push(note_on);
+
+                            // Add note off event
+                            let note_off_timestamp = ((start_time + duration) * self.sample_rate as f64) as u64;
+                            let note_off = MidiEvent::note_off(note_off_timestamp, 0, note, 64);
+                            clip.events.push(note_off);
+                        }
+
+                        // Sort events by timestamp
+                        clip.events.sort_by_key(|e| e.timestamp);
+                    }
+                }
+            }
             Command::RequestBufferPoolStats => {
                 // Send buffer pool statistics back to UI
                 let stats = self.buffer_pool.stats();
@@ -1008,6 +1033,11 @@ impl EngineController {
     /// Add a pre-loaded MIDI clip to a track
     pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) {
         let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip));
+    }
+
+    /// Update all notes in a MIDI clip
+    pub fn update_midi_clip_notes(&mut self, track_id: TrackId, clip_id: MidiClipId, notes: Vec<(f64, u8, u8, f64)>) {
+        let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
     /// Request buffer pool statistics

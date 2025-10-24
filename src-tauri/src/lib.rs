@@ -211,6 +211,7 @@ pub fn run() {
         audio::audio_create_midi_clip,
         audio::audio_add_midi_note,
         audio::audio_load_midi_file,
+        audio::audio_update_midi_clip_notes,
         audio::audio_send_midi_note_on,
         audio::audio_send_midi_note_off,
       ])

@@ -76,6 +76,9 @@ pub enum Command {
     AddMidiNote(TrackId, MidiClipId, f64, u8, u8, f64),
     /// Add a pre-loaded MIDI clip to a track
     AddLoadedMidiClip(TrackId, MidiClip),
+    /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
+    /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
+    UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),
 
     // Diagnostics commands
     /// Request buffer pool statistics

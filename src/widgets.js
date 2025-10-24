@@ -4460,6 +4460,661 @@ class VirtualPiano extends Widget {
   }
 }
 
+/**
+ * Piano Roll Editor
+ * MIDI note editor with piano keyboard on left and grid on right
+ */
+class PianoRollEditor extends Widget {
+  constructor(width, height, x, y) {
+    super(x, y)
+    this.width = width
+    this.height = height
+
+    // Display settings
+    this.keyboardWidth = 60  // Width of piano keyboard on left
+    this.noteHeight = 16  // Height of each note row
+    this.pixelsPerSecond = 100  // Horizontal zoom
+    this.minNote = 21  // A0
+    this.maxNote = 108  // C8
+    this.totalNotes = this.maxNote - this.minNote + 1
+
+    // Scroll state
+    this.scrollX = 0
+    this.scrollY = 0
+    this.initialScrollSet = false  // Track if we've set initial scroll position
+
+    // Interaction state
+    this.selectedNotes = new Set()  // Set of note indices
+    this.dragMode = null  // null, 'move', 'resize-left', 'resize-right', 'create'
+    this.dragStartX = 0
+    this.dragStartY = 0
+    this.creatingNote = null  // Temporary note being created
+    this.isDragging = false
+
+    // Note preview playback state
+    this.playingNote = null  // Currently playing note number
+    this.playingNoteMaxDuration = null  // Max duration in seconds
+    this.playingNoteStartTime = null  // Timestamp when note started playing
+
+    // Auto-scroll state
+    this.autoScrollEnabled = true  // Auto-scroll to follow playhead during playback
+    this.lastPlayheadTime = 0  // Track last playhead position
+
+    // Start timer to check for note duration expiry
+    this.checkNoteDurationTimer = setInterval(() => this.checkNoteDuration(), 50)
+  }
+
+  checkNoteDuration() {
+    if (this.playingNote !== null && this.playingNoteMaxDuration !== null && this.playingNoteStartTime !== null) {
+      const elapsed = (Date.now() - this.playingNoteStartTime) / 1000
+      if (elapsed >= this.playingNoteMaxDuration) {
+        // Stop the note
+        const clipData = this.getSelectedClip()
+        if (clipData) {
+          invoke('audio_send_midi_note_off', {
+            trackId: clipData.trackId,
+            note: this.playingNote
+          })
+          this.playingNote = null
+          this.playingNoteMaxDuration = null
+          this.playingNoteStartTime = null
+        }
+      }
+    }
+  }
+
+  // Get the currently selected MIDI clip from context
+  getSelectedClip() {
+    if (typeof context === 'undefined' || !context.activeObject || !context.activeObject.audioTracks) {
+      return null
+    }
+
+    // Find the first MIDI track with a selected clip
+    for (const track of context.activeObject.audioTracks) {
+      if (track.type === 'midi' && track.clips && track.clips.length > 0) {
+        // For now, just return the first clip on the first MIDI track
+        // TODO: Add proper clip selection mechanism
+        return { clip: track.clips[0], trackId: track.audioTrackId }
+      }
+    }
+    return null
+  }
+
+  hitTest(x, y) {
+    return x >= 0 && x <= this.width && y >= 0 && y <= this.height
+  }
+
+  // Convert screen coordinates to note/time
+  screenToNote(y) {
+    const gridY = y + this.scrollY
+    const noteIndex = Math.floor(gridY / this.noteHeight)
+    return this.maxNote - noteIndex  // Invert (higher notes at top)
+  }
+
+  screenToTime(x) {
+    const gridX = x - this.keyboardWidth + this.scrollX
+    return gridX / this.pixelsPerSecond
+  }
+
+  // Convert note/time to screen coordinates
+  noteToScreenY(note) {
+    const noteIndex = this.maxNote - note
+    return noteIndex * this.noteHeight - this.scrollY
+  }
+
+  timeToScreenX(time) {
+    return time * this.pixelsPerSecond - this.scrollX + this.keyboardWidth
+  }
+
+  // Find note at screen position
+  findNoteAtPosition(x, y) {
+    const clipData = this.getSelectedClip()
+    if (!clipData || !clipData.clip.notes) {
+      return -1
+    }
+
+    const note = this.screenToNote(y)
+    const time = this.screenToTime(x)
+
+    // Search in reverse order so we find top-most notes first
+    for (let i = clipData.clip.notes.length - 1; i >= 0; i--) {
+      const n = clipData.clip.notes[i]
+      const noteMatches = Math.round(n.note) === Math.round(note)
+      const timeInRange = time >= n.start_time && time <= (n.start_time + n.duration)
+
+      if (noteMatches && timeInRange) {
+        return i
+      }
+    }
+
+    return -1
+  }
+
+  // Check if clicking on the right edge resize handle
+  isOnResizeHandle(x, noteIndex) {
+    const clipData = this.getSelectedClip()
+    if (!clipData || noteIndex < 0 || noteIndex >= clipData.clip.notes.length) {
+      return false
+    }
+
+    const note = clipData.clip.notes[noteIndex]
+    const noteEndX = this.timeToScreenX(note.start_time + note.duration)
+
+    // Consider clicking within 8 pixels of the right edge as resize
+    return Math.abs(x - noteEndX) < 8
+  }
+
+  mousedown(x, y) {
+    this._globalEvents.add("mousemove")
+    this._globalEvents.add("mouseup")
+
+    this.isDragging = true
+    this.dragStartX = x
+    this.dragStartY = y
+
+    // Check if clicking on keyboard or grid
+    if (x < this.keyboardWidth) {
+      // Clicking on keyboard - could preview note
+      return
+    }
+
+    const note = this.screenToNote(y)
+    const time = this.screenToTime(x)
+
+    // Check if clicking on an existing note
+    const noteIndex = this.findNoteAtPosition(x, y)
+
+    if (noteIndex >= 0) {
+      // Clicking on an existing note
+      const clipData = this.getSelectedClip()
+      if (this.isOnResizeHandle(x, noteIndex)) {
+        // Start resizing
+        this.dragMode = 'resize'
+        this.resizingNoteIndex = noteIndex
+        this.selectedNotes.clear()
+        this.selectedNotes.add(noteIndex)
+      } else {
+        // Start moving
+        this.dragMode = 'move'
+        this.movingStartTime = time
+        this.movingStartNote = note
+
+        // Select this note (or add to selection with Ctrl/Cmd)
+        if (!this.selectedNotes.has(noteIndex)) {
+          this.selectedNotes.clear()
+          this.selectedNotes.add(noteIndex)
+        }
+
+        // Play preview of the note
+        if (clipData && clipData.clip.notes[noteIndex]) {
+          const clickedNote = clipData.clip.notes[noteIndex]
+          this.playingNote = clickedNote.note
+          this.playingNoteMaxDuration = clickedNote.duration
+          this.playingNoteStartTime = Date.now()
+
+          invoke('audio_send_midi_note_on', {
+            trackId: clipData.trackId,
+            note: clickedNote.note,
+            velocity: clickedNote.velocity
+          })
+        }
+      }
+    } else {
+      // Clicking on empty space - start creating a new note
+      this.dragMode = 'create'
+      this.selectedNotes.clear()
+
+      // Create a temporary note for preview
+      const newNoteValue = Math.round(note)
+      this.creatingNote = {
+        note: newNoteValue,
+        start_time: time,
+        duration: 0.1, // Minimum duration
+        velocity: 100
+      }
+
+      // Play preview of the new note
+      const clipData = this.getSelectedClip()
+      if (clipData) {
+        this.playingNote = newNoteValue
+        this.playingNoteMaxDuration = null // No max duration for creating notes
+        this.playingNoteStartTime = Date.now()
+
+        invoke('audio_send_midi_note_on', {
+          trackId: clipData.trackId,
+          note: newNoteValue,
+          velocity: 100
+        })
+      }
+    }
+  }
+
+  mousemove(x, y) {
+    // Update cursor based on hover position even when not dragging
+    if (!this.isDragging && x >= this.keyboardWidth) {
+      const noteIndex = this.findNoteAtPosition(x, y)
+      if (noteIndex >= 0 && this.isOnResizeHandle(x, noteIndex)) {
+        this.cursor = 'ew-resize'
+      } else {
+        this.cursor = 'default'
+      }
+    }
+
+    if (!this.isDragging) return
+
+    const clipData = this.getSelectedClip()
+    if (!clipData) return
+
+    if (this.dragMode === 'create') {
+      // Extend the note being created
+      if (this.creatingNote) {
+        const currentTime = this.screenToTime(x)
+        const duration = Math.max(0.1, currentTime - this.creatingNote.start_time)
+        this.creatingNote.duration = duration
+      }
+    } else if (this.dragMode === 'move') {
+      // Move selected notes
+      const currentTime = this.screenToTime(x)
+      const currentNote = this.screenToNote(y)
+
+      const deltaTime = currentTime - this.movingStartTime
+      const deltaNote = Math.round(currentNote - this.movingStartNote)
+
+      // Check if pitch changed
+      if (deltaNote !== 0) {
+        const firstSelectedIndex = Array.from(this.selectedNotes)[0]
+        if (firstSelectedIndex >= 0 && firstSelectedIndex < clipData.clip.notes.length) {
+          const movedNote = clipData.clip.notes[firstSelectedIndex]
+          const newPitch = Math.max(0, Math.min(127, movedNote.note + deltaNote))
+
+          // Stop old note if one is playing
+          if (this.playingNote !== null) {
+            invoke('audio_send_midi_note_off', {
+              trackId: clipData.trackId,
+              note: this.playingNote
+            })
+          }
+
+          // Update playing note to new pitch
+          this.playingNote = newPitch
+          this.playingNoteMaxDuration = movedNote.duration
+          this.playingNoteStartTime = Date.now()
+
+          // Play new note at new pitch
+          invoke('audio_send_midi_note_on', {
+            trackId: clipData.trackId,
+            note: newPitch,
+            velocity: movedNote.velocity
+          })
+        }
+      }
+
+      // Update positions of all selected notes
+      for (const noteIndex of this.selectedNotes) {
+        if (noteIndex >= 0 && noteIndex < clipData.clip.notes.length) {
+          const note = clipData.clip.notes[noteIndex]
+          note.start_time = Math.max(0, note.start_time + deltaTime)
+          note.note = Math.max(0, Math.min(127, note.note + deltaNote))
+        }
+      }
+
+      // Update drag start positions for next move
+      this.movingStartTime = currentTime
+      this.movingStartNote = currentNote
+
+      // Trigger timeline redraw to show updated notes
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw()
+      }
+    } else if (this.dragMode === 'resize') {
+      // Resize the selected note
+      if (this.resizingNoteIndex >= 0 && this.resizingNoteIndex < clipData.clip.notes.length) {
+        const note = clipData.clip.notes[this.resizingNoteIndex]
+        const currentTime = this.screenToTime(x)
+        const newDuration = Math.max(0.1, currentTime - note.start_time)
+        note.duration = newDuration
+
+        // Trigger timeline redraw to show updated notes
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw()
+        }
+      }
+    }
+  }
+
+  mouseup(x, y) {
+    this._globalEvents.delete("mousemove")
+    this._globalEvents.delete("mouseup")
+
+    const clipData = this.getSelectedClip()
+
+    // Stop playing note
+    if (this.playingNote !== null && clipData) {
+      invoke('audio_send_midi_note_off', {
+        trackId: clipData.trackId,
+        note: this.playingNote
+      })
+      this.playingNote = null
+      this.playingNoteMaxDuration = null
+      this.playingNoteStartTime = null
+    }
+
+    // If we were creating a note, add it to the clip
+    if (this.dragMode === 'create' && this.creatingNote && clipData) {
+      if (!clipData.clip.notes) {
+        clipData.clip.notes = []
+      }
+
+      // Binary search to find insertion position to maintain sorted order
+      const newNote = { ...this.creatingNote }
+      let left = 0
+      let right = clipData.clip.notes.length
+      while (left < right) {
+        const mid = Math.floor((left + right) / 2)
+        if (clipData.clip.notes[mid].start_time < newNote.start_time) {
+          left = mid + 1
+        } else {
+          right = mid
+        }
+      }
+      clipData.clip.notes.splice(left, 0, newNote)
+
+      // Trigger timeline redraw to show new note
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw()
+      }
+
+      // Sync to backend
+      this.syncNotesToBackend(clipData)
+    }
+
+    // If we moved or resized notes, sync to backend
+    if ((this.dragMode === 'move' || this.dragMode === 'resize') && clipData) {
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw()
+      }
+
+      // Sync to backend
+      this.syncNotesToBackend(clipData)
+    }
+
+    this.isDragging = false
+    this.dragMode = null
+    this.creatingNote = null
+    this.resizingNoteIndex = -1
+  }
+
+  wheel(e) {
+    // Support horizontal scrolling from trackpad (deltaX) or Shift+scroll (deltaY)
+    if (e.deltaX !== 0) {
+      // Trackpad horizontal scroll
+      this.scrollX += e.deltaX
+    } else if (e.shiftKey) {
+      // Shift+wheel for horizontal scroll
+      this.scrollX += e.deltaY
+    } else {
+      // Normal vertical scroll
+      this.scrollY += e.deltaY
+    }
+
+    this.scrollX = Math.max(0, this.scrollX)
+    this.scrollY = Math.max(0, this.scrollY)
+
+    // Disable auto-scroll when user manually scrolls
+    this.autoScrollEnabled = false
+  }
+
+  syncNotesToBackend(clipData) {
+    // Convert notes to backend format: (start_time, note, velocity, duration)
+    const notes = clipData.clip.notes.map(n => [
+      n.start_time,
+      n.note,
+      n.velocity,
+      n.duration
+    ])
+
+    // Send to backend
+    invoke('audio_update_midi_clip_notes', {
+      trackId: clipData.trackId,
+      clipId: clipData.clip.clipId,
+      notes: notes
+    }).catch(err => {
+      console.error('Failed to update MIDI notes:', err)
+    })
+  }
+
+  draw(ctx) {
+    // Update dimensions
+    // (width/height will be set by parent container)
+
+    // Set initial scroll position to center on G4 (MIDI note 67) on first draw
+    if (!this.initialScrollSet && this.height > 0) {
+      const g4Index = this.maxNote - 67  // G4 is MIDI note 67
+      const g4Y = g4Index * this.noteHeight
+      // Center G4 in the viewport
+      this.scrollY = g4Y - (this.height / 2)
+      this.initialScrollSet = true
+    }
+
+    // Auto-scroll to follow playhead during playback
+    if (this.autoScrollEnabled && context.activeObject && this.width > 0) {
+      const playheadTime = context.activeObject.currentTime || 0
+
+      // Check if playhead is moving forward (playing)
+      if (playheadTime > this.lastPlayheadTime) {
+        // Center playhead in viewport
+        const gridWidth = this.width - this.keyboardWidth
+        const playheadScreenX = playheadTime * this.pixelsPerSecond
+        const targetScrollX = playheadScreenX - (gridWidth / 2)
+
+        this.scrollX = Math.max(0, targetScrollX)
+      }
+
+      this.lastPlayheadTime = playheadTime
+    }
+
+    // Clear
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(0, 0, this.width, this.height)
+
+    // Draw piano keyboard
+    this.drawKeyboard(ctx, this.width, this.height)
+
+    // Draw grid
+    this.drawGrid(ctx, this.width, this.height)
+
+    // Draw notes if we have a selected clip
+    const selected = this.getSelectedClip()
+    if (selected && selected.clip && selected.clip.notes) {
+      this.drawNotes(ctx, this.width, this.height, selected.clip)
+    }
+
+    // Draw playhead
+    this.drawPlayhead(ctx, this.width, this.height)
+  }
+
+  drawKeyboard(ctx, width, height) {
+    const keyboardWidth = this.keyboardWidth
+
+    // Draw keyboard background
+    ctx.fillStyle = shade
+    ctx.fillRect(0, 0, keyboardWidth, height)
+
+    // Draw keys
+    for (let note = this.minNote; note <= this.maxNote; note++) {
+      const y = this.noteToScreenY(note)
+
+      if (y < 0 || y > height) continue
+
+      const isBlackKey = [1, 3, 6, 8, 10].includes(note % 12)
+
+      ctx.fillStyle = isBlackKey ? '#333' : '#fff'
+      ctx.fillRect(5, y, keyboardWidth - 10, this.noteHeight - 1)
+
+      // Draw note label for C notes
+      if (note % 12 === 0) {
+        ctx.fillStyle = '#999'
+        ctx.font = '10px sans-serif'
+        ctx.textAlign = 'right'
+        ctx.textBaseline = 'middle'
+        ctx.fillText(`C${Math.floor(note / 12) - 1}`, keyboardWidth - 15, y + this.noteHeight / 2)
+      }
+    }
+  }
+
+  drawGrid(ctx, width, height) {
+    const gridLeft = this.keyboardWidth
+    const gridWidth = width - gridLeft
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(gridLeft, 0, gridWidth, height)
+    ctx.clip()
+
+    // Draw background
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(gridLeft, 0, gridWidth, height)
+
+    // Draw horizontal lines (note separators)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+    ctx.lineWidth = 1
+
+    for (let note = this.minNote; note <= this.maxNote; note++) {
+      const y = this.noteToScreenY(note)
+
+      if (y < 0 || y > height) continue
+
+      // Highlight C notes
+      if (note % 12 === 0) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
+      } else {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+      }
+
+      ctx.beginPath()
+      ctx.moveTo(gridLeft, y)
+      ctx.lineTo(width, y)
+      ctx.stroke()
+    }
+
+    // Draw vertical lines (time grid)
+    const beatInterval = 0.5  // Half second intervals
+    const startTime = Math.floor(this.scrollX / this.pixelsPerSecond / beatInterval) * beatInterval
+    const endTime = (this.scrollX + gridWidth) / this.pixelsPerSecond
+
+    for (let time = startTime; time <= endTime; time += beatInterval) {
+      const x = this.timeToScreenX(time)
+
+      if (x < gridLeft || x > width) continue
+
+      // Every second is brighter
+      if (Math.abs(time % 1.0) < 0.01) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)'
+      } else {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'
+      }
+
+      ctx.beginPath()
+      ctx.moveTo(x, 0)
+      ctx.lineTo(x, height)
+      ctx.stroke()
+    }
+
+    ctx.restore()
+  }
+
+  drawNotes(ctx, width, height, clip) {
+    const gridLeft = this.keyboardWidth
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(gridLeft, 0, width - gridLeft, height)
+    ctx.clip()
+
+    // Draw existing notes
+    ctx.fillStyle = '#6fdc6f'
+
+    for (let i = 0; i < clip.notes.length; i++) {
+      const note = clip.notes[i]
+
+      const x = this.timeToScreenX(note.start_time)
+      const y = this.noteToScreenY(note.note)
+      const noteWidth = note.duration * this.pixelsPerSecond
+      const noteHeight = this.noteHeight - 2
+
+      // Skip if off-screen
+      if (x + noteWidth < gridLeft || x > width || y + noteHeight < 0 || y > height) {
+        continue
+      }
+
+      // Highlight selected notes
+      if (this.selectedNotes.has(i)) {
+        ctx.fillStyle = '#8ffc8f'
+      } else {
+        ctx.fillStyle = '#6fdc6f'
+      }
+
+      ctx.fillRect(x, y, noteWidth, noteHeight)
+
+      // Draw border
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)'
+      ctx.strokeRect(x, y, noteWidth, noteHeight)
+    }
+
+    // Draw note being created
+    if (this.creatingNote) {
+      const x = this.timeToScreenX(this.creatingNote.start_time)
+      const y = this.noteToScreenY(this.creatingNote.note)
+      const noteWidth = this.creatingNote.duration * this.pixelsPerSecond
+      const noteHeight = this.noteHeight - 2
+
+      // Draw with a slightly transparent color to indicate it's being created
+      ctx.fillStyle = 'rgba(111, 220, 111, 0.7)'
+      ctx.fillRect(x, y, noteWidth, noteHeight)
+
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)'
+      ctx.setLineDash([4, 4])
+      ctx.strokeRect(x, y, noteWidth, noteHeight)
+      ctx.setLineDash([])
+    }
+
+    ctx.restore()
+  }
+
+  drawPlayhead(ctx, width, height) {
+    // Get current playhead time from context
+    if (typeof context === 'undefined' || !context.activeObject) {
+      return
+    }
+
+    const playheadTime = context.activeObject.currentTime || 0
+    const gridLeft = this.keyboardWidth
+
+    // Convert time to screen X position
+    const playheadX = this.timeToScreenX(playheadTime)
+
+    // Only draw if playhead is visible
+    if (playheadX < gridLeft || playheadX > width) {
+      return
+    }
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(gridLeft, 0, width - gridLeft, height)
+    ctx.clip()
+
+    // Draw playhead line
+    ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(playheadX, 0)
+    ctx.lineTo(playheadX, height)
+    ctx.stroke()
+
+    ctx.restore()
+  }
+}
+
 export {
   SCROLL,
   Widget,
@@ -4473,5 +5128,6 @@ export {
   ScrollableWindowHeaders,
   TimelineWindow,
   TimelineWindowV2,
-  VirtualPiano
+  VirtualPiano,
+  PianoRollEditor
 };

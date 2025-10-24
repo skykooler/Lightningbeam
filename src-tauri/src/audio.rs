@@ -507,6 +507,23 @@ pub async fn audio_load_midi_file(
     }
 }
 
+#[tauri::command]
+pub async fn audio_update_midi_clip_notes(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    notes: Vec<(f64, u8, u8, f64)>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.update_midi_clip_notes(track_id, clip_id, notes);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {
