@@ -8,7 +8,7 @@
    version="1.1"
    id="svg1"
    inkscape:version="1.4 (e7c3feb100, 2024-10-09)"
-   sodipodi:docname="piano.svg"
+   sodipodi:docname="piano-roll.svg"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns="http://www.w3.org/2000/svg"
@@ -24,8 +24,8 @@
      inkscape:deskcolor="#505050"
      inkscape:document-units="mm"
      inkscape:zoom="16.035511"
-     inkscape:cx="22.231908"
-     inkscape:cy="24.102756"
+     inkscape:cx="22.263088"
+     inkscape:cy="24.102755"
      inkscape:window-width="2256"
      inkscape:window-height="1432"
      inkscape:window-x="0"
@@ -63,43 +63,29 @@
        height="10.427897"
        x="1.1219889"
        y="1.1714885"
-       inkscape:path-effect="#path-effect1"
        sodipodi:type="rect"
-       d="m 1.9157389,1.1714885 h 8.8403971 a 0.79375001,0.79375001 45 0 1 0.79375,0.79375 v 8.8403975 a 0.79375001,0.79375001 135 0 1 -0.79375,0.79375 H 1.9157389 a 0.79375001,0.79375001 45 0 1 -0.79375,-0.79375 l 0,-8.8403975 a 0.79375001,0.79375001 135 0 1 0.79375,-0.79375 z" />
-    <path
-       style="fill:none;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
-       d="M 6.3946773,6.6255579 V 11.361012"
-       id="path1" />
-    <path
-       style="fill:none;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
-       d="M 3.6389113,6.6255579 V 11.361012"
-       id="path1-5" />
-    <path
-       style="fill:none;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
-       d="M 9.1504432,6.6255589 V 11.361012"
-       id="path1-2" />
+       d="m 1.9157389,1.1714885 h 8.8403971 a 0.79375001,0.79375001 45 0 1 0.79375,0.79375 v 8.8403975 a 0.79375001,0.79375001 135 0 1 -0.79375,0.79375 H 1.9157389 a 0.79375001,0.79375001 45 0 1 -0.79375,-0.79375 l 0,-8.8403975 a 0.79375001,0.79375001 135 0 1 0.79375,-0.79375 z"
+       inkscape:path-effect="#path-effect1" />
     <rect
-       style="fill:#ffffff;fill-opacity:1;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
+       style="fill:#ffffff;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
        id="rect2"
-       width="1.6664836"
-       height="5.4449468"
-       x="5.537518"
-       y="1.2044882" />
+       width="3.233968"
+       height="1.2704875"
+       x="1.9964805"
+       y="8.4974165" />
     <rect
-       style="fill:#ffffff;fill-opacity:1;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
-       id="rect2-7"
-       width="1.6664836"
-       height="5.4449468"
-       x="8.4957237"
-       y="1.245263"
-       inkscape:transform-center-x="2.557475"
-       inkscape:transform-center-y="1.4189861" />
-    <rect
-       style="fill:#ffffff;fill-opacity:1;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
+       style="fill:#ffffff;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
        id="rect2-6"
-       width="1.6664836"
-       height="5.4449468"
-       x="2.5793126"
-       y="1.2770908" />
+       width="3.233968"
+       height="1.2704875"
+       x="4.6925573"
+       y="3.4603424" />
+    <rect
+       style="fill:#ffffff;stroke:#ffffff;stroke-width:0.499999;stroke-linecap:round;stroke-linejoin:round"
+       id="rect2-9"
+       width="1.6499833"
+       height="1.2704878"
+       x="9.0543737"
+       y="5.7136955" />
   </g>
 </svg>
