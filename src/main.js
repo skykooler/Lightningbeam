@@ -4522,6 +4522,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
     if (event.target === event.currentTarget) {
       if (event.button === 0) {
         // Left click
+        event.preventDefault(); // Prevent text selection during drag
         event.currentTarget.setAttribute("dragging", true);
         event.currentTarget.style.userSelect = "none";
         rootPane.style.userSelect = "none";
@@ -4655,7 +4656,7 @@ function splitPane(div, percent, horiz, newPane = undefined) {
           { id: "ctx_option4", text: horiz ? "Join Right" : "Join Down" },
         ],
       });
-      menu.popup({ x: event.clientX, y: event.clientY });
+      await menu.popup();
     }
 
     console.log("Right-click on the element");

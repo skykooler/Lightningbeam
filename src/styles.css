@@ -150,7 +150,7 @@ button {
 }
 .horizontal-grid:not(.panecontainer > .horizontal-grid),
 .vertical-grid:not(.panecontainer > .vertical-grid) {
-  gap: 3px;
+  gap: 8px;
 }
 .horizontal-grid {
   flex-direction: row;
