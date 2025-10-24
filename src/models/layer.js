@@ -1011,14 +1011,15 @@ class Layer extends Widget {
 }
 
 class AudioTrack {
-  constructor(uuid, name) {
+  constructor(uuid, name, type = 'audio') {
     // ID and name
     if (!uuid) {
       this.idx = uuidv4();
     } else {
       this.idx = uuid;
     }
-    this.name = name || "Audio";
+    this.name = name || (type === 'midi' ? "MIDI" : "Audio");
+    this.type = type; // 'audio' or 'midi'
     this.audible = true;
     this.visible = true;  // For consistency with Layer (audio tracks are always "visible" in timeline)
 
@@ -1042,8 +1043,8 @@ class AudioTrack {
     // Reference to DAW backend track
     this.audioTrackId = null;
 
-    // Audio clips
-    this.clips = []; // { clipId, poolIndex, name, startTime, duration, offset }
+    // Audio clips (for audio tracks) or MIDI clips (for MIDI tracks)
+    this.clips = []; // { clipId, poolIndex, name, startTime, duration, offset } or MIDI clip data
 
     // Timeline display settings (for track hierarchy)
     this.collapsed = false
@@ -1093,14 +1094,21 @@ class AudioTrack {
     }
 
     try {
-      const trackId = await invoke('audio_create_track', {
+      const params = {
         name: this.name,
-        trackType: 'audio'
-      });
+        trackType: this.type
+      };
+
+      // Add instrument parameter for MIDI tracks
+      if (this.type === 'midi' && this.instrument) {
+        params.instrument = this.instrument;
+      }
+
+      const trackId = await invoke('audio_create_track', params);
       this.audioTrackId = trackId;
-      console.log('Audio track created:', this.name, 'with ID:', trackId);
+      console.log(`${this.type === 'midi' ? 'MIDI' : 'Audio'} track created:`, this.name, 'with ID:', trackId);
     } catch (error) {
-      console.error('Failed to create audio track:', error);
+      console.error(`Failed to create ${this.type} track:`, error);
       throw error;
     }
   }

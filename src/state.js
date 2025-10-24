@@ -65,11 +65,14 @@ export let config = {
     selectNone: "<mod>A",
     group: "<mod>g",
     addLayer: "<mod>l",
+    addAudioTrack: "<mod>t",
     addKeyframe: "F6",
     addBlankKeyframe: "F7",
     zoomIn: "<mod>+",
     zoomOut: "<mod>-",
     resetZoom: "<mod>0",
+    nextLayout: "<mod>Tab",
+    previousLayout: "<mod><shift>Tab",
   },
   fileWidth: 800,
   fileHeight: 600,
@@ -78,7 +81,13 @@ export let config = {
   scrollSpeed: 1,
   debug: false,
   reopenLastSession: false,
-  lastImportFilterIndex: 0  // Index of last used filter in import dialog (0=Image, 1=Audio, 2=Lightningbeam)
+  lastImportFilterIndex: 0,  // Index of last used filter in import dialog (0=Image, 1=Audio, 2=Lightningbeam)
+  // Layout settings
+  currentLayout: "animation",  // Current active layout key
+  defaultLayout: "animation",  // Default layout for new files
+  showStartScreen: false,  // Show layout picker on startup (disabled for now)
+  restoreLayoutFromFile: false,  // Restore layout when opening files
+  customLayouts: []  // User-saved custom layouts
 };
 
 // Object pointer registry

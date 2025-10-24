@@ -149,6 +149,12 @@ impl Engine {
         }
     }
 
+    /// Process live MIDI input from all MIDI tracks
+    fn process_live_midi(&mut self, output: &mut [f32]) {
+        // Process all MIDI tracks to handle live input
+        self.project.process_live_midi(output, self.sample_rate, self.channels);
+    }
+
     /// Process audio callback - called from the audio thread
     pub fn process(&mut self, output: &mut [f32]) {
         // Process all pending commands
@@ -203,8 +209,8 @@ impl Engine {
                 self.frames_since_last_event = 0;
             }
         } else {
-            // Not playing, output silence
-            output.fill(0.0);
+            // Not playing, but process live MIDI input
+            self.process_live_midi(output);
         }
 
         // Process recording if active (independent of playback state)
@@ -263,9 +269,13 @@ impl Engine {
                 self.playing = false;
                 self.playhead = 0;
                 self.playhead_atomic.store(0, Ordering::Relaxed);
+                // Stop all MIDI notes when stopping playback
+                self.project.stop_all_notes();
             }
             Command::Pause => {
                 self.playing = false;
+                // Stop all MIDI notes when pausing playback
+                self.project.stop_all_notes();
             }
             Command::Seek(seconds) => {
                 let samples = (seconds * self.sample_rate as f64 * self.channels as f64) as u64;
@@ -672,6 +682,16 @@ impl Engine {
 
                 // Notify UI that reset is complete
                 let _ = self.event_tx.push(AudioEvent::ProjectReset);
+            }
+
+            Command::SendMidiNoteOn(track_id, note, velocity) => {
+                // Send a live MIDI note on event to the specified track's instrument
+                self.project.send_midi_note_on(track_id, note, velocity);
+            }
+
+            Command::SendMidiNoteOff(track_id, note) => {
+                // Send a live MIDI note off event to the specified track's instrument
+                self.project.send_midi_note_off(track_id, note);
             }
         }
     }
@@ -1082,5 +1102,15 @@ impl EngineController {
     /// Reset the entire project (clear all tracks, audio pool, and state)
     pub fn reset(&mut self) {
         let _ = self.command_tx.push(Command::Reset);
+    }
+
+    /// Send a live MIDI note on event to a track's instrument
+    pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
+        let _ = self.command_tx.push(Command::SendMidiNoteOn(track_id, note, velocity));
+    }
+
+    /// Send a live MIDI note off event to a track's instrument
+    pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
+        let _ = self.command_tx.push(Command::SendMidiNoteOff(track_id, note));
     }
 }

@@ -61,7 +61,7 @@ import {
   shadow,
 } from "./styles.js";
 import { Icon } from "./icon.js";
-import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, Widget } from "./widgets.js";
+import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, VirtualPiano, Widget } from "./widgets.js";
 
 // State management
 import {
@@ -101,6 +101,10 @@ import {
 } from "./models/graphics-object.js";
 import { createRoot } from "./models/root.js";
 import { actions, initializeActions } from "./actions/index.js";
+
+// Layout system
+import { defaultLayouts, getLayout, getLayoutNames } from "./layouts.js";
+import { buildLayout, loadLayoutByKeyOrName, saveCustomLayout } from "./layoutmanager.js";
 
 const {
   writeTextFile: writeTextFile,
@@ -673,7 +677,44 @@ initializeGraphicsObjectDependencies({
 
 // ============ ROOT OBJECT INITIALIZATION ============
 // Extracted to: models/root.js
-let root = createRoot();
+let _rootInternal = createRoot();
+console.log('[INIT] Setting root.frameRate to config.framerate:', config.framerate);
+_rootInternal.frameRate = config.framerate;
+console.log('[INIT] root.frameRate is now:', _rootInternal.frameRate);
+
+// Make root a global variable with getter/setter to catch reassignments
+let __root = new Proxy(_rootInternal, {
+  get(target, prop) {
+    return Reflect.get(target, prop);
+  },
+  set(target, prop, value) {
+    return Reflect.set(target, prop, value);
+  }
+});
+
+Object.defineProperty(globalThis, 'root', {
+  get() {
+    return __root;
+  },
+  set(newRoot) {
+    console.error('[ROOT REPLACED] root is being replaced!');
+    console.error('[ROOT REPLACED] Old root idx:', __root?.idx, 'New root idx:', newRoot?.idx);
+    console.trace('[ROOT REPLACED] Stack trace:');
+    __root = newRoot;
+  },
+  configurable: true,
+  enumerable: true
+});
+
+// Set up a watchdog to monitor root.frameRate
+setInterval(() => {
+  if (root && root.frameRate === undefined) {
+    console.error('[WATCHDOG] root.frameRate is undefined!');
+    console.error('[WATCHDOG] root object idx:', root.idx);
+    console.error('[WATCHDOG] Has frameRate property?', 'frameRate' in root);
+    console.trace('[WATCHDOG] Stack trace:');
+  }
+}, 1000);
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -1004,7 +1045,7 @@ function playbackLoop() {
 
 // Single-step forward by one frame/second
 function advance() {
-  if (context.timelineWidget?.timelineState?.mode === "frames") {
+  if (context.timelineWidget?.timelineState?.timeFormat === "frames") {
     context.activeObject.currentTime += 1 / context.activeObject.frameRate;
   } else {
     context.activeObject.currentTime += 1;
@@ -1026,6 +1067,66 @@ function advance() {
   }
 }
 
+// Calculate which MIDI notes are currently playing at a given time (efficient binary search)
+function getPlayingNotesAtTime(time) {
+  const playingNotes = [];
+
+  // Check all MIDI tracks
+  for (const track of context.activeObject.audioTracks) {
+    if (track.type !== 'midi') continue;
+
+    // Check all clips in the track
+    for (const clip of track.clips) {
+      if (!clip.notes || clip.notes.length === 0) continue;
+
+      // Check if current time is within the clip's range
+      const clipLocalTime = time - clip.startTime;
+      if (clipLocalTime < 0 || clipLocalTime > clip.duration) {
+        continue;
+      }
+
+      // Binary search to find the first note that might be playing
+      // Notes are sorted by start_time
+      let left = 0;
+      let right = clip.notes.length - 1;
+      let firstCandidate = clip.notes.length;
+
+      while (left <= right) {
+        const mid = Math.floor((left + right) / 2);
+        const note = clip.notes[mid];
+        const noteEndTime = note.start_time + note.duration;
+
+        if (noteEndTime <= clipLocalTime) {
+          // This note ends before current time, search right
+          left = mid + 1;
+        } else {
+          // This note might be playing or starts after current time
+          firstCandidate = mid;
+          right = mid - 1;
+        }
+      }
+
+      // Check notes from firstCandidate onwards until we find one that starts after current time
+      for (let i = firstCandidate; i < clip.notes.length; i++) {
+        const note = clip.notes[i];
+
+        // If note starts after current time, we're done with this clip
+        if (note.start_time > clipLocalTime) {
+          break;
+        }
+
+        // Check if note is currently playing
+        const noteEndTime = note.start_time + note.duration;
+        if (note.start_time <= clipLocalTime && clipLocalTime < noteEndTime) {
+          playingNotes.push(note.note);
+        }
+      }
+    }
+  }
+
+  return playingNotes;
+}
+
 // Handle audio events pushed from Rust via Tauri event system
 async function handleAudioEvent(event) {
   switch (event.type) {
@@ -1033,17 +1134,29 @@ async function handleAudioEvent(event) {
       // Sync frontend time with DAW time
       if (playing) {
         // Quantize time to framerate for animation playback
+        console.log('[PlaybackPosition] context.activeObject:', context.activeObject, 'root:', root, 'same?', context.activeObject === root);
+        console.log('[PlaybackPosition] root.frameRate:', root.frameRate, 'activeObject.frameRate:', context.activeObject.frameRate);
         const framerate = context.activeObject.frameRate;
+        console.log('[PlaybackPosition] framerate:', framerate, 'event.time:', event.time, 'currentTime before:', context.activeObject.currentTime);
         const frameDuration = 1 / framerate;
         const quantizedTime = Math.floor(event.time / frameDuration) * frameDuration;
+        console.log('[PlaybackPosition] frameDuration:', frameDuration, 'quantizedTime:', quantizedTime);
 
         context.activeObject.currentTime = quantizedTime;
+        console.log('[PlaybackPosition] currentTime after:', context.activeObject.currentTime);
         if (context.timelineWidget?.timelineState) {
           context.timelineWidget.timelineState.currentTime = quantizedTime;
         }
         // Update time display
         if (context.updateTimeDisplay) {
           context.updateTimeDisplay();
+        }
+
+        // Update piano widget with currently playing notes
+        if (context.pianoWidget && context.pianoRedraw) {
+          const playingNotes = getPlayingNotesAtTime(quantizedTime);
+          context.pianoWidget.setPlayingNotes(playingNotes);
+          context.pianoRedraw();
         }
       }
       break;
@@ -1156,7 +1269,7 @@ async function finalizeRecording(clipId, poolIndex, waveform) {
 
 // Single-step backward by one frame/second
 function rewind() {
-  if (context.timelineWidget?.timelineState?.mode === "frames") {
+  if (context.timelineWidget?.timelineState?.timeFormat === "frames") {
     context.activeObject.currentTime -= 1 / context.activeObject.frameRate;
   } else {
     context.activeObject.currentTime -= 1;
@@ -1279,21 +1392,67 @@ function newWindow(path) {
   invoke("create_window", {app: window.__TAURI__.app, path: path})
 }
 
-function _newFile(width, height, fps) {
+function _newFile(width, height, fps, layoutKey) {
+  console.log('[_newFile] REPLACING ROOT - Creating new file with fps:', fps, 'layout:', layoutKey);
+  console.trace('[_newFile] Stack trace for root replacement:');
+
+  const oldRoot = root;
+  console.log('[_newFile] Old root:', oldRoot, 'frameRate:', oldRoot?.frameRate);
+
   root = new GraphicsObject("root");
+
+  // Switch to the selected layout if provided
+  if (layoutKey) {
+    config.currentLayout = layoutKey;
+    config.defaultLayout = layoutKey;
+    console.log('[_newFile] Switching to layout:', layoutKey);
+    switchLayout(layoutKey);
+  }
+
+  // Define frameRate as a non-configurable property with a backing variable
+  let _frameRate = fps;
+  Object.defineProperty(root, 'frameRate', {
+    get() {
+      return _frameRate;
+    },
+    set(value) {
+      console.log('[frameRate setter] Setting frameRate to:', value, 'from:', _frameRate);
+      console.trace('[frameRate setter] Stack trace:');
+      _frameRate = value;
+    },
+    enumerable: true,
+    configurable: false
+  });
+
+  console.log('[_newFile] Immediately after setting frameRate:', root.frameRate);
+  console.log('[_newFile] Checking if property exists:', 'frameRate' in root);
+  console.log('[_newFile] Property descriptor:', Object.getOwnPropertyDescriptor(root, 'frameRate'));
+
+  console.log('[_newFile] New root:', root, 'frameRate:', root.frameRate);
+  console.log('[_newFile] After setting, root.frameRate:', root.frameRate);
+  console.log('[_newFile] root object:', root);
+  console.log('[_newFile] Before objectStack - root.frameRate:', root.frameRate);
   context.objectStack = [root];
+  console.log('[_newFile] After objectStack - root.frameRate:', root.frameRate);
   context.selection = [];
   context.shapeselection = [];
   config.fileWidth = width;
   config.fileHeight = height;
   config.framerate = fps;
   filePath = undefined;
+  console.log('[_newFile] Before saveConfig - root.frameRate:', root.frameRate);
   saveConfig();
+  console.log('[_newFile] After saveConfig - root.frameRate:', root.frameRate);
   undoStack.length = 0;  // Clear without breaking reference
   redoStack.length = 0;  // Clear without breaking reference
+  console.log('[_newFile] Before updateUI - root.frameRate:', root.frameRate);
   updateUI();
+  console.log('[_newFile] After updateUI - root.frameRate:', root.frameRate);
   updateLayers();
+  console.log('[_newFile] After updateLayers - root.frameRate:', root.frameRate);
   updateMenu();
+  console.log('[_newFile] After updateMenu - root.frameRate:', root.frameRate);
+  console.log('[_newFile] At end of _newFile, root.frameRate:', root.frameRate);
 }
 
 async function newFile() {
@@ -1570,6 +1729,24 @@ async function _open(path, returnJson = false) {
             //   undoStack.push(action)
             // }
             root = GraphicsObject.fromJSON(file.json)
+
+            // Restore frameRate property with getter/setter (same pattern as in _newFile)
+            // This is needed because GraphicsObject.fromJSON creates a new object without frameRate
+            let _frameRate = config.framerate;  // frameRate was set from file.fps in _newFile call above
+            Object.defineProperty(root, 'frameRate', {
+              get() {
+                return _frameRate;
+              },
+              set(value) {
+                console.log('[frameRate setter] Setting frameRate to:', value, 'from:', _frameRate);
+                console.trace('[frameRate setter] Stack trace:');
+                _frameRate = value;
+              },
+              enumerable: true,
+              configurable: false
+            });
+            console.log('[openFile] After restoring frameRate property, root.frameRate:', root.frameRate);
+
             context.objectStack = [root]
           }
 
@@ -1647,6 +1824,7 @@ async function importFile() {
   // Define supported extensions
   const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
   const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
+  const midiExtensions = ["mid", "midi"];
   const beamExtensions = ["beam"];
 
   // Define filters in consistent order
@@ -1658,6 +1836,10 @@ async function importFile() {
     {
       name: "Audio files",
       extensions: audioExtensions,
+    },
+    {
+      name: "MIDI files",
+      extensions: midiExtensions,
     },
     {
       name: "Lightningbeam files",
@@ -1710,8 +1892,10 @@ async function importFile() {
     let usedFilterIndex = 0;
     if (audioExtensions.includes(ext)) {
       usedFilterIndex = 1; // Audio
+    } else if (midiExtensions.includes(ext)) {
+      usedFilterIndex = 2; // MIDI
     } else if (beamExtensions.includes(ext)) {
-      usedFilterIndex = 2; // Lightningbeam
+      usedFilterIndex = 3; // Lightningbeam
     } else {
       usedFilterIndex = 0; // Image (default)
     }
@@ -1778,6 +1962,9 @@ async function importFile() {
     } else if (audioExtensions.includes(ext)) {
       // Handle audio files - pass file path directly to backend
       actions.addAudio.create(path, context.activeObject, filename);
+    } else if (midiExtensions.includes(ext)) {
+      // Handle MIDI files
+      actions.addMIDI.create(path, context.activeObject, filename);
     } else {
       // Handle image files - convert to data URL
       const { dataURL, mimeType } = await convertToDataURL(
@@ -4305,7 +4492,8 @@ function createPane(paneType = undefined, div = undefined) {
     }
   }
 
-  div.className = "vertical-grid";
+  div.className = "vertical-grid pane";
+  div.setAttribute("data-pane-name", paneType.name);
   header.style.height = "calc( 2 * var(--lineheight))";
   content.style.height = "calc( 100% - 2 * var(--lineheight) )";
   div.appendChild(header);
@@ -5348,6 +5536,7 @@ function updateMenu() {
 }
 
 async function renderMenu() {
+  console.log('[renderMenu] START - root.frameRate:', root.frameRate);
   let activeFrame;
   let activeKeyframe;
   let newFrameMenuItem;
@@ -5358,6 +5547,7 @@ async function renderMenu() {
 
   // Move this
   updateOutliner();
+  console.log('[renderMenu] After updateOutliner - root.frameRate:', root.frameRate);
 
   let recentFilesList = [];
   config.recentFiles.forEach((file) => {
@@ -5563,6 +5753,13 @@ async function renderMenu() {
         text: "Add Audio Track",
         enabled: true,
         action: addEmptyAudioTrack,
+        accelerator: getShortcut("addAudioTrack")
+      },
+      {
+        text: "Add MIDI Track",
+        enabled: true,
+        action: addEmptyMIDITrack,
+        accelerator: getShortcut("addMIDITrack")
       },
       {
         text: "Delete Layer",
@@ -5652,6 +5849,40 @@ async function renderMenu() {
       },
     ],
   });
+  // Build layout submenu items
+  const layoutMenuItems = [
+    {
+      text: "Next Layout",
+      enabled: true,
+      action: nextLayout,
+      accelerator: getShortcut("nextLayout"),
+    },
+    {
+      text: "Previous Layout",
+      enabled: true,
+      action: previousLayout,
+      accelerator: getShortcut("previousLayout"),
+    },
+  ];
+
+  // Add separator
+  layoutMenuItems.push(await PredefinedMenuItem.new({ item: "Separator" }));
+
+  // Add individual layouts
+  for (const layoutKey of getLayoutNames()) {
+    const layout = getLayout(layoutKey);
+    layoutMenuItems.push({
+      text: layout.name,
+      enabled: true,
+      action: () => switchLayout(layoutKey),
+    });
+  }
+
+  const layoutSubmenu = await Submenu.new({
+    text: "Layout",
+    items: layoutMenuItems,
+  });
+
   const viewSubmenu = await Submenu.new({
     text: "View",
     items: [
@@ -5679,6 +5910,7 @@ async function renderMenu() {
         action: recenter,
         // accelerator: getShortcut("recenter"),
       },
+      layoutSubmenu,
     ],
   });
   const helpSubmenu = await Submenu.new({
@@ -5707,9 +5939,90 @@ async function renderMenu() {
   const menu = await Menu.new({
     items: items,
   });
+  console.log('[renderMenu] Before setAsWindowMenu - root.frameRate:', root.frameRate);
   await (macOS ? menu.setAsAppMenu() : menu.setAsWindowMenu());
+  console.log('[renderMenu] END - root.frameRate:', root.frameRate);
 }
 updateMenu();
+
+function piano() {
+  let piano_cvs = document.createElement("canvas");
+  piano_cvs.className = "piano";
+
+  // Create the virtual piano widget
+  piano_cvs.virtualPiano = new VirtualPiano();
+
+  // Variable to store the last time updatePianoCanvasSize was called
+  let lastResizeTime = 0;
+  const throttleIntervalMs = 20;
+
+  function updatePianoCanvasSize() {
+    const canvasStyles = window.getComputedStyle(piano_cvs);
+    const width = parseInt(canvasStyles.width);
+    const height = parseInt(canvasStyles.height);
+
+    // Set actual size in memory (scaled for retina displays)
+    piano_cvs.width = width * window.devicePixelRatio;
+    piano_cvs.height = height * window.devicePixelRatio;
+
+    // Normalize coordinate system to use CSS pixels
+    const ctx = piano_cvs.getContext("2d");
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+    // Render the piano
+    piano_cvs.virtualPiano.draw(ctx, width, height);
+  }
+
+  // Store references in context for global access
+  context.pianoWidget = piano_cvs.virtualPiano;
+  context.pianoCanvas = piano_cvs;
+  context.pianoRedraw = updatePianoCanvasSize;
+
+  const resizeObserver = new ResizeObserver((entries) => {
+    const currentTime = Date.now();
+    if (currentTime - lastResizeTime >= throttleIntervalMs) {
+      lastResizeTime = currentTime;
+      updatePianoCanvasSize();
+    }
+  });
+  resizeObserver.observe(piano_cvs);
+
+  // Mouse event handlers
+  piano_cvs.addEventListener("mousedown", (e) => {
+    const rect = piano_cvs.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const width = parseInt(window.getComputedStyle(piano_cvs).width);
+    const height = parseInt(window.getComputedStyle(piano_cvs).height);
+    piano_cvs.virtualPiano.mousedown(x, y, width, height);
+    updatePianoCanvasSize(); // Redraw to show pressed state
+  });
+
+  piano_cvs.addEventListener("mousemove", (e) => {
+    const rect = piano_cvs.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const width = parseInt(window.getComputedStyle(piano_cvs).width);
+    const height = parseInt(window.getComputedStyle(piano_cvs).height);
+    piano_cvs.virtualPiano.mousemove(x, y, width, height);
+    updatePianoCanvasSize(); // Redraw to show hover state
+  });
+
+  piano_cvs.addEventListener("mouseup", (e) => {
+    const rect = piano_cvs.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const width = parseInt(window.getComputedStyle(piano_cvs).width);
+    const height = parseInt(window.getComputedStyle(piano_cvs).height);
+    piano_cvs.virtualPiano.mouseup(x, y, width, height);
+    updatePianoCanvasSize(); // Redraw to show released state
+  });
+
+  // Prevent text selection
+  piano_cvs.addEventListener("selectstart", (e) => e.preventDefault());
+
+  return piano_cvs;
+}
 
 const panes = {
   stage: {
@@ -5736,7 +6049,80 @@ const panes = {
     name: "outliner",
     func: outliner,
   },
+  piano: {
+    name: "piano",
+    func: piano,
+  },
 };
+
+/**
+ * Switch to a different layout
+ * @param {string} layoutKey - The key of the layout to switch to
+ */
+function switchLayout(layoutKey) {
+  try {
+    console.log(`Switching to layout: ${layoutKey}`);
+
+    // Load the layout definition
+    const layoutDef = loadLayoutByKeyOrName(layoutKey);
+    if (!layoutDef) {
+      console.error(`Layout not found: ${layoutKey}`);
+      return;
+    }
+
+    // Clear existing layout (except root element)
+    while (rootPane.firstChild) {
+      rootPane.removeChild(rootPane.firstChild);
+    }
+
+    // Clear layoutElements array
+    layoutElements.length = 0;
+
+    // Clear canvases array (will be repopulated when stage pane is created)
+    canvases.length = 0;
+
+    // Build new layout from definition directly into rootPane
+    buildLayout(rootPane, layoutDef, panes, createPane, splitPane);
+
+    // Update config
+    config.currentLayout = layoutKey;
+    saveConfig();
+
+    // Trigger layout update
+    updateAll();
+    updateUI();
+    updateLayers();
+
+    console.log(`Layout switched to: ${layoutDef.name}`);
+  } catch (error) {
+    console.error(`Error switching layout:`, error);
+  }
+}
+
+/**
+ * Switch to the next layout in the list
+ */
+function nextLayout() {
+  const layoutKeys = getLayoutNames();
+  const currentIndex = layoutKeys.indexOf(config.currentLayout);
+  const nextIndex = (currentIndex + 1) % layoutKeys.length;
+  switchLayout(layoutKeys[nextIndex]);
+}
+
+/**
+ * Switch to the previous layout in the list
+ */
+function previousLayout() {
+  const layoutKeys = getLayoutNames();
+  const currentIndex = layoutKeys.indexOf(config.currentLayout);
+  const prevIndex = (currentIndex - 1 + layoutKeys.length) % layoutKeys.length;
+  switchLayout(layoutKeys[prevIndex]);
+}
+
+// Make layout functions available globally for menu actions
+window.switchLayout = switchLayout;
+window.nextLayout = nextLayout;
+window.previousLayout = previousLayout;
 
 function _arrayBufferToBase64(buffer) {
   var binary = "";
@@ -5857,6 +6243,7 @@ if (window.openedFiles?.length>0) {
 }
 
 async function addEmptyAudioTrack() {
+  console.log('[addEmptyAudioTrack] BEFORE - root.frameRate:', root.frameRate);
   const trackName = `Audio Track ${context.activeObject.audioTracks.length + 1}`;
   const trackUuid = uuidv4();
 
@@ -5867,11 +6254,17 @@ async function addEmptyAudioTrack() {
     // Initialize track in backend (creates empty audio track)
     await newAudioTrack.initializeTrack();
 
+    console.log('[addEmptyAudioTrack] After initializeTrack - root.frameRate:', root.frameRate);
+
     // Add track to active object
     context.activeObject.audioTracks.push(newAudioTrack);
 
+    console.log('[addEmptyAudioTrack] After push - root.frameRate:', root.frameRate);
+
     // Select the newly created track
     context.activeObject.activeLayer = newAudioTrack;
+
+    console.log('[addEmptyAudioTrack] After setting activeLayer - root.frameRate:', root.frameRate);
 
     // Update UI
     updateLayers();
@@ -5879,9 +6272,104 @@ async function addEmptyAudioTrack() {
       context.timelineWidget.requestRedraw();
     }
 
+    console.log('[addEmptyAudioTrack] AFTER - root.frameRate:', root.frameRate);
     console.log('Empty audio track created:', trackName, 'with ID:', newAudioTrack.audioTrackId);
   } catch (error) {
     console.error('Failed to create empty audio track:', error);
+  }
+}
+
+async function addEmptyMIDITrack() {
+  console.log('[addEmptyMIDITrack] Creating new MIDI track');
+  const trackName = `MIDI Track ${context.activeObject.audioTracks.filter(t => t.type === 'midi').length + 1}`;
+  const trackUuid = uuidv4();
+
+  try {
+    // Get available instruments
+    const instruments = await getAvailableInstruments();
+
+    // Default to SimpleSynth for now (we can add UI selection later)
+    const instrument = instruments.length > 0 ? instruments[0] : 'SimpleSynth';
+
+    // Create new AudioTrack with type='midi'
+    const newMIDITrack = new AudioTrack(trackUuid, trackName, 'midi');
+    newMIDITrack.instrument = instrument;
+
+    // Initialize track in backend (creates MIDI track with instrument)
+    await newMIDITrack.initializeTrack();
+
+    console.log('[addEmptyMIDITrack] After initializeTrack - instrument:', instrument);
+
+    // Add track to active object
+    context.activeObject.audioTracks.push(newMIDITrack);
+
+    // Select the newly created track
+    context.activeObject.activeLayer = newMIDITrack;
+
+    // Update UI
+    updateLayers();
+    if (context.timelineWidget) {
+      context.timelineWidget.requestRedraw();
+    }
+
+    console.log('Empty MIDI track created:', trackName, 'with ID:', newMIDITrack.audioTrackId);
+  } catch (error) {
+    console.error('Failed to create empty MIDI track:', error);
+  }
+}
+
+// MIDI Command Wrappers
+async function getAvailableInstruments() {
+  try {
+    const instruments = await invoke('audio_get_available_instruments');
+    console.log('Available instruments:', instruments);
+    return instruments;
+  } catch (error) {
+    console.error('Failed to get available instruments:', error);
+    throw error;
+  }
+}
+
+async function createMIDITrack(name, instrument) {
+  try {
+    const trackId = await invoke('audio_create_track', { name, trackType: 'midi', instrument });
+    console.log('MIDI track created:', name, 'with instrument:', instrument, 'ID:', trackId);
+    return trackId;
+  } catch (error) {
+    console.error('Failed to create MIDI track:', error);
+    throw error;
+  }
+}
+
+async function createMIDIClip(trackId, startTime, duration) {
+  try {
+    const clipId = await invoke('audio_create_midi_clip', { trackId, startTime, duration });
+    console.log('MIDI clip created on track', trackId, 'with ID:', clipId);
+    return clipId;
+  } catch (error) {
+    console.error('Failed to create MIDI clip:', error);
+    throw error;
+  }
+}
+
+async function addMIDINote(trackId, clipId, timeOffset, note, velocity, duration) {
+  try {
+    await invoke('audio_add_midi_note', { trackId, clipId, timeOffset, note, velocity, duration });
+    console.log('MIDI note added:', note, 'at', timeOffset);
+  } catch (error) {
+    console.error('Failed to add MIDI note:', error);
+    throw error;
+  }
+}
+
+async function loadMIDIFile(trackId, path, startTime) {
+  try {
+    const duration = await invoke('audio_load_midi_file', { trackId, path, startTime });
+    console.log('MIDI file loaded:', path, 'duration:', duration);
+    return duration;
+  } catch (error) {
+    console.error('Failed to load MIDI file:', error);
+    throw error;
   }
 }
 

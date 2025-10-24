@@ -432,6 +432,95 @@ export const actions = {
       }
     },
   },
+  addMIDI: {
+    create: (filePath, object, midiname) => {
+      redoStack.length = 0;
+      let action = {
+        filePath: filePath,
+        midiname: midiname,
+        trackuuid: uuidv4(),
+        object: object.idx,
+      };
+      undoStack.push({ name: "addMIDI", action: action });
+      actions.addMIDI.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      // Create new AudioTrack with type='midi' for MIDI files
+      let newMIDITrack = new AudioTrack(action.trackuuid, action.midiname, 'midi');
+      let object = pointerList[action.object];
+
+      // Get available instruments and use the first one (SimpleSynth)
+      const { invoke } = window.__TAURI__.core;
+      const instruments = await invoke('audio_get_available_instruments');
+      const instrument = instruments.length > 0 ? instruments[0] : 'SimpleSynth';
+      newMIDITrack.instrument = instrument;
+
+      // Add placeholder clip immediately so user sees feedback
+      newMIDITrack.clips.push({
+        clipId: 0,
+        name: 'Loading...',
+        startTime: 0,
+        duration: 10,
+        loading: true
+      });
+
+      // Add track to object immediately
+      object.audioTracks.push(newMIDITrack);
+
+      // Update UI to show placeholder
+      updateLayers();
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw();
+      }
+
+      // Load MIDI file asynchronously and update clip
+      try {
+        // Initialize track in backend
+        await newMIDITrack.initializeTrack();
+
+        // Load MIDI file into the track
+        const metadata = await invoke('audio_load_midi_file', {
+          trackId: newMIDITrack.audioTrackId,
+          path: action.filePath,
+          startTime: 0
+        });
+
+        // Replace placeholder clip with real clip including note data
+        newMIDITrack.clips[0] = {
+          clipId: 0,
+          name: action.midiname,
+          startTime: 0,
+          duration: metadata.duration,
+          notes: metadata.notes,  // Store MIDI notes for visualization
+          loading: false
+        };
+
+        // Update UI with real clip data
+        updateLayers();
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw();
+        }
+      } catch (error) {
+        console.error('Failed to load MIDI file:', error);
+        // Update clip to show error
+        newMIDITrack.clips[0].name = 'Error loading';
+        newMIDITrack.clips[0].loading = false;
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw();
+        }
+      }
+    },
+    rollback: (action) => {
+      let object = pointerList[action.object];
+      let track = pointerList[action.trackuuid];
+      object.audioTracks.splice(object.audioTracks.indexOf(track), 1);
+      updateLayers();
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw();
+      }
+    },
+  },
   duplicateObject: {
     create: (items) => {
       redoStack.length = 0;

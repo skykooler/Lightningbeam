@@ -108,6 +108,12 @@ pub enum Command {
     // Project commands
     /// Reset the entire project (remove all tracks, clear audio pool, reset state)
     Reset,
+
+    // Live MIDI input commands
+    /// Send a live MIDI note on event to a track's instrument (track_id, note, velocity)
+    SendMidiNoteOn(TrackId, u8, u8),
+    /// Send a live MIDI note off event to a track's instrument (track_id, note)
+    SendMidiNoteOff(TrackId, u8),
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -139,4 +145,8 @@ pub enum AudioEvent {
     RecordingError(String),
     /// Project has been reset
     ProjectReset,
+    /// MIDI note started playing (note, velocity)
+    NoteOn(u8, u8),
+    /// MIDI note stopped playing (note)
+    NoteOff(u8),
 }

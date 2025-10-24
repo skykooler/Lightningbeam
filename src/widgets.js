@@ -1235,9 +1235,19 @@ class TimelineWindowV2 extends Widget {
           const endX = this.timelineState.timeToPixel(clip.startTime + clip.duration)
           const clipWidth = endX - startX
 
-          // Draw clip rectangle with audio-specific color
-          // Use gray color for loading clips, blue for loaded clips
-          ctx.fillStyle = clip.loading ? '#666666' : '#4a90e2'
+          // Determine clip color based on track type
+          const isMIDI = audioTrack.type === 'midi'
+          let clipColor
+          if (clip.loading) {
+            clipColor = '#666666'  // Gray for loading
+          } else if (isMIDI) {
+            clipColor = '#2d5016'  // Dark green background for MIDI clips
+          } else {
+            clipColor = '#4a90e2'  // Blue for audio clips
+          }
+
+          // Draw clip rectangle
+          ctx.fillStyle = clipColor
           ctx.fillRect(
             startX,
             y + 5,
@@ -1273,8 +1283,74 @@ class TimelineWindowV2 extends Widget {
             ctx.restore()
           }
 
-          // Draw waveform only for loaded clips
-          if (!clip.loading && clip.waveform && clip.waveform.length > 0) {
+          // Draw MIDI clip visualization (piano roll bars) or audio waveform
+          if (!clip.loading) {
+            if (isMIDI && clip.notes && clip.notes.length > 0) {
+              // Draw piano roll notes for MIDI clips
+              // Divide track height by 12 to represent chromatic notes (C, C#, D, etc.)
+              // Leave 2px padding at top and bottom
+              const verticalPadding = 2
+              const availableHeight = trackHeight - 10 - (verticalPadding * 2)
+              const noteHeight = availableHeight / 12
+
+              // Calculate visible time range within the clip
+              const clipEndX = startX + clipWidth
+              const visibleStartTime = this.timelineState.pixelToTime(Math.max(startX, 0)) - clip.startTime
+              const visibleEndTime = this.timelineState.pixelToTime(Math.min(clipEndX, this.width)) - clip.startTime
+
+              // Binary search to find first visible note
+              let firstVisibleIdx = 0
+              let left = 0
+              let right = clip.notes.length - 1
+              while (left <= right) {
+                const mid = Math.floor((left + right) / 2)
+                const noteEndTime = clip.notes[mid].start_time + clip.notes[mid].duration
+
+                if (noteEndTime < visibleStartTime) {
+                  left = mid + 1
+                  firstVisibleIdx = left
+                } else {
+                  right = mid - 1
+                }
+              }
+
+              // Draw visible notes only
+              ctx.fillStyle = '#6fdc6f'  // Bright green for note bars
+
+              for (let i = firstVisibleIdx; i < clip.notes.length; i++) {
+                const note = clip.notes[i]
+
+                // Exit early if note starts after visible range
+                if (note.start_time > visibleEndTime) {
+                  break
+                }
+
+                // Calculate note position (pitch mod 12 for chromatic representation)
+                const pitchClass = note.note % 12
+                // Invert Y so higher pitches appear at top
+                const noteY = y + 5 + ((11 - pitchClass) * noteHeight)
+
+                // Calculate note timing on timeline
+                const noteStartX = this.timelineState.timeToPixel(clip.startTime + note.start_time)
+                const noteEndX = this.timelineState.timeToPixel(clip.startTime + note.start_time + note.duration)
+
+                // Clip to visible bounds
+                const visibleStartX = Math.max(noteStartX, startX + 2)
+                const visibleEndX = Math.min(noteEndX, startX + clipWidth - 2)
+                const visibleWidth = visibleEndX - visibleStartX
+
+                if (visibleWidth > 0) {
+                  // Draw note rectangle
+                  ctx.fillRect(
+                    visibleStartX,
+                    noteY,
+                    visibleWidth,
+                    noteHeight - 1  // Small gap between notes
+                  )
+                }
+              }
+            } else if (!isMIDI && clip.waveform && clip.waveform.length > 0) {
+              // Draw waveform for audio clips
             ctx.fillStyle = 'rgba(255, 255, 255, 0.3)'
 
             // Only draw waveform within visible area
@@ -1319,6 +1395,7 @@ class TimelineWindowV2 extends Widget {
 
               ctx.closePath()
               ctx.fill()
+            }
             }
           }
         }
@@ -3953,6 +4030,436 @@ class TimelineWindowV2 extends Widget {
   }
 }
 
+/**
+ * VirtualPiano - Interactive piano keyboard for MIDI input
+ * Displays a piano keyboard that users can click/play
+ * Can be connected to MIDI tracks in the DAW backend
+ */
+class VirtualPiano extends Widget {
+  constructor() {
+    super(0, 0);
+
+    // Piano configuration - width scales based on height
+    this.whiteKeyAspectRatio = 6.0; // White key height:width ratio (taller keys)
+    this.blackKeyWidthRatio = 0.6; // Black key width as ratio of white key width
+    this.blackKeyHeightRatio = 0.62; // Black key height as ratio of white key height
+
+    // State
+    this.pressedKeys = new Set(); // Currently pressed MIDI note numbers (user input)
+    this.playingNotes = new Set(); // Currently playing notes (from MIDI playback)
+    this.hoveredKey = null; // Currently hovered key
+    this.visibleStartNote = 48; // C3 - will be adjusted based on pane width
+    this.visibleEndNote = 72; // C5 - will be adjusted based on pane width
+
+    // MIDI note mapping (white keys in an octave: C, D, E, F, G, A, B)
+    this.whiteKeysInOctave = [0, 2, 4, 5, 7, 9, 11]; // Semitones from C
+    // Black keys indexed by white key position (after which white key the black key appears)
+    // Position 0 (after C), 1 (after D), null (no black after E), 3 (after F), 4 (after G), 5 (after A), null (no black after B)
+    this.blackKeysInOctave = [1, 3, null, 6, 8, 10, null]; // Actual semitone values
+
+    // Keyboard bindings matching piano layout
+    // Black keys: W E (one group) T Y U (other group)
+    // White keys: A S D F G H J K
+    this.keyboardMap = {
+      'a': 60, // C4
+      'w': 61, // C#4
+      's': 62, // D4
+      'e': 63, // D#4
+      'd': 64, // E4
+      'f': 65, // F4
+      't': 66, // F#4
+      'g': 67, // G4
+      'y': 68, // G#4
+      'h': 69, // A4
+      'u': 70, // A#4
+      'j': 71, // B4
+      'k': 72, // C5
+    };
+
+    // Reverse mapping for displaying keyboard keys on piano keys
+    this.noteToKeyMap = {};
+    for (const [key, note] of Object.entries(this.keyboardMap)) {
+      this.noteToKeyMap[note] = key.toUpperCase();
+    }
+
+    // Setup keyboard event listeners
+    this.setupKeyboardListeners();
+  }
+
+  /**
+   * Setup keyboard event listeners for computer keyboard input
+   */
+  setupKeyboardListeners() {
+    window.addEventListener('keydown', (e) => {
+      if (e.repeat) return; // Ignore key repeats
+      const midiNote = this.keyboardMap[e.key.toLowerCase()];
+      if (midiNote !== undefined) {
+        this.noteOn(midiNote, 100); // Default velocity 100
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const midiNote = this.keyboardMap[e.key.toLowerCase()];
+      if (midiNote !== undefined) {
+        this.noteOff(midiNote);
+        e.preventDefault();
+      }
+    });
+  }
+
+  /**
+   * Convert MIDI note number to note info
+   */
+  getMidiNoteInfo(midiNote) {
+    const octave = Math.floor(midiNote / 12) - 1;
+    const semitone = midiNote % 12;
+    const isBlack = [1, 3, 6, 8, 10].includes(semitone);
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    return {
+      octave,
+      semitone,
+      isBlack,
+      name: noteNames[semitone] + octave
+    };
+  }
+
+  /**
+   * Calculate key position and dimensions for a given MIDI note
+   * @param {number} midiNote - MIDI note number
+   * @param {number} whiteKeyHeight - Height of white keys (full pane height)
+   * @param {number} whiteKeyWidth - Width of white keys (calculated from height)
+   * @param {number} offsetX - Horizontal offset for centering
+   */
+  getKeyGeometry(midiNote, whiteKeyHeight, whiteKeyWidth, offsetX = 0) {
+    const info = this.getMidiNoteInfo(midiNote);
+    const blackKeyWidth = whiteKeyWidth * this.blackKeyWidthRatio;
+    const blackKeyHeight = whiteKeyHeight * this.blackKeyHeightRatio;
+
+    // Count how many white keys are between visibleStartNote and this note
+    let whiteKeysBefore = 0;
+    for (let n = this.visibleStartNote; n < midiNote; n++) {
+      const nInfo = this.getMidiNoteInfo(n);
+      if (!nInfo.isBlack) {
+        whiteKeysBefore++;
+      }
+    }
+
+    if (info.isBlack) {
+      // Black key positioning - place it between the white keys
+      // The black key goes after the white key at position whiteKeysBefore
+      const x = offsetX + whiteKeysBefore * whiteKeyWidth + whiteKeyWidth - blackKeyWidth / 2;
+
+      return {
+        x,
+        y: 0,
+        width: blackKeyWidth,
+        height: blackKeyHeight,
+        isBlack: true
+      };
+    } else {
+      // White key positioning - just use the count
+      const x = offsetX + whiteKeysBefore * whiteKeyWidth;
+
+      return {
+        x,
+        y: 0,
+        width: whiteKeyWidth,
+        height: whiteKeyHeight,
+        isBlack: false
+      };
+    }
+  }
+
+  /**
+   * Calculate visible range and offset based on pane width and height
+   */
+  calculateVisibleRange(width, height) {
+    // Calculate white key width based on height to maintain aspect ratio
+    const whiteKeyWidth = height / this.whiteKeyAspectRatio;
+
+    // Calculate how many white keys can fit in the pane (ceiling to fill space)
+    const whiteKeysFit = Math.ceil(width / whiteKeyWidth);
+
+    // Keyboard-mapped range is C4 (60) to C5 (72)
+    // This contains 8 white keys: C, D, E, F, G, A, B, C
+    const keyboardCenter = 60; // C4
+    const keyboardWhiteKeys = 8;
+
+    if (whiteKeysFit <= keyboardWhiteKeys) {
+      // Not enough space to show all keyboard keys, just center what we have
+      this.visibleStartNote = 60; // C4
+      this.visibleEndNote = 72; // C5
+      const totalWhiteKeyWidth = keyboardWhiteKeys * whiteKeyWidth;
+      const offsetX = (width - totalWhiteKeyWidth) / 2;
+      return { offsetX, whiteKeyWidth };
+    }
+
+    // Calculate how many extra white keys we have space for
+    const extraWhiteKeys = whiteKeysFit - keyboardWhiteKeys;
+    const leftExtra = Math.floor(extraWhiteKeys / 2);
+    const rightExtra = extraWhiteKeys - leftExtra;
+
+    // Start from C4 and go back leftExtra white keys
+    let startNote = 60; // C4
+    let leftCount = 0;
+    while (leftCount < leftExtra && startNote > 0) {
+      startNote--;
+      const info = this.getMidiNoteInfo(startNote);
+      if (!info.isBlack) {
+        leftCount++;
+      }
+    }
+
+    // Now count forward exactly whiteKeysFit white keys from startNote
+    let endNote = startNote - 1; // Start one before so the first increment includes startNote
+    let whiteKeyCount = 0;
+
+    while (whiteKeyCount < whiteKeysFit && endNote < 127) {
+      endNote++;
+      const info = this.getMidiNoteInfo(endNote);
+      if (!info.isBlack) {
+        whiteKeyCount++;
+      }
+    }
+
+    this.visibleStartNote = startNote;
+    this.visibleEndNote = endNote;
+
+    // No offset - keys start from left edge and fill to the right
+    return { offsetX: 0, whiteKeyWidth };
+  }
+
+  /**
+   * Find which MIDI note is at the given x, y position
+   */
+  findKeyAtPosition(x, y, height, whiteKeyWidth, offsetX) {
+    // Check black keys first (they're on top)
+    for (let note = this.visibleStartNote; note <= this.visibleEndNote; note++) {
+      const info = this.getMidiNoteInfo(note);
+      if (!info.isBlack) continue;
+
+      const geom = this.getKeyGeometry(note, height, whiteKeyWidth, offsetX);
+      if (x >= geom.x && x < geom.x + geom.width &&
+          y >= geom.y && y < geom.y + geom.height) {
+        return note;
+      }
+    }
+
+    // Then check white keys
+    for (let note = this.visibleStartNote; note <= this.visibleEndNote; note++) {
+      const info = this.getMidiNoteInfo(note);
+      if (info.isBlack) continue;
+
+      const geom = this.getKeyGeometry(note, height, whiteKeyWidth, offsetX);
+      if (x >= geom.x && x < geom.x + geom.width &&
+          y >= geom.y && y < geom.y + geom.height) {
+        return note;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Set which notes are currently playing (from MIDI playback)
+   */
+  setPlayingNotes(notes) {
+    this.playingNotes = new Set(notes);
+  }
+
+  /**
+   * Trigger a note on event
+   */
+  noteOn(midiNote, velocity = 100) {
+    this.pressedKeys.add(midiNote);
+
+    console.log(`Note ON: ${this.getMidiNoteInfo(midiNote).name} (${midiNote}) velocity: ${velocity}`);
+
+    // Send to backend - use track ID 0 (first MIDI track)
+    // TODO: Make this configurable to select which track to send to
+    invoke('audio_send_midi_note_on', { trackId: 0, note: midiNote, velocity }).catch(error => {
+      console.error('Failed to send MIDI note on:', error);
+    });
+
+    // Request redraw to show the pressed key
+    if (typeof context !== 'undefined' && context.pianoRedraw) {
+      context.pianoRedraw();
+    }
+  }
+
+  /**
+   * Trigger a note off event
+   */
+  noteOff(midiNote) {
+    this.pressedKeys.delete(midiNote);
+
+    console.log(`Note OFF: ${this.getMidiNoteInfo(midiNote).name} (${midiNote})`);
+
+    // Send to backend - use track ID 0 (first MIDI track)
+    invoke('audio_send_midi_note_off', { trackId: 0, note: midiNote }).catch(error => {
+      console.error('Failed to send MIDI note off:', error);
+    });
+
+    // Request redraw to show the released key
+    if (typeof context !== 'undefined' && context.pianoRedraw) {
+      context.pianoRedraw();
+    }
+  }
+
+  hitTest(x, y) {
+    // Will be calculated in draw() based on pane width/height
+    return true; // Accept all events, let findKeyAtPosition handle precision
+  }
+
+  mousedown(x, y, width, height) {
+    const { offsetX, whiteKeyWidth } = this.calculateVisibleRange(width, height);
+    const key = this.findKeyAtPosition(x, y, height, whiteKeyWidth, offsetX);
+    if (key !== null) {
+      this.noteOn(key, 100);
+    }
+  }
+
+  mousemove(x, y, width, height) {
+    const { offsetX, whiteKeyWidth } = this.calculateVisibleRange(width, height);
+    this.hoveredKey = this.findKeyAtPosition(x, y, height, whiteKeyWidth, offsetX);
+  }
+
+  mouseup(x, y, width, height) {
+    // Release all pressed keys on mouse up
+    for (const key of this.pressedKeys) {
+      this.noteOff(key);
+    }
+  }
+
+  draw(ctx, width, height) {
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, width, height);
+
+    // Calculate visible range and offset
+    const { offsetX, whiteKeyWidth } = this.calculateVisibleRange(width, height);
+
+    // Draw white keys first
+    for (let note = this.visibleStartNote; note <= this.visibleEndNote; note++) {
+      const info = this.getMidiNoteInfo(note);
+      if (info.isBlack) continue;
+
+      const geom = this.getKeyGeometry(note, height, whiteKeyWidth, offsetX);
+
+      // Key color
+      const isPressed = this.pressedKeys.has(note);
+      const isPlaying = this.playingNotes.has(note);
+      const isHovered = this.hoveredKey === note;
+
+      if (isPressed) {
+        ctx.fillStyle = highlight; // User pressed key
+      } else if (isPlaying) {
+        ctx.fillStyle = '#c8e6c9'; // Light green for MIDI playback
+      } else if (isHovered) {
+        ctx.fillStyle = '#f0f0f0';
+      } else {
+        ctx.fillStyle = '#ffffff';
+      }
+
+      // Draw white key with rounded corners at the bottom
+      const radius = 3;
+      ctx.beginPath();
+      ctx.moveTo(geom.x, geom.y);
+      ctx.lineTo(geom.x + geom.width, geom.y);
+      ctx.lineTo(geom.x + geom.width, geom.y + geom.height - radius);
+      ctx.arcTo(geom.x + geom.width, geom.y + geom.height, geom.x + geom.width - radius, geom.y + geom.height, radius);
+      ctx.lineTo(geom.x + radius, geom.y + geom.height);
+      ctx.arcTo(geom.x, geom.y + geom.height, geom.x, geom.y + geom.height - radius, radius);
+      ctx.lineTo(geom.x, geom.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Key border
+      ctx.strokeStyle = shadow;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Keyboard mapping label (if exists)
+      const keyLabel = this.noteToKeyMap[note];
+      if (keyLabel) {
+        ctx.fillStyle = isPressed ? '#000000' : '#333333';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(keyLabel, geom.x + geom.width / 2, geom.y + geom.height - 30);
+      }
+
+      // Note name at bottom of white keys
+      if (info.semitone === 0) { // Only show octave number on C notes
+        ctx.fillStyle = labelColor;
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(info.name, geom.x + geom.width / 2, geom.y + geom.height - 5);
+      }
+    }
+
+    // Draw black keys on top
+    for (let note = this.visibleStartNote; note <= this.visibleEndNote; note++) {
+      const info = this.getMidiNoteInfo(note);
+      if (!info.isBlack) continue;
+
+      const geom = this.getKeyGeometry(note, height, whiteKeyWidth, offsetX);
+
+      // Key color
+      const isPressed = this.pressedKeys.has(note);
+      const isPlaying = this.playingNotes.has(note);
+      const isHovered = this.hoveredKey === note;
+
+      if (isPressed) {
+        ctx.fillStyle = '#4a4a4a'; // User pressed black key
+      } else if (isPlaying) {
+        ctx.fillStyle = '#66bb6a'; // Darker green for MIDI playback on black keys
+      } else if (isHovered) {
+        ctx.fillStyle = '#2a2a2a';
+      } else {
+        ctx.fillStyle = '#000000';
+      }
+
+      // Draw black key with rounded corners at the bottom
+      const blackRadius = 2;
+      ctx.beginPath();
+      ctx.moveTo(geom.x, geom.y);
+      ctx.lineTo(geom.x + geom.width, geom.y);
+      ctx.lineTo(geom.x + geom.width, geom.y + geom.height - blackRadius);
+      ctx.arcTo(geom.x + geom.width, geom.y + geom.height, geom.x + geom.width - blackRadius, geom.y + geom.height, blackRadius);
+      ctx.lineTo(geom.x + blackRadius, geom.y + geom.height);
+      ctx.arcTo(geom.x, geom.y + geom.height, geom.x, geom.y + geom.height - blackRadius, blackRadius);
+      ctx.lineTo(geom.x, geom.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Highlight on top edge
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(geom.x, geom.y);
+      ctx.lineTo(geom.x + geom.width, geom.y);
+      ctx.stroke();
+
+      // Keyboard mapping label (if exists)
+      const keyLabel = this.noteToKeyMap[note];
+      if (keyLabel) {
+        ctx.fillStyle = isPressed ? '#ffffff' : 'rgba(255, 255, 255, 0.7)';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(keyLabel, geom.x + geom.width / 2, geom.y + geom.height - 20);
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
 export {
   SCROLL,
   Widget,
@@ -3965,5 +4472,6 @@ export {
   ScrollableWindow,
   ScrollableWindowHeaders,
   TimelineWindow,
-  TimelineWindowV2
+  TimelineWindowV2,
+  VirtualPiano
 };

@@ -1,6 +1,6 @@
 use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter};
 
 #[derive(serde::Serialize)]
 pub struct AudioFileMetadata {
@@ -9,6 +9,20 @@ pub struct AudioFileMetadata {
     pub sample_rate: u32,
     pub channels: u32,
     pub waveform: Vec<WaveformPeak>,
+}
+
+#[derive(serde::Serialize)]
+pub struct MidiNote {
+    pub note: u8,           // MIDI note number (0-127)
+    pub start_time: f64,    // Start time in seconds
+    pub duration: f64,      // Note duration in seconds
+    pub velocity: u8,       // Note velocity (0-127)
+}
+
+#[derive(serde::Serialize)]
+pub struct MidiFileMetadata {
+    pub duration: f64,
+    pub notes: Vec<MidiNote>,
 }
 
 pub struct AudioState {
@@ -54,6 +68,12 @@ impl EventEmitter for TauriEventEmitter {
             }
             AudioEvent::RecordingError(message) => {
                 SerializedAudioEvent::RecordingError { message }
+            }
+            AudioEvent::NoteOn(note, velocity) => {
+                SerializedAudioEvent::NoteOn { note, velocity }
+            }
+            AudioEvent::NoteOff(note) => {
+                SerializedAudioEvent::NoteOff { note }
             }
             _ => return, // Ignore other event types for now
         };
@@ -192,10 +212,18 @@ pub async fn audio_set_track_parameter(
 }
 
 #[tauri::command]
+pub async fn audio_get_available_instruments() -> Result<Vec<String>, String> {
+    // Return list of available instruments
+    // For now, only SimpleSynth is available
+    Ok(vec!["SimpleSynth".to_string()])
+}
+
+#[tauri::command]
 pub async fn audio_create_track(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     name: String,
     track_type: String,
+    instrument: Option<String>,
 ) -> Result<u32, String> {
     let mut audio_state = state.lock().unwrap();
 
@@ -206,7 +234,14 @@ pub async fn audio_create_track(
     if let Some(controller) = &mut audio_state.controller {
         match track_type.as_str() {
             "audio" => controller.create_audio_track(name),
-            "midi" => controller.create_midi_track(name),
+            "midi" => {
+                // Validate instrument for MIDI tracks
+                let inst = instrument.unwrap_or_else(|| "SimpleSynth".to_string());
+                if inst != "SimpleSynth" {
+                    return Err(format!("Unknown instrument: {}", inst));
+                }
+                controller.create_midi_track(name)
+            },
             _ => return Err(format!("Unknown track type: {}", track_type)),
         }
         Ok(track_id)
@@ -348,6 +383,130 @@ pub async fn audio_resume_recording(
     }
 }
 
+#[tauri::command]
+pub async fn audio_create_midi_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    start_time: f64,
+    duration: f64,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.create_midi_clip(track_id, start_time, duration);
+        // Return a clip ID (for now, just use 0 as clips are managed internally)
+        Ok(0)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_add_midi_note(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    time_offset: f64,
+    note: u8,
+    velocity: u8,
+    duration: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.add_midi_note(track_id, clip_id, time_offset, note, velocity, duration);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_send_midi_note_on(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    note: u8,
+    velocity: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // For now, send to the first MIDI track (track_id 0)
+        // TODO: Make this configurable to select which track to send to
+        controller.send_midi_note_on(track_id, note, velocity);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_send_midi_note_off(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    note: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_midi_note_off(track_id, note);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_load_midi_file(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    path: String,
+    start_time: f64,
+) -> Result<MidiFileMetadata, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Extract sample_rate before the mutable borrow
+    let sample_rate = audio_state.sample_rate;
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Load and parse the MIDI file
+        let mut clip = daw_backend::load_midi_file(&path, 0, sample_rate)?;
+
+        // Set the start time
+        clip.start_time = start_time;
+        let duration = clip.duration;
+
+        // Extract note data from MIDI events
+        let mut notes = Vec::new();
+        let mut active_notes: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
+
+        for event in &clip.events {
+            let time_seconds = event.timestamp as f64 / sample_rate as f64;
+
+            if event.is_note_on() {
+                // Store note on event (time and velocity)
+                active_notes.insert(event.data1, (time_seconds, event.data2));
+            } else if event.is_note_off() {
+                // Find matching note on and create a MidiNote
+                if let Some((start, velocity)) = active_notes.remove(&event.data1) {
+                    notes.push(MidiNote {
+                        note: event.data1,
+                        start_time: start,
+                        duration: time_seconds - start,
+                        velocity,
+                    });
+                }
+            }
+        }
+
+        // Add the loaded MIDI clip to the track
+        controller.add_loaded_midi_clip(track_id, clip);
+
+        Ok(MidiFileMetadata {
+            duration,
+            notes,
+        })
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {
@@ -356,6 +515,8 @@ pub enum SerializedAudioEvent {
     RecordingProgress { clip_id: u32, duration: f64 },
     RecordingStopped { clip_id: u32, pool_index: usize, waveform: Vec<WaveformPeak> },
     RecordingError { message: String },
+    NoteOn { note: u8, velocity: u8 },
+    NoteOff { note: u8 },
 }
 
 // audio_get_events command removed - events are now pushed via Tauri event system

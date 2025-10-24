@@ -406,6 +406,54 @@ impl Project {
             None => {}
         }
     }
+
+    /// Stop all notes on all MIDI tracks
+    pub fn stop_all_notes(&mut self) {
+        for track in self.tracks.values_mut() {
+            if let TrackNode::Midi(midi_track) = track {
+                midi_track.stop_all_notes();
+            }
+        }
+    }
+
+    /// Process live MIDI input from all MIDI tracks (called even when not playing)
+    pub fn process_live_midi(&mut self, output: &mut [f32], sample_rate: u32, channels: u32) {
+        // Process all MIDI tracks to handle queued live input events
+        for track in self.tracks.values_mut() {
+            if let TrackNode::Midi(midi_track) = track {
+                // Process only queued live events, not clips
+                midi_track.process_live_input(output, sample_rate, channels);
+            }
+        }
+    }
+
+    /// Send a live MIDI note on event to a track's instrument
+    pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
+        if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
+            // Create a MIDI event and queue it to the instrument
+            let event = crate::audio::midi::MidiEvent {
+                timestamp: 0, // Immediate playback
+                status: 0x90, // Note on
+                data1: note,
+                data2: velocity,
+            };
+            track.instrument.queue_event(event);
+        }
+    }
+
+    /// Send a live MIDI note off event to a track's instrument
+    pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
+        if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
+            // Create a MIDI event and queue it to the instrument
+            let event = crate::audio::midi::MidiEvent {
+                timestamp: 0, // Immediate playback
+                status: 0x80, // Note off
+                data1: note,
+                data2: 0,
+            };
+            track.instrument.queue_event(event);
+        }
+    }
 }
 
 impl Default for Project {

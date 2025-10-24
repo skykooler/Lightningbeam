@@ -388,6 +388,33 @@ impl MidiTrack {
         !self.muted && (!any_solo || self.solo)
     }
 
+    /// Stop all currently playing notes on this track's instrument
+    pub fn stop_all_notes(&mut self) {
+        self.instrument.all_notes_off();
+    }
+
+    /// Process only live MIDI input (queued events) without rendering clips
+    /// This is used when playback is stopped but we want to hear live input
+    pub fn process_live_input(
+        &mut self,
+        output: &mut [f32],
+        sample_rate: u32,
+        channels: u32,
+    ) {
+        // Generate audio from the instrument (which processes queued events)
+        self.instrument.process(output, channels as usize, sample_rate);
+
+        // Apply effect chain
+        for effect in &mut self.effects {
+            effect.process(output, channels as usize, sample_rate);
+        }
+
+        // Apply track volume (no automation during live input)
+        for sample in output.iter_mut() {
+            *sample *= self.volume;
+        }
+    }
+
     /// Render this MIDI track into the output buffer
     pub fn render(
         &mut self,

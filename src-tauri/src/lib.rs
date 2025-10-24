@@ -199,6 +199,7 @@ pub fn run() {
         audio::audio_seek,
         audio::audio_test_beep,
         audio::audio_set_track_parameter,
+        audio::audio_get_available_instruments,
         audio::audio_create_track,
         audio::audio_load_file,
         audio::audio_add_clip,
@@ -207,6 +208,11 @@ pub fn run() {
         audio::audio_stop_recording,
         audio::audio_pause_recording,
         audio::audio_resume_recording,
+        audio::audio_create_midi_clip,
+        audio::audio_add_midi_note,
+        audio::audio_load_midi_file,
+        audio::audio_send_midi_note_on,
+        audio::audio_send_midi_note_off,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

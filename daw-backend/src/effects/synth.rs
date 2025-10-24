@@ -192,6 +192,16 @@ impl SimpleSynth {
         self.pending_events.push(event);
     }
 
+    /// Stop all currently playing notes immediately (no release envelope)
+    pub fn all_notes_off(&mut self) {
+        for voice in &mut self.voices {
+            voice.active = false;
+            voice.envelope_state = EnvelopeState::Off;
+            voice.envelope_level = 0.0;
+        }
+        self.pending_events.clear();
+    }
+
     /// Process all queued events
     fn process_events(&mut self) {
         // Collect events first to avoid borrowing issues
