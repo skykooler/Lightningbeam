@@ -4638,6 +4638,35 @@ function splitPane(div, percent, horiz, newPane = undefined) {
       }
       // TODO: use icon menu items
       // See https://github.com/tauri-apps/tauri/blob/dev/packages/api/src/menu/iconMenuItem.ts
+
+      // Check if children contain nested splits to determine which joins are unambiguous
+      const leftUpChild = div.children[0];
+      const rightDownChild = div.children[1];
+
+      // A child is a leaf if it's a panecontainer that directly contains another panecontainer
+      // A child has nested splits if it's a panecontainer that contains a grid
+      const leftUpHasSplit = leftUpChild &&
+        leftUpChild.classList.contains("panecontainer") &&
+        leftUpChild.firstElementChild &&
+        (leftUpChild.firstElementChild.classList.contains("horizontal-grid") ||
+         leftUpChild.firstElementChild.classList.contains("vertical-grid")) &&
+        leftUpChild.firstElementChild.hasAttribute("lb-percent");
+
+      const rightDownHasSplit = rightDownChild &&
+        rightDownChild.classList.contains("panecontainer") &&
+        rightDownChild.firstElementChild &&
+        (rightDownChild.firstElementChild.classList.contains("horizontal-grid") ||
+         rightDownChild.firstElementChild.classList.contains("vertical-grid")) &&
+        rightDownChild.firstElementChild.hasAttribute("lb-percent");
+
+      // Join Left/Up is unambiguous if we're keeping the left/up side (which may have splits)
+      // and removing the right/down side (which should be a simple pane)
+      const canJoinLeftUp = !rightDownHasSplit;
+
+      // Join Right/Down is unambiguous if we're keeping the right/down side (which may have splits)
+      // and removing the left/up side (which should be a simple pane)
+      const canJoinRightDown = !leftUpHasSplit;
+
       const menu = await Menu.new({
         items: [
           { id: "ctx_option0", text: "Area options", enabled: false },
@@ -4652,11 +4681,83 @@ function splitPane(div, percent, horiz, newPane = undefined) {
             action: () => createSplit("horizontal"),
           },
           new PredefinedMenuItem("Separator"),
-          { id: "ctx_option3", text: horiz ? "Join Left" : "Join Up" },
-          { id: "ctx_option4", text: horiz ? "Join Right" : "Join Down" },
+          {
+            id: "ctx_option3",
+            text: horiz ? "Join Left" : "Join Up",
+            enabled: canJoinLeftUp,
+            action: () => {
+              // Join left/up: remove the left/up pane, keep the right/down pane
+              const keepChild = div.children[1];
+
+              // Move all children from the kept panecontainer to the parent
+              const children = Array.from(keepChild.children);
+
+              // Replace the split div with just the kept child's contents
+              div.className = "panecontainer";
+              div.innerHTML = "";
+              children.forEach(child => {
+                // Recursively clear explicit sizing on grid and panecontainer elements only
+                function clearSizes(el) {
+                  if (el.classList.contains("horizontal-grid") ||
+                      el.classList.contains("vertical-grid") ||
+                      el.classList.contains("panecontainer")) {
+                    el.style.width = "";
+                    el.style.height = "";
+                    Array.from(el.children).forEach(clearSizes);
+                  }
+                }
+                clearSizes(child);
+                div.appendChild(child);
+              });
+              div.removeAttribute("lb-percent");
+
+              setTimeout(() => {
+                updateAll();
+                updateUI();
+                updateLayers();
+              }, 20);
+            }
+          },
+          {
+            id: "ctx_option4",
+            text: horiz ? "Join Right" : "Join Down",
+            enabled: canJoinRightDown,
+            action: () => {
+              // Join right/down: remove the right/down pane, keep the left/up pane
+              const keepChild = div.children[0];
+
+              // Move all children from the kept panecontainer to the parent
+              const children = Array.from(keepChild.children);
+
+              // Replace the split div with just the kept child's contents
+              div.className = "panecontainer";
+              div.innerHTML = "";
+              children.forEach(child => {
+                // Recursively clear explicit sizing on grid and panecontainer elements only
+                function clearSizes(el) {
+                  if (el.classList.contains("horizontal-grid") ||
+                      el.classList.contains("vertical-grid") ||
+                      el.classList.contains("panecontainer")) {
+                    el.style.width = "";
+                    el.style.height = "";
+                    Array.from(el.children).forEach(clearSizes);
+                  }
+                }
+                clearSizes(child);
+                div.appendChild(child);
+              });
+              div.removeAttribute("lb-percent");
+
+              setTimeout(() => {
+                updateAll();
+                updateUI();
+                updateLayers();
+              }, 20);
+            }
+          },
         ],
       });
-      await menu.popup();
+      await menu.popup(new PhysicalPosition(event.clientX, event.clientY));
     }
 
     console.log("Right-click on the element");
@@ -5865,8 +5966,9 @@ async function renderMenu() {
   // Add individual layouts
   for (const layoutKey of getLayoutNames()) {
     const layout = getLayout(layoutKey);
+    const isCurrentLayout = config.currentLayout === layoutKey;
     layoutMenuItems.push({
-      text: layout.name,
+      text: isCurrentLayout ? `✓ ${layout.name}` : layout.name,
       enabled: true,
       action: () => switchLayout(layoutKey),
     });
@@ -6171,6 +6273,7 @@ function switchLayout(layoutKey) {
     updateAll();
     updateUI();
     updateLayers();
+    updateMenu();
 
     console.log(`Layout switched to: ${layoutDef.name}`);
   } catch (error) {
