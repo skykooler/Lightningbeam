@@ -1038,3 +1038,272 @@ button {
     color: #999;
   }
 }
+
+/* ============================================
+   NODE EDITOR STYLES
+   ============================================ */
+
+/* Node editor container */
+#node-editor-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  background: #1e1e1e;
+}
+
+/* Node palette */
+.node-palette {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 4px;
+  padding: 8px;
+  max-width: 200px;
+  z-index: 100;
+}
+
+.node-palette h3 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  color: #ccc;
+  text-transform: uppercase;
+}
+
+.node-palette-item {
+  padding: 6px 8px;
+  margin: 4px 0;
+  background: #3d3d3d;
+  border: 1px solid #4d4d4d;
+  border-radius: 3px;
+  cursor: pointer;
+  color: #ddd;
+  font-size: 13px;
+  transition: background 0.2s;
+}
+
+.node-palette-item:hover {
+  background: #4d4d4d;
+}
+
+.node-palette-item:active {
+  background: #5d5d5d;
+}
+
+/* Node content styling */
+.node-content {
+  padding: 8px;
+  min-width: 180px;
+}
+
+/* Expanded VoiceAllocator node */
+.drawflow .drawflow-node.expanded {
+  background: rgba(60, 60, 80, 0.95) !important;
+  border: 2px solid #7c7cff !important;
+  box-shadow: 0 0 20px rgba(124, 124, 255, 0.4);
+}
+
+.drawflow .drawflow-node.expanded .node-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.drawflow .drawflow-node.expanded .voice-allocator-contents {
+  flex: 1;
+  background: rgba(40, 40, 50, 0.8);
+  border-radius: 4px;
+  margin-top: 8px;
+  padding: 8px;
+  position: relative;
+  overflow: auto;
+}
+
+/* Child nodes (inside VoiceAllocator) */
+.drawflow .drawflow-node.child-node {
+  opacity: 0.9;
+  border: 1px solid #5a5aaa !important;
+  box-shadow: 0 2px 8px rgba(90, 90, 170, 0.3);
+  z-index: 10;
+}
+
+.drawflow .drawflow-node.child-node .node-title {
+  font-size: 11px;
+}
+
+/* Template nodes (non-deletable I/O nodes) */
+.drawflow .drawflow-node.template-node {
+  border: 2px solid #9d4edd !important;
+  background: rgba(157, 78, 221, 0.15) !important;
+  box-shadow: 0 0 12px rgba(157, 78, 221, 0.4);
+  pointer-events: auto;
+  cursor: default;
+}
+
+.drawflow .drawflow-node.template-node .node-title {
+  color: #c77dff;
+  font-weight: bold;
+}
+
+.node-title {
+  font-weight: bold;
+  font-size: 13px;
+  margin-bottom: 6px;
+  color: #fff;
+  text-align: center;
+}
+
+.node-info {
+  font-size: 11px;
+  color: #999;
+  text-align: center;
+  padding: 4px 0;
+}
+
+.node-param {
+  margin: 3px 0;
+}
+
+.node-param label {
+  display: block;
+  font-size: 10px;
+  color: #ccc;
+  margin-bottom: 2px;
+}
+
+.node-slider {
+  width: calc(100% - 8px);
+  max-width: 140px;
+  height: 3px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #4d4d4d;
+  outline: none;
+  border-radius: 2px;
+}
+
+.node-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #4CAF50;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.node-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: #4CAF50;
+  cursor: pointer;
+  border-radius: 50%;
+  border: none;
+}
+
+/* Signal Type Connectors */
+
+/* Audio ports - Blue circles (matches audio clips) */
+.connector-audio {
+  width: 14px !important;
+  height: 14px !important;
+  border-radius: 50% !important;
+  background: #2196F3 !important;
+  border: 2px solid #1565C0 !important;
+}
+
+/* MIDI ports - Green squares (matches MIDI clips) */
+.connector-midi {
+  width: 14px !important;
+  height: 14px !important;
+  border-radius: 2px !important;
+  background: #4CAF50 !important;
+  border: 2px solid #2E7D32 !important;
+}
+
+/* CV ports - Orange diamonds */
+.connector-cv {
+  width: 12px !important;
+  height: 12px !important;
+  background: #FF9800 !important;
+  border: 2px solid #E65100 !important;
+  transform: rotate(45deg) !important;
+  border-radius: 2px !important;
+}
+
+/* Connection line styling - Override Drawflow defaults */
+.drawflow .connection .main-path {
+  stroke-width: 3px;
+}
+
+.connection-audio .main-path {
+  stroke: #2196F3 !important;
+  stroke-width: 4px !important;
+}
+
+.connection-midi .main-path {
+  stroke: #4CAF50 !important;
+  stroke-width: 3px !important;
+  stroke-dasharray: 8, 4 !important;
+}
+
+.connection-cv .main-path {
+  stroke: #FF9800 !important;
+  stroke-width: 2px !important;
+}
+
+/* Port label text styling - position labels away from connectors */
+.drawflow .drawflow-node .input > span,
+.drawflow .drawflow-node .output > span {
+  font-size: 9px;
+  color: #999;
+  pointer-events: none;
+  position: absolute;
+  line-height: 20px;
+  top: 0;
+}
+
+/* Input labels - position to the right of the connector */
+.drawflow .drawflow-node .input > span {
+  left: 24px;
+}
+
+/* Output labels - position to the left of the connector */
+.drawflow .drawflow-node .output > span {
+  right: 24px;
+}
+
+/* Node styling overrides for Drawflow */
+.drawflow .drawflow-node {
+  background: #2d2d2d !important;
+  border: 2px solid #4d4d4d !important;
+  border-radius: 6px !important;
+  color: #ddd !important;
+  padding: 8px !important;
+}
+
+.drawflow .drawflow-node.selected {
+  border-color: #4CAF50 !important;
+  box-shadow: 0 0 10px rgba(76, 175, 80, 0.5) !important;
+}
+
+/* Error message styling */
+.node-editor-error {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(244, 67, 54, 0.9);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 4px;
+  font-size: 14px;
+  z-index: 200;
+  animation: fadeOut 3s forwards;
+}
+
+@keyframes fadeOut {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}

@@ -1,12 +1,14 @@
 use crate::audio::buffer_pool::BufferPool;
 use crate::audio::clip::ClipId;
 use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
+use crate::audio::node_graph::{nodes::*, InstrumentGraph};
 use crate::audio::pool::AudioPool;
 use crate::audio::project::Project;
 use crate::audio::recording::RecordingState;
-use crate::audio::track::{Track, TrackId};
+use crate::audio::track::{Track, TrackId, TrackNode};
 use crate::command::{AudioEvent, Command};
 use crate::effects::{Effect, GainEffect, PanEffect, SimpleEQ};
+use petgraph::stable_graph::NodeIndex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -718,6 +720,193 @@ impl Engine {
                 // Send a live MIDI note off event to the specified track's instrument
                 self.project.send_midi_note_off(track_id, note);
             }
+
+            // Node graph commands
+            Command::GraphAddNode(track_id, node_type, _x, _y) => {
+                // Get MIDI track (graphs are only for MIDI tracks currently)
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    // Create graph if it doesn't exist
+                    if track.instrument_graph.is_none() {
+                        // Use large buffer to accommodate any audio callback size
+                        track.instrument_graph = Some(InstrumentGraph::new(self.sample_rate, 8192));
+                    }
+
+                    if let Some(graph) = &mut track.instrument_graph {
+                        // Create the node based on type
+                        let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
+                            "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
+                            "Gain" => Box::new(GainNode::new("Gain".to_string())),
+                            "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
+                            "Filter" => Box::new(FilterNode::new("Filter".to_string())),
+                            "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
+                            "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
+                            "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
+                            "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
+                            "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
+                            "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
+                            "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
+                            "VoiceAllocator" => Box::new(VoiceAllocatorNode::new("VoiceAllocator".to_string(), self.sample_rate, 8192)),
+                            "AudioOutput" => Box::new(AudioOutputNode::new("Output".to_string())),
+                            _ => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Unknown node type: {}", node_type)
+                                ));
+                                return;
+                            }
+                        };
+
+                        // Add node to graph
+                        let node_idx = graph.add_node(node);
+                        let node_id = node_idx.index() as u32;
+
+                        // Automatically set MIDI-receiving nodes as MIDI targets
+                        if node_type == "MidiInput" || node_type == "VoiceAllocator" {
+                            graph.set_midi_target(node_idx, true);
+                        }
+
+                        // Emit success event
+                        let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
+                    }
+                }
+            }
+
+            Command::GraphAddNodeToTemplate(track_id, voice_allocator_id, node_type, _x, _y) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                        // Create the node
+                        let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
+                            "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
+                            "Gain" => Box::new(GainNode::new("Gain".to_string())),
+                            "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
+                            "Filter" => Box::new(FilterNode::new("Filter".to_string())),
+                            "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
+                            "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
+                            "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
+                            "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
+                            "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
+                            "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
+                            "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
+                            "AudioOutput" => Box::new(AudioOutputNode::new("Output".to_string())),
+                            _ => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Unknown node type: {}", node_type)
+                                ));
+                                return;
+                            }
+                        };
+
+                        // Add node to VoiceAllocator's template graph
+                        match graph.add_node_to_voice_allocator_template(va_idx, node) {
+                            Ok(node_id) => {
+                                println!("Added node {} (ID: {}) to VoiceAllocator {} template", node_type, node_id, voice_allocator_id);
+                                let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to add node to template: {}", e)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::GraphRemoveNode(track_id, node_index) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_index as usize);
+                        graph.remove_node(node_idx);
+                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                    }
+                }
+            }
+
+            Command::GraphConnect(track_id, from, from_port, to, to_port) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let from_idx = NodeIndex::new(from as usize);
+                        let to_idx = NodeIndex::new(to as usize);
+
+                        match graph.connect(from_idx, from_port, to_idx, to_port) {
+                            Ok(()) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("{:?}", e)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::GraphConnectInTemplate(track_id, voice_allocator_id, from, from_port, to, to_port) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                        match graph.connect_in_voice_allocator_template(va_idx, from, from_port, to, to_port) {
+                            Ok(()) => {
+                                println!("Connected nodes in VoiceAllocator {} template: {} -> {}", voice_allocator_id, from, to);
+                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to connect in template: {}", e)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::GraphDisconnect(track_id, from, from_port, to, to_port) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let from_idx = NodeIndex::new(from as usize);
+                        let to_idx = NodeIndex::new(to as usize);
+                        graph.disconnect(from_idx, from_port, to_idx, to_port);
+                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                    }
+                }
+            }
+
+            Command::GraphSetParameter(track_id, node_index, param_id, value) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_index as usize);
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            graph_node.node.set_parameter(param_id, value);
+                        }
+                    }
+                }
+            }
+
+            Command::GraphSetMidiTarget(track_id, node_index, enabled) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_index as usize);
+                        graph.set_midi_target(node_idx, enabled);
+                    }
+                }
+            }
+
+            Command::GraphSetOutputNode(track_id, node_index) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(graph) = &mut track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_index as usize);
+                        graph.set_output_node(Some(node_idx));
+                    }
+                }
+            }
         }
     }
 
@@ -1142,5 +1331,50 @@ impl EngineController {
     /// Send a live MIDI note off event to a track's instrument
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
         let _ = self.command_tx.push(Command::SendMidiNoteOff(track_id, note));
+    }
+
+    // Node graph operations
+
+    /// Add a node to a track's instrument graph
+    pub fn graph_add_node(&mut self, track_id: TrackId, node_type: String, x: f32, y: f32) {
+        let _ = self.command_tx.push(Command::GraphAddNode(track_id, node_type, x, y));
+    }
+
+    pub fn graph_add_node_to_template(&mut self, track_id: TrackId, voice_allocator_id: u32, node_type: String, x: f32, y: f32) {
+        let _ = self.command_tx.push(Command::GraphAddNodeToTemplate(track_id, voice_allocator_id, node_type, x, y));
+    }
+
+    pub fn graph_connect_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, from_node: u32, from_port: usize, to_node: u32, to_port: usize) {
+        let _ = self.command_tx.push(Command::GraphConnectInTemplate(track_id, voice_allocator_id, from_node, from_port, to_node, to_port));
+    }
+
+    /// Remove a node from a track's instrument graph
+    pub fn graph_remove_node(&mut self, track_id: TrackId, node_id: u32) {
+        let _ = self.command_tx.push(Command::GraphRemoveNode(track_id, node_id));
+    }
+
+    /// Connect two nodes in a track's instrument graph
+    pub fn graph_connect(&mut self, track_id: TrackId, from_node: u32, from_port: usize, to_node: u32, to_port: usize) {
+        let _ = self.command_tx.push(Command::GraphConnect(track_id, from_node, from_port, to_node, to_port));
+    }
+
+    /// Disconnect two nodes in a track's instrument graph
+    pub fn graph_disconnect(&mut self, track_id: TrackId, from_node: u32, from_port: usize, to_node: u32, to_port: usize) {
+        let _ = self.command_tx.push(Command::GraphDisconnect(track_id, from_node, from_port, to_node, to_port));
+    }
+
+    /// Set a parameter on a node in a track's instrument graph
+    pub fn graph_set_parameter(&mut self, track_id: TrackId, node_id: u32, param_id: u32, value: f32) {
+        let _ = self.command_tx.push(Command::GraphSetParameter(track_id, node_id, param_id, value));
+    }
+
+    /// Set which node receives MIDI events in a track's instrument graph
+    pub fn graph_set_midi_target(&mut self, track_id: TrackId, node_id: u32, enabled: bool) {
+        let _ = self.command_tx.push(Command::GraphSetMidiTarget(track_id, node_id, enabled));
+    }
+
+    /// Set which node is the audio output in a track's instrument graph
+    pub fn graph_set_output_node(&mut self, track_id: TrackId, node_id: u32) {
+        let _ = self.command_tx.push(Command::GraphSetOutputNode(track_id, node_id));
     }
 }

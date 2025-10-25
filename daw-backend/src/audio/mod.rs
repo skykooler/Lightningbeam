@@ -3,6 +3,7 @@ pub mod buffer_pool;
 pub mod clip;
 pub mod engine;
 pub mod midi;
+pub mod node_graph;
 pub mod pool;
 pub mod project;
 pub mod recording;

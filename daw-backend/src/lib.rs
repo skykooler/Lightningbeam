@@ -9,6 +9,7 @@ pub mod command;
 pub mod dsp;
 pub mod effects;
 pub mod io;
+pub mod tui;
 
 // Re-export commonly used types
 pub use audio::{

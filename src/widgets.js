@@ -4146,9 +4146,10 @@ class VirtualPiano extends Widget {
     }
 
     if (info.isBlack) {
-      // Black key positioning - place it between the white keys
-      // The black key goes after the white key at position whiteKeysBefore
-      const x = offsetX + whiteKeysBefore * whiteKeyWidth + whiteKeyWidth - blackKeyWidth / 2;
+      // Black key positioning - place it at the right edge of the preceding white key
+      // whiteKeysBefore is the number of white keys to the left, so multiply by width
+      // and subtract half the black key width to center it at the gap
+      const x = offsetX + whiteKeysBefore * whiteKeyWidth - blackKeyWidth / 2;
 
       return {
         x,

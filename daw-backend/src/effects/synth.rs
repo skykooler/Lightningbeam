@@ -130,7 +130,7 @@ impl SynthVoice {
 pub struct SimpleSynth {
     voices: Vec<SynthVoice>,
     sample_rate: f32,
-    pending_events: Vec<MidiEvent>,
+    pub pending_events: Vec<MidiEvent>,
 }
 
 impl SimpleSynth {

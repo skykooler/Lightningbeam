@@ -62,6 +62,7 @@ import {
 } from "./styles.js";
 import { Icon } from "./icon.js";
 import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, VirtualPiano, PianoRollEditor, Widget } from "./widgets.js";
+import { nodeTypes, SignalType, getPortClass } from "./nodeTypes.js";
 
 // State management
 import {
@@ -6041,6 +6042,686 @@ async function renderMenu() {
 }
 updateMenu();
 
+function nodeEditor() {
+  // Create container for the node editor
+  const container = document.createElement("div");
+  container.id = "node-editor-container";
+
+  // Create the Drawflow canvas
+  const editorDiv = document.createElement("div");
+  editorDiv.id = "drawflow";
+  editorDiv.style.width = "100%";
+  editorDiv.style.height = "100%";
+  editorDiv.style.position = "relative";
+  container.appendChild(editorDiv);
+
+  // Create node palette
+  const palette = document.createElement("div");
+  palette.className = "node-palette";
+  palette.innerHTML = `
+    <h3>Nodes</h3>
+    ${Object.entries(nodeTypes)
+      .filter(([type, def]) => type !== 'TemplateInput' && type !== 'TemplateOutput') // Hide template nodes
+      .map(([type, def]) => `
+        <div class="node-palette-item" data-node-type="${type}">
+          ${def.name}
+        </div>
+      `).join('')}
+  `;
+  container.appendChild(palette);
+
+  // Initialize Drawflow editor (will be set up after DOM insertion)
+  let editor = null;
+  let nodeIdCounter = 1;
+
+  // Track expanded VoiceAllocator nodes
+  const expandedNodes = new Set(); // Set of node IDs that are expanded
+  const nodeParents = new Map();   // Map of child node ID -> parent VoiceAllocator ID
+
+  // Wait for DOM insertion
+  setTimeout(() => {
+    const drawflowDiv = container.querySelector("#drawflow");
+    if (!drawflowDiv) return;
+
+    editor = new Drawflow(drawflowDiv);
+    editor.reroute = true;
+    editor.reroute_fix_curvature = true;
+    editor.force_first_input = false;
+    editor.start();
+
+    // Store editor reference in context
+    context.nodeEditor = editor;
+
+    // Add palette item drag-and-drop handlers
+    const paletteItems = container.querySelectorAll(".node-palette-item");
+    let draggedNodeType = null;
+
+    paletteItems.forEach(item => {
+      // Make items draggable
+      item.setAttribute('draggable', 'true');
+
+      // Click handler for quick add
+      item.addEventListener("click", () => {
+        const nodeType = item.getAttribute("data-node-type");
+        addNode(nodeType, 100, 100, null);
+      });
+
+      // Drag start
+      item.addEventListener('dragstart', (e) => {
+        draggedNodeType = item.getAttribute('data-node-type');
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('text/plain', draggedNodeType); // Required for drag to work
+        console.log('Drag started:', draggedNodeType);
+      });
+
+      // Drag end
+      item.addEventListener('dragend', () => {
+        console.log('Drag ended');
+        draggedNodeType = null;
+      });
+    });
+
+    // Add drop handler to drawflow canvas
+    drawflowDiv.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    });
+
+    drawflowDiv.addEventListener('drop', (e) => {
+      e.preventDefault();
+
+      // Get node type from dataTransfer instead of global variable
+      const nodeType = e.dataTransfer.getData('text/plain');
+      console.log('Drop event fired, nodeType:', nodeType);
+
+      if (!nodeType) {
+        console.log('No nodeType in drop data, aborting');
+        return;
+      }
+
+      // Get drop position relative to the editor
+      const rect = drawflowDiv.getBoundingClientRect();
+      const precanvasX = editor.precanvas?.x || 0;
+      const precanvasY = editor.precanvas?.y || 0;
+      const zoom = editor.zoom || 1;
+      const x = (e.clientX - rect.left - precanvasX) / zoom;
+      const y = (e.clientY - rect.top - precanvasY) / zoom;
+
+      console.log('Position calculation:', { clientX: e.clientX, clientY: e.clientY, rectLeft: rect.left, rectTop: rect.top, precanvasX, precanvasY, zoom, x, y });
+
+      // Check if dropping into an expanded VoiceAllocator
+      let parentNodeId = null;
+      for (const expandedNodeId of expandedNodes) {
+        const contentsArea = document.getElementById(`voice-allocator-contents-${expandedNodeId}`);
+        if (contentsArea) {
+          const contentsRect = contentsArea.getBoundingClientRect();
+          if (e.clientX >= contentsRect.left && e.clientX <= contentsRect.right &&
+              e.clientY >= contentsRect.top && e.clientY <= contentsRect.bottom) {
+            parentNodeId = expandedNodeId;
+            console.log(`Dropping into VoiceAllocator ${expandedNodeId} at position (${x}, ${y})`);
+            break;
+          }
+        }
+      }
+
+      // Add the node
+      console.log(`Adding node ${nodeType} at (${x}, ${y}) with parent ${parentNodeId}`);
+      addNode(nodeType, x, y, parentNodeId);
+
+      // Clear the draggedNodeType
+      draggedNodeType = null;
+    });
+
+    // Connection event handlers
+    editor.on("connectionCreated", (connection) => {
+      handleConnectionCreated(connection);
+    });
+
+    editor.on("connectionRemoved", (connection) => {
+      handleConnectionRemoved(connection);
+    });
+
+    // Node events
+    editor.on("nodeCreated", (nodeId) => {
+      setupNodeParameters(nodeId);
+
+      // Add double-click handler for VoiceAllocator expansion
+      setTimeout(() => {
+        const nodeElement = document.getElementById(`node-${nodeId}`);
+        if (nodeElement) {
+          nodeElement.addEventListener('dblclick', (e) => {
+            // Prevent double-click from bubbling to canvas
+            e.stopPropagation();
+            handleNodeDoubleClick(nodeId);
+          });
+        }
+      }, 50);
+    });
+
+    // Node moved - resize parent VoiceAllocator
+    editor.on("nodeMoved", (nodeId) => {
+      const node = editor.getNodeFromId(nodeId);
+      if (node && node.data.parentNodeId) {
+        resizeVoiceAllocatorToFit(node.data.parentNodeId);
+      }
+    });
+
+    // Node removed - prevent deletion of template nodes
+    editor.on("nodeRemoved", (nodeId) => {
+      const nodeElement = document.getElementById(`node-${nodeId}`);
+      if (nodeElement && nodeElement.getAttribute('data-template-node') === 'true') {
+        console.warn('Cannot delete template nodes');
+        // TODO: Re-add the node if it was deleted
+        return;
+      }
+
+      // Clean up parent-child tracking
+      const parentId = nodeParents.get(nodeId);
+      nodeParents.delete(nodeId);
+
+      // Resize parent if needed
+      if (parentId) {
+        resizeVoiceAllocatorToFit(parentId);
+      }
+    });
+
+  }, 100);
+
+  // Add a node to the graph
+  function addNode(nodeType, x, y, parentNodeId = null) {
+    if (!editor) return;
+
+    const nodeDef = nodeTypes[nodeType];
+    if (!nodeDef) return;
+
+    const nodeId = nodeIdCounter++;
+    const html = nodeDef.getHTML(nodeId);
+
+    // Count inputs and outputs by type
+    const inputsCount = nodeDef.inputs.length;
+    const outputsCount = nodeDef.outputs.length;
+
+    // Add node to Drawflow
+    const drawflowNodeId = editor.addNode(
+      nodeType,
+      inputsCount,
+      outputsCount,
+      x,
+      y,
+      `node-${nodeType.toLowerCase()}`,
+      { nodeType, backendId: null, parentNodeId: parentNodeId },
+      html
+    );
+
+    // Track parent-child relationship
+    if (parentNodeId !== null) {
+      nodeParents.set(drawflowNodeId, parentNodeId);
+      console.log(`Node ${drawflowNodeId} (${nodeType}) is child of VoiceAllocator ${parentNodeId}`);
+
+      // Mark template nodes as non-deletable
+      const isTemplateNode = (nodeType === 'TemplateInput' || nodeType === 'TemplateOutput');
+
+      // Add CSS class to mark as child node
+      setTimeout(() => {
+        const nodeElement = document.getElementById(`node-${drawflowNodeId}`);
+        if (nodeElement) {
+          nodeElement.classList.add('child-node');
+          nodeElement.setAttribute('data-parent-node', parentNodeId);
+
+          if (isTemplateNode) {
+            nodeElement.classList.add('template-node');
+            nodeElement.setAttribute('data-template-node', 'true');
+          }
+
+          // Only show if parent is currently expanded
+          if (!expandedNodes.has(parentNodeId)) {
+            nodeElement.style.display = 'none';
+          }
+        }
+
+        // Auto-resize parent VoiceAllocator after adding child node
+        resizeVoiceAllocatorToFit(parentNodeId);
+      }, 10);
+    }
+
+    // Apply port styling based on signal types
+    setTimeout(() => {
+      styleNodePorts(drawflowNodeId, nodeDef);
+    }, 10);
+
+    // Send command to backend
+    // If parent node exists, add to VoiceAllocator template; otherwise add to main graph
+    const commandName = parentNodeId ? "graph_add_node_to_template" : "graph_add_node";
+    const commandArgs = parentNodeId
+      ? {
+          trackId: 0,
+          voiceAllocatorId: editor.getNodeFromId(parentNodeId).data.backendId,
+          nodeType: nodeType,
+          x: x,
+          y: y
+        }
+      : {
+          trackId: 0,
+          nodeType: nodeType,
+          x: x,
+          y: y
+        };
+
+    invoke(commandName, commandArgs).then(backendNodeId => {
+      console.log(`Node ${nodeType} added with backend ID: ${backendNodeId} (parent: ${parentNodeId})`);
+
+      // Store backend node ID using Drawflow's update method
+      editor.updateNodeDataFromId(drawflowNodeId, { nodeType, backendId: backendNodeId, parentNodeId: parentNodeId });
+
+      console.log("Verifying stored backend ID:", editor.getNodeFromId(drawflowNodeId).data.backendId);
+
+      // If this is an AudioOutput node, automatically set it as the graph output
+      if (nodeType === "AudioOutput") {
+        console.log(`Setting node ${backendNodeId} as graph output`);
+        invoke("graph_set_output_node", {
+          trackId: 0,
+          nodeId: backendNodeId
+        }).then(() => {
+          console.log("Output node set successfully");
+        }).catch(err => {
+          console.error("Failed to set output node:", err);
+        });
+      }
+
+      // If this is a VoiceAllocator, automatically create template I/O nodes inside it
+      if (nodeType === "VoiceAllocator") {
+        setTimeout(() => {
+          // Get the node position
+          const node = editor.getNodeFromId(drawflowNodeId);
+          if (node) {
+            // Create TemplateInput on the left
+            addNode("TemplateInput", node.pos_x + 50, node.pos_y + 100, drawflowNodeId);
+            // Create TemplateOutput on the right
+            addNode("TemplateOutput", node.pos_x + 450, node.pos_y + 100, drawflowNodeId);
+          }
+        }, 100);
+      }
+    }).catch(err => {
+      console.error("Failed to add node to backend:", err);
+      showError("Failed to add node: " + err);
+    });
+  }
+
+  // Auto-resize VoiceAllocator to fit its child nodes
+  function resizeVoiceAllocatorToFit(voiceAllocatorNodeId) {
+    if (!voiceAllocatorNodeId) return;
+
+    const parentNode = editor.getNodeFromId(voiceAllocatorNodeId);
+    const parentElement = document.getElementById(`node-${voiceAllocatorNodeId}`);
+    if (!parentNode || !parentElement) return;
+
+    // Find all child nodes
+    const childNodeIds = [];
+    for (const [childId, parentId] of nodeParents.entries()) {
+      if (parentId === voiceAllocatorNodeId) {
+        childNodeIds.push(childId);
+      }
+    }
+
+    if (childNodeIds.length === 0) return;
+
+    // Calculate bounding box of all child nodes
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    for (const childId of childNodeIds) {
+      const childNode = editor.getNodeFromId(childId);
+      const childElement = document.getElementById(`node-${childId}`);
+      if (!childNode || !childElement) continue;
+
+      const childWidth = childElement.offsetWidth || 200;
+      const childHeight = childElement.offsetHeight || 150;
+
+      minX = Math.min(minX, childNode.pos_x);
+      minY = Math.min(minY, childNode.pos_y);
+      maxX = Math.max(maxX, childNode.pos_x + childWidth);
+      maxY = Math.max(maxY, childNode.pos_y + childHeight);
+    }
+
+    // Add generous margin
+    const margin = 60;
+    const headerHeight = 120; // Space for VoiceAllocator header
+
+    const requiredWidth = (maxX - minX) + (margin * 2);
+    const requiredHeight = (maxY - minY) + (margin * 2) + headerHeight;
+
+    // Set minimum size
+    const finalWidth = Math.max(requiredWidth, 600);
+    const finalHeight = Math.max(requiredHeight, 400);
+
+    // Only resize if expanded
+    if (expandedNodes.has(voiceAllocatorNodeId)) {
+      parentElement.style.width = `${finalWidth}px`;
+      parentElement.style.height = `${finalHeight}px`;
+      parentElement.style.minWidth = `${finalWidth}px`;
+      parentElement.style.minHeight = `${finalHeight}px`;
+
+      console.log(`Resized VoiceAllocator ${voiceAllocatorNodeId} to ${finalWidth}x${finalHeight}`);
+    }
+  }
+
+  // Style node ports based on signal types
+  function styleNodePorts(nodeId, nodeDef) {
+    const nodeElement = document.getElementById(`node-${nodeId}`);
+    if (!nodeElement) return;
+
+    // Style input ports
+    const inputs = nodeElement.querySelectorAll(".input");
+    inputs.forEach((input, index) => {
+      if (index < nodeDef.inputs.length) {
+        const portDef = nodeDef.inputs[index];
+        const connector = input.querySelector(".input_0, .input_1, .input_2, .input_3");
+        if (connector) {
+          connector.classList.add(getPortClass(portDef.type));
+        }
+        // Add label
+        const label = document.createElement("span");
+        label.textContent = portDef.name;
+        input.insertBefore(label, input.firstChild);
+      }
+    });
+
+    // Style output ports
+    const outputs = nodeElement.querySelectorAll(".output");
+    outputs.forEach((output, index) => {
+      if (index < nodeDef.outputs.length) {
+        const portDef = nodeDef.outputs[index];
+        const connector = output.querySelector(".output_0, .output_1, .output_2, .output_3");
+        if (connector) {
+          connector.classList.add(getPortClass(portDef.type));
+        }
+        // Add label
+        const label = document.createElement("span");
+        label.textContent = portDef.name;
+        output.appendChild(label);
+      }
+    });
+  }
+
+  // Setup parameter event listeners for a node
+  function setupNodeParameters(nodeId) {
+    setTimeout(() => {
+      const nodeElement = document.getElementById(`node-${nodeId}`);
+      if (!nodeElement) return;
+
+      const sliders = nodeElement.querySelectorAll(".node-slider");
+      sliders.forEach(slider => {
+        // Prevent node dragging when interacting with slider
+        slider.addEventListener("mousedown", (e) => {
+          e.stopPropagation();
+        });
+        slider.addEventListener("pointerdown", (e) => {
+          e.stopPropagation();
+        });
+
+        slider.addEventListener("input", (e) => {
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const value = parseFloat(e.target.value);
+
+          // Update display
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (nodeData) {
+            const nodeDef = nodeTypes[nodeData.name];
+            if (nodeDef && nodeDef.parameters[paramId]) {
+              const param = nodeDef.parameters[paramId];
+              const displaySpan = nodeElement.querySelector(`#${param.name}-${nodeId}`);
+              if (displaySpan) {
+                displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2);
+              }
+            }
+
+            // Send to backend
+            if (nodeData.data.backendId !== null) {
+              invoke("graph_set_parameter", {
+                trackId: 0,
+                nodeId: nodeData.data.backendId,
+                paramId: paramId,
+                value: value
+              }).catch(err => {
+                console.error("Failed to set parameter:", err);
+              });
+            }
+          }
+        });
+      });
+    }, 100);
+  }
+
+  // Handle double-click on nodes (for VoiceAllocator expansion)
+  function handleNodeDoubleClick(nodeId) {
+    const node = editor.getNodeFromId(nodeId);
+    if (!node) return;
+
+    // Only VoiceAllocator nodes can be expanded
+    if (node.data.nodeType !== 'VoiceAllocator') return;
+
+    const nodeElement = document.getElementById(`node-${nodeId}`);
+    if (!nodeElement) return;
+
+    const contentsArea = document.getElementById(`voice-allocator-contents-${nodeId}`);
+    if (!contentsArea) return;
+
+    // Toggle expanded state
+    if (expandedNodes.has(nodeId)) {
+      // Collapse
+      expandedNodes.delete(nodeId);
+      nodeElement.classList.remove('expanded');
+      nodeElement.style.width = '';
+      nodeElement.style.height = '';
+      nodeElement.style.minWidth = '';
+      nodeElement.style.minHeight = '';
+      contentsArea.style.display = 'none';
+
+      // Hide all child nodes
+      for (const [childId, parentId] of nodeParents.entries()) {
+        if (parentId === nodeId) {
+          const childElement = document.getElementById(`node-${childId}`);
+          if (childElement) {
+            childElement.style.display = 'none';
+          }
+        }
+      }
+
+      console.log('Collapsed VoiceAllocator node:', nodeId);
+    } else {
+      // Expand
+      expandedNodes.add(nodeId);
+      nodeElement.classList.add('expanded');
+
+      // Make the node larger to show contents
+      nodeElement.style.width = '600px';
+      nodeElement.style.height = '400px';
+      nodeElement.style.minWidth = '600px';
+      nodeElement.style.minHeight = '400px';
+      contentsArea.style.display = 'block';
+
+      // Show all child nodes
+      for (const [childId, parentId] of nodeParents.entries()) {
+        if (parentId === nodeId) {
+          const childElement = document.getElementById(`node-${childId}`);
+          if (childElement) {
+            childElement.style.display = 'block';
+          }
+        }
+      }
+
+      console.log('Expanded VoiceAllocator node:', nodeId);
+    }
+  }
+
+  // Handle connection creation
+  function handleConnectionCreated(connection) {
+    console.log("handleConnectionCreated called:", connection);
+    const outputNode = editor.getNodeFromId(connection.output_id);
+    const inputNode = editor.getNodeFromId(connection.input_id);
+
+    console.log("Output node:", outputNode, "Input node:", inputNode);
+    if (!outputNode || !inputNode) {
+      console.log("Missing node - returning");
+      return;
+    }
+
+    console.log("Output node name:", outputNode.name, "Input node name:", inputNode.name);
+    const outputDef = nodeTypes[outputNode.name];
+    const inputDef = nodeTypes[inputNode.name];
+
+    console.log("Output def:", outputDef, "Input def:", inputDef);
+    if (!outputDef || !inputDef) {
+      console.log("Missing node definition - returning");
+      return;
+    }
+
+    // Extract port indices from connection class names
+    // Drawflow uses 1-based indexing, but our arrays are 0-based
+    const outputPort = parseInt(connection.output_class.replace("output_", "")) - 1;
+    const inputPort = parseInt(connection.input_class.replace("input_", "")) - 1;
+
+    console.log("Port indices (0-based) - output:", outputPort, "input:", inputPort);
+    console.log("Output class:", connection.output_class, "Input class:", connection.input_class);
+
+    // Validate signal types
+    console.log("Checking port bounds - outputPort:", outputPort, "< outputs.length:", outputDef.outputs.length, "inputPort:", inputPort, "< inputs.length:", inputDef.inputs.length);
+    if (outputPort < outputDef.outputs.length && inputPort < inputDef.inputs.length) {
+      const outputType = outputDef.outputs[outputPort].type;
+      const inputType = inputDef.inputs[inputPort].type;
+
+      console.log("Signal types - output:", outputType, "input:", inputType);
+
+      if (outputType !== inputType) {
+        console.log("TYPE MISMATCH! Removing connection");
+        // Type mismatch - remove connection
+        editor.removeSingleConnection(
+          connection.output_id,
+          connection.input_id,
+          connection.output_class,
+          connection.input_class
+        );
+        showError(`Cannot connect ${outputType} to ${inputType}`);
+        return;
+      }
+
+      console.log("Types match - proceeding with connection");
+
+      // Style the connection based on signal type
+      setTimeout(() => {
+        const connectionElement = document.querySelector(
+          `.connection.node_in_node-${connection.input_id}.node_out_node-${connection.output_id}`
+        );
+        if (connectionElement) {
+          connectionElement.classList.add(`connection-${outputType}`);
+        }
+      }, 10);
+
+      // Send to backend
+      console.log("Backend IDs - output:", outputNode.data.backendId, "input:", inputNode.data.backendId);
+      if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+        // Check if both nodes are inside the same VoiceAllocator
+        // Convert connection IDs to numbers to match Map keys
+        const outputId = parseInt(connection.output_id);
+        const inputId = parseInt(connection.input_id);
+        const outputParent = nodeParents.get(outputId);
+        const inputParent = nodeParents.get(inputId);
+        console.log(`Parent detection - output node ${outputId} parent: ${outputParent}, input node ${inputId} parent: ${inputParent}`);
+
+        if (outputParent && inputParent && outputParent === inputParent) {
+          // Both nodes are inside the same VoiceAllocator - connect in template
+          const parentNode = editor.getNodeFromId(outputParent);
+          console.log(`Connecting in VoiceAllocator template ${parentNode.data.backendId}: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
+          invoke("graph_connect_in_template", {
+            trackId: 0,
+            voiceAllocatorId: parentNode.data.backendId,
+            fromNode: outputNode.data.backendId,
+            fromPort: outputPort,
+            toNode: inputNode.data.backendId,
+            toPort: inputPort
+          }).then(() => {
+            console.log("Template connection successful");
+          }).catch(err => {
+            console.error("Failed to connect nodes in template:", err);
+            showError("Template connection failed: " + err);
+            // Remove the connection
+            editor.removeSingleConnection(
+              connection.output_id,
+              connection.input_id,
+              connection.output_class,
+              connection.input_class
+            );
+          });
+        } else {
+          // Normal connection in main graph
+          console.log(`Connecting: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
+          invoke("graph_connect", {
+            trackId: 0,
+            fromNode: outputNode.data.backendId,
+            fromPort: outputPort,
+            toNode: inputNode.data.backendId,
+            toPort: inputPort
+          }).then(() => {
+            console.log("Connection successful");
+          }).catch(err => {
+            console.error("Failed to connect nodes:", err);
+            showError("Connection failed: " + err);
+            // Remove the connection
+            editor.removeSingleConnection(
+              connection.output_id,
+              connection.input_id,
+              connection.output_class,
+              connection.input_class
+            );
+          });
+        }
+      }
+
+    } else {
+      console.log("Port validation FAILED - ports out of bounds");
+    }
+  }
+
+  // Handle connection removal
+  function handleConnectionRemoved(connection) {
+    const outputNode = editor.getNodeFromId(connection.output_id);
+    const inputNode = editor.getNodeFromId(connection.input_id);
+
+    if (!outputNode || !inputNode) return;
+
+    // Drawflow uses 1-based indexing, but our arrays are 0-based
+    const outputPort = parseInt(connection.output_class.replace("output_", "")) - 1;
+    const inputPort = parseInt(connection.input_class.replace("input_", "")) - 1;
+
+    // Send to backend
+    if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+      invoke("graph_disconnect", {
+        trackId: 0,
+        fromNode: outputNode.data.backendId,
+        fromPort: outputPort,
+        toNode: inputNode.data.backendId,
+        toPort: inputPort
+      }).catch(err => {
+        console.error("Failed to disconnect nodes:", err);
+      });
+    }
+  }
+
+  // Show error message
+  function showError(message) {
+    const errorDiv = document.createElement("div");
+    errorDiv.className = "node-editor-error";
+    errorDiv.textContent = message;
+    container.appendChild(errorDiv);
+
+    setTimeout(() => {
+      errorDiv.remove();
+    }, 3000);
+  }
+
+  return container;
+}
+
 function piano() {
   let piano_cvs = document.createElement("canvas");
   piano_cvs.className = "piano";
@@ -6233,6 +6914,10 @@ const panes = {
   pianoRoll: {
     name: "piano-roll",
     func: pianoRoll,
+  },
+  nodeEditor: {
+    name: "node-editor",
+    func: nodeEditor,
   },
 };
 

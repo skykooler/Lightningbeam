@@ -1,5 +1,6 @@
 use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use tauri::{Emitter};
 
 #[derive(serde::Serialize)]
@@ -31,6 +32,9 @@ pub struct AudioState {
     channels: u32,
     next_track_id: u32,
     next_pool_index: usize,
+    next_graph_node_id: u32,
+    // Track next node ID for each VoiceAllocator template (VoiceAllocator backend ID -> next template node ID)
+    template_node_counters: HashMap<u32, u32>,
 }
 
 impl Default for AudioState {
@@ -41,6 +45,8 @@ impl Default for AudioState {
             channels: 0,
             next_track_id: 0,
             next_pool_index: 0,
+            next_graph_node_id: 0,
+            template_node_counters: HashMap::new(),
         }
     }
 }
@@ -75,6 +81,15 @@ impl EventEmitter for TauriEventEmitter {
             AudioEvent::NoteOff(note) => {
                 SerializedAudioEvent::NoteOff { note }
             }
+            AudioEvent::GraphNodeAdded(track_id, node_id, node_type) => {
+                SerializedAudioEvent::GraphNodeAdded { track_id, node_id, node_type }
+            }
+            AudioEvent::GraphConnectionError(track_id, message) => {
+                SerializedAudioEvent::GraphConnectionError { track_id, message }
+            }
+            AudioEvent::GraphStateChanged(track_id) => {
+                SerializedAudioEvent::GraphStateChanged { track_id }
+            }
             _ => return, // Ignore other event types for now
         };
 
@@ -97,6 +112,7 @@ pub async fn audio_init(
         controller.reset();
         audio_state.next_track_id = 0;
         audio_state.next_pool_index = 0;
+        audio_state.next_graph_node_id = 0;
         return Ok(format!(
             "Audio already initialized (DAW state reset): {} Hz, {} ch",
             audio_state.sample_rate, audio_state.channels
@@ -123,6 +139,7 @@ pub async fn audio_init(
     audio_state.channels = system.channels;
     audio_state.next_track_id = 0;
     audio_state.next_pool_index = 0;
+    audio_state.next_graph_node_id = 0;
 
     Ok(info)
 }
@@ -524,6 +541,158 @@ pub async fn audio_update_midi_clip_notes(
     }
 }
 
+// Node graph commands
+
+#[tauri::command]
+pub async fn graph_add_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_type: String,
+    x: f32,
+    y: f32,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Get the next node ID before adding (nodes are added sequentially)
+    let node_id = audio_state.next_graph_node_id;
+    audio_state.next_graph_node_id += 1;
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_add_node(track_id, node_type, x, y);
+        Ok(node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_add_node_to_template(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+    node_type: String,
+    x: f32,
+    y: f32,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Get template-local node ID for this VoiceAllocator
+    let node_id = audio_state.template_node_counters
+        .entry(voice_allocator_id)
+        .or_insert(0);
+    let template_node_id = *node_id;
+    *node_id += 1;
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_add_node_to_template(track_id, voice_allocator_id, node_type, x, y);
+        Ok(template_node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_remove_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_remove_node(track_id, node_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_connect(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_connect(track_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_connect_in_template(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_connect_in_template(track_id, voice_allocator_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_disconnect(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_disconnect(track_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_set_parameter(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    param_id: u32,
+    value: f32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_set_parameter(track_id, node_id, param_id, value);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_set_output_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_set_output_node(track_id, node_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {
@@ -534,6 +703,9 @@ pub enum SerializedAudioEvent {
     RecordingError { message: String },
     NoteOn { note: u8, velocity: u8 },
     NoteOff { note: u8 },
+    GraphNodeAdded { track_id: u32, node_id: u32, node_type: String },
+    GraphConnectionError { track_id: u32, message: String },
+    GraphStateChanged { track_id: u32 },
 }
 
 // audio_get_events command removed - events are now pushed via Tauri event system

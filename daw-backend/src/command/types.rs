@@ -117,6 +117,26 @@ pub enum Command {
     SendMidiNoteOn(TrackId, u8, u8),
     /// Send a live MIDI note off event to a track's instrument (track_id, note)
     SendMidiNoteOff(TrackId, u8),
+
+    // Node graph commands
+    /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)
+    GraphAddNode(TrackId, String, f32, f32),
+    /// Add a node to a VoiceAllocator's template graph (track_id, voice_allocator_node_id, node_type, position_x, position_y)
+    GraphAddNodeToTemplate(TrackId, u32, String, f32, f32),
+    /// Remove a node from a track's instrument graph (track_id, node_index)
+    GraphRemoveNode(TrackId, u32),
+    /// Connect two nodes in a track's graph (track_id, from_node, from_port, to_node, to_port)
+    GraphConnect(TrackId, u32, usize, u32, usize),
+    /// Connect nodes in a VoiceAllocator template (track_id, voice_allocator_node_id, from_node, from_port, to_node, to_port)
+    GraphConnectInTemplate(TrackId, u32, u32, usize, u32, usize),
+    /// Disconnect two nodes in a track's graph (track_id, from_node, from_port, to_node, to_port)
+    GraphDisconnect(TrackId, u32, usize, u32, usize),
+    /// Set a parameter on a node (track_id, node_index, param_id, value)
+    GraphSetParameter(TrackId, u32, u32, f32),
+    /// Set which node receives MIDI events (track_id, node_index, enabled)
+    GraphSetMidiTarget(TrackId, u32, bool),
+    /// Set which node is the audio output (track_id, node_index)
+    GraphSetOutputNode(TrackId, u32),
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -152,4 +172,12 @@ pub enum AudioEvent {
     NoteOn(u8, u8),
     /// MIDI note stopped playing (note)
     NoteOff(u8),
+
+    // Node graph events
+    /// Node added to graph (track_id, node_index, node_type)
+    GraphNodeAdded(TrackId, u32, String),
+    /// Connection error occurred (track_id, error_message)
+    GraphConnectionError(TrackId, String),
+    /// Graph state changed (for full UI sync)
+    GraphStateChanged(TrackId),
 }

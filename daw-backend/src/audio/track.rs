@@ -1,6 +1,7 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
 use super::clip::Clip;
 use super::midi::MidiClip;
+use super::node_graph::InstrumentGraph;
 use super::pool::AudioPool;
 use crate::effects::{Effect, SimpleSynth};
 use std::collections::HashMap;
@@ -309,6 +310,8 @@ pub struct MidiTrack {
     /// Automation lanes for this track
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
+    /// Optional instrument graph (replaces SimpleSynth when present)
+    pub instrument_graph: Option<InstrumentGraph>,
 }
 
 impl MidiTrack {
@@ -325,6 +328,7 @@ impl MidiTrack {
             solo: false,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
+            instrument_graph: None,
         }
     }
 
@@ -401,8 +405,19 @@ impl MidiTrack {
         sample_rate: u32,
         channels: u32,
     ) {
-        // Generate audio from the instrument (which processes queued events)
-        self.instrument.process(output, channels as usize, sample_rate);
+        // Generate audio - use instrument graph if available, otherwise SimpleSynth
+        if let Some(graph) = &mut self.instrument_graph {
+            // Get pending MIDI events from SimpleSynth (they're queued there by send_midi_note_on/off)
+            // We need to drain them so they're not processed again
+            let events: Vec<crate::audio::midi::MidiEvent> =
+                self.instrument.pending_events.drain(..).collect();
+
+            // Process graph with MIDI events
+            graph.process(output, &events);
+        } else {
+            // Fallback to SimpleSynth (which processes queued events)
+            self.instrument.process(output, channels as usize, sample_rate);
+        }
 
         // Apply effect chain
         for effect in &mut self.effects {
@@ -427,6 +442,7 @@ impl MidiTrack {
         let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
 
         // Collect MIDI events from all clips that overlap with current time range
+        let mut midi_events = Vec::new();
         for clip in &self.clips {
             let events = clip.get_events_in_range(
                 playhead_seconds,
@@ -434,14 +450,22 @@ impl MidiTrack {
                 sample_rate,
             );
 
-            // Queue events in the instrument
             for (_timestamp, event) in events {
-                self.instrument.queue_event(event);
+                midi_events.push(event);
             }
         }
 
-        // Generate audio from the instrument
-        self.instrument.process(output, channels as usize, sample_rate);
+        // Generate audio - use instrument graph if available, otherwise SimpleSynth
+        if let Some(graph) = &mut self.instrument_graph {
+            // Use node graph for audio generation
+            graph.process(output, &midi_events);
+        } else {
+            // Fallback to SimpleSynth
+            for event in &midi_events {
+                self.instrument.queue_event(*event);
+            }
+            self.instrument.process(output, channels as usize, sample_rate);
+        }
 
         // Apply effect chain
         for effect in &mut self.effects {

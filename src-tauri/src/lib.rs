@@ -214,6 +214,14 @@ pub fn run() {
         audio::audio_update_midi_clip_notes,
         audio::audio_send_midi_note_on,
         audio::audio_send_midi_note_off,
+        audio::graph_add_node,
+        audio::graph_add_node_to_template,
+        audio::graph_remove_node,
+        audio::graph_connect,
+        audio::graph_connect_in_template,
+        audio::graph_disconnect,
+        audio::graph_set_parameter,
+        audio::graph_set_output_node,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

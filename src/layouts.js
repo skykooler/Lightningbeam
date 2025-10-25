@@ -79,10 +79,10 @@ export const defaultLayouts = {
       children: [
         {
           type: "vertical-grid",
-          percent: 70,
+          percent: 50,
           children: [
             { type: "pane", name: "timelineV2" },
-            { type: "pane", name: "piano"}
+            { type: "pane", name: "nodeEditor"}
           ]
         },
         { type: "pane", name: "infopanel" }

@@ -198,6 +198,17 @@ impl Project {
         self.tracks.get_mut(&track_id)
     }
 
+    /// Get oscilloscope data from a node in a track's graph
+    pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<Vec<f32>> {
+        if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
+            if let Some(ref graph) = track.instrument_graph {
+                let node_idx = petgraph::stable_graph::NodeIndex::new(node_id as usize);
+                return graph.get_oscilloscope_data(node_idx, sample_count);
+            }
+        }
+        None
+    }
+
     /// Get all root-level track IDs
     pub fn root_tracks(&self) -> &[TrackId] {
         &self.root_tracks

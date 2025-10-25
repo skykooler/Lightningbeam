@@ -9,6 +9,20 @@ symphonia = { version = "0.5", features = ["all"] }
 rtrb = "0.3"
 midly = "0.5"
 serde = { version = "1.0", features = ["derive"] }
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Node-based audio graph dependencies
+dasp_graph = "0.11"
+dasp_signal = "0.11"
+dasp_sample = "0.11"
+dasp_interpolate = "0.11"
+dasp_envelope = "0.11"
+dasp_ring_buffer = "0.11"
+dasp_peak = "0.11"
+dasp_rms = "0.11"
+petgraph = "0.6"
+serde_json = "1.0"
 
 [dev-dependencies]
 
