@@ -739,6 +739,10 @@ impl Engine {
                             "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
                             "Filter" => Box::new(FilterNode::new("Filter".to_string())),
                             "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
+                            "LFO" => Box::new(LFONode::new("LFO".to_string())),
+                            "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
+                            "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
+                            "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
@@ -786,6 +790,10 @@ impl Engine {
                             "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
                             "Filter" => Box::new(FilterNode::new("Filter".to_string())),
                             "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
+                            "LFO" => Box::new(LFONode::new("LFO".to_string())),
+                            "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
+                            "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
+                            "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
@@ -973,6 +981,35 @@ impl Engine {
                             track_id,
                             format!("Failed to read preset file: {}", e)
                         ));
+                    }
+                }
+            }
+
+            Command::GraphSaveTemplatePreset(track_id, voice_allocator_id, preset_path, preset_name) => {
+                use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref graph) = track.instrument_graph {
+                        let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                        // Get the VoiceAllocator node and serialize its template
+                        if let Some(node) = graph.get_node(va_idx) {
+                            // Downcast to VoiceAllocatorNode
+                            let node_ptr = node as *const dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *const VoiceAllocatorNode;
+
+                            unsafe {
+                                let va_node = &*node_ptr;
+                                let template_preset = va_node.template_graph().to_preset(&preset_name);
+
+                                // Write to file
+                                if let Ok(json) = template_preset.to_json() {
+                                    if let Err(e) = std::fs::write(&preset_path, json) {
+                                        eprintln!("Failed to save template preset: {}", e);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1455,5 +1492,10 @@ impl EngineController {
     /// Load a preset into a track's graph
     pub fn graph_load_preset(&mut self, track_id: TrackId, preset_path: String) {
         let _ = self.command_tx.push(Command::GraphLoadPreset(track_id, preset_path));
+    }
+
+    /// Save a VoiceAllocator's template graph as a preset
+    pub fn graph_save_template_preset(&mut self, track_id: TrackId, voice_allocator_id: u32, preset_path: String, preset_name: String) {
+        let _ = self.command_tx.push(Command::GraphSaveTemplatePreset(track_id, voice_allocator_id, preset_path, preset_name));
     }
 }

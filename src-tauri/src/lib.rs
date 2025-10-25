@@ -227,6 +227,7 @@ pub fn run() {
         audio::graph_list_presets,
         audio::graph_delete_preset,
         audio::graph_get_state,
+        audio::graph_get_template_state,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

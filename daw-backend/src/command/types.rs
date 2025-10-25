@@ -142,6 +142,8 @@ pub enum Command {
     GraphSavePreset(TrackId, String, String, String, Vec<String>),
     /// Load a preset into a track's graph (track_id, preset_path)
     GraphLoadPreset(TrackId, String),
+    /// Save a VoiceAllocator's template graph as a preset (track_id, voice_allocator_id, preset_path, preset_name)
+    GraphSaveTemplatePreset(TrackId, u32, String, String),
 }
 
 /// Events sent from audio thread back to UI/control thread

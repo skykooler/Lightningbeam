@@ -422,6 +422,113 @@ export const nodeTypes = {
         <div class="node-info" style="font-size: 9px;">Audio to mixer</div>
       </div>
     `
+  },
+
+  LFO: {
+    name: 'LFO',
+    category: NodeCategory.UTILITY,
+    description: 'Low frequency oscillator for modulation',
+    inputs: [],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'frequency', label: 'Frequency', min: 0.01, max: 20, default: 1.0, unit: 'Hz' },
+      { id: 1, name: 'amplitude', label: 'Amplitude', min: 0, max: 1, default: 1.0, unit: '' },
+      { id: 2, name: 'waveform', label: 'Waveform', min: 0, max: 4, default: 0, unit: '' },
+      { id: 3, name: 'phase', label: 'Phase', min: 0, max: 1, default: 0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">LFO</div>
+        <div class="node-param">
+          <label>Wave: <span id="lfowave-${nodeId}">Sine</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="2" min="0" max="4" value="0" step="1">
+        </div>
+        <div class="node-param">
+          <label>Freq: <span id="lfofreq-${nodeId}">1.0</span> Hz</label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="0" min="0.01" max="20" value="1.0" step="0.01">
+        </div>
+        <div class="node-param">
+          <label>Depth: <span id="lfoamp-${nodeId}">1.0</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="1" min="0" max="1" value="1.0" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  NoiseGenerator: {
+    name: 'NoiseGenerator',
+    category: NodeCategory.GENERATOR,
+    description: 'White and pink noise generator',
+    inputs: [],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'amplitude', label: 'Amplitude', min: 0, max: 1, default: 0.5, unit: '' },
+      { id: 1, name: 'color', label: 'Color', min: 0, max: 1, default: 0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Noise</div>
+        <div class="node-param">
+          <label>Color: <span id="noisecolor-${nodeId}">White</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="1" min="0" max="1" value="0" step="1">
+        </div>
+        <div class="node-param">
+          <label>Level: <span id="noiselevel-${nodeId}">0.5</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="0" min="0" max="1" value="0.5" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  Splitter: {
+    name: 'Splitter',
+    category: NodeCategory.UTILITY,
+    description: 'Split audio signal to multiple outputs for parallel routing',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Out 1', type: SignalType.AUDIO, index: 0 },
+      { name: 'Out 2', type: SignalType.AUDIO, index: 1 },
+      { name: 'Out 3', type: SignalType.AUDIO, index: 2 },
+      { name: 'Out 4', type: SignalType.AUDIO, index: 3 }
+    ],
+    parameters: [],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Splitter</div>
+        <div class="node-info" style="font-size: 10px;">1→4 split</div>
+      </div>
+    `
+  },
+
+  Pan: {
+    name: 'Pan',
+    category: NodeCategory.UTILITY,
+    description: 'Stereo panning with CV modulation',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 },
+      { name: 'Pan CV', type: SignalType.CV, index: 1 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'pan', label: 'Pan', min: -1, max: 1, default: 0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Pan</div>
+        <div class="node-param">
+          <label>Position: <span id="panpos-${nodeId}">0.0</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="0" min="-1" max="1" value="0" step="0.01">
+        </div>
+      </div>
+    `
   }
 };
 

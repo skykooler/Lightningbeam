@@ -891,6 +891,51 @@ pub async fn graph_get_state(
     }
 }
 
+#[tauri::command]
+pub async fn graph_get_template_state(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+) -> Result<String, String> {
+    use daw_backend::GraphPreset;
+
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // For template graphs, we'll use a different temp file path
+        let temp_path = std::env::temp_dir().join(format!("temp_template_state_{}_{}.json", track_id, voice_allocator_id));
+        let temp_path_str = temp_path.to_string_lossy().to_string();
+
+        // Send a custom command to save the template graph
+        // We'll need to add this command to the backend
+        controller.graph_save_template_preset(
+            track_id,
+            voice_allocator_id,
+            temp_path_str.clone(),
+            "temp_template".to_string()
+        );
+
+        // Give the audio thread time to process
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Read the temp file
+        let json = match std::fs::read_to_string(&temp_path) {
+            Ok(json) => json,
+            Err(_) => {
+                // If file doesn't exist, template is likely empty
+                let empty_preset = GraphPreset::new("empty_template");
+                empty_preset.to_json().unwrap_or_else(|_| "{}".to_string())
+            }
+        };
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path);
+
+        Ok(json)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {

@@ -125,6 +125,17 @@ impl InstrumentGraph {
         to: NodeIndex,
         to_port: usize,
     ) -> Result<(), ConnectionError> {
+        eprintln!("[GRAPH] connect() called: {:?} port {} -> {:?} port {}", from, from_port, to, to_port);
+
+        // Check if this exact connection already exists
+        if let Some(edge_idx) = self.graph.find_edge(from, to) {
+            let existing_conn = &self.graph[edge_idx];
+            if existing_conn.from_port == from_port && existing_conn.to_port == to_port {
+                eprintln!("[GRAPH] Connection already exists, skipping duplicate");
+                return Ok(()); // Connection already exists, don't create duplicate
+            }
+        }
+
         // Validate the connection
         self.validate_connection(from, from_port, to, to_port)?;
 
@@ -309,6 +320,11 @@ impl InstrumentGraph {
     pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent]) {
         // Use the requested output buffer size for processing
         let process_size = output_buffer.len();
+
+        if process_size > self.buffer_size * 2 {
+            eprintln!("[GRAPH] WARNING: process_size {} > allocated buffer_size {} * 2",
+                      process_size, self.buffer_size);
+        }
 
         // Clear all output buffers (audio/CV and MIDI)
         for node in self.graph.node_weights_mut() {
@@ -670,8 +686,10 @@ impl InstrumentGraph {
             index_map.insert(serialized_node.id, node_idx);
 
             // Set parameters
+            eprintln!("[PRESET] Node {}: type={}, params={:?}", serialized_node.id, serialized_node.node_type, serialized_node.parameters);
             for (&param_id, &value) in &serialized_node.parameters {
                 if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                    eprintln!("[PRESET]   Setting param {} = {}", param_id, value);
                     graph_node.node.set_parameter(param_id, value);
                 }
             }
@@ -681,26 +699,32 @@ impl InstrumentGraph {
         }
 
         // Create connections
+        eprintln!("[PRESET] Creating {} connections", preset.connections.len());
         for conn in &preset.connections {
             let from_idx = index_map.get(&conn.from_node)
                 .ok_or_else(|| format!("Connection from unknown node {}", conn.from_node))?;
             let to_idx = index_map.get(&conn.to_node)
                 .ok_or_else(|| format!("Connection to unknown node {}", conn.to_node))?;
 
+            eprintln!("[PRESET]   Connecting: node {} port {} -> node {} port {}", conn.from_node, conn.from_port, conn.to_node, conn.to_port);
             graph.connect(*from_idx, conn.from_port, *to_idx, conn.to_port)
                 .map_err(|e| format!("Failed to connect nodes: {:?}", e))?;
         }
 
         // Set MIDI targets
+        eprintln!("[PRESET] Setting MIDI targets: {:?}", preset.midi_targets);
         for &target_id in &preset.midi_targets {
             if let Some(&target_idx) = index_map.get(&target_id) {
+                eprintln!("[PRESET]   MIDI target: node {} -> index {:?}", target_id, target_idx);
                 graph.set_midi_target(target_idx, true);
             }
         }
 
         // Set output node
+        eprintln!("[PRESET] Setting output node: {:?}", preset.output_node);
         if let Some(output_id) = preset.output_node {
             if let Some(&output_idx) = index_map.get(&output_id) {
+                eprintln!("[PRESET]   Output node: {} -> index {:?}", output_id, output_idx);
                 graph.output_node = Some(output_idx);
             }
         }

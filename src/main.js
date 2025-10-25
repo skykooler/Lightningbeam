@@ -62,7 +62,7 @@ import {
 } from "./styles.js";
 import { Icon } from "./icon.js";
 import { AlphaSelectionBar, ColorSelectorWidget, ColorWidget, HueSelectionBar, SaturationValueSelectionGradient, TimelineWindow, TimelineWindowV2, VirtualPiano, PianoRollEditor, Widget } from "./widgets.js";
-import { nodeTypes, SignalType, getPortClass } from "./nodeTypes.js";
+import { nodeTypes, SignalType, getPortClass, NodeCategory, getCategories, getNodesByCategory } from "./nodeTypes.js";
 
 // State management
 import {
@@ -6059,28 +6059,95 @@ function nodeEditor() {
   const container = document.createElement("div");
   container.id = "node-editor-container";
 
+  // Track editing context: null = main graph, {voiceAllocatorId, voiceAllocatorName} = editing template
+  let editingContext = null;
+
+  // Track palette navigation: null = showing categories, string = showing nodes in that category
+  let selectedCategory = null;
+
+  // Create breadcrumb/context header
+  const header = document.createElement("div");
+  header.className = "node-editor-header";
+  header.innerHTML = '<div class="context-breadcrumb">Main Graph</div>';
+  container.appendChild(header);
+
   // Create the Drawflow canvas
   const editorDiv = document.createElement("div");
   editorDiv.id = "drawflow";
   editorDiv.style.width = "100%";
-  editorDiv.style.height = "100%";
+  editorDiv.style.height = "calc(100% - 40px)"; // Account for header
   editorDiv.style.position = "relative";
   container.appendChild(editorDiv);
 
   // Create node palette
   const palette = document.createElement("div");
   palette.className = "node-palette";
-  palette.innerHTML = `
-    <h3>Nodes</h3>
-    ${Object.entries(nodeTypes)
-      .filter(([type, def]) => type !== 'TemplateInput' && type !== 'TemplateOutput') // Hide template nodes
-      .map(([type, def]) => `
-        <div class="node-palette-item" data-node-type="${type}">
-          ${def.name}
-        </div>
-      `).join('')}
-  `;
   container.appendChild(palette);
+
+  // Category display names
+  const categoryNames = {
+    [NodeCategory.INPUT]: 'Inputs',
+    [NodeCategory.GENERATOR]: 'Generators',
+    [NodeCategory.EFFECT]: 'Effects',
+    [NodeCategory.UTILITY]: 'Utilities',
+    [NodeCategory.OUTPUT]: 'Outputs'
+  };
+
+  // Function to update palette based on context and selected category
+  function updatePalette() {
+    const isTemplate = editingContext !== null;
+
+    if (selectedCategory === null) {
+      // Show categories
+      const categories = getCategories().filter(category => {
+        // Filter categories based on context
+        if (isTemplate) {
+          // In template: show all categories
+          return true;
+        } else {
+          // In main graph: hide INPUT/OUTPUT categories that contain template nodes
+          return true; // We'll filter nodes instead
+        }
+      });
+
+      palette.innerHTML = `
+        <h3>Node Categories</h3>
+        ${categories.map(category => `
+          <div class="node-category-item" data-category="${category}">
+            ${categoryNames[category] || category}
+          </div>
+        `).join('')}
+      `;
+    } else {
+      // Show nodes in selected category
+      const nodesInCategory = getNodesByCategory(selectedCategory);
+
+      // Filter based on context
+      const filteredNodes = nodesInCategory.filter(node => {
+        if (isTemplate) {
+          // In template: hide VoiceAllocator, AudioOutput, MidiInput
+          return node.type !== 'VoiceAllocator' && node.type !== 'AudioOutput' && node.type !== 'MidiInput';
+        } else {
+          // In main graph: hide TemplateInput/TemplateOutput
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput';
+        }
+      });
+
+      palette.innerHTML = `
+        <div class="palette-header">
+          <button class="palette-back-btn">← Back</button>
+          <h3>${categoryNames[selectedCategory] || selectedCategory}</h3>
+        </div>
+        ${filteredNodes.map(node => `
+          <div class="node-palette-item" data-node-type="${node.type}" draggable="true" title="${node.description}">
+            ${node.name}
+          </div>
+        `).join('')}
+      `;
+    }
+  }
+
+  updatePalette();
 
   // Initialize Drawflow editor (will be set up after DOM insertion)
   let editor = null;
@@ -6104,33 +6171,88 @@ function nodeEditor() {
     // Store editor reference in context
     context.nodeEditor = editor;
 
-    // Add palette item drag-and-drop handlers
-    const paletteItems = container.querySelectorAll(".node-palette-item");
+    // Add trackpad/mousewheel scrolling support for panning
+    drawflowDiv.addEventListener('wheel', (e) => {
+      // Don't scroll if hovering over palette or other UI elements
+      if (e.target.closest('.node-palette')) {
+        return;
+      }
+
+      // Don't interfere with zoom (Ctrl+wheel)
+      if (e.ctrlKey) return;
+
+      // Prevent default scrolling behavior
+      e.preventDefault();
+
+      // Pan the canvas based on scroll direction
+      const deltaX = e.deltaX;
+      const deltaY = e.deltaY;
+
+      // Update Drawflow's canvas position
+      if (typeof editor.canvas_x === 'undefined') {
+        editor.canvas_x = 0;
+      }
+      if (typeof editor.canvas_y === 'undefined') {
+        editor.canvas_y = 0;
+      }
+
+      editor.canvas_x -= deltaX;
+      editor.canvas_y -= deltaY;
+
+      // Update the canvas transform
+      const precanvas = drawflowDiv.querySelector('.drawflow');
+      if (precanvas) {
+        const zoom = editor.zoom || 1;
+        precanvas.style.transform = `translate(${editor.canvas_x}px, ${editor.canvas_y}px) scale(${zoom})`;
+      }
+    }, { passive: false });
+
+    // Add palette item drag-and-drop handlers using event delegation
     let draggedNodeType = null;
 
-    paletteItems.forEach(item => {
-      // Make items draggable
-      item.setAttribute('draggable', 'true');
+    // Use event delegation for click on palette items, categories, and back button
+    palette.addEventListener("click", (e) => {
+      // Handle back button
+      const backBtn = e.target.closest(".palette-back-btn");
+      if (backBtn) {
+        selectedCategory = null;
+        updatePalette();
+        return;
+      }
 
-      // Click handler for quick add
-      item.addEventListener("click", () => {
+      // Handle category selection
+      const categoryItem = e.target.closest(".node-category-item");
+      if (categoryItem) {
+        selectedCategory = categoryItem.getAttribute("data-category");
+        updatePalette();
+        return;
+      }
+
+      // Handle node selection
+      const item = e.target.closest(".node-palette-item");
+      if (item) {
         const nodeType = item.getAttribute("data-node-type");
         addNode(nodeType, 100, 100, null);
-      });
+      }
+    });
 
-      // Drag start
-      item.addEventListener('dragstart', (e) => {
+    // Use event delegation for drag events
+    palette.addEventListener('dragstart', (e) => {
+      const item = e.target.closest(".node-palette-item");
+      if (item) {
         draggedNodeType = item.getAttribute('data-node-type');
         e.dataTransfer.effectAllowed = 'copy';
-        e.dataTransfer.setData('text/plain', draggedNodeType); // Required for drag to work
+        e.dataTransfer.setData('text/plain', draggedNodeType);
         console.log('Drag started:', draggedNodeType);
-      });
+      }
+    });
 
-      // Drag end
-      item.addEventListener('dragend', () => {
+    palette.addEventListener('dragend', (e) => {
+      const item = e.target.closest(".node-palette-item");
+      if (item) {
         console.log('Drag ended');
         draggedNodeType = null;
-      });
+      }
     });
 
     // Add drop handler to drawflow canvas
@@ -6302,7 +6424,7 @@ function nodeEditor() {
     }, 10);
 
     // Send command to backend
-    // If parent node exists, add to VoiceAllocator template; otherwise add to main graph
+    // Check editing context first (dedicated template view), then parent node (inline editing)
     const trackId = getCurrentMidiTrack();
     if (trackId === null) {
       console.error('No MIDI track selected');
@@ -6311,21 +6433,38 @@ function nodeEditor() {
       return;
     }
 
-    const commandName = parentNodeId ? "graph_add_node_to_template" : "graph_add_node";
-    const commandArgs = parentNodeId
-      ? {
-          trackId: trackId,
-          voiceAllocatorId: editor.getNodeFromId(parentNodeId).data.backendId,
-          nodeType: nodeType,
-          x: x,
-          y: y
-        }
-      : {
-          trackId: trackId,
-          nodeType: nodeType,
-          x: x,
-          y: y
-        };
+    // Determine if we're adding to a template or main graph
+    let commandName, commandArgs;
+    if (editingContext) {
+      // Adding to template in dedicated view
+      commandName = "graph_add_node_to_template";
+      commandArgs = {
+        trackId: trackId,
+        voiceAllocatorId: editingContext.voiceAllocatorId,
+        nodeType: nodeType,
+        x: x,
+        y: y
+      };
+    } else if (parentNodeId) {
+      // Adding to template inline (old approach, still supported for backwards compat)
+      commandName = "graph_add_node_to_template";
+      commandArgs = {
+        trackId: trackId,
+        voiceAllocatorId: editor.getNodeFromId(parentNodeId).data.backendId,
+        nodeType: nodeType,
+        x: x,
+        y: y
+      };
+    } else {
+      // Adding to main graph
+      commandName = "graph_add_node";
+      commandArgs = {
+        trackId: trackId,
+        nodeType: nodeType,
+        x: x,
+        y: y
+      };
+    }
 
     invoke(commandName, commandArgs).then(backendNodeId => {
       console.log(`Node ${nodeType} added with backend ID: ${backendNodeId} (parent: ${parentNodeId})`);
@@ -6518,66 +6657,29 @@ function nodeEditor() {
     }, 100);
   }
 
-  // Handle double-click on nodes (for VoiceAllocator expansion)
+  // Handle double-click on nodes (for VoiceAllocator template editing)
   function handleNodeDoubleClick(nodeId) {
     const node = editor.getNodeFromId(nodeId);
     if (!node) return;
 
-    // Only VoiceAllocator nodes can be expanded
+    // Only VoiceAllocator nodes can be opened for template editing
     if (node.data.nodeType !== 'VoiceAllocator') return;
 
-    const nodeElement = document.getElementById(`node-${nodeId}`);
-    if (!nodeElement) return;
-
-    const contentsArea = document.getElementById(`voice-allocator-contents-${nodeId}`);
-    if (!contentsArea) return;
-
-    // Toggle expanded state
-    if (expandedNodes.has(nodeId)) {
-      // Collapse
-      expandedNodes.delete(nodeId);
-      nodeElement.classList.remove('expanded');
-      nodeElement.style.width = '';
-      nodeElement.style.height = '';
-      nodeElement.style.minWidth = '';
-      nodeElement.style.minHeight = '';
-      contentsArea.style.display = 'none';
-
-      // Hide all child nodes
-      for (const [childId, parentId] of nodeParents.entries()) {
-        if (parentId === nodeId) {
-          const childElement = document.getElementById(`node-${childId}`);
-          if (childElement) {
-            childElement.style.display = 'none';
-          }
-        }
-      }
-
-      console.log('Collapsed VoiceAllocator node:', nodeId);
-    } else {
-      // Expand
-      expandedNodes.add(nodeId);
-      nodeElement.classList.add('expanded');
-
-      // Make the node larger to show contents
-      nodeElement.style.width = '600px';
-      nodeElement.style.height = '400px';
-      nodeElement.style.minWidth = '600px';
-      nodeElement.style.minHeight = '400px';
-      contentsArea.style.display = 'block';
-
-      // Show all child nodes
-      for (const [childId, parentId] of nodeParents.entries()) {
-        if (parentId === nodeId) {
-          const childElement = document.getElementById(`node-${childId}`);
-          if (childElement) {
-            childElement.style.display = 'block';
-          }
-        }
-      }
-
-      console.log('Expanded VoiceAllocator node:', nodeId);
+    // Don't allow entering templates when already editing a template
+    if (editingContext) {
+      showError("Cannot nest template editing - exit current template first");
+      return;
     }
+
+    // Get the backend ID and node name
+    if (node.data.backendId === null) {
+      showError("VoiceAllocator not yet created on backend");
+      return;
+    }
+
+    // Enter template editing mode
+    const nodeName = node.name || 'VoiceAllocator';
+    enterTemplate(node.data.backendId, nodeName);
   }
 
   // Handle connection creation
@@ -6646,20 +6748,46 @@ function nodeEditor() {
       // Send to backend
       console.log("Backend IDs - output:", outputNode.data.backendId, "input:", inputNode.data.backendId);
       if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
-        // Check if both nodes are inside the same VoiceAllocator
-        // Convert connection IDs to numbers to match Map keys
-        const outputId = parseInt(connection.output_id);
-        const inputId = parseInt(connection.input_id);
-        const outputParent = nodeParents.get(outputId);
-        const inputParent = nodeParents.get(inputId);
-        console.log(`Parent detection - output node ${outputId} parent: ${outputParent}, input node ${inputId} parent: ${inputParent}`);
+        const currentTrackId = getCurrentMidiTrack();
+        if (currentTrackId === null) return;
 
-        if (outputParent && inputParent && outputParent === inputParent) {
-          // Both nodes are inside the same VoiceAllocator - connect in template
-          const parentNode = editor.getNodeFromId(outputParent);
-          console.log(`Connecting in VoiceAllocator template ${parentNode.data.backendId}: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
-          const currentTrackId = getCurrentMidiTrack();
-          if (currentTrackId !== null) {
+        // Check if we're in template editing mode (dedicated view)
+        if (editingContext) {
+          // Connecting in template view
+          console.log(`Connecting in template ${editingContext.voiceAllocatorId}: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
+          invoke("graph_connect_in_template", {
+            trackId: currentTrackId,
+            voiceAllocatorId: editingContext.voiceAllocatorId,
+            fromNode: outputNode.data.backendId,
+            fromPort: outputPort,
+            toNode: inputNode.data.backendId,
+            toPort: inputPort
+          }).then(() => {
+            console.log("Template connection successful");
+          }).catch(err => {
+            console.error("Failed to connect nodes in template:", err);
+            showError("Template connection failed: " + err);
+            // Remove the connection
+            editor.removeSingleConnection(
+              connection.output_id,
+              connection.input_id,
+              connection.output_class,
+              connection.input_class
+            );
+          });
+        } else {
+          // Check if both nodes are inside the same VoiceAllocator (inline editing)
+          // Convert connection IDs to numbers to match Map keys
+          const outputId = parseInt(connection.output_id);
+          const inputId = parseInt(connection.input_id);
+          const outputParent = nodeParents.get(outputId);
+          const inputParent = nodeParents.get(inputId);
+          console.log(`Parent detection - output node ${outputId} parent: ${outputParent}, input node ${inputId} parent: ${inputParent}`);
+
+          if (outputParent && inputParent && outputParent === inputParent) {
+            // Both nodes are inside the same VoiceAllocator - connect in template (inline editing)
+            const parentNode = editor.getNodeFromId(outputParent);
+            console.log(`Connecting in VoiceAllocator template ${parentNode.data.backendId}: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
             invoke("graph_connect_in_template", {
               trackId: currentTrackId,
               voiceAllocatorId: parentNode.data.backendId,
@@ -6680,12 +6808,9 @@ function nodeEditor() {
                 connection.input_class
               );
             });
-          }
-        } else {
-          // Normal connection in main graph
-          console.log(`Connecting: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
-          const currentTrackId = getCurrentMidiTrack();
-          if (currentTrackId !== null) {
+          } else {
+            // Normal connection in main graph
+            console.log(`Connecting: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
             invoke("graph_connect", {
               trackId: currentTrackId,
               fromNode: outputNode.data.backendId,
@@ -6754,6 +6879,38 @@ function nodeEditor() {
     }, 3000);
   }
 
+  // Function to update breadcrumb display
+  function updateBreadcrumb() {
+    const breadcrumb = header.querySelector('.context-breadcrumb');
+    if (editingContext) {
+      breadcrumb.innerHTML = `
+        Main Graph &gt;
+        <span class="template-name">${editingContext.voiceAllocatorName} Template</span>
+        <button class="exit-template-btn">← Exit Template</button>
+      `;
+      const exitBtn = breadcrumb.querySelector('.exit-template-btn');
+      exitBtn.addEventListener('click', exitTemplate);
+    } else {
+      breadcrumb.textContent = 'Main Graph';
+    }
+  }
+
+  // Function to enter template editing mode
+  async function enterTemplate(voiceAllocatorId, voiceAllocatorName) {
+    editingContext = { voiceAllocatorId, voiceAllocatorName };
+    updateBreadcrumb();
+    updatePalette();
+    await reloadGraph();
+  }
+
+  // Function to exit template editing mode
+  async function exitTemplate() {
+    editingContext = null;
+    updateBreadcrumb();
+    updatePalette();
+    await reloadGraph();
+  }
+
   // Function to reload graph from backend
   async function reloadGraph() {
     if (!editor) return;
@@ -6771,7 +6928,19 @@ function nodeEditor() {
     }
 
     try {
-      const graphJson = await invoke('graph_get_state', { trackId });
+      // Get graph based on editing context
+      let graphJson;
+      if (editingContext) {
+        // Loading template graph
+        graphJson = await invoke('graph_get_template_state', {
+          trackId,
+          voiceAllocatorId: editingContext.voiceAllocatorId
+        });
+      } else {
+        // Loading main graph
+        graphJson = await invoke('graph_get_state', { trackId });
+      }
+
       const preset = JSON.parse(graphJson);
 
       // If graph is empty (no nodes), just leave cleared
@@ -7165,22 +7334,46 @@ function createPresetItem(preset) {
     <div class="preset-item" data-preset-path="${preset.path}" data-preset-tags="${preset.tags.join(',')}">
       <div class="preset-item-header">
         <span class="preset-name">${preset.name}</span>
+        <button class="preset-load-btn" title="Load preset">Load</button>
         ${deleteBtn}
       </div>
-      <div class="preset-description">${preset.description || 'No description'}</div>
-      <div class="preset-tags">${tags}</div>
-      <div class="preset-author">by ${preset.author || 'Unknown'}</div>
+      <div class="preset-details">
+        <div class="preset-description">${preset.description || 'No description'}</div>
+        <div class="preset-tags">${tags}</div>
+        <div class="preset-author">by ${preset.author || 'Unknown'}</div>
+      </div>
     </div>
   `;
 }
 
 function addPresetItemHandlers(listElement) {
-  // Load preset on click
+  // Toggle selection on preset item click
   listElement.querySelectorAll('.preset-item').forEach(item => {
-    item.addEventListener('click', async (e) => {
-      // Don't trigger if clicking delete button
-      if (e.target.classList.contains('preset-delete-btn')) return;
+    item.addEventListener('click', (e) => {
+      // Don't trigger if clicking buttons
+      if (e.target.classList.contains('preset-load-btn') ||
+          e.target.classList.contains('preset-delete-btn')) {
+        return;
+      }
 
+      // Toggle selection
+      const wasSelected = item.classList.contains('selected');
+
+      // Deselect all presets
+      listElement.querySelectorAll('.preset-item').forEach(i => i.classList.remove('selected'));
+
+      // Select this preset if it wasn't selected
+      if (!wasSelected) {
+        item.classList.add('selected');
+      }
+    });
+  });
+
+  // Load preset on Load button click
+  listElement.querySelectorAll('.preset-load-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const item = btn.closest('.preset-item');
       const presetPath = item.dataset.presetPath;
       await loadPreset(presetPath);
     });

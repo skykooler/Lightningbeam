@@ -1051,16 +1051,68 @@ button {
   background: #1e1e1e;
 }
 
+/* Node editor header and breadcrumb */
+.node-editor-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #3d3d3d;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  z-index: 200;
+}
+
+.context-breadcrumb {
+  color: #ddd;
+  font-size: 14px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-name {
+  color: #7c7cff;
+  font-weight: bold;
+}
+
+.exit-template-btn {
+  margin-left: 12px;
+  padding: 4px 12px;
+  background: #3d3d3d;
+  border: 1px solid #4d4d4d;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.exit-template-btn:hover {
+  background: #4d4d4d;
+  border-color: #5d5d5d;
+}
+
+.exit-template-btn:active {
+  background: #5d5d5d;
+}
+
 /* Node palette */
 .node-palette {
   position: absolute;
-  top: 10px;
+  top: 50px;
   left: 10px;
   background: #2d2d2d;
   border: 1px solid #3d3d3d;
   border-radius: 4px;
   padding: 8px;
   max-width: 200px;
+  max-height: calc(100% - 100px);
+  overflow-y: auto;
   z-index: 100;
 }
 
@@ -1069,6 +1121,54 @@ button {
   font-size: 12px;
   color: #ccc;
   text-transform: uppercase;
+}
+
+.palette-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.palette-back-btn {
+  padding: 6px 8px;
+  background: #3d3d3d;
+  border: 1px solid #4d4d4d;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.palette-back-btn:hover {
+  background: #4d4d4d;
+}
+
+.palette-header h3 {
+  margin: 0;
+}
+
+.node-category-item {
+  padding: 8px 10px;
+  margin: 4px 0;
+  background: #3d3d3d;
+  border: 1px solid #5d5d5d;
+  border-radius: 3px;
+  cursor: pointer;
+  color: #ddd;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.node-category-item:hover {
+  background: #4d4d4d;
+  border-color: #7c7cff;
+}
+
+.node-category-item:active {
+  background: #5d5d5d;
 }
 
 .node-palette-item {
@@ -1410,9 +1510,10 @@ button {
   background: #252525;
   border: 1px solid #3d3d3d;
   border-radius: 4px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   cursor: pointer;
   transition: all 0.2s;
+  margin-bottom: 4px;
 }
 
 .preset-item:hover {
@@ -1420,17 +1521,52 @@ button {
   border-color: #4CAF50;
 }
 
+.preset-item.selected {
+  background: #2d2d2d;
+  border-color: #7c7cff;
+  padding: 10px 12px;
+}
+
 .preset-item-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  gap: 8px;
 }
 
 .preset-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: #fff;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-item.selected .preset-name {
+  font-size: 14px;
+  white-space: normal;
+}
+
+.preset-load-btn {
+  background: #4CAF50;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  transition: background 0.2s;
+  display: none;
+}
+
+.preset-item.selected .preset-load-btn {
+  display: block;
+}
+
+.preset-load-btn:hover {
+  background: #45a049;
 }
 
 .preset-delete-btn {
@@ -1442,10 +1578,26 @@ button {
   padding: 2px 6px;
   border-radius: 3px;
   transition: background 0.2s;
+  display: none;
+}
+
+.preset-item.selected .preset-delete-btn {
+  display: block;
 }
 
 .preset-delete-btn:hover {
   background: rgba(244, 67, 54, 0.2);
+}
+
+.preset-details {
+  display: none;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #3d3d3d;
+}
+
+.preset-item.selected .preset-details {
+  display: block;
 }
 
 .preset-description {
