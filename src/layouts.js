@@ -72,7 +72,7 @@ export const defaultLayouts = {
 
   audioDaw: {
     name: "Audio/DAW",
-    description: "Audio tracks prominent with mixer and node editor",
+    description: "Audio tracks prominent with mixer, node editor, and preset browser",
     layout: {
       type: "horizontal-grid",
       percent: 75,
@@ -85,7 +85,7 @@ export const defaultLayouts = {
             { type: "pane", name: "nodeEditor"}
           ]
         },
-        { type: "pane", name: "infopanel" }
+        { type: "pane", name: "presetBrowser" }
       ]
     }
   },

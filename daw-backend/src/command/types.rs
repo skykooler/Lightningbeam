@@ -137,6 +137,11 @@ pub enum Command {
     GraphSetMidiTarget(TrackId, u32, bool),
     /// Set which node is the audio output (track_id, node_index)
     GraphSetOutputNode(TrackId, u32),
+
+    /// Save current graph as a preset (track_id, preset_path, preset_name, description, tags)
+    GraphSavePreset(TrackId, String, String, String, Vec<String>),
+    /// Load a preset into a track's graph (track_id, preset_path)
+    GraphLoadPreset(TrackId, String),
 }
 
 /// Events sent from audio thread back to UI/control thread

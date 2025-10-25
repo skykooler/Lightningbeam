@@ -722,7 +722,7 @@ impl Engine {
             }
 
             // Node graph commands
-            Command::GraphAddNode(track_id, node_type, _x, _y) => {
+            Command::GraphAddNode(track_id, node_type, x, y) => {
                 // Get MIDI track (graphs are only for MIDI tracks currently)
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                     // Create graph if it doesn't exist
@@ -759,6 +759,9 @@ impl Engine {
                         // Add node to graph
                         let node_idx = graph.add_node(node);
                         let node_id = node_idx.index() as u32;
+
+                        // Save position
+                        graph.set_node_position(node_idx, x, y);
 
                         // Automatically set MIDI-receiving nodes as MIDI targets
                         if node_type == "MidiInput" || node_type == "VoiceAllocator" {
@@ -904,6 +907,72 @@ impl Engine {
                     if let Some(graph) = &mut track.instrument_graph {
                         let node_idx = NodeIndex::new(node_index as usize);
                         graph.set_output_node(Some(node_idx));
+                    }
+                }
+            }
+
+            Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref graph) = track.instrument_graph {
+                        // Serialize the graph to a preset
+                        let mut preset = graph.to_preset(&preset_name);
+                        preset.metadata.description = description;
+                        preset.metadata.tags = tags;
+                        preset.metadata.author = String::from("User");
+
+                        // Write to file
+                        if let Ok(json) = preset.to_json() {
+                            if let Err(e) = std::fs::write(&preset_path, json) {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to save preset: {}", e)
+                                ));
+                            }
+                        } else {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                "Failed to serialize preset".to_string()
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Command::GraphLoadPreset(track_id, preset_path) => {
+                // Read and deserialize the preset
+                match std::fs::read_to_string(&preset_path) {
+                    Ok(json) => {
+                        match crate::audio::node_graph::preset::GraphPreset::from_json(&json) {
+                            Ok(preset) => {
+                                match InstrumentGraph::from_preset(&preset, self.sample_rate, 8192) {
+                                    Ok(graph) => {
+                                        // Replace the track's graph
+                                        if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                                            track.instrument_graph = Some(graph);
+                                            let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                            track_id,
+                                            format!("Failed to create graph from preset: {}", e)
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to parse preset: {}", e)
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                            track_id,
+                            format!("Failed to read preset file: {}", e)
+                        ));
                     }
                 }
             }
@@ -1376,5 +1445,15 @@ impl EngineController {
     /// Set which node is the audio output in a track's instrument graph
     pub fn graph_set_output_node(&mut self, track_id: TrackId, node_id: u32) {
         let _ = self.command_tx.push(Command::GraphSetOutputNode(track_id, node_id));
+    }
+
+    /// Save the current graph as a preset
+    pub fn graph_save_preset(&mut self, track_id: TrackId, preset_path: String, preset_name: String, description: String, tags: Vec<String>) {
+        let _ = self.command_tx.push(Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags));
+    }
+
+    /// Load a preset into a track's graph
+    pub fn graph_load_preset(&mut self, track_id: TrackId, preset_path: String) {
+        let _ = self.command_tx.push(Command::GraphLoadPreset(track_id, preset_path));
     }
 }

@@ -78,6 +78,9 @@ pub struct InstrumentGraph {
 
     /// Temporary buffers for node MIDI inputs during processing
     midi_input_buffers: Vec<Vec<MidiEvent>>,
+
+    /// UI positions for nodes (node_index -> (x, y))
+    node_positions: std::collections::HashMap<u32, (f32, f32)>,
 }
 
 impl InstrumentGraph {
@@ -94,6 +97,7 @@ impl InstrumentGraph {
             input_buffers: vec![vec![0.0; buffer_size * 2]; 16],
             // Pre-allocate MIDI input buffers (max 128 events per port)
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
+            node_positions: std::collections::HashMap::new(),
         }
     }
 
@@ -101,6 +105,16 @@ impl InstrumentGraph {
     pub fn add_node(&mut self, node: Box<dyn AudioNode>) -> NodeIndex {
         let graph_node = GraphNode::new(node, self.buffer_size);
         self.graph.add_node(graph_node)
+    }
+
+    /// Set the UI position for a node
+    pub fn set_node_position(&mut self, node: NodeIndex, x: f32, y: f32) {
+        self.node_positions.insert(node.index() as u32, (x, y));
+    }
+
+    /// Get the UI position for a node
+    pub fn get_node_position(&self, node: NodeIndex) -> Option<(f32, f32)> {
+        self.node_positions.get(&(node.index() as u32)).copied()
     }
 
     /// Connect two nodes with type checking
@@ -542,5 +556,155 @@ impl InstrumentGraph {
         }
 
         new_graph
+    }
+
+    /// Serialize the graph to a preset
+    pub fn to_preset(&self, name: impl Into<String>) -> crate::audio::node_graph::preset::GraphPreset {
+        use crate::audio::node_graph::preset::{GraphPreset, SerializedConnection, SerializedNode};
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        let mut preset = GraphPreset::new(name);
+
+        // Serialize all nodes
+        for node_idx in self.graph.node_indices() {
+            if let Some(graph_node) = self.graph.node_weight(node_idx) {
+                let node = &graph_node.node;
+                let node_id = node_idx.index() as u32;
+
+                let mut serialized = SerializedNode::new(node_id, node.node_type());
+
+                // Get all parameters
+                for param in node.parameters() {
+                    let value = node.get_parameter(param.id);
+                    serialized.set_parameter(param.id, value);
+                }
+
+                // For VoiceAllocator nodes, serialize the template graph
+                // We need to downcast to access template_graph()
+                // This is safe because we know the node type
+                if node.node_type() == "VoiceAllocator" {
+                    // Use Any to downcast
+                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
+                    let node_ptr = node_ptr as *const VoiceAllocatorNode;
+                    unsafe {
+                        let va_node = &*node_ptr;
+                        let template_preset = va_node.template_graph().to_preset("template");
+                        serialized.template_graph = Some(Box::new(template_preset));
+                    }
+                }
+
+                // Save position if available
+                if let Some(pos) = self.get_node_position(node_idx) {
+                    serialized.set_position(pos.0, pos.1);
+                }
+
+                preset.add_node(serialized);
+            }
+        }
+
+        // Serialize connections
+        for edge in self.graph.edge_references() {
+            let source = edge.source();
+            let target = edge.target();
+            let conn = edge.weight();
+
+            preset.add_connection(SerializedConnection {
+                from_node: source.index() as u32,
+                from_port: conn.from_port,
+                to_node: target.index() as u32,
+                to_port: conn.to_port,
+            });
+        }
+
+        // MIDI targets
+        preset.midi_targets = self.midi_targets.iter().map(|idx| idx.index() as u32).collect();
+
+        // Output node
+        preset.output_node = self.output_node.map(|idx| idx.index() as u32);
+
+        preset
+    }
+
+    /// Deserialize a preset into the graph
+    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize) -> Result<Self, String> {
+        use crate::audio::node_graph::nodes::*;
+        use petgraph::stable_graph::NodeIndex;
+        use std::collections::HashMap;
+
+        let mut graph = Self::new(sample_rate, buffer_size);
+        let mut index_map: HashMap<u32, NodeIndex> = HashMap::new();
+
+        // Create all nodes
+        for serialized_node in &preset.nodes {
+            // Create the node based on type
+            let node: Box<dyn crate::audio::node_graph::AudioNode> = match serialized_node.node_type.as_str() {
+                "Oscillator" => Box::new(OscillatorNode::new("Oscillator")),
+                "Gain" => Box::new(GainNode::new("Gain")),
+                "Mixer" => Box::new(MixerNode::new("Mixer")),
+                "Filter" => Box::new(FilterNode::new("Filter")),
+                "ADSR" => Box::new(ADSRNode::new("ADSR")),
+                "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
+                "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
+                "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
+                "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
+                "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
+                "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),
+                "VoiceAllocator" => {
+                    let mut va = VoiceAllocatorNode::new("VoiceAllocator", sample_rate, buffer_size);
+
+                    // If there's a template graph, deserialize and set it
+                    if let Some(ref template_preset) = serialized_node.template_graph {
+                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size)?;
+                        // Set the template graph (we'll need to add this method to VoiceAllocator)
+                        *va.template_graph_mut() = template_graph;
+                        va.rebuild_voices();
+                    }
+
+                    Box::new(va)
+                }
+                "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
+                _ => return Err(format!("Unknown node type: {}", serialized_node.node_type)),
+            };
+
+            let node_idx = graph.add_node(node);
+            index_map.insert(serialized_node.id, node_idx);
+
+            // Set parameters
+            for (&param_id, &value) in &serialized_node.parameters {
+                if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                    graph_node.node.set_parameter(param_id, value);
+                }
+            }
+
+            // Restore position
+            graph.set_node_position(node_idx, serialized_node.position.0, serialized_node.position.1);
+        }
+
+        // Create connections
+        for conn in &preset.connections {
+            let from_idx = index_map.get(&conn.from_node)
+                .ok_or_else(|| format!("Connection from unknown node {}", conn.from_node))?;
+            let to_idx = index_map.get(&conn.to_node)
+                .ok_or_else(|| format!("Connection to unknown node {}", conn.to_node))?;
+
+            graph.connect(*from_idx, conn.from_port, *to_idx, conn.to_port)
+                .map_err(|e| format!("Failed to connect nodes: {:?}", e))?;
+        }
+
+        // Set MIDI targets
+        for &target_id in &preset.midi_targets {
+            if let Some(&target_idx) = index_map.get(&target_id) {
+                graph.set_midi_target(target_idx, true);
+            }
+        }
+
+        // Set output node
+        if let Some(output_id) = preset.output_node {
+            if let Some(&output_idx) = index_map.get(&output_id) {
+                graph.output_node = Some(output_idx);
+            }
+        }
+
+        Ok(graph)
     }
 }

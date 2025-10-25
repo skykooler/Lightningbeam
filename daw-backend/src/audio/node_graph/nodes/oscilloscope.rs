@@ -102,7 +102,7 @@ impl OscilloscopeNode {
         ];
 
         let parameters = vec![
-            Parameter::new(PARAM_TIME_SCALE, "Time Scale", 10.0, 1000.0, 100.0, ParameterUnit::Milliseconds),
+            Parameter::new(PARAM_TIME_SCALE, "Time Scale", 10.0, 1000.0, 100.0, ParameterUnit::Time),
             Parameter::new(PARAM_TRIGGER_MODE, "Trigger", 0.0, 2.0, 0.0, ParameterUnit::Generic),
             Parameter::new(PARAM_TRIGGER_LEVEL, "Trigger Level", -1.0, 1.0, 0.0, ParameterUnit::Generic),
         ];

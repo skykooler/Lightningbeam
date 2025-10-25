@@ -17,6 +17,7 @@ pub use audio::{
     Metatrack, MidiClip, MidiClipId, MidiEvent, MidiTrack, ParameterId, PoolAudioFile, Project, RecordingState, RenderContext, Track, TrackId,
     TrackNode,
 };
+pub use audio::node_graph::{GraphPreset, InstrumentGraph, PresetMetadata, SerializedConnection, SerializedNode};
 pub use command::{AudioEvent, Command};
 pub use effects::{Effect, GainEffect, PanEffect, SimpleEQ, SimpleSynth};
 pub use io::{load_midi_file, AudioFile, WaveformPeak, WavWriter};

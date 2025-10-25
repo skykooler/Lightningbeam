@@ -2839,6 +2839,9 @@ class TimelineWindowV2 extends Widget {
       // Clear selections when selecting layer
       this.context.selection = []
       this.context.shapeselection = []
+
+      // Clear node editor when selecting a non-audio layer
+      setTimeout(() => this.context.reloadNodeEditor?.(), 50);
     } else if (track.type === 'shape') {
       // Find the layer this shape belongs to and select it
       for (let i = 0; i < this.context.activeObject.allLayers.length; i++) {
@@ -2862,6 +2865,11 @@ class TimelineWindowV2 extends Widget {
       this.context.activeObject.activeLayer = track.object
       this.context.selection = []
       this.context.shapeselection = []
+
+      // If this is a MIDI track, reload the node editor
+      if (track.object.type === 'midi') {
+        setTimeout(() => this.context.reloadNodeEditor?.(), 50);
+      }
     }
 
     // Update the stage UI to reflect selection changes

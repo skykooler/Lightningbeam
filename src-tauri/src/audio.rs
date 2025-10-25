@@ -1,7 +1,7 @@
 use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tauri::{Emitter};
+use tauri::{Emitter, Manager};
 
 #[derive(serde::Serialize)]
 pub struct AudioFileMetadata {
@@ -688,6 +688,204 @@ pub async fn graph_set_output_node(
     if let Some(controller) = &mut audio_state.controller {
         controller.graph_set_output_node(track_id, node_id);
         Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+// Preset management commands
+
+#[tauri::command]
+pub async fn graph_save_preset(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_name: String,
+    description: String,
+    tags: Vec<String>,
+) -> Result<String, String> {
+    use std::fs;
+
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Get user presets directory
+        let app_data_dir = app_handle.path().app_data_dir()
+            .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+        let presets_dir = app_data_dir.join("presets");
+
+        // Create presets directory if it doesn't exist
+        fs::create_dir_all(&presets_dir)
+            .map_err(|e| format!("Failed to create presets directory: {}", e))?;
+
+        // Create preset path
+        let filename = format!("{}.json", preset_name.replace(" ", "_"));
+        let preset_path = presets_dir.join(&filename);
+        let preset_path_str = preset_path.to_string_lossy().to_string();
+
+        // Send command to save preset
+        controller.graph_save_preset(
+            track_id,
+            preset_path_str.clone(),
+            preset_name,
+            description,
+            tags
+        );
+
+        Ok(preset_path_str)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_load_preset(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_path: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Send command to load preset
+        controller.graph_load_preset(track_id, preset_path);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct PresetInfo {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub author: String,
+    pub tags: Vec<String>,
+    pub is_factory: bool,
+}
+
+#[tauri::command]
+pub async fn graph_list_presets(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<PresetInfo>, String> {
+    use daw_backend::GraphPreset;
+    use std::fs;
+
+    let mut presets = Vec::new();
+
+    // Load factory presets from bundled assets
+    let factory_presets = [
+        "Basic_Sine.json",
+        "Sawtooth_Bass.json",
+        "Warm_Pad.json",
+        "Pluck.json",
+        "Poly_Synth.json",
+    ];
+
+    for preset_file in &factory_presets {
+        // Try to load from resource directory
+        if let Ok(resource_dir) = app_handle.path().resource_dir() {
+            let factory_path = resource_dir.join("assets/factory_presets").join(preset_file);
+            if let Ok(json) = fs::read_to_string(&factory_path) {
+                if let Ok(preset) = GraphPreset::from_json(&json) {
+                    presets.push(PresetInfo {
+                        name: preset.metadata.name,
+                        path: factory_path.to_string_lossy().to_string(),
+                        description: preset.metadata.description,
+                        author: preset.metadata.author,
+                        tags: preset.metadata.tags,
+                        is_factory: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // Load user presets
+    if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
+        let user_presets_dir = app_data_dir.join("presets");
+        if user_presets_dir.exists() {
+            if let Ok(entries) = fs::read_dir(user_presets_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(path) = entry.path().canonicalize() {
+                        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                            if let Ok(json) = fs::read_to_string(&path) {
+                                if let Ok(preset) = GraphPreset::from_json(&json) {
+                                    presets.push(PresetInfo {
+                                        name: preset.metadata.name,
+                                        path: path.to_string_lossy().to_string(),
+                                        description: preset.metadata.description,
+                                        author: preset.metadata.author,
+                                        tags: preset.metadata.tags,
+                                        is_factory: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(presets)
+}
+
+#[tauri::command]
+pub async fn graph_delete_preset(
+    preset_path: String,
+) -> Result<(), String> {
+    use std::fs;
+
+    // Only allow deleting user presets (not factory presets)
+    if preset_path.contains("factory") || preset_path.contains("assets") {
+        return Err("Cannot delete factory presets".to_string());
+    }
+
+    fs::remove_file(&preset_path)
+        .map_err(|e| format!("Failed to delete preset: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn graph_get_state(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+) -> Result<String, String> {
+    use daw_backend::GraphPreset;
+
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Send a command to get the graph state
+        // For now, we'll use the preset serialization to get the graph
+        let temp_path = std::env::temp_dir().join(format!("temp_graph_state_{}.json", track_id));
+        let temp_path_str = temp_path.to_string_lossy().to_string();
+
+        controller.graph_save_preset(
+            track_id,
+            temp_path_str.clone(),
+            "temp".to_string(),
+            "".to_string(),
+            vec![]
+        );
+
+        // Give the audio thread time to process
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Read the temp file
+        let json = match std::fs::read_to_string(&temp_path) {
+            Ok(json) => json,
+            Err(_) => {
+                // If file doesn't exist, graph is likely empty - return empty preset
+                let empty_preset = GraphPreset::new("empty");
+                empty_preset.to_json().unwrap_or_else(|_| "{}".to_string())
+            }
+        };
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path);
+
+        Ok(json)
     } else {
         Err("Audio not initialized".to_string())
     }

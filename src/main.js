@@ -6042,6 +6042,18 @@ async function renderMenu() {
 }
 updateMenu();
 
+// Helper function to get the current MIDI track
+function getCurrentMidiTrack() {
+  const activeLayer = context.activeObject?.activeLayer;
+  if (!activeLayer || !(activeLayer instanceof AudioTrack) || activeLayer.type !== 'midi') {
+    return null;
+  }
+  if (activeLayer.audioTrackId === null) {
+    return null;
+  }
+  return activeLayer.audioTrackId;
+}
+
 function nodeEditor() {
   // Create container for the node editor
   const container = document.createElement("div");
@@ -6291,17 +6303,25 @@ function nodeEditor() {
 
     // Send command to backend
     // If parent node exists, add to VoiceAllocator template; otherwise add to main graph
+    const trackId = getCurrentMidiTrack();
+    if (trackId === null) {
+      console.error('No MIDI track selected');
+      showNodeEditorError(container, 'Please select a MIDI track first');
+      editor.removeNodeId(`node-${drawflowNodeId}`);
+      return;
+    }
+
     const commandName = parentNodeId ? "graph_add_node_to_template" : "graph_add_node";
     const commandArgs = parentNodeId
       ? {
-          trackId: 0,
+          trackId: trackId,
           voiceAllocatorId: editor.getNodeFromId(parentNodeId).data.backendId,
           nodeType: nodeType,
           x: x,
           y: y
         }
       : {
-          trackId: 0,
+          trackId: trackId,
           nodeType: nodeType,
           x: x,
           y: y
@@ -6318,14 +6338,17 @@ function nodeEditor() {
       // If this is an AudioOutput node, automatically set it as the graph output
       if (nodeType === "AudioOutput") {
         console.log(`Setting node ${backendNodeId} as graph output`);
-        invoke("graph_set_output_node", {
-          trackId: 0,
-          nodeId: backendNodeId
-        }).then(() => {
-          console.log("Output node set successfully");
-        }).catch(err => {
-          console.error("Failed to set output node:", err);
-        });
+        const currentTrackId = getCurrentMidiTrack();
+        if (currentTrackId !== null) {
+          invoke("graph_set_output_node", {
+            trackId: currentTrackId,
+            nodeId: backendNodeId
+          }).then(() => {
+            console.log("Output node set successfully");
+          }).catch(err => {
+            console.error("Failed to set output node:", err);
+          });
+        }
       }
 
       // If this is a VoiceAllocator, automatically create template I/O nodes inside it
@@ -6477,14 +6500,17 @@ function nodeEditor() {
 
             // Send to backend
             if (nodeData.data.backendId !== null) {
-              invoke("graph_set_parameter", {
-                trackId: 0,
-                nodeId: nodeData.data.backendId,
-                paramId: paramId,
-                value: value
-              }).catch(err => {
-                console.error("Failed to set parameter:", err);
-              });
+              const currentTrackId = getCurrentMidiTrack();
+              if (currentTrackId !== null) {
+                invoke("graph_set_parameter", {
+                  trackId: currentTrackId,
+                  nodeId: nodeData.data.backendId,
+                  paramId: paramId,
+                  value: value
+                }).catch(err => {
+                  console.error("Failed to set parameter:", err);
+                });
+              }
             }
           }
         });
@@ -6632,48 +6658,54 @@ function nodeEditor() {
           // Both nodes are inside the same VoiceAllocator - connect in template
           const parentNode = editor.getNodeFromId(outputParent);
           console.log(`Connecting in VoiceAllocator template ${parentNode.data.backendId}: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
-          invoke("graph_connect_in_template", {
-            trackId: 0,
-            voiceAllocatorId: parentNode.data.backendId,
-            fromNode: outputNode.data.backendId,
-            fromPort: outputPort,
-            toNode: inputNode.data.backendId,
-            toPort: inputPort
-          }).then(() => {
-            console.log("Template connection successful");
-          }).catch(err => {
-            console.error("Failed to connect nodes in template:", err);
-            showError("Template connection failed: " + err);
-            // Remove the connection
-            editor.removeSingleConnection(
-              connection.output_id,
-              connection.input_id,
-              connection.output_class,
-              connection.input_class
-            );
-          });
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId !== null) {
+            invoke("graph_connect_in_template", {
+              trackId: currentTrackId,
+              voiceAllocatorId: parentNode.data.backendId,
+              fromNode: outputNode.data.backendId,
+              fromPort: outputPort,
+              toNode: inputNode.data.backendId,
+              toPort: inputPort
+            }).then(() => {
+              console.log("Template connection successful");
+            }).catch(err => {
+              console.error("Failed to connect nodes in template:", err);
+              showError("Template connection failed: " + err);
+              // Remove the connection
+              editor.removeSingleConnection(
+                connection.output_id,
+                connection.input_id,
+                connection.output_class,
+                connection.input_class
+              );
+            });
+          }
         } else {
           // Normal connection in main graph
           console.log(`Connecting: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
-          invoke("graph_connect", {
-            trackId: 0,
-            fromNode: outputNode.data.backendId,
-            fromPort: outputPort,
-            toNode: inputNode.data.backendId,
-            toPort: inputPort
-          }).then(() => {
-            console.log("Connection successful");
-          }).catch(err => {
-            console.error("Failed to connect nodes:", err);
-            showError("Connection failed: " + err);
-            // Remove the connection
-            editor.removeSingleConnection(
-              connection.output_id,
-              connection.input_id,
-              connection.output_class,
-              connection.input_class
-            );
-          });
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId !== null) {
+            invoke("graph_connect", {
+              trackId: currentTrackId,
+              fromNode: outputNode.data.backendId,
+              fromPort: outputPort,
+              toNode: inputNode.data.backendId,
+              toPort: inputPort
+            }).then(() => {
+              console.log("Connection successful");
+            }).catch(err => {
+              console.error("Failed to connect nodes:", err);
+              showError("Connection failed: " + err);
+              // Remove the connection
+              editor.removeSingleConnection(
+                connection.output_id,
+                connection.input_id,
+                connection.output_class,
+                connection.input_class
+              );
+            });
+          }
         }
       }
 
@@ -6695,15 +6727,18 @@ function nodeEditor() {
 
     // Send to backend
     if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
-      invoke("graph_disconnect", {
-        trackId: 0,
-        fromNode: outputNode.data.backendId,
-        fromPort: outputPort,
-        toNode: inputNode.data.backendId,
-        toPort: inputPort
-      }).catch(err => {
-        console.error("Failed to disconnect nodes:", err);
-      });
+      const currentTrackId = getCurrentMidiTrack();
+      if (currentTrackId !== null) {
+        invoke("graph_disconnect", {
+          trackId: currentTrackId,
+          fromNode: outputNode.data.backendId,
+          fromPort: outputPort,
+          toNode: inputNode.data.backendId,
+          toPort: inputPort
+        }).catch(err => {
+          console.error("Failed to disconnect nodes:", err);
+        });
+      }
     }
   }
 
@@ -6718,6 +6753,132 @@ function nodeEditor() {
       errorDiv.remove();
     }, 3000);
   }
+
+  // Function to reload graph from backend
+  async function reloadGraph() {
+    if (!editor) return;
+
+    const trackId = getCurrentMidiTrack();
+
+    // Clear editor first
+    editor.clearModuleSelected();
+    editor.clear();
+
+    // If no MIDI track selected, just leave it cleared
+    if (trackId === null) {
+      console.log('No MIDI track selected, editor cleared');
+      return;
+    }
+
+    try {
+      const graphJson = await invoke('graph_get_state', { trackId });
+      const preset = JSON.parse(graphJson);
+
+      // If graph is empty (no nodes), just leave cleared
+      if (!preset.nodes || preset.nodes.length === 0) {
+        console.log('Graph is empty, editor cleared');
+        return;
+      }
+
+      // Rebuild from preset
+      const nodeMap = new Map(); // Maps backend node ID to Drawflow node ID
+
+      // Add all nodes
+      for (const serializedNode of preset.nodes) {
+        const nodeType = serializedNode.node_type;
+        const nodeDef = nodeTypes[nodeType];
+        if (!nodeDef) continue;
+
+        // Create node HTML
+        let html = `<div class="node-content"><div class="node-title">${nodeDef.name}</div>`;
+        for (const param of nodeDef.parameters) {
+          const value = serializedNode.parameters[param.id] || param.default;
+          html += `<div class="node-parameter">
+            <label>${param.name}</label>
+            <input type="range" data-param-id="${param.id}" min="${param.min}" max="${param.max}" step="${param.step || 0.01}" value="${value}" />
+            <span class="param-value">${value.toFixed(2)}</span>
+          </div>`;
+        }
+        html += `</div>`;
+
+        // Add node to Drawflow
+        const drawflowId = editor.addNode(
+          nodeType,
+          nodeDef.inputs.length,
+          nodeDef.outputs.length,
+          serializedNode.position[0],
+          serializedNode.position[1],
+          nodeType,
+          { nodeType, backendId: serializedNode.id, parentNodeId: null },
+          html,
+          false
+        );
+
+        nodeMap.set(serializedNode.id, drawflowId);
+
+        // Style ports
+        setTimeout(() => styleNodePorts(drawflowId, nodeDef), 10);
+
+        // Wire up parameter controls
+        setTimeout(() => {
+          const nodeElement = container.querySelector(`#node-${drawflowId}`);
+          if (!nodeElement) return;
+
+          nodeElement.querySelectorAll('input[type="range"]').forEach(slider => {
+            const paramId = parseInt(slider.dataset.paramId);
+            const displaySpan = slider.nextElementSibling;
+
+            slider.addEventListener('input', (e) => {
+              const value = parseFloat(e.target.value);
+              if (displaySpan) {
+                const param = nodeDef.parameters.find(p => p.id === paramId);
+                displaySpan.textContent = value.toFixed(param?.unit === 'Hz' ? 0 : 2);
+              }
+
+              const currentTrackId = getCurrentMidiTrack();
+              if (currentTrackId !== null) {
+                invoke("graph_set_parameter", {
+                  trackId: currentTrackId,
+                  nodeId: serializedNode.id,
+                  paramId: paramId,
+                  value: value
+                }).catch(err => {
+                  console.error("Failed to set parameter:", err);
+                });
+              }
+            });
+          });
+        }, 100);
+      }
+
+      // Add all connections
+      for (const conn of preset.connections) {
+        const outputDrawflowId = nodeMap.get(conn.from_node);
+        const inputDrawflowId = nodeMap.get(conn.to_node);
+
+        if (outputDrawflowId && inputDrawflowId) {
+          // Drawflow uses 1-based port indexing
+          editor.addConnection(
+            outputDrawflowId,
+            inputDrawflowId,
+            `output_${conn.from_port + 1}`,
+            `input_${conn.to_port + 1}`
+          );
+        }
+      }
+
+      console.log('Graph reloaded from backend');
+    } catch (error) {
+      console.error('Failed to reload graph:', error);
+      showError(`Failed to reload graph: ${error}`);
+    }
+  }
+
+  // Store reload function in context so it can be called from preset browser
+  context.reloadNodeEditor = reloadGraph;
+
+  // Initial load of graph
+  setTimeout(() => reloadGraph(), 200);
 
   return container;
 }
@@ -6882,6 +7043,296 @@ function pianoRoll() {
   return canvas;
 }
 
+function presetBrowser() {
+  const container = document.createElement("div");
+  container.className = "preset-browser-pane";
+
+  container.innerHTML = `
+    <div class="preset-browser-header">
+      <h3>Instrument Presets</h3>
+      <button class="preset-btn preset-save-btn" title="Save current graph as preset">
+        <span>💾</span> Save Preset
+      </button>
+    </div>
+    <div class="preset-filter">
+      <input type="text" id="preset-search" placeholder="Search presets..." />
+      <select id="preset-tag-filter">
+        <option value="">All Tags</option>
+      </select>
+    </div>
+    <div class="preset-categories">
+      <div class="preset-category">
+        <h4>Factory Presets</h4>
+        <div class="preset-list" id="factory-preset-list">
+          <div class="preset-loading">Loading...</div>
+        </div>
+      </div>
+      <div class="preset-category">
+        <h4>User Presets</h4>
+        <div class="preset-list" id="user-preset-list">
+          <div class="preset-empty">No user presets yet</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Load presets after DOM insertion
+  setTimeout(async () => {
+    await loadPresetList(container);
+
+    // Set up save button handler
+    const saveBtn = container.querySelector('.preset-save-btn');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => showSavePresetDialog(container));
+    }
+
+    // Set up search and filter
+    const searchInput = container.querySelector('#preset-search');
+    const tagFilter = container.querySelector('#preset-tag-filter');
+
+    if (searchInput) {
+      searchInput.addEventListener('input', () => filterPresets(container));
+    }
+    if (tagFilter) {
+      tagFilter.addEventListener('change', () => filterPresets(container));
+    }
+  }, 0);
+
+  return container;
+}
+
+async function loadPresetList(container) {
+  try {
+    const presets = await invoke('graph_list_presets');
+
+    const factoryList = container.querySelector('#factory-preset-list');
+    const userList = container.querySelector('#user-preset-list');
+    const tagFilter = container.querySelector('#preset-tag-filter');
+
+    // Collect all unique tags
+    const allTags = new Set();
+    presets.forEach(preset => {
+      preset.tags.forEach(tag => allTags.add(tag));
+    });
+
+    // Populate tag filter
+    if (tagFilter) {
+      allTags.forEach(tag => {
+        const option = document.createElement('option');
+        option.value = tag;
+        option.textContent = tag.charAt(0).toUpperCase() + tag.slice(1);
+        tagFilter.appendChild(option);
+      });
+    }
+
+    // Separate factory and user presets
+    const factoryPresets = presets.filter(p => p.is_factory);
+    const userPresets = presets.filter(p => !p.is_factory);
+
+    // Render factory presets
+    if (factoryList) {
+      if (factoryPresets.length === 0) {
+        factoryList.innerHTML = '<div class="preset-empty">No factory presets found</div>';
+      } else {
+        factoryList.innerHTML = factoryPresets.map(preset => createPresetItem(preset)).join('');
+        addPresetItemHandlers(factoryList);
+      }
+    }
+
+    // Render user presets
+    if (userList) {
+      if (userPresets.length === 0) {
+        userList.innerHTML = '<div class="preset-empty">No user presets yet</div>';
+      } else {
+        userList.innerHTML = userPresets.map(preset => createPresetItem(preset)).join('');
+        addPresetItemHandlers(userList);
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load presets:', error);
+    const factoryList = container.querySelector('#factory-preset-list');
+    const userList = container.querySelector('#user-preset-list');
+    if (factoryList) factoryList.innerHTML = '<div class="preset-error">Failed to load presets</div>';
+    if (userList) userList.innerHTML = '';
+  }
+}
+
+function createPresetItem(preset) {
+  const tags = preset.tags.map(tag => `<span class="preset-tag">${tag}</span>`).join('');
+  const deleteBtn = preset.is_factory ? '' : '<button class="preset-delete-btn" title="Delete preset">🗑️</button>';
+
+  return `
+    <div class="preset-item" data-preset-path="${preset.path}" data-preset-tags="${preset.tags.join(',')}">
+      <div class="preset-item-header">
+        <span class="preset-name">${preset.name}</span>
+        ${deleteBtn}
+      </div>
+      <div class="preset-description">${preset.description || 'No description'}</div>
+      <div class="preset-tags">${tags}</div>
+      <div class="preset-author">by ${preset.author || 'Unknown'}</div>
+    </div>
+  `;
+}
+
+function addPresetItemHandlers(listElement) {
+  // Load preset on click
+  listElement.querySelectorAll('.preset-item').forEach(item => {
+    item.addEventListener('click', async (e) => {
+      // Don't trigger if clicking delete button
+      if (e.target.classList.contains('preset-delete-btn')) return;
+
+      const presetPath = item.dataset.presetPath;
+      await loadPreset(presetPath);
+    });
+  });
+
+  // Delete preset on delete button click
+  listElement.querySelectorAll('.preset-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const item = btn.closest('.preset-item');
+      const presetPath = item.dataset.presetPath;
+      const presetName = item.querySelector('.preset-name').textContent;
+
+      if (confirm(`Delete preset "${presetName}"?`)) {
+        try {
+          await invoke('graph_delete_preset', { presetPath });
+          // Reload preset list
+          const container = btn.closest('.preset-browser-pane');
+          await loadPresetList(container);
+        } catch (error) {
+          alert(`Failed to delete preset: ${error}`);
+        }
+      }
+    });
+  });
+}
+
+async function loadPreset(presetPath) {
+  const trackId = getCurrentMidiTrack();
+  if (trackId === null) {
+    alert('Please select a MIDI track first');
+    return;
+  }
+
+  try {
+    await invoke('graph_load_preset', {
+      trackId: trackId,
+      presetPath
+    });
+
+    // Refresh the node editor to show the loaded preset
+    await context.reloadNodeEditor?.();
+
+    console.log('Preset loaded successfully');
+  } catch (error) {
+    alert(`Failed to load preset: ${error}`);
+  }
+}
+
+function showSavePresetDialog(container) {
+  const currentTrackId = getCurrentMidiTrack();
+  if (currentTrackId === null) {
+    alert('Please select a MIDI track first');
+    return;
+  }
+
+  // Create modal dialog
+  const dialog = document.createElement('div');
+  dialog.className = 'modal-overlay';
+  dialog.innerHTML = `
+    <div class="modal-dialog">
+      <h3>Save Preset</h3>
+      <form id="save-preset-form">
+        <div class="form-group">
+          <label>Preset Name</label>
+          <input type="text" id="preset-name" required placeholder="My Awesome Synth" />
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="preset-description" placeholder="Describe the sound..." rows="3"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="preset-tags" placeholder="bass, lead, pad" />
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn-cancel">Cancel</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(dialog);
+
+  // Focus name input
+  setTimeout(() => dialog.querySelector('#preset-name')?.focus(), 100);
+
+  // Handle cancel
+  dialog.querySelector('.btn-cancel').addEventListener('click', () => {
+    dialog.remove();
+  });
+
+  // Handle save
+  dialog.querySelector('#save-preset-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const name = dialog.querySelector('#preset-name').value.trim();
+    const description = dialog.querySelector('#preset-description').value.trim();
+    const tagsInput = dialog.querySelector('#preset-tags').value.trim();
+    const tags = tagsInput ? tagsInput.split(',').map(t => t.trim()).filter(t => t) : [];
+
+    if (!name) {
+      alert('Please enter a preset name');
+      return;
+    }
+
+    try {
+      await invoke('graph_save_preset', {
+        trackId: currentTrackId,
+        presetName: name,
+        description,
+        tags
+      });
+
+      dialog.remove();
+
+      // Reload preset list
+      await loadPresetList(container);
+
+      alert(`Preset "${name}" saved successfully!`);
+    } catch (error) {
+      alert(`Failed to save preset: ${error}`);
+    }
+  });
+
+  // Close on background click
+  dialog.addEventListener('click', (e) => {
+    if (e.target === dialog) {
+      dialog.remove();
+    }
+  });
+}
+
+function filterPresets(container) {
+  const searchTerm = container.querySelector('#preset-search')?.value.toLowerCase() || '';
+  const selectedTag = container.querySelector('#preset-tag-filter')?.value || '';
+
+  const allItems = container.querySelectorAll('.preset-item');
+
+  allItems.forEach(item => {
+    const name = item.querySelector('.preset-name').textContent.toLowerCase();
+    const description = item.querySelector('.preset-description').textContent.toLowerCase();
+    const tags = item.dataset.presetTags.split(',');
+
+    const matchesSearch = !searchTerm || name.includes(searchTerm) || description.includes(searchTerm);
+    const matchesTag = !selectedTag || tags.includes(selectedTag);
+
+    item.style.display = (matchesSearch && matchesTag) ? 'block' : 'none';
+  });
+}
+
 const panes = {
   stage: {
     name: "stage",
@@ -6918,6 +7369,10 @@ const panes = {
   nodeEditor: {
     name: "node-editor",
     func: nodeEditor,
+  },
+  presetBrowser: {
+    name: "preset-browser",
+    func: presetBrowser,
   },
 };
 
@@ -7178,6 +7633,9 @@ async function addEmptyMIDITrack() {
     if (context.timelineWidget) {
       context.timelineWidget.requestRedraw();
     }
+
+    // Refresh node editor to show empty graph
+    setTimeout(() => context.reloadNodeEditor?.(), 100);
 
     console.log('Empty MIDI track created:', trackName, 'with ID:', newMIDITrack.audioTrackId);
   } catch (error) {

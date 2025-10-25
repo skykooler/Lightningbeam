@@ -222,6 +222,11 @@ pub fn run() {
         audio::graph_disconnect,
         audio::graph_set_parameter,
         audio::graph_set_output_node,
+        audio::graph_save_preset,
+        audio::graph_load_preset,
+        audio::graph_list_presets,
+        audio::graph_delete_preset,
+        audio::graph_get_state,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())
