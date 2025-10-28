@@ -1337,6 +1337,7 @@ button {
 
 /* Wider nodes for nodes with sample layers */
 .drawflow .drawflow-node:has(.sample-layers-container) {
+  width: 296px !important; /* Fixed width to prevent dragging issues with table layout */
   min-width: 296px !important; /* 280px content + 8px padding on each side */
 }
 
@@ -1903,6 +1904,7 @@ button {
   border: 1px solid #444;
   border-radius: 3px;
   background: #2a2a2a;
+  padding-right: 4px; /* Space to prevent scrollbar overlap */
 }
 
 .sample-layers-table {
@@ -1928,11 +1930,11 @@ button {
   font-size: 9px;
 }
 
-.sample-layers-table th:nth-child(1) { width: 28%; } /* File */
-.sample-layers-table th:nth-child(2) { width: 24%; } /* Range */
-.sample-layers-table th:nth-child(3) { width: 12%; } /* Root */
+.sample-layers-table th:nth-child(1) { width: 24%; } /* File */
+.sample-layers-table th:nth-child(2) { width: 20%; } /* Range */
+.sample-layers-table th:nth-child(3) { width: 10%; } /* Root */
 .sample-layers-table th:nth-child(4) { width: 14%; } /* Vel */
-.sample-layers-table th:nth-child(5) { width: 22%; } /* Actions */
+.sample-layers-table th:nth-child(5) { width: 32%; } /* Actions - wider to avoid scrollbar */
 
 .sample-layers-table td {
   padding: 3px;

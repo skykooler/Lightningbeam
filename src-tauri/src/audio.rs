@@ -90,6 +90,9 @@ impl EventEmitter for TauriEventEmitter {
             AudioEvent::GraphStateChanged(track_id) => {
                 SerializedAudioEvent::GraphStateChanged { track_id }
             }
+            AudioEvent::GraphPresetLoaded(track_id) => {
+                SerializedAudioEvent::GraphPresetLoaded { track_id }
+            }
             _ => return, // Ignore other event types for now
         };
 
@@ -999,6 +1002,7 @@ pub async fn multi_sampler_get_layers(
     track_id: u32,
     node_id: u32,
 ) -> Result<Vec<LayerInfo>, String> {
+    eprintln!("[multi_sampler_get_layers] FUNCTION CALLED with track_id: {}, node_id: {}", track_id, node_id);
     use daw_backend::GraphPreset;
 
     let mut audio_state = state.lock().unwrap();
@@ -1011,6 +1015,7 @@ pub async fn multi_sampler_get_layers(
             .as_nanos();
         let temp_path = std::env::temp_dir().join(format!("temp_layers_query_{}_{}_{}.json", track_id, node_id, timestamp));
         let temp_path_str = temp_path.to_string_lossy().to_string();
+        eprintln!("[multi_sampler_get_layers] Temp path: {}", temp_path_str);
 
         controller.graph_save_preset(
             track_id,
@@ -1024,6 +1029,7 @@ pub async fn multi_sampler_get_layers(
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         // Read the temp file and parse it
+        eprintln!("[multi_sampler_get_layers] Reading temp file...");
         match std::fs::read_to_string(&temp_path) {
             Ok(json) => {
                 // Clean up temp file
@@ -1036,10 +1042,16 @@ pub async fn multi_sampler_get_layers(
                 };
 
                 // Find the node with the matching ID
+                eprintln!("[multi_sampler_get_layers] Looking for node_id: {}", node_id);
+                eprintln!("[multi_sampler_get_layers] Available nodes: {:?}", preset.nodes.iter().map(|n| (n.id, &n.node_type)).collect::<Vec<_>>());
+
                 if let Some(node) = preset.nodes.iter().find(|n| n.id == node_id) {
+                    eprintln!("[multi_sampler_get_layers] Found node: {} type: {}", node.id, node.node_type);
                     if let Some(ref sample_data) = node.sample_data {
+                        eprintln!("[multi_sampler_get_layers] Node has sample_data");
                         // Check if it's a MultiSampler
                         if let daw_backend::audio::node_graph::preset::SampleData::MultiSampler { layers } = sample_data {
+                            eprintln!("[multi_sampler_get_layers] Returning {} layers", layers.len());
                             return Ok(layers.iter().map(|layer| LayerInfo {
                                 file_path: layer.file_path.clone().unwrap_or_default(),
                                 key_min: layer.key_min,
@@ -1048,15 +1060,25 @@ pub async fn multi_sampler_get_layers(
                                 velocity_min: layer.velocity_min,
                                 velocity_max: layer.velocity_max,
                             }).collect());
+                        } else {
+                            eprintln!("[multi_sampler_get_layers] sample_data is not MultiSampler type");
                         }
+                    } else {
+                        eprintln!("[multi_sampler_get_layers] Node has no sample_data");
                     }
+                } else {
+                    eprintln!("[multi_sampler_get_layers] Node not found");
                 }
 
                 Ok(Vec::new())
             }
-            Err(_) => Ok(Vec::new()), // Return empty list if file doesn't exist
+            Err(e) => {
+                eprintln!("[multi_sampler_get_layers] Failed to read temp file: {}", e);
+                Ok(Vec::new()) // Return empty list if file doesn't exist
+            }
         }
     } else {
+        eprintln!("[multi_sampler_get_layers] Audio not initialized");
         Err("Audio not initialized".to_string())
     }
 }
@@ -1122,6 +1144,7 @@ pub enum SerializedAudioEvent {
     GraphNodeAdded { track_id: u32, node_id: u32, node_type: String },
     GraphConnectionError { track_id: u32, message: String },
     GraphStateChanged { track_id: u32 },
+    GraphPresetLoaded { track_id: u32 },
 }
 
 // audio_get_events command removed - events are now pushed via Tauri event system

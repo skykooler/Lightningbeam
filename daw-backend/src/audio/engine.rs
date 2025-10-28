@@ -1003,6 +1003,8 @@ impl Engine {
                                         if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                                             track.instrument_graph = Some(graph);
                                             let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                            // Emit preset loaded event after everything is loaded
+                                            let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
                                         }
                                     }
                                     Err(e) => {

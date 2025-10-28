@@ -1202,6 +1202,11 @@ async function handleAudioEvent(event) {
       context.recordingTrackId = null;
       context.recordingClipId = null;
       break;
+
+    case 'GraphPresetLoaded':
+      // Preset loaded - layers are already populated during graph reload
+      console.log('GraphPresetLoaded event received for track:', event.track_id);
+      break;
   }
 }
 
@@ -7219,6 +7224,7 @@ function nodeEditor() {
 
       // Rebuild from preset
       const nodeMap = new Map(); // Maps backend node ID to Drawflow node ID
+      const setupPromises = []; // Track async setup operations
 
       // Add all nodes
       for (const serializedNode of preset.nodes) {
@@ -7226,17 +7232,9 @@ function nodeEditor() {
         const nodeDef = nodeTypes[nodeType];
         if (!nodeDef) continue;
 
-        // Create node HTML
-        let html = `<div class="node-content"><div class="node-title">${nodeDef.name}</div>`;
-        for (const param of nodeDef.parameters) {
-          const value = serializedNode.parameters[param.id] || param.default;
-          html += `<div class="node-parameter">
-            <label>${param.name}</label>
-            <input type="range" data-param-id="${param.id}" min="${param.min}" max="${param.max}" step="${param.step || 0.01}" value="${value}" />
-            <span class="param-value">${value.toFixed(2)}</span>
-          </div>`;
-        }
-        html += `</div>`;
+        // Create node HTML using the node definition's getHTML function
+        // Use backend node ID as the nodeId for unique element IDs
+        const html = nodeDef.getHTML(serializedNode.id);
 
         // Add node to Drawflow
         const drawflowId = editor.addNode(
@@ -7253,39 +7251,241 @@ function nodeEditor() {
 
         nodeMap.set(serializedNode.id, drawflowId);
 
-        // Style ports
-        setTimeout(() => styleNodePorts(drawflowId, nodeDef), 10);
+        // Style ports (as Promise)
+        setupPromises.push(new Promise(resolve => {
+          setTimeout(() => {
+            styleNodePorts(drawflowId, nodeDef);
+            resolve();
+          }, 10);
+        }));
 
-        // Wire up parameter controls
-        setTimeout(() => {
+        // Wire up parameter controls and set values from preset (as Promise)
+        setupPromises.push(new Promise(resolve => {
+          setTimeout(() => {
           const nodeElement = container.querySelector(`#node-${drawflowId}`);
           if (!nodeElement) return;
 
+          // Set parameter values from preset
           nodeElement.querySelectorAll('input[type="range"]').forEach(slider => {
-            const paramId = parseInt(slider.dataset.paramId);
-            const displaySpan = slider.nextElementSibling;
+            const paramId = parseInt(slider.dataset.param);
+            const value = serializedNode.parameters[paramId];
+            if (value !== undefined) {
+              slider.value = value;
+              // Update display span
+              const param = nodeDef.parameters.find(p => p.id === paramId);
+              const displaySpan = slider.previousElementSibling?.querySelector('span');
+              if (displaySpan && param) {
+                displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2) + (param.unit ? ` ${param.unit}` : '');
+              }
+            }
+          });
 
-            slider.addEventListener('input', (e) => {
-              const value = parseFloat(e.target.value);
-              if (displaySpan) {
-                const param = nodeDef.parameters.find(p => p.id === paramId);
-                displaySpan.textContent = value.toFixed(param?.unit === 'Hz' ? 0 : 2);
+          // Set up event handlers for buttons
+
+          // Handle Load Sample button for SimpleSampler
+          const loadSampleBtn = nodeElement.querySelector(".load-sample-btn");
+          if (loadSampleBtn) {
+            loadSampleBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+            loadSampleBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+            loadSampleBtn.addEventListener("click", async (e) => {
+              e.stopPropagation();
+
+              const nodeData = editor.getNodeFromId(drawflowId);
+              if (!nodeData || nodeData.data.backendId === null) {
+                showError("Node not yet created on backend");
+                return;
               }
 
               const currentTrackId = getCurrentMidiTrack();
-              if (currentTrackId !== null) {
-                invoke("graph_set_parameter", {
-                  trackId: currentTrackId,
-                  nodeId: serializedNode.id,
-                  paramId: paramId,
-                  value: value
-                }).catch(err => {
-                  console.error("Failed to set parameter:", err);
+              if (currentTrackId === null) {
+                showError("No MIDI track selected");
+                return;
+              }
+
+              try {
+                const filePath = await openFileDialog({
+                  title: "Load Audio Sample",
+                  filters: [{
+                    name: "Audio Files",
+                    extensions: audioExtensions
+                  }]
                 });
+
+                if (filePath) {
+                  await invoke("sampler_load_sample", {
+                    trackId: currentTrackId,
+                    nodeId: nodeData.data.backendId,
+                    filePath: filePath
+                  });
+
+                  // Update UI to show filename
+                  const sampleInfo = nodeElement.querySelector(`#sample-info-${drawflowId}`);
+                  if (sampleInfo) {
+                    const filename = filePath.split('/').pop().split('\\').pop();
+                    sampleInfo.textContent = filename;
+                  }
+                }
+              } catch (err) {
+                console.error("Failed to load sample:", err);
+                showError(`Failed to load sample: ${err}`);
               }
             });
-          });
+          }
+
+          // Handle Add Layer button for MultiSampler
+          const addLayerBtn = nodeElement.querySelector(".add-layer-btn");
+          if (addLayerBtn) {
+            addLayerBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+            addLayerBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+            addLayerBtn.addEventListener("click", async (e) => {
+              e.stopPropagation();
+
+              const nodeData = editor.getNodeFromId(drawflowId);
+              if (!nodeData || nodeData.data.backendId === null) {
+                showError("Node not yet created on backend");
+                return;
+              }
+
+              const currentTrackId = getCurrentMidiTrack();
+              if (currentTrackId === null) {
+                showError("No MIDI track selected");
+                return;
+              }
+
+              try {
+                const filePath = await openFileDialog({
+                  title: "Add Sample Layer",
+                  filters: [{
+                    name: "Audio Files",
+                    extensions: audioExtensions
+                  }]
+                });
+
+                if (filePath) {
+                  // Show dialog to configure layer mapping
+                  const layerConfig = await showLayerConfigDialog(filePath);
+
+                  if (layerConfig) {
+                    await invoke("multi_sampler_add_layer", {
+                      trackId: currentTrackId,
+                      nodeId: nodeData.data.backendId,
+                      filePath: filePath,
+                      keyMin: layerConfig.keyMin,
+                      keyMax: layerConfig.keyMax,
+                      rootKey: layerConfig.rootKey,
+                      velocityMin: layerConfig.velocityMin,
+                      velocityMax: layerConfig.velocityMax
+                    });
+
+                    // Wait a bit for the audio thread to process the add command
+                    await new Promise(resolve => setTimeout(resolve, 100));
+
+                    // Refresh the layers list
+                    await refreshSampleLayersList(drawflowId);
+                  }
+                }
+              } catch (err) {
+                console.error("Failed to add layer:", err);
+                showError(`Failed to add layer: ${err}`);
+              }
+            });
+          }
+
+          // For MultiSampler nodes, populate the layers table from preset data
+          if (nodeType === 'MultiSampler') {
+            console.log(`[reloadGraph] Found MultiSampler node ${drawflowId}, sample_data:`, serializedNode.sample_data);
+            if (serializedNode.sample_data) {
+              console.log(`[reloadGraph] sample_data.type:`, serializedNode.sample_data.type);
+              console.log(`[reloadGraph] sample_data keys:`, Object.keys(serializedNode.sample_data));
+            }
+          }
+
+          if (nodeType === 'MultiSampler' && serializedNode.sample_data && serializedNode.sample_data.type === 'multi_sampler') {
+            console.log(`[reloadGraph] Condition met for node ${drawflowId}, looking for layers list element with backend ID ${serializedNode.id}`);
+            // Use backend ID (serializedNode.id) since that's what was used in getHTML
+            const layersList = nodeElement.querySelector(`#sample-layers-list-${serializedNode.id}`);
+            const layersContainer = nodeElement.querySelector(`#sample-layers-container-${serializedNode.id}`);
+            console.log(`[reloadGraph] layersList:`, layersList);
+            console.log(`[reloadGraph] layersContainer:`, layersContainer);
+
+            if (layersList) {
+              const layers = serializedNode.sample_data.layers || [];
+              console.log(`[reloadGraph] Populating ${layers.length} layers for node ${drawflowId}`);
+
+              // Prevent scroll events from bubbling to canvas
+              if (layersContainer && !layersContainer.dataset.scrollListenerAdded) {
+                layersContainer.addEventListener('wheel', (e) => {
+                  e.stopPropagation();
+                }, { passive: false });
+                layersContainer.dataset.scrollListenerAdded = 'true';
+              }
+
+              if (layers.length === 0) {
+                layersList.innerHTML = '<tr><td colspan="5" class="sample-layers-empty">No layers loaded</td></tr>';
+              } else {
+                layersList.innerHTML = layers.map((layer, index) => {
+                  const filename = layer.file_path.split('/').pop().split('\\').pop();
+                  const keyRange = `${midiToNoteName(layer.key_min)}-${midiToNoteName(layer.key_max)}`;
+                  const rootNote = midiToNoteName(layer.root_key);
+                  const velRange = `${layer.velocity_min}-${layer.velocity_max}`;
+
+                  return `
+                    <tr data-index="${index}">
+                      <td class="sample-layer-filename" title="${filename}">${filename}</td>
+                      <td>${keyRange}</td>
+                      <td>${rootNote}</td>
+                      <td>${velRange}</td>
+                      <td>
+                        <div class="sample-layer-actions">
+                          <button class="btn-edit-layer" data-drawflow-node="${drawflowId}" data-index="${index}">Edit</button>
+                          <button class="btn-delete-layer" data-drawflow-node="${drawflowId}" data-index="${index}">Del</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('');
+
+                // Set up event handlers for edit/delete buttons
+                layersList.querySelectorAll('.btn-edit-layer').forEach(btn => {
+                  btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const drawflowNodeId = parseInt(btn.dataset.drawflowNode);
+                    const layerIndex = parseInt(btn.dataset.index);
+                    const layer = layers[layerIndex];
+                    await showLayerEditDialog(drawflowNodeId, layerIndex, layer);
+                  });
+                });
+
+                layersList.querySelectorAll('.btn-delete-layer').forEach(btn => {
+                  btn.addEventListener('click', async (e) => {
+                    e.stopPropagation();
+                    const drawflowNodeId = parseInt(btn.dataset.drawflowNode);
+                    const layerIndex = parseInt(btn.dataset.index);
+                    if (confirm('Delete this sample layer?')) {
+                      const nodeData = editor.getNodeFromId(drawflowNodeId);
+                      const currentTrackId = getCurrentMidiTrack();
+                      if (nodeData && currentTrackId !== null) {
+                        try {
+                          await invoke("multi_sampler_remove_layer", {
+                            trackId: currentTrackId,
+                            nodeId: nodeData.data.backendId,
+                            layerIndex: layerIndex
+                          });
+                          await refreshSampleLayersList(drawflowNodeId);
+                        } catch (err) {
+                          showError(`Failed to remove layer: ${err}`);
+                        }
+                      }
+                    }
+                  });
+                });
+              }
+            }
+          }
+
+          resolve();
         }, 100);
+        }));
       }
 
       // Add all connections
@@ -7304,6 +7504,9 @@ function nodeEditor() {
         }
       }
 
+      // Wait for all node setup operations to complete
+      await Promise.all(setupPromises);
+
       console.log('Graph reloaded from backend');
     } catch (error) {
       console.error('Failed to reload graph:', error);
@@ -7312,7 +7515,15 @@ function nodeEditor() {
   }
 
   // Store reload function in context so it can be called from preset browser
-  context.reloadNodeEditor = reloadGraph;
+  // Wrap it to track the promise
+  context.reloadNodeEditor = async () => {
+    context.reloadGraphPromise = reloadGraph();
+    await context.reloadGraphPromise;
+    context.reloadGraphPromise = null;
+  };
+
+  // Store refreshSampleLayersList in context so it can be called from event handlers
+  context.refreshSampleLayersList = refreshSampleLayersList;
 
   // Initial load of graph
   setTimeout(() => reloadGraph(), 200);

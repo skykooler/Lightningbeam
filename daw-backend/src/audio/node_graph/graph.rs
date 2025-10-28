@@ -861,7 +861,9 @@ impl InstrumentGraph {
                                 } else if let Some(ref path) = file_path {
                                     // Fall back to loading from file (resolve path relative to preset)
                                     let resolved_path = resolve_sample_path(path);
-                                    let _ = sampler_node.load_sample_from_file(&resolved_path);
+                                    if let Err(e) = sampler_node.load_sample_from_file(&resolved_path) {
+                                        eprintln!("Failed to load sample from {}: {}", resolved_path, e);
+                                    }
                                 }
                             }
                         }
@@ -901,14 +903,16 @@ impl InstrumentGraph {
                                     } else if let Some(ref path) = layer.file_path {
                                         // Fall back to loading from file (resolve path relative to preset)
                                         let resolved_path = resolve_sample_path(path);
-                                        let _ = multi_sampler_node.load_layer_from_file(
+                                        if let Err(e) = multi_sampler_node.load_layer_from_file(
                                             &resolved_path,
                                             layer.key_min,
                                             layer.key_max,
                                             layer.root_key,
                                             layer.velocity_min,
                                             layer.velocity_max,
-                                        );
+                                        ) {
+                                            eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
+                                        }
                                     }
                                 }
                             }

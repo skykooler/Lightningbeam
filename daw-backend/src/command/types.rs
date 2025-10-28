@@ -196,6 +196,8 @@ pub enum AudioEvent {
     GraphConnectionError(TrackId, String),
     /// Graph state changed (for full UI sync)
     GraphStateChanged(TrackId),
+    /// Preset fully loaded (track_id) - emitted after all nodes and samples are loaded
+    GraphPresetLoaded(TrackId),
 }
 
 /// Synchronous queries sent from UI thread to audio thread
