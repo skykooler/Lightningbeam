@@ -1348,6 +1348,101 @@ button {
   background: #5d5d5d;
 }
 
+/* Palette search */
+.palette-search {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.palette-content {
+  /* Content container for dynamic palette updates */
+}
+
+.palette-search-input {
+  width: 100%;
+  padding: 6px 28px 6px 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--node-border);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.palette-search-input:focus {
+  outline: none;
+  border-color: var(--node-primary);
+}
+
+.palette-search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  background: #3d3d3d;
+  border: none;
+  border-radius: 3px;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+
+.palette-search-clear:hover {
+  background: var(--node-border);
+  color: var(--text-primary);
+}
+
+.no-results {
+  padding: 12px 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+  font-style: italic;
+}
+
+.node-palette-item mark {
+  background: var(--success-dark);
+  color: var(--text-inverse);
+  padding: 1px 2px;
+  border-radius: 2px;
+}
+
+/* Minimap */
+.node-minimap {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  width: 200px;
+  height: 150px;
+  background: rgba(40, 40, 40, 0.9);
+  border: 2px solid #555;
+  border-radius: 4px;
+  overflow: hidden;
+  pointer-events: all;
+  z-index: 100;
+}
+
+#minimap-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.minimap-viewport {
+  position: absolute;
+  border: 2px solid #4CAF50;
+  background: rgba(76, 175, 80, 0.1);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
 /* Node content styling */
 .node-content {
   padding: 8px;

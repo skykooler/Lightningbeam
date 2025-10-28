@@ -6140,6 +6140,34 @@ function nodeEditor() {
   palette.className = "node-palette";
   container.appendChild(palette);
 
+  // Create persistent search input
+  const paletteSearch = document.createElement("div");
+  paletteSearch.className = "palette-search";
+  paletteSearch.innerHTML = `
+    <input type="text" placeholder="Search nodes..." class="palette-search-input" value="">
+    <button class="palette-search-clear" style="display: none;">×</button>
+  `;
+  palette.appendChild(paletteSearch);
+
+  // Create content container that will be updated
+  const paletteContent = document.createElement("div");
+  paletteContent.className = "palette-content";
+  palette.appendChild(paletteContent);
+
+  // Get references to search elements
+  const searchInput = paletteSearch.querySelector(".palette-search-input");
+  const searchClearBtn = paletteSearch.querySelector(".palette-search-clear");
+
+  // Create minimap
+  const minimap = document.createElement("div");
+  minimap.className = "node-minimap";
+  minimap.style.display = 'none'; // Hidden by default
+  minimap.innerHTML = `
+    <canvas id="minimap-canvas"></canvas>
+    <div class="minimap-viewport"></div>
+  `;
+  container.appendChild(minimap);
+
   // Category display names
   const categoryNames = {
     [NodeCategory.INPUT]: 'Inputs',
@@ -6149,12 +6177,31 @@ function nodeEditor() {
     [NodeCategory.OUTPUT]: 'Outputs'
   };
 
+  // Search state
+  let searchQuery = '';
+
+  // Handle search input changes
+  searchInput.addEventListener('input', (e) => {
+    searchQuery = e.target.value;
+    searchClearBtn.style.display = searchQuery ? 'flex' : 'none';
+    updatePalette();
+  });
+
+  // Handle search clear
+  searchClearBtn.addEventListener('click', () => {
+    searchQuery = '';
+    searchInput.value = '';
+    searchClearBtn.style.display = 'none';
+    searchInput.focus();
+    updatePalette();
+  });
+
   // Function to update palette based on context and selected category
   function updatePalette() {
     const isTemplate = editingContext !== null;
 
-    if (selectedCategory === null) {
-      // Show categories
+    if (selectedCategory === null && !searchQuery) {
+      // Show categories when no search query
       const categories = getCategories().filter(category => {
         // Filter categories based on context
         if (isTemplate) {
@@ -6166,7 +6213,7 @@ function nodeEditor() {
         }
       });
 
-      palette.innerHTML = `
+      paletteContent.innerHTML = `
         <h3>Node Categories</h3>
         ${categories.map(category => `
           <div class="node-category-item" data-category="${category}">
@@ -6174,12 +6221,18 @@ function nodeEditor() {
           </div>
         `).join('')}
       `;
-    } else {
-      // Show nodes in selected category
-      const nodesInCategory = getNodesByCategory(selectedCategory);
+    } else if (selectedCategory === null && searchQuery) {
+      // Show all matching nodes across all categories when searching from main panel
+      const allCategories = getCategories();
+      let allNodes = [];
+
+      allCategories.forEach(category => {
+        const nodesInCategory = getNodesByCategory(category);
+        allNodes = allNodes.concat(nodesInCategory);
+      });
 
       // Filter based on context
-      const filteredNodes = nodesInCategory.filter(node => {
+      let filteredNodes = allNodes.filter(node => {
         if (isTemplate) {
           // In template: hide VoiceAllocator, AudioOutput, MidiInput
           return node.type !== 'VoiceAllocator' && node.type !== 'AudioOutput' && node.type !== 'MidiInput';
@@ -6189,16 +6242,68 @@ function nodeEditor() {
         }
       });
 
-      palette.innerHTML = `
+      // Apply search filter
+      const query = searchQuery.toLowerCase();
+      filteredNodes = filteredNodes.filter(node => {
+        return node.name.toLowerCase().includes(query) ||
+               node.description.toLowerCase().includes(query);
+      });
+
+      // Function to highlight search matches in text
+      const highlightMatch = (text) => {
+        const regex = new RegExp(`(${searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+        return text.replace(regex, '<mark>$1</mark>');
+      };
+
+      paletteContent.innerHTML = `
+        <h3>Search Results</h3>
+        ${filteredNodes.length > 0 ? filteredNodes.map(node => `
+          <div class="node-palette-item" data-node-type="${node.type}" draggable="true" title="${node.description}">
+            ${highlightMatch(node.name)}
+          </div>
+        `).join('') : '<div class="no-results">No matching nodes found</div>'}
+      `;
+    } else {
+      // Show nodes in selected category
+      const nodesInCategory = getNodesByCategory(selectedCategory);
+
+      // Filter based on context
+      let filteredNodes = nodesInCategory.filter(node => {
+        if (isTemplate) {
+          // In template: hide VoiceAllocator, AudioOutput, MidiInput
+          return node.type !== 'VoiceAllocator' && node.type !== 'AudioOutput' && node.type !== 'MidiInput';
+        } else {
+          // In main graph: hide TemplateInput/TemplateOutput
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput';
+        }
+      });
+
+      // Apply search filter
+      if (searchQuery) {
+        const query = searchQuery.toLowerCase();
+        filteredNodes = filteredNodes.filter(node => {
+          return node.name.toLowerCase().includes(query) ||
+                 node.description.toLowerCase().includes(query);
+        });
+      }
+
+      // Function to highlight search matches in text
+      const highlightMatch = (text) => {
+        if (!searchQuery) return text;
+        const regex = new RegExp(`(${searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+        return text.replace(regex, '<mark>$1</mark>');
+      };
+
+      paletteContent.innerHTML = `
         <div class="palette-header">
           <button class="palette-back-btn">← Back</button>
           <h3>${categoryNames[selectedCategory] || selectedCategory}</h3>
         </div>
-        ${filteredNodes.map(node => `
+        ${filteredNodes.length > 0 ? filteredNodes.map(node => `
           <div class="node-palette-item" data-node-type="${node.type}" draggable="true" title="${node.description}">
-            ${node.name}
+            ${highlightMatch(node.name)}
           </div>
-        `).join('')}
+        `).join('') : '<div class="no-results">No matching nodes found</div>'}
       `;
     }
   }
@@ -6240,6 +6345,147 @@ function nodeEditor() {
       get suppressActionRecording() { return suppressActionRecording; },
       set suppressActionRecording(value) { suppressActionRecording = value; }
     };
+
+    // Initialize minimap
+    const minimapCanvas = container.querySelector("#minimap-canvas");
+    const minimapViewport = container.querySelector(".minimap-viewport");
+    const minimapCtx = minimapCanvas.getContext('2d');
+
+    // Set canvas size to match container
+    minimapCanvas.width = 200;
+    minimapCanvas.height = 150;
+
+    function updateMinimap() {
+      if (!editor) return;
+
+      const ctx = minimapCtx;
+      const canvas = minimapCanvas;
+
+      // Clear canvas
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Get all nodes
+      const module = editor.module;
+      const nodes = editor.drawflow.drawflow[module]?.data || {};
+      const nodeList = Object.values(nodes);
+
+      if (nodeList.length === 0) {
+        minimap.style.display = 'none';
+        return;
+      }
+
+      // Calculate bounding box of all nodes
+      let minX = Infinity, minY = Infinity;
+      let maxX = -Infinity, maxY = -Infinity;
+
+      nodeList.forEach(node => {
+        minX = Math.min(minX, node.pos_x);
+        minY = Math.min(minY, node.pos_y);
+        maxX = Math.max(maxX, node.pos_x + 160); // Approximate node width
+        maxY = Math.max(maxY, node.pos_y + 100); // Approximate node height
+      });
+
+      // Add padding
+      const padding = 20;
+      minX -= padding;
+      minY -= padding;
+      maxX += padding;
+      maxY += padding;
+
+      // Calculate graph dimensions
+      const graphWidth = maxX - minX;
+      const graphHeight = maxY - minY;
+
+      // Check if graph fits in viewport
+      const zoom = editor.zoom || 1;
+      const drawflowRect = drawflowDiv.getBoundingClientRect();
+      const viewportWidth = drawflowRect.width / zoom;
+      const viewportHeight = drawflowRect.height / zoom;
+
+      // Only show minimap if graph is larger than viewport
+      if (graphWidth <= viewportWidth && graphHeight <= viewportHeight) {
+        minimap.style.display = 'none';
+        return;
+      } else {
+        minimap.style.display = 'block';
+      }
+
+      // Calculate scale to fit in minimap
+      const scale = Math.min(canvas.width / graphWidth, canvas.height / graphHeight);
+
+      // Draw nodes
+      ctx.fillStyle = '#666';
+      nodeList.forEach(node => {
+        const x = (node.pos_x - minX) * scale;
+        const y = (node.pos_y - minY) * scale;
+        const width = 160 * scale;
+        const height = 100 * scale;
+
+        ctx.fillRect(x, y, width, height);
+      });
+
+      // Update viewport indicator
+      const canvasX = editor.canvas_x || 0;
+      const canvasY = editor.canvas_y || 0;
+
+      const viewportX = (-canvasX / zoom - minX) * scale;
+      const viewportY = (-canvasY / zoom - minY) * scale;
+      const viewportIndicatorWidth = (drawflowRect.width / zoom) * scale;
+      const viewportIndicatorHeight = (drawflowRect.height / zoom) * scale;
+
+      minimapViewport.style.left = Math.max(0, viewportX) + 'px';
+      minimapViewport.style.top = Math.max(0, viewportY) + 'px';
+      minimapViewport.style.width = viewportIndicatorWidth + 'px';
+      minimapViewport.style.height = viewportIndicatorHeight + 'px';
+
+      // Store scale info for click navigation
+      minimapCanvas.dataset.scale = scale;
+      minimapCanvas.dataset.minX = minX;
+      minimapCanvas.dataset.minY = minY;
+    }
+
+    // Update minimap on various events
+    editor.on('nodeCreated', () => setTimeout(updateMinimap, 100));
+    editor.on('nodeRemoved', () => setTimeout(updateMinimap, 100));
+    editor.on('nodeMoved', () => updateMinimap());
+
+    // Update minimap on pan/zoom
+    drawflowDiv.addEventListener('wheel', () => setTimeout(updateMinimap, 10));
+
+    // Initial minimap render
+    setTimeout(updateMinimap, 200);
+
+    // Click-to-navigate on minimap
+    minimapCanvas.addEventListener('mousedown', (e) => {
+      const rect = minimapCanvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+
+      const scale = parseFloat(minimapCanvas.dataset.scale || 1);
+      const minX = parseFloat(minimapCanvas.dataset.minX || 0);
+      const minY = parseFloat(minimapCanvas.dataset.minY || 0);
+
+      // Convert click position to graph coordinates
+      const graphX = (clickX / scale) + minX;
+      const graphY = (clickY / scale) + minY;
+
+      // Center the viewport on the clicked position
+      const zoom = editor.zoom || 1;
+      const drawflowRect = drawflowDiv.getBoundingClientRect();
+      const viewportCenterX = drawflowRect.width / (2 * zoom);
+      const viewportCenterY = drawflowRect.height / (2 * zoom);
+
+      editor.canvas_x = -(graphX - viewportCenterX) * zoom;
+      editor.canvas_y = -(graphY - viewportCenterY) * zoom;
+
+      // Update the canvas transform
+      const precanvas = drawflowDiv.querySelector('.drawflow');
+      if (precanvas) {
+        precanvas.style.transform = `translate(${editor.canvas_x}px, ${editor.canvas_y}px) scale(${zoom})`;
+      }
+
+      updateMinimap();
+    });
 
     // Add reconnection support: dragging from a connected input disconnects and starts new connection
     drawflowDiv.addEventListener('mousedown', (e) => {
