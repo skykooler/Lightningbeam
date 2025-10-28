@@ -884,6 +884,190 @@ export const nodeTypes = {
         </div>
       </div>
     `
+  },
+
+  Compressor: {
+    name: 'Compressor',
+    category: NodeCategory.EFFECT,
+    description: 'Dynamic range compressor with soft-knee',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'threshold', label: 'Threshold', min: -60, max: 0, default: -20, unit: 'dB' },
+      { id: 1, name: 'ratio', label: 'Ratio', min: 1, max: 20, default: 4, unit: ':1' },
+      { id: 2, name: 'attack', label: 'Attack', min: 0.1, max: 100, default: 5, unit: 'ms' },
+      { id: 3, name: 'release', label: 'Release', min: 10, max: 1000, default: 100, unit: 'ms' },
+      { id: 4, name: 'makeup_gain', label: 'Makeup Gain', min: 0, max: 20, default: 0, unit: 'dB' },
+      { id: 5, name: 'knee', label: 'Knee', min: 0, max: 12, default: 6, unit: 'dB' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Compressor</div>
+        <div class="node-param">
+          <label>Threshold: <span id="threshold-${nodeId}">-20</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="-60" max="0" value="-20" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Ratio: <span id="ratio-${nodeId}">4.0</span>:1</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="1" max="20" value="4" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Attack: <span id="attack-${nodeId}">5</span> ms</label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="0.1" max="100" value="5" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Release: <span id="release-${nodeId}">100</span> ms</label>
+          <input type="range" data-node="${nodeId}" data-param="3" min="10" max="1000" value="100" step="1">
+        </div>
+        <div class="node-param">
+          <label>Makeup: <span id="makeup-${nodeId}">0</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="4" min="0" max="20" value="0" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Knee: <span id="knee-${nodeId}">6</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="5" min="0" max="12" value="6" step="0.1">
+        </div>
+      </div>
+    `
+  },
+
+  Limiter: {
+    name: 'Limiter',
+    category: NodeCategory.EFFECT,
+    description: 'Peak limiter with ceiling control',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'threshold', label: 'Threshold', min: -60, max: 0, default: -10, unit: 'dB' },
+      { id: 1, name: 'release', label: 'Release', min: 10, max: 1000, default: 50, unit: 'ms' },
+      { id: 2, name: 'ceiling', label: 'Ceiling', min: -20, max: 0, default: 0, unit: 'dB' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Limiter</div>
+        <div class="node-param">
+          <label>Threshold: <span id="limthreshold-${nodeId}">-10</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="-60" max="0" value="-10" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Release: <span id="limrelease-${nodeId}">50</span> ms</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="10" max="1000" value="50" step="1">
+        </div>
+        <div class="node-param">
+          <label>Ceiling: <span id="ceiling-${nodeId}">0</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="-20" max="0" value="0" step="0.1">
+        </div>
+      </div>
+    `
+  },
+
+  Distortion: {
+    name: 'Distortion',
+    category: NodeCategory.EFFECT,
+    description: 'Waveshaping distortion with multiple algorithms',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'drive', label: 'Drive', min: 0.01, max: 20, default: 1, unit: '' },
+      { id: 1, name: 'type', label: 'Type', min: 0, max: 3, default: 0, unit: '' },
+      { id: 2, name: 'tone', label: 'Tone', min: 0, max: 1, default: 0.7, unit: '' },
+      { id: 3, name: 'mix', label: 'Mix', min: 0, max: 1, default: 1, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Distortion</div>
+        <div class="node-param">
+          <label>Type: <span id="disttype-${nodeId}">Soft Clip</span></label>
+          <select data-node="${nodeId}" data-param="1" style="width: 100%; padding: 2px;">
+            <option value="0">Soft Clip</option>
+            <option value="1">Hard Clip</option>
+            <option value="2">Tanh</option>
+            <option value="3">Asymmetric</option>
+          </select>
+        </div>
+        <div class="node-param">
+          <label>Drive: <span id="drive-${nodeId}">1.00</span></label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0.01" max="20" value="1" step="0.01">
+        </div>
+        <div class="node-param">
+          <label>Tone: <span id="tone-${nodeId}">0.70</span></label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="0" max="1" value="0.7" step="0.01">
+        </div>
+        <div class="node-param">
+          <label>Mix: <span id="mix-${nodeId}">1.00</span></label>
+          <input type="range" data-node="${nodeId}" data-param="3" min="0" max="1" value="1" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  EQ: {
+    name: 'EQ',
+    category: NodeCategory.EFFECT,
+    description: '3-band parametric EQ',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'low_freq', label: 'Low Freq', min: 20, max: 500, default: 100, unit: 'Hz' },
+      { id: 1, name: 'low_gain', label: 'Low Gain', min: -24, max: 24, default: 0, unit: 'dB' },
+      { id: 2, name: 'mid_freq', label: 'Mid Freq', min: 200, max: 5000, default: 1000, unit: 'Hz' },
+      { id: 3, name: 'mid_gain', label: 'Mid Gain', min: -24, max: 24, default: 0, unit: 'dB' },
+      { id: 4, name: 'mid_q', label: 'Mid Q', min: 0.1, max: 10, default: 0.707, unit: '' },
+      { id: 5, name: 'high_freq', label: 'High Freq', min: 2000, max: 20000, default: 8000, unit: 'Hz' },
+      { id: 6, name: 'high_gain', label: 'High Gain', min: -24, max: 24, default: 0, unit: 'dB' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">EQ</div>
+        <div style="font-size: 10px; margin-top: 4px; font-weight: bold;">Low Band</div>
+        <div class="node-param">
+          <label>Freq: <span id="lowfreq-${nodeId}">100</span> Hz</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="20" max="500" value="100" step="1">
+        </div>
+        <div class="node-param">
+          <label>Gain: <span id="lowgain-${nodeId}">0</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="-24" max="24" value="0" step="0.1">
+        </div>
+        <div style="font-size: 10px; margin-top: 4px; font-weight: bold;">Mid Band</div>
+        <div class="node-param">
+          <label>Freq: <span id="midfreq-${nodeId}">1000</span> Hz</label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="200" max="5000" value="1000" step="10">
+        </div>
+        <div class="node-param">
+          <label>Gain: <span id="midgain-${nodeId}">0</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="3" min="-24" max="24" value="0" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Q: <span id="midq-${nodeId}">0.71</span></label>
+          <input type="range" data-node="${nodeId}" data-param="4" min="0.1" max="10" value="0.707" step="0.01">
+        </div>
+        <div style="font-size: 10px; margin-top: 4px; font-weight: bold;">High Band</div>
+        <div class="node-param">
+          <label>Freq: <span id="highfreq-${nodeId}">8000</span> Hz</label>
+          <input type="range" data-node="${nodeId}" data-param="5" min="2000" max="20000" value="8000" step="100">
+        </div>
+        <div class="node-param">
+          <label>Gain: <span id="highgain-${nodeId}">0</span> dB</label>
+          <input type="range" data-node="${nodeId}" data-param="6" min="-24" max="24" value="0" step="0.1">
+        </div>
+      </div>
+    `
   }
 };
 

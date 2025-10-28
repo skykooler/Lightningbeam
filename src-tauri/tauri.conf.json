@@ -35,7 +35,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "assets/factory_presets/*"
+      "../src/assets/instruments/**/*"
     ],
     "linux": {
       "appimage": {

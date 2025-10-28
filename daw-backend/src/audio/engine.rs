@@ -6,7 +6,7 @@ use crate::audio::pool::AudioPool;
 use crate::audio::project::Project;
 use crate::audio::recording::RecordingState;
 use crate::audio::track::{Track, TrackId, TrackNode};
-use crate::command::{AudioEvent, Command};
+use crate::command::{AudioEvent, Command, Query, QueryResponse};
 use crate::effects::{Effect, GainEffect, PanEffect, SimpleEQ};
 use petgraph::stable_graph::NodeIndex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,8 @@ pub struct Engine {
     // Lock-free communication
     command_rx: rtrb::Consumer<Command>,
     event_tx: rtrb::Producer<AudioEvent>,
+    query_rx: rtrb::Consumer<Query>,
+    query_response_tx: rtrb::Producer<QueryResponse>,
 
     // Shared playhead for UI reads
     playhead_atomic: Arc<AtomicU64>,
@@ -53,6 +55,8 @@ impl Engine {
         channels: u32,
         command_rx: rtrb::Consumer<Command>,
         event_tx: rtrb::Producer<AudioEvent>,
+        query_rx: rtrb::Consumer<Query>,
+        query_response_tx: rtrb::Producer<QueryResponse>,
     ) -> Self {
         let event_interval_frames = (sample_rate as usize * channels as usize) / 60; // Update 60 times per second
 
@@ -69,6 +73,8 @@ impl Engine {
             channels,
             command_rx,
             event_tx,
+            query_rx,
+            query_response_tx,
             playhead_atomic: Arc::new(AtomicU64::new(0)),
             frames_since_last_event: 0,
             event_interval_frames,
@@ -142,9 +148,16 @@ impl Engine {
     }
 
     /// Get a handle for controlling playback from the UI thread
-    pub fn get_controller(&self, command_tx: rtrb::Producer<Command>) -> EngineController {
+    pub fn get_controller(
+        &self,
+        command_tx: rtrb::Producer<Command>,
+        query_tx: rtrb::Producer<Query>,
+        query_response_rx: rtrb::Consumer<QueryResponse>,
+    ) -> EngineController {
         EngineController {
             command_tx,
+            query_tx,
+            query_response_rx,
             playhead: Arc::clone(&self.playhead_atomic),
             sample_rate: self.sample_rate,
             channels: self.channels,
@@ -162,6 +175,11 @@ impl Engine {
         // Process all pending commands
         while let Ok(cmd) = self.command_rx.pop() {
             self.handle_command(cmd);
+        }
+
+        // Process all pending queries
+        while let Ok(query) = self.query_rx.pop() {
+            self.handle_query(query);
         }
 
         if self.playing {
@@ -744,8 +762,12 @@ impl Engine {
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
+                            "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
+                            "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
+                            "EQ" => Box::new(EQNode::new("EQ".to_string())),
                             "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
                             "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
                             "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
@@ -803,8 +825,12 @@ impl Engine {
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
+                            "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
+                            "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
+                            "EQ" => Box::new(EQNode::new("EQ".to_string())),
                             "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
                             "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
                             "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
@@ -968,7 +994,10 @@ impl Engine {
                     Ok(json) => {
                         match crate::audio::node_graph::preset::GraphPreset::from_json(&json) {
                             Ok(preset) => {
-                                match InstrumentGraph::from_preset(&preset, self.sample_rate, 8192) {
+                                // Extract the directory path from the preset path for resolving relative sample paths
+                                let preset_base_path = std::path::Path::new(&preset_path).parent();
+
+                                match InstrumentGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path) {
                                     Ok(graph) => {
                                         // Replace the track's graph
                                         if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
@@ -1122,6 +1151,61 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Handle synchronous queries from the UI thread
+    fn handle_query(&mut self, query: Query) {
+        let response = match query {
+            Query::GetGraphState(track_id) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    if let Some(ref graph) = track.instrument_graph {
+                        let preset = graph.to_preset("temp");
+                        match preset.to_json() {
+                            Ok(json) => QueryResponse::GraphState(Ok(json)),
+                            Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
+                        }
+                    } else {
+                        // Empty graph
+                        let empty_preset = crate::audio::node_graph::preset::GraphPreset::new("empty");
+                        match empty_preset.to_json() {
+                            Ok(json) => QueryResponse::GraphState(Ok(json)),
+                            Err(_) => QueryResponse::GraphState(Err("Failed to serialize empty graph".to_string())),
+                        }
+                    }
+                } else {
+                    QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+            Query::GetTemplateState(track_id, voice_allocator_id) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref mut graph) = track.instrument_graph {
+                        let node_idx = NodeIndex::new(voice_allocator_id as usize);
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            // Downcast to VoiceAllocatorNode
+                            let node_ptr = &*graph_node.node as *const dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *const VoiceAllocatorNode;
+                            unsafe {
+                                let va_node = &*node_ptr;
+                                let template_preset = va_node.template_graph().to_preset("template");
+                                match template_preset.to_json() {
+                                    Ok(json) => QueryResponse::GraphState(Ok(json)),
+                                    Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize template: {:?}", e))),
+                                }
+                            }
+                        } else {
+                            QueryResponse::GraphState(Err("Voice allocator node not found".to_string()))
+                        }
+                    } else {
+                        QueryResponse::GraphState(Err("Graph not found".to_string()))
+                    }
+                } else {
+                    QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+        };
+
+        // Send response back
+        let _ = self.query_response_tx.push(response);
     }
 
     /// Handle starting a recording
@@ -1285,6 +1369,8 @@ impl Engine {
 /// Controller for the engine that can be used from the UI thread
 pub struct EngineController {
     command_tx: rtrb::Producer<Command>,
+    query_tx: rtrb::Producer<Query>,
+    query_response_rx: rtrb::Consumer<QueryResponse>,
     playhead: Arc<AtomicU64>,
     sample_rate: u32,
     channels: u32,
@@ -1625,5 +1711,50 @@ impl EngineController {
     /// Remove a layer from a MultiSampler node
     pub fn multi_sampler_remove_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize) {
         let _ = self.command_tx.push(Command::MultiSamplerRemoveLayer(track_id, node_id, layer_index));
+    }
+
+    /// Send a synchronous query and wait for the response
+    /// This blocks until the audio thread processes the query
+    pub fn query_graph_state(&mut self, track_id: TrackId) -> Result<String, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetGraphState(track_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::GraphState(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query a template graph state
+    pub fn query_template_state(&mut self, track_id: TrackId, voice_allocator_id: u32) -> Result<String, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetTemplateState(track_id, voice_allocator_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::GraphState(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        Err("Query timeout".to_string())
     }
 }

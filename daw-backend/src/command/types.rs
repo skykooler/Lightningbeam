@@ -197,3 +197,19 @@ pub enum AudioEvent {
     /// Graph state changed (for full UI sync)
     GraphStateChanged(TrackId),
 }
+
+/// Synchronous queries sent from UI thread to audio thread
+#[derive(Debug)]
+pub enum Query {
+    /// Get the current graph state as JSON (track_id)
+    GetGraphState(TrackId),
+    /// Get a voice allocator's template graph state as JSON (track_id, voice_allocator_id)
+    GetTemplateState(TrackId, u32),
+}
+
+/// Responses to synchronous queries
+#[derive(Debug)]
+pub enum QueryResponse {
+    /// Graph state as JSON string
+    GraphState(Result<String, String>),
+}

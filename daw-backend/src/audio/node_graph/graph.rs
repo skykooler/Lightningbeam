@@ -746,10 +746,29 @@ impl InstrumentGraph {
     }
 
     /// Deserialize a preset into the graph
-    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize) -> Result<Self, String> {
+    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize, preset_base_path: Option<&std::path::Path>) -> Result<Self, String> {
         use crate::audio::node_graph::nodes::*;
         use petgraph::stable_graph::NodeIndex;
         use std::collections::HashMap;
+
+        // Helper function to resolve sample paths relative to preset
+        let resolve_sample_path = |path: &str| -> String {
+            let path_obj = std::path::Path::new(path);
+
+            // If path is absolute, use it as-is
+            if path_obj.is_absolute() {
+                return path.to_string();
+            }
+
+            // If we have a base path and the path is relative, resolve it
+            if let Some(base) = preset_base_path {
+                let resolved = base.join(path);
+                resolved.to_string_lossy().to_string()
+            } else {
+                // No base path, use path as-is
+                path.to_string()
+            }
+        };
 
         let mut graph = Self::new(sample_rate, buffer_size);
         let mut index_map: HashMap<u32, NodeIndex> = HashMap::new();
@@ -768,8 +787,12 @@ impl InstrumentGraph {
                 "Splitter" => Box::new(SplitterNode::new("Splitter")),
                 "Pan" => Box::new(PanNode::new("Pan")),
                 "Delay" => Box::new(DelayNode::new("Delay")),
+                "Distortion" => Box::new(DistortionNode::new("Distortion")),
                 "Reverb" => Box::new(ReverbNode::new("Reverb")),
                 "Chorus" => Box::new(ChorusNode::new("Chorus")),
+                "Compressor" => Box::new(CompressorNode::new("Compressor")),
+                "Limiter" => Box::new(LimiterNode::new("Limiter")),
+                "EQ" => Box::new(EQNode::new("EQ")),
                 "Flanger" => Box::new(FlangerNode::new("Flanger")),
                 "FMSynth" => Box::new(FMSynthNode::new("FM Synth")),
                 "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable")),
@@ -786,7 +809,7 @@ impl InstrumentGraph {
 
                     // If there's a template graph, deserialize and set it
                     if let Some(ref template_preset) = serialized_node.template_graph {
-                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size)?;
+                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path)?;
                         // Set the template graph (we'll need to add this method to VoiceAllocator)
                         *va.template_graph_mut() = template_graph;
                         va.rebuild_voices();
@@ -836,8 +859,9 @@ impl InstrumentGraph {
                                         sampler_node.set_sample(samples, embedded.sample_rate as f32);
                                     }
                                 } else if let Some(ref path) = file_path {
-                                    // Fall back to loading from file
-                                    let _ = sampler_node.load_sample_from_file(path);
+                                    // Fall back to loading from file (resolve path relative to preset)
+                                    let resolved_path = resolve_sample_path(path);
+                                    let _ = sampler_node.load_sample_from_file(&resolved_path);
                                 }
                             }
                         }
@@ -875,9 +899,10 @@ impl InstrumentGraph {
                                             );
                                         }
                                     } else if let Some(ref path) = layer.file_path {
-                                        // Fall back to loading from file
+                                        // Fall back to loading from file (resolve path relative to preset)
+                                        let resolved_path = resolve_sample_path(path);
                                         let _ = multi_sampler_node.load_layer_from_file(
-                                            path,
+                                            &resolved_path,
                                             layer.key_min,
                                             layer.key_max,
                                             layer.root_key,

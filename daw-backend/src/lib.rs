@@ -59,6 +59,8 @@ impl AudioSystem {
         // Create queues
         let (command_tx, command_rx) = rtrb::RingBuffer::new(256);
         let (event_tx, event_rx) = rtrb::RingBuffer::new(256);
+        let (query_tx, query_rx) = rtrb::RingBuffer::new(16); // Smaller buffer for synchronous queries
+        let (query_response_tx, query_response_rx) = rtrb::RingBuffer::new(16);
 
         // Create input ringbuffer for recording (large buffer for audio samples)
         // Buffer size: 10 seconds of audio at 48kHz stereo = 48000 * 2 * 10 = 960000 samples
@@ -66,9 +68,9 @@ impl AudioSystem {
         let (mut input_tx, input_rx) = rtrb::RingBuffer::new(input_buffer_size);
 
         // Create engine
-        let mut engine = Engine::new(sample_rate, channels, command_rx, event_tx);
+        let mut engine = Engine::new(sample_rate, channels, command_rx, event_tx, query_rx, query_response_tx);
         engine.set_input_rx(input_rx);
-        let controller = engine.get_controller(command_tx);
+        let controller = engine.get_controller(command_tx, query_tx, query_response_rx);
 
         // Build output stream
         let output_config: cpal::StreamConfig = default_output_config.clone().into();

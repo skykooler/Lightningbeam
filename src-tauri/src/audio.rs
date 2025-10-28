@@ -785,33 +785,68 @@ pub async fn graph_list_presets(
 
     let mut presets = Vec::new();
 
-    // Load factory presets from bundled assets
-    let factory_presets = [
-        "Basic_Sine.json",
-        "Sawtooth_Bass.json",
-        "Warm_Pad.json",
-        "Pluck.json",
-        "Poly_Synth.json",
-    ];
-
-    for preset_file in &factory_presets {
-        // Try to load from resource directory
-        if let Ok(resource_dir) = app_handle.path().resource_dir() {
-            let factory_path = resource_dir.join("assets/factory_presets").join(preset_file);
-            if let Ok(json) = fs::read_to_string(&factory_path) {
-                if let Ok(preset) = GraphPreset::from_json(&json) {
-                    presets.push(PresetInfo {
-                        name: preset.metadata.name,
-                        path: factory_path.to_string_lossy().to_string(),
-                        description: preset.metadata.description,
-                        author: preset.metadata.author,
-                        tags: preset.metadata.tags,
-                        is_factory: true,
-                    });
+    // Recursively scan for JSON files in instruments directory
+    fn scan_presets_recursive(dir: &std::path::Path, presets: &mut Vec<PresetInfo>) {
+        eprintln!("Scanning directory: {:?}", dir);
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Recurse into subdirectories
+                    scan_presets_recursive(&path, presets);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    eprintln!("Found JSON file: {:?}", path);
+                    // Load JSON preset files
+                    match std::fs::read_to_string(&path) {
+                        Ok(json) => {
+                            match daw_backend::GraphPreset::from_json(&json) {
+                                Ok(preset) => {
+                                    eprintln!("  ✓ Loaded preset: {}", preset.metadata.name);
+                                    presets.push(PresetInfo {
+                                        name: preset.metadata.name,
+                                        path: path.to_string_lossy().to_string(),
+                                        description: preset.metadata.description,
+                                        author: preset.metadata.author,
+                                        tags: preset.metadata.tags,
+                                        is_factory: true,
+                                    });
+                                }
+                                Err(e) => eprintln!("  ✗ Failed to parse preset: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("  ✗ Failed to read file: {}", e),
+                    }
                 }
             }
         }
     }
+
+    // Try multiple locations for instruments
+    let mut instruments_found = false;
+
+    // 1. Try bundled resources (production)
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let instruments_dir = resource_dir.join("assets/instruments");
+        eprintln!("Trying bundled path: {:?} (exists: {})", instruments_dir, instruments_dir.exists());
+        if instruments_dir.exists() {
+            scan_presets_recursive(&instruments_dir, &mut presets);
+            instruments_found = true;
+        }
+    }
+
+    // 2. Fallback to dev location (development mode)
+    if !instruments_found {
+        // Try relative to current working directory (dev mode)
+        if let Ok(cwd) = std::env::current_dir() {
+            let dev_instruments = cwd.join("../src/assets/instruments");
+            eprintln!("Trying dev path: {:?} (exists: {})", dev_instruments, dev_instruments.exists());
+            if dev_instruments.exists() {
+                scan_presets_recursive(&dev_instruments, &mut presets);
+            }
+        }
+    }
+
+    eprintln!("Found {} factory presets", presets.len());
 
     // Load user presets
     if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
@@ -845,15 +880,26 @@ pub async fn graph_list_presets(
 
 #[tauri::command]
 pub async fn graph_delete_preset(
+    app_handle: tauri::AppHandle,
     preset_path: String,
 ) -> Result<(), String> {
     use std::fs;
+    use std::path::Path;
 
-    // Only allow deleting user presets (not factory presets)
-    if preset_path.contains("factory") || preset_path.contains("assets") {
-        return Err("Cannot delete factory presets".to_string());
+    let preset_path = Path::new(&preset_path);
+
+    // Check if preset is in the app's resource directory (factory content - cannot delete)
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        if let Ok(canonical_preset) = preset_path.canonicalize() {
+            if let Ok(canonical_resource) = resource_dir.canonicalize() {
+                if canonical_preset.starts_with(canonical_resource) {
+                    return Err("Cannot delete factory presets or bundled instruments".to_string());
+                }
+            }
+        }
     }
 
+    // If we get here, it's a user preset - safe to delete
     fs::remove_file(&preset_path)
         .map_err(|e| format!("Failed to delete preset: {}", e))?;
 
@@ -865,40 +911,10 @@ pub async fn graph_get_state(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     track_id: u32,
 ) -> Result<String, String> {
-    use daw_backend::GraphPreset;
-
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {
-        // Send a command to get the graph state
-        // For now, we'll use the preset serialization to get the graph
-        let temp_path = std::env::temp_dir().join(format!("temp_graph_state_{}.json", track_id));
-        let temp_path_str = temp_path.to_string_lossy().to_string();
-
-        controller.graph_save_preset(
-            track_id,
-            temp_path_str.clone(),
-            "temp".to_string(),
-            "".to_string(),
-            vec![]
-        );
-
-        // Give the audio thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Read the temp file
-        let json = match std::fs::read_to_string(&temp_path) {
-            Ok(json) => json,
-            Err(_) => {
-                // If file doesn't exist, graph is likely empty - return empty preset
-                let empty_preset = GraphPreset::new("empty");
-                empty_preset.to_json().unwrap_or_else(|_| "{}".to_string())
-            }
-        };
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&temp_path);
-
-        Ok(json)
+        // Use synchronous query to get graph state
+        controller.query_graph_state(track_id)
     } else {
         Err("Audio not initialized".to_string())
     }
@@ -910,40 +926,10 @@ pub async fn graph_get_template_state(
     track_id: u32,
     voice_allocator_id: u32,
 ) -> Result<String, String> {
-    use daw_backend::GraphPreset;
-
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {
-        // For template graphs, we'll use a different temp file path
-        let temp_path = std::env::temp_dir().join(format!("temp_template_state_{}_{}.json", track_id, voice_allocator_id));
-        let temp_path_str = temp_path.to_string_lossy().to_string();
-
-        // Send a custom command to save the template graph
-        // We'll need to add this command to the backend
-        controller.graph_save_template_preset(
-            track_id,
-            voice_allocator_id,
-            temp_path_str.clone(),
-            "temp_template".to_string()
-        );
-
-        // Give the audio thread time to process
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Read the temp file
-        let json = match std::fs::read_to_string(&temp_path) {
-            Ok(json) => json,
-            Err(_) => {
-                // If file doesn't exist, template is likely empty
-                let empty_preset = GraphPreset::new("empty_template");
-                empty_preset.to_json().unwrap_or_else(|_| "{}".to_string())
-            }
-        };
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&temp_path);
-
-        Ok(json)
+        // Use synchronous query to get template graph state
+        controller.query_template_state(track_id, voice_allocator_id)
     } else {
         Err("Audio not initialized".to_string())
     }
