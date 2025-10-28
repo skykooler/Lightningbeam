@@ -228,6 +228,11 @@ pub fn run() {
         audio::graph_delete_preset,
         audio::graph_get_state,
         audio::graph_get_template_state,
+        audio::sampler_load_sample,
+        audio::multi_sampler_add_layer,
+        audio::multi_sampler_get_layers,
+        audio::multi_sampler_update_layer,
+        audio::multi_sampler_remove_layer,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

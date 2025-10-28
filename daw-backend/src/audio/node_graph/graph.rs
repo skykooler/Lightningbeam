@@ -107,6 +107,11 @@ impl InstrumentGraph {
         self.graph.add_node(graph_node)
     }
 
+    /// Get the number of nodes in the graph
+    pub fn node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
     /// Set the UI position for a node
     pub fn set_node_position(&mut self, node: NodeIndex, x: f32, y: f32) {
         self.node_positions.insert(node.index() as u32, (x, y));
@@ -125,13 +130,10 @@ impl InstrumentGraph {
         to: NodeIndex,
         to_port: usize,
     ) -> Result<(), ConnectionError> {
-        eprintln!("[GRAPH] connect() called: {:?} port {} -> {:?} port {}", from, from_port, to, to_port);
-
         // Check if this exact connection already exists
         if let Some(edge_idx) = self.graph.find_edge(from, to) {
             let existing_conn = &self.graph[edge_idx];
             if existing_conn.from_port == from_port && existing_conn.to_port == to_port {
-                eprintln!("[GRAPH] Connection already exists, skipping duplicate");
                 return Ok(()); // Connection already exists, don't create duplicate
             }
         }
@@ -320,11 +322,6 @@ impl InstrumentGraph {
     pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent]) {
         // Use the requested output buffer size for processing
         let process_size = output_buffer.len();
-
-        if process_size > self.buffer_size * 2 {
-            eprintln!("[GRAPH] WARNING: process_size {} > allocated buffer_size {} * 2",
-                      process_size, self.buffer_size);
-        }
 
         // Clear all output buffers (audio/CV and MIDI)
         for node in self.graph.node_weights_mut() {
@@ -609,6 +606,113 @@ impl InstrumentGraph {
                     }
                 }
 
+                // For SimpleSampler nodes, serialize the loaded sample
+                if node.node_type() == "SimpleSampler" {
+                    use crate::audio::node_graph::nodes::SimpleSamplerNode;
+                    use crate::audio::node_graph::preset::{EmbeddedSampleData, SampleData};
+                    use base64::{Engine as _, engine::general_purpose};
+
+                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
+                    let node_ptr = node_ptr as *const SimpleSamplerNode;
+                    unsafe {
+                        let sampler_node = &*node_ptr;
+                        if let Some(sample_path) = sampler_node.get_sample_path() {
+                            // Check file size
+                            let should_embed = std::fs::metadata(sample_path)
+                                .map(|m| m.len() < 100_000) // < 100KB
+                                .unwrap_or(false);
+
+                            if should_embed {
+                                // Embed the sample data
+                                let (sample_data, sample_rate) = sampler_node.get_sample_data_for_embedding();
+
+                                // Convert f32 samples to bytes
+                                let bytes: Vec<u8> = sample_data
+                                    .iter()
+                                    .flat_map(|&f| f.to_le_bytes())
+                                    .collect();
+
+                                // Encode to base64
+                                let data_base64 = general_purpose::STANDARD.encode(&bytes);
+
+                                serialized.sample_data = Some(SampleData::SimpleSampler {
+                                    file_path: Some(sample_path.to_string()),
+                                    embedded_data: Some(EmbeddedSampleData {
+                                        data_base64,
+                                        sample_rate: sample_rate as u32,
+                                    }),
+                                });
+                            } else {
+                                // Just save the file path
+                                serialized.sample_data = Some(SampleData::SimpleSampler {
+                                    file_path: Some(sample_path.to_string()),
+                                    embedded_data: None,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // For MultiSampler nodes, serialize all loaded layers
+                if node.node_type() == "MultiSampler" {
+                    use crate::audio::node_graph::nodes::MultiSamplerNode;
+                    use crate::audio::node_graph::preset::{EmbeddedSampleData, LayerData, SampleData};
+                    use base64::{Engine as _, engine::general_purpose};
+
+                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
+                    let node_ptr = node_ptr as *const MultiSamplerNode;
+                    unsafe {
+                        let multi_sampler_node = &*node_ptr;
+                        let layers_info = multi_sampler_node.get_layers_info();
+                        if !layers_info.is_empty() {
+                            let layers: Vec<LayerData> = layers_info
+                                .iter()
+                                .enumerate()
+                                .map(|(layer_index, info)| {
+                                    // Check if we should embed this layer
+                                    let should_embed = std::fs::metadata(&info.file_path)
+                                        .map(|m| m.len() < 100_000) // < 100KB
+                                        .unwrap_or(false);
+
+                                    let embedded_data = if should_embed {
+                                        // Get the sample data for this layer
+                                        if let Some((sample_data, sample_rate)) = multi_sampler_node.get_layer_data(layer_index) {
+                                            // Convert f32 samples to bytes
+                                            let bytes: Vec<u8> = sample_data
+                                                .iter()
+                                                .flat_map(|&f| f.to_le_bytes())
+                                                .collect();
+
+                                            // Encode to base64
+                                            let data_base64 = general_purpose::STANDARD.encode(&bytes);
+
+                                            Some(EmbeddedSampleData {
+                                                data_base64,
+                                                sample_rate: sample_rate as u32,
+                                            })
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    LayerData {
+                                        file_path: Some(info.file_path.clone()),
+                                        embedded_data,
+                                        key_min: info.key_min,
+                                        key_max: info.key_max,
+                                        root_key: info.root_key,
+                                        velocity_min: info.velocity_min,
+                                        velocity_max: info.velocity_max,
+                                    }
+                                })
+                                .collect();
+                            serialized.sample_data = Some(SampleData::MultiSampler { layers });
+                        }
+                    }
+                }
+
                 // Save position if available
                 if let Some(pos) = self.get_node_position(node_idx) {
                     serialized.set_position(pos.0, pos.1);
@@ -659,6 +763,18 @@ impl InstrumentGraph {
                 "Mixer" => Box::new(MixerNode::new("Mixer")),
                 "Filter" => Box::new(FilterNode::new("Filter")),
                 "ADSR" => Box::new(ADSRNode::new("ADSR")),
+                "LFO" => Box::new(LFONode::new("LFO")),
+                "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise")),
+                "Splitter" => Box::new(SplitterNode::new("Splitter")),
+                "Pan" => Box::new(PanNode::new("Pan")),
+                "Delay" => Box::new(DelayNode::new("Delay")),
+                "Reverb" => Box::new(ReverbNode::new("Reverb")),
+                "Chorus" => Box::new(ChorusNode::new("Chorus")),
+                "Flanger" => Box::new(FlangerNode::new("Flanger")),
+                "FMSynth" => Box::new(FMSynthNode::new("FM Synth")),
+                "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable")),
+                "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler")),
+                "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler")),
                 "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
                 "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
                 "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
@@ -686,11 +802,93 @@ impl InstrumentGraph {
             index_map.insert(serialized_node.id, node_idx);
 
             // Set parameters
-            eprintln!("[PRESET] Node {}: type={}, params={:?}", serialized_node.id, serialized_node.node_type, serialized_node.parameters);
             for (&param_id, &value) in &serialized_node.parameters {
                 if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
-                    eprintln!("[PRESET]   Setting param {} = {}", param_id, value);
                     graph_node.node.set_parameter(param_id, value);
+                }
+            }
+
+            // Restore sample data for sampler nodes
+            if let Some(ref sample_data) = serialized_node.sample_data {
+                match sample_data {
+                    crate::audio::node_graph::preset::SampleData::SimpleSampler { file_path, embedded_data } => {
+                        // Load sample into SimpleSampler
+                        if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut SimpleSamplerNode;
+                            unsafe {
+                                let sampler_node = &mut *node_ptr;
+
+                                // Try embedded data first, then fall back to file path
+                                if let Some(ref embedded) = embedded_data {
+                                    use base64::{Engine as _, engine::general_purpose};
+
+                                    // Decode base64
+                                    if let Ok(bytes) = general_purpose::STANDARD.decode(&embedded.data_base64) {
+                                        // Convert bytes back to f32 samples
+                                        let samples: Vec<f32> = bytes
+                                            .chunks_exact(4)
+                                            .map(|chunk| {
+                                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                                            })
+                                            .collect();
+
+                                        sampler_node.set_sample(samples, embedded.sample_rate as f32);
+                                    }
+                                } else if let Some(ref path) = file_path {
+                                    // Fall back to loading from file
+                                    let _ = sampler_node.load_sample_from_file(path);
+                                }
+                            }
+                        }
+                    }
+                    crate::audio::node_graph::preset::SampleData::MultiSampler { layers } => {
+                        // Load layers into MultiSampler
+                        if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+                            unsafe {
+                                let multi_sampler_node = &mut *node_ptr;
+                                for layer in layers {
+                                    // Try embedded data first, then fall back to file path
+                                    if let Some(ref embedded) = layer.embedded_data {
+                                        use base64::{Engine as _, engine::general_purpose};
+
+                                        // Decode base64
+                                        if let Ok(bytes) = general_purpose::STANDARD.decode(&embedded.data_base64) {
+                                            // Convert bytes back to f32 samples
+                                            let samples: Vec<f32> = bytes
+                                                .chunks_exact(4)
+                                                .map(|chunk| {
+                                                    f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                                                })
+                                                .collect();
+
+                                            multi_sampler_node.add_layer(
+                                                samples,
+                                                embedded.sample_rate as f32,
+                                                layer.key_min,
+                                                layer.key_max,
+                                                layer.root_key,
+                                                layer.velocity_min,
+                                                layer.velocity_max,
+                                            );
+                                        }
+                                    } else if let Some(ref path) = layer.file_path {
+                                        // Fall back to loading from file
+                                        let _ = multi_sampler_node.load_layer_from_file(
+                                            path,
+                                            layer.key_min,
+                                            layer.key_max,
+                                            layer.root_key,
+                                            layer.velocity_min,
+                                            layer.velocity_max,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -699,32 +897,26 @@ impl InstrumentGraph {
         }
 
         // Create connections
-        eprintln!("[PRESET] Creating {} connections", preset.connections.len());
         for conn in &preset.connections {
             let from_idx = index_map.get(&conn.from_node)
                 .ok_or_else(|| format!("Connection from unknown node {}", conn.from_node))?;
             let to_idx = index_map.get(&conn.to_node)
                 .ok_or_else(|| format!("Connection to unknown node {}", conn.to_node))?;
 
-            eprintln!("[PRESET]   Connecting: node {} port {} -> node {} port {}", conn.from_node, conn.from_port, conn.to_node, conn.to_port);
             graph.connect(*from_idx, conn.from_port, *to_idx, conn.to_port)
                 .map_err(|e| format!("Failed to connect nodes: {:?}", e))?;
         }
 
         // Set MIDI targets
-        eprintln!("[PRESET] Setting MIDI targets: {:?}", preset.midi_targets);
         for &target_id in &preset.midi_targets {
             if let Some(&target_idx) = index_map.get(&target_id) {
-                eprintln!("[PRESET]   MIDI target: node {} -> index {:?}", target_id, target_idx);
                 graph.set_midi_target(target_idx, true);
             }
         }
 
         // Set output node
-        eprintln!("[PRESET] Setting output node: {:?}", preset.output_node);
         if let Some(output_id) = preset.output_node {
             if let Some(&output_idx) = index_map.get(&output_id) {
-                eprintln!("[PRESET]   Output node: {} -> index {:?}", output_id, output_idx);
                 graph.output_node = Some(output_idx);
             }
         }

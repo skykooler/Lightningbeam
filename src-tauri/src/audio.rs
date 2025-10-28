@@ -743,7 +743,20 @@ pub async fn graph_load_preset(
     track_id: u32,
     preset_path: String,
 ) -> Result<(), String> {
+    use daw_backend::GraphPreset;
+
     let mut audio_state = state.lock().unwrap();
+
+    // Load the preset JSON to count nodes
+    let json = std::fs::read_to_string(&preset_path)
+        .map_err(|e| format!("Failed to read preset file: {}", e))?;
+    let preset = GraphPreset::from_json(&json)
+        .map_err(|e| format!("Failed to parse preset: {}", e))?;
+
+    // Update the node ID counter to account for nodes in the preset
+    let node_count = preset.nodes.len() as u32;
+    audio_state.next_graph_node_id = node_count;
+
     if let Some(controller) = &mut audio_state.controller {
         // Send command to load preset
         controller.graph_load_preset(track_id, preset_path);
@@ -931,6 +944,180 @@ pub async fn graph_get_template_state(
         let _ = std::fs::remove_file(&temp_path);
 
         Ok(json)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn sampler_load_sample(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    file_path: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.sampler_load_sample(track_id, node_id, file_path);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_add_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    file_path: String,
+    key_min: u8,
+    key_max: u8,
+    root_key: u8,
+    velocity_min: u8,
+    velocity_max: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_add_layer(
+            track_id,
+            node_id,
+            file_path,
+            key_min,
+            key_max,
+            root_key,
+            velocity_min,
+            velocity_max,
+        );
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct LayerInfo {
+    pub file_path: String,
+    pub key_min: u8,
+    pub key_max: u8,
+    pub root_key: u8,
+    pub velocity_min: u8,
+    pub velocity_max: u8,
+}
+
+#[tauri::command]
+pub async fn multi_sampler_get_layers(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<Vec<LayerInfo>, String> {
+    use daw_backend::GraphPreset;
+
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Use preset serialization to get node data including layers
+        // Use timestamp to ensure unique temp file for each query to avoid conflicts
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path = std::env::temp_dir().join(format!("temp_layers_query_{}_{}_{}.json", track_id, node_id, timestamp));
+        let temp_path_str = temp_path.to_string_lossy().to_string();
+
+        controller.graph_save_preset(
+            track_id,
+            temp_path_str.clone(),
+            "temp".to_string(),
+            "".to_string(),
+            vec![]
+        );
+
+        // Give the audio thread time to process
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Read the temp file and parse it
+        match std::fs::read_to_string(&temp_path) {
+            Ok(json) => {
+                // Clean up temp file
+                let _ = std::fs::remove_file(&temp_path);
+
+                // Parse the preset JSON
+                let preset: GraphPreset = match serde_json::from_str(&json) {
+                    Ok(p) => p,
+                    Err(e) => return Err(format!("Failed to parse preset: {}", e)),
+                };
+
+                // Find the node with the matching ID
+                if let Some(node) = preset.nodes.iter().find(|n| n.id == node_id) {
+                    if let Some(ref sample_data) = node.sample_data {
+                        // Check if it's a MultiSampler
+                        if let daw_backend::audio::node_graph::preset::SampleData::MultiSampler { layers } = sample_data {
+                            return Ok(layers.iter().map(|layer| LayerInfo {
+                                file_path: layer.file_path.clone().unwrap_or_default(),
+                                key_min: layer.key_min,
+                                key_max: layer.key_max,
+                                root_key: layer.root_key,
+                                velocity_min: layer.velocity_min,
+                                velocity_max: layer.velocity_max,
+                            }).collect());
+                        }
+                    }
+                }
+
+                Ok(Vec::new())
+            }
+            Err(_) => Ok(Vec::new()), // Return empty list if file doesn't exist
+        }
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_update_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    layer_index: usize,
+    key_min: u8,
+    key_max: u8,
+    root_key: u8,
+    velocity_min: u8,
+    velocity_max: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_update_layer(
+            track_id,
+            node_id,
+            layer_index,
+            key_min,
+            key_max,
+            root_key,
+            velocity_min,
+            velocity_max,
+        );
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_remove_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    layer_index: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_remove_layer(track_id, node_id, layer_index);
+        Ok(())
     } else {
         Err("Audio not initialized".to_string())
     }

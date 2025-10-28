@@ -8,7 +8,7 @@ pub struct MidiToCVNode {
     note: u8,           // Current MIDI note number
     gate: f32,          // Gate CV (1.0 when note on, 0.0 when off)
     velocity: f32,      // Velocity CV (0.0-1.0)
-    pitch_cv: f32,      // Pitch CV (0.0-1.0 V/oct)
+    pitch_cv: f32,      // Pitch CV (V/Oct: 0V = A4, ±1V per octave)
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -24,7 +24,7 @@ impl MidiToCVNode {
         ];
 
         let outputs = vec![
-            NodePort::new("V/Oct", SignalType::CV, 0),     // 0.0-1.0 pitch CV
+            NodePort::new("V/Oct", SignalType::CV, 0),     // V/Oct: 0V = A4, ±1V per octave
             NodePort::new("Gate", SignalType::CV, 1),      // 1.0 = on, 0.0 = off
             NodePort::new("Velocity", SignalType::CV, 2),  // 0.0-1.0
         ];
@@ -41,11 +41,12 @@ impl MidiToCVNode {
         }
     }
 
-    /// Convert MIDI note to V/oct CV (0-1 range representing pitch)
-    /// Maps MIDI notes 0-127 to CV 0.0-1.0 for pitch tracking
+    /// Convert MIDI note to V/oct CV (proper V/Oct standard)
+    /// 0V = A4 (MIDI 69), ±1V per octave
+    /// Middle C (MIDI 60) = -0.75V, A5 (MIDI 81) = +1.0V
     fn midi_note_to_voct(note: u8) -> f32 {
-        // Simple linear mapping: each semitone is 1/127 of the CV range
-        note as f32 / 127.0
+        // Standard V/Oct: 0V at A4, 1V per octave (12 semitones)
+        (note as f32 - 69.0) / 12.0
     }
 }
 

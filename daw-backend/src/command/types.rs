@@ -144,6 +144,15 @@ pub enum Command {
     GraphLoadPreset(TrackId, String),
     /// Save a VoiceAllocator's template graph as a preset (track_id, voice_allocator_id, preset_path, preset_name)
     GraphSaveTemplatePreset(TrackId, u32, String, String),
+
+    /// Load a sample into a SimpleSampler node (track_id, node_id, file_path)
+    SamplerLoadSample(TrackId, u32, String),
+    /// Add a sample layer to a MultiSampler node (track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max)
+    MultiSamplerAddLayer(TrackId, u32, String, u8, u8, u8, u8, u8),
+    /// Update a MultiSampler layer's configuration (track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max)
+    MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8),
+    /// Remove a layer from a MultiSampler node (track_id, node_id, layer_index)
+    MultiSamplerRemoveLayer(TrackId, u32, usize),
 }
 
 /// Events sent from audio thread back to UI/control thread

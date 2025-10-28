@@ -743,6 +743,14 @@ impl Engine {
                             "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
+                            "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
+                            "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
+                            "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
+                            "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
+                            "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
+                            "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
+                            "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
@@ -794,6 +802,14 @@ impl Engine {
                             "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
+                            "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
+                            "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
+                            "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
+                            "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
+                            "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
+                            "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
+                            "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
@@ -1007,6 +1023,98 @@ impl Engine {
                                     if let Err(e) = std::fs::write(&preset_path, json) {
                                         eprintln!("Failed to save template preset: {}", e);
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::SamplerLoadSample(track_id, node_id, file_path) => {
+                use crate::audio::node_graph::nodes::SimpleSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref mut graph) = track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_id as usize);
+
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            // Downcast to SimpleSamplerNode
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut SimpleSamplerNode;
+
+                            unsafe {
+                                let sampler_node = &mut *node_ptr;
+                                if let Err(e) = sampler_node.load_sample_from_file(&file_path) {
+                                    eprintln!("Failed to load sample: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max) => {
+                use crate::audio::node_graph::nodes::MultiSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref mut graph) = track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_id as usize);
+
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            // Downcast to MultiSamplerNode
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+
+                            unsafe {
+                                let multi_sampler_node = &mut *node_ptr;
+                                if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max) {
+                                    eprintln!("Failed to add sample layer: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max) => {
+                use crate::audio::node_graph::nodes::MultiSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref mut graph) = track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_id as usize);
+
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            // Downcast to MultiSamplerNode
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+
+                            unsafe {
+                                let multi_sampler_node = &mut *node_ptr;
+                                if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max) {
+                                    eprintln!("Failed to update sample layer: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::MultiSamplerRemoveLayer(track_id, node_id, layer_index) => {
+                use crate::audio::node_graph::nodes::MultiSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(ref mut graph) = track.instrument_graph {
+                        let node_idx = NodeIndex::new(node_id as usize);
+
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            // Downcast to MultiSamplerNode
+                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+
+                            unsafe {
+                                let multi_sampler_node = &mut *node_ptr;
+                                if let Err(e) = multi_sampler_node.remove_layer(layer_index) {
+                                    eprintln!("Failed to remove sample layer: {}", e);
                                 }
                             }
                         }
@@ -1497,5 +1605,25 @@ impl EngineController {
     /// Save a VoiceAllocator's template graph as a preset
     pub fn graph_save_template_preset(&mut self, track_id: TrackId, voice_allocator_id: u32, preset_path: String, preset_name: String) {
         let _ = self.command_tx.push(Command::GraphSaveTemplatePreset(track_id, voice_allocator_id, preset_path, preset_name));
+    }
+
+    /// Load a sample into a SimpleSampler node
+    pub fn sampler_load_sample(&mut self, track_id: TrackId, node_id: u32, file_path: String) {
+        let _ = self.command_tx.push(Command::SamplerLoadSample(track_id, node_id, file_path));
+    }
+
+    /// Add a sample layer to a MultiSampler node
+    pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
+        let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max));
+    }
+
+    /// Update a MultiSampler layer's configuration
+    pub fn multi_sampler_update_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
+        let _ = self.command_tx.push(Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max));
+    }
+
+    /// Remove a layer from a MultiSampler node
+    pub fn multi_sampler_remove_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize) {
+        let _ = self.command_tx.push(Command::MultiSamplerRemoveLayer(track_id, node_id, layer_index));
     }
 }

@@ -127,15 +127,14 @@ impl AudioNode for OscillatorNode {
             // Start with base frequency
             let mut frequency = self.frequency;
 
-            // V/Oct input: 0.0-1.0 maps to MIDI notes 0-127
+            // V/Oct input: Standard V/Oct (0V = A4 440Hz, ±1V per octave)
             if !inputs.is_empty() && frame < inputs[0].len() {
                 let voct = inputs[0][frame]; // Read V/Oct CV (mono)
-                if voct > 0.001 {
-                    // Convert CV to MIDI note number (0-1 -> 0-127)
-                    let midi_note = voct * 127.0;
-                    // Convert MIDI note to frequency: f = 440 * 2^((n-69)/12)
-                    frequency = 440.0 * 2.0_f32.powf((midi_note - 69.0) / 12.0);
-                }
+                // Convert V/Oct to frequency: f = 440 * 2^(voct)
+                // voct = 0.0 -> 440 Hz (A4)
+                // voct = 1.0 -> 880 Hz (A5)
+                // voct = -0.75 -> 261.6 Hz (C4, middle C)
+                frequency = 440.0 * 2.0_f32.powf(voct);
             }
 
             // FM input: modulates the frequency

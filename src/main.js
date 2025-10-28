@@ -9,6 +9,12 @@ import {
   closeDialog,
 } from "./newfile.js";
 import {
+  createStartScreen,
+  updateStartScreen,
+  showStartScreen,
+  hideStartScreen,
+} from "./startscreen.js";
+import {
   titleCase,
   getMousePositionFraction,
   getKeyframesSurrounding,
@@ -124,6 +130,12 @@ const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu;
 const { PhysicalPosition, LogicalPosition } = window.__TAURI__.dpi;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
+
+// Supported file extensions
+const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
+const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
+const midiExtensions = ["mid", "midi"];
+const beamExtensions = ["beam"];
 
 // import init, { CoreInterface } from './pkg/lightningbeam_core.js';
 
@@ -1369,7 +1381,9 @@ function _newFile(width, height, fps, layoutKey) {
   const oldRoot = root;
   console.log('[_newFile] Old root:', oldRoot, 'frameRate:', oldRoot?.frameRate);
 
-  root = new GraphicsObject("root");
+  // Determine initial child type based on layout
+  const initialChildType = layoutKey === 'audioDaw' ? 'midi' : 'layer';
+  root = new GraphicsObject("root", initialChildType);
 
   // Switch to the selected layout if provided
   if (layoutKey) {
@@ -1791,12 +1805,6 @@ function revert() {
 }
 
 async function importFile() {
-  // Define supported extensions
-  const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
-  const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
-  const midiExtensions = ["mid", "midi"];
-  const beamExtensions = ["beam"];
-
   // Define filters in consistent order
   const allFilters = [
     {
@@ -4363,12 +4371,33 @@ function outliner(object = undefined) {
 async function startup() {
   await loadConfig();
   createNewFileDialog(_newFile, _open, config);
+
+  // Create start screen with callback
+  createStartScreen(async (options) => {
+    hideStartScreen();
+
+    if (options.type === 'new') {
+      // Create new project with selected focus
+      _newFile(
+        options.width || 800,
+        options.height || 600,
+        options.fps || 24,
+        options.projectFocus
+      );
+    } else if (options.type === 'reopen' || options.type === 'recent') {
+      // Open existing file
+      await _open(options.filePath);
+    }
+  });
+
   if (!window.openedFiles?.length) {
     if (config.reopenLastSession && config.recentFiles?.length) {
       document.body.style.cursor = "wait"
       setTimeout(()=>_open(config.recentFiles[0]), 10)
     } else {
-      showNewFileDialog(config);
+      // Show start screen instead of new file dialog
+      await updateStartScreen(config);
+      showStartScreen();
     }
   }
 }
@@ -6074,9 +6103,11 @@ function nodeEditor() {
   // Create the Drawflow canvas
   const editorDiv = document.createElement("div");
   editorDiv.id = "drawflow";
-  editorDiv.style.width = "100%";
-  editorDiv.style.height = "calc(100% - 40px)"; // Account for header
-  editorDiv.style.position = "relative";
+  editorDiv.style.position = "absolute";
+  editorDiv.style.top = "40px"; // Start below header
+  editorDiv.style.left = "0";
+  editorDiv.style.right = "0";
+  editorDiv.style.bottom = "0";
   container.appendChild(editorDiv);
 
   // Create node palette
@@ -6611,7 +6642,7 @@ function nodeEditor() {
       const nodeElement = document.getElementById(`node-${nodeId}`);
       if (!nodeElement) return;
 
-      const sliders = nodeElement.querySelectorAll(".node-slider");
+      const sliders = nodeElement.querySelectorAll('input[type="range"]');
       sliders.forEach(slider => {
         // Prevent node dragging when interacting with slider
         slider.addEventListener("mousedown", (e) => {
@@ -6654,6 +6685,115 @@ function nodeEditor() {
           }
         });
       });
+
+      // Handle Load Sample button for SimpleSampler
+      const loadSampleBtn = nodeElement.querySelector(".load-sample-btn");
+      if (loadSampleBtn) {
+        loadSampleBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+        loadSampleBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+        loadSampleBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (!nodeData || nodeData.data.backendId === null) {
+            showError("Node not yet created on backend");
+            return;
+          }
+
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId === null) {
+            showError("No MIDI track selected");
+            return;
+          }
+
+          try {
+            const filePath = await openFileDialog({
+              title: "Load Audio Sample",
+              filters: [{
+                name: "Audio Files",
+                extensions: audioExtensions
+              }]
+            });
+
+            if (filePath) {
+              await invoke("sampler_load_sample", {
+                trackId: currentTrackId,
+                nodeId: nodeData.data.backendId,
+                filePath: filePath
+              });
+
+              // Update UI to show filename
+              const sampleInfo = nodeElement.querySelector(`#sample-info-${nodeId}`);
+              if (sampleInfo) {
+                const filename = filePath.split('/').pop().split('\\').pop();
+                sampleInfo.textContent = filename;
+              }
+            }
+          } catch (err) {
+            console.error("Failed to load sample:", err);
+            showError(`Failed to load sample: ${err}`);
+          }
+        });
+      }
+
+      // Handle Add Layer button for MultiSampler
+      const addLayerBtn = nodeElement.querySelector(".add-layer-btn");
+      if (addLayerBtn) {
+        addLayerBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+        addLayerBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+        addLayerBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (!nodeData || nodeData.data.backendId === null) {
+            showError("Node not yet created on backend");
+            return;
+          }
+
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId === null) {
+            showError("No MIDI track selected");
+            return;
+          }
+
+          try {
+            const filePath = await openFileDialog({
+              title: "Add Sample Layer",
+              filters: [{
+                name: "Audio Files",
+                extensions: audioExtensions
+              }]
+            });
+
+            if (filePath) {
+              // Show dialog to configure layer mapping
+              const layerConfig = await showLayerConfigDialog(filePath);
+
+              if (layerConfig) {
+                await invoke("multi_sampler_add_layer", {
+                  trackId: currentTrackId,
+                  nodeId: nodeData.data.backendId,
+                  filePath: filePath,
+                  keyMin: layerConfig.keyMin,
+                  keyMax: layerConfig.keyMax,
+                  rootKey: layerConfig.rootKey,
+                  velocityMin: layerConfig.velocityMin,
+                  velocityMax: layerConfig.velocityMax
+                });
+
+                // Wait a bit for the audio thread to process the add command
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                // Refresh the layers list
+                await refreshSampleLayersList(nodeId);
+              }
+            }
+          } catch (err) {
+            console.error("Failed to add layer:", err);
+            showError(`Failed to add layer: ${err}`);
+          }
+        });
+      }
     }, 100);
   }
 
@@ -6680,6 +6820,134 @@ function nodeEditor() {
     // Enter template editing mode
     const nodeName = node.name || 'VoiceAllocator';
     enterTemplate(node.data.backendId, nodeName);
+  }
+
+  // Refresh the layers list for a MultiSampler node
+  async function refreshSampleLayersList(nodeId) {
+    const nodeData = editor.getNodeFromId(nodeId);
+    if (!nodeData || nodeData.data.backendId === null) {
+      return;
+    }
+
+    const currentTrackId = getCurrentMidiTrack();
+    if (currentTrackId === null) {
+      return;
+    }
+
+    try {
+      const layers = await invoke("multi_sampler_get_layers", {
+        trackId: currentTrackId,
+        nodeId: nodeData.data.backendId
+      });
+
+      const layersList = document.querySelector(`#sample-layers-list-${nodeId}`);
+      const layersContainer = document.querySelector(`#sample-layers-container-${nodeId}`);
+
+      if (!layersList) return;
+
+      // Prevent scroll events from bubbling to canvas
+      if (layersContainer && !layersContainer.dataset.scrollListenerAdded) {
+        layersContainer.addEventListener('wheel', (e) => {
+          e.stopPropagation();
+        }, { passive: false });
+        layersContainer.dataset.scrollListenerAdded = 'true';
+      }
+
+      if (layers.length === 0) {
+        layersList.innerHTML = '<tr><td colspan="5" class="sample-layers-empty">No layers loaded</td></tr>';
+      } else {
+        layersList.innerHTML = layers.map((layer, index) => {
+          const filename = layer.file_path.split('/').pop().split('\\').pop();
+          const keyRange = `${midiToNoteName(layer.key_min)}-${midiToNoteName(layer.key_max)}`;
+          const rootNote = midiToNoteName(layer.root_key);
+          const velRange = `${layer.velocity_min}-${layer.velocity_max}`;
+
+          return `
+            <tr data-index="${index}">
+              <td class="sample-layer-filename" title="${filename}">${filename}</td>
+              <td>${keyRange}</td>
+              <td>${rootNote}</td>
+              <td>${velRange}</td>
+              <td>
+                <div class="sample-layer-actions">
+                  <button class="btn-edit-layer" data-node="${nodeId}" data-index="${index}">Edit</button>
+                  <button class="btn-delete-layer" data-node="${nodeId}" data-index="${index}">Del</button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        // Add event listeners for edit buttons
+        const editButtons = layersList.querySelectorAll('.btn-edit-layer');
+        editButtons.forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const index = parseInt(btn.dataset.index);
+            const layer = layers[index];
+
+            // Show edit dialog with current values
+            const layerConfig = await showLayerConfigDialog(layer.file_path, {
+              keyMin: layer.key_min,
+              keyMax: layer.key_max,
+              rootKey: layer.root_key,
+              velocityMin: layer.velocity_min,
+              velocityMax: layer.velocity_max
+            });
+
+            if (layerConfig) {
+              try {
+                await invoke("multi_sampler_update_layer", {
+                  trackId: currentTrackId,
+                  nodeId: nodeData.data.backendId,
+                  layerIndex: index,
+                  keyMin: layerConfig.keyMin,
+                  keyMax: layerConfig.keyMax,
+                  rootKey: layerConfig.rootKey,
+                  velocityMin: layerConfig.velocityMin,
+                  velocityMax: layerConfig.velocityMax
+                });
+
+                // Refresh the list
+                await refreshSampleLayersList(nodeId);
+              } catch (err) {
+                console.error("Failed to update layer:", err);
+                showError(`Failed to update layer: ${err}`);
+              }
+            }
+          });
+        });
+
+        // Add event listeners for delete buttons
+        const deleteButtons = layersList.querySelectorAll('.btn-delete-layer');
+        deleteButtons.forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const index = parseInt(btn.dataset.index);
+            const layer = layers[index];
+            const filename = layer.file_path.split('/').pop().split('\\').pop();
+
+            if (confirm(`Delete layer "${filename}"?`)) {
+              try {
+                await invoke("multi_sampler_remove_layer", {
+                  trackId: currentTrackId,
+                  nodeId: nodeData.data.backendId,
+                  layerIndex: index
+                });
+
+                // Refresh the list
+                await refreshSampleLayersList(nodeId);
+              } catch (err) {
+                console.error("Failed to remove layer:", err);
+                showError(`Failed to remove layer: ${err}`);
+              }
+            }
+          });
+        });
+      }
+    } catch (err) {
+      console.error("Failed to get layers:", err);
+    }
   }
 
   // Handle connection creation
@@ -7505,6 +7773,161 @@ function showSavePresetDialog(container) {
     if (e.target === dialog) {
       dialog.remove();
     }
+  });
+}
+
+// Helper function to convert MIDI note number to note name
+function midiToNoteName(midiNote) {
+  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  const octave = Math.floor(midiNote / 12) - 1;
+  const noteName = noteNames[midiNote % 12];
+  return `${noteName}${octave}`;
+}
+
+// Show dialog to configure MultiSampler layer zones
+function showLayerConfigDialog(filePath, existingConfig = null) {
+  return new Promise((resolve) => {
+    const filename = filePath.split('/').pop().split('\\').pop();
+    const isEdit = existingConfig !== null;
+
+    // Use existing values or defaults
+    const keyMin = existingConfig?.keyMin ?? 0;
+    const keyMax = existingConfig?.keyMax ?? 127;
+    const rootKey = existingConfig?.rootKey ?? 60;
+    const velocityMin = existingConfig?.velocityMin ?? 0;
+    const velocityMax = existingConfig?.velocityMax ?? 127;
+
+    // Create modal dialog
+    const dialog = document.createElement('div');
+    dialog.className = 'modal-overlay';
+    dialog.innerHTML = `
+      <div class="modal-dialog">
+        <h3>${isEdit ? 'Edit' : 'Configure'} Sample Layer</h3>
+        <p style="font-size: 12px; color: #666; margin-bottom: 16px;">
+          File: <strong>${filename}</strong>
+        </p>
+        <form id="layer-config-form">
+          <div class="form-group">
+            <label>Key Range</label>
+            <div class="form-group-inline">
+              <div>
+                <label style="font-size: 11px; color: #888;">Min</label>
+                <input type="number" id="key-min" min="0" max="127" value="${keyMin}" required />
+                <div id="key-min-name" class="form-note-name">${midiToNoteName(keyMin)}</div>
+              </div>
+              <span>-</span>
+              <div>
+                <label style="font-size: 11px; color: #888;">Max</label>
+                <input type="number" id="key-max" min="0" max="127" value="${keyMax}" required />
+                <div id="key-max-name" class="form-note-name">${midiToNoteName(keyMax)}</div>
+              </div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Root Key (original pitch)</label>
+            <input type="number" id="root-key" min="0" max="127" value="${rootKey}" required />
+            <div id="root-key-name" class="form-note-name">${midiToNoteName(rootKey)}</div>
+          </div>
+          <div class="form-group">
+            <label>Velocity Range</label>
+            <div class="form-group-inline">
+              <div>
+                <label style="font-size: 11px; color: #888;">Min</label>
+                <input type="number" id="velocity-min" min="0" max="127" value="${velocityMin}" required />
+              </div>
+              <span>-</span>
+              <div>
+                <label style="font-size: 11px; color: #888;">Max</label>
+                <input type="number" id="velocity-max" min="0" max="127" value="${velocityMax}" required />
+              </div>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn-cancel">Cancel</button>
+            <button type="submit" class="btn-primary">${isEdit ? 'Update' : 'Add'} Layer</button>
+          </div>
+        </form>
+      </div>
+    `;
+
+    document.body.appendChild(dialog);
+
+    // Update note names when inputs change
+    const keyMinInput = dialog.querySelector('#key-min');
+    const keyMaxInput = dialog.querySelector('#key-max');
+    const rootKeyInput = dialog.querySelector('#root-key');
+
+    const updateKeyMinName = () => {
+      const note = parseInt(keyMinInput.value) || 0;
+      dialog.querySelector('#key-min-name').textContent = midiToNoteName(note);
+    };
+
+    const updateKeyMaxName = () => {
+      const note = parseInt(keyMaxInput.value) || 127;
+      dialog.querySelector('#key-max-name').textContent = midiToNoteName(note);
+    };
+
+    const updateRootKeyName = () => {
+      const note = parseInt(rootKeyInput.value) || 60;
+      dialog.querySelector('#root-key-name').textContent = midiToNoteName(note);
+    };
+
+    keyMinInput.addEventListener('input', updateKeyMinName);
+    keyMaxInput.addEventListener('input', updateKeyMaxName);
+    rootKeyInput.addEventListener('input', updateRootKeyName);
+
+    // Focus first input
+    setTimeout(() => dialog.querySelector('#key-min')?.focus(), 100);
+
+    // Handle cancel
+    dialog.querySelector('.btn-cancel').addEventListener('click', () => {
+      dialog.remove();
+      resolve(null);
+    });
+
+    // Handle submit
+    dialog.querySelector('#layer-config-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+
+      const keyMin = parseInt(keyMinInput.value);
+      const keyMax = parseInt(keyMaxInput.value);
+      const rootKey = parseInt(rootKeyInput.value);
+      const velocityMin = parseInt(dialog.querySelector('#velocity-min').value);
+      const velocityMax = parseInt(dialog.querySelector('#velocity-max').value);
+
+      // Validate ranges
+      if (keyMin > keyMax) {
+        alert('Key Min must be less than or equal to Key Max');
+        return;
+      }
+
+      if (velocityMin > velocityMax) {
+        alert('Velocity Min must be less than or equal to Velocity Max');
+        return;
+      }
+
+      if (rootKey < keyMin || rootKey > keyMax) {
+        alert('Root Key must be within the key range');
+        return;
+      }
+
+      dialog.remove();
+      resolve({
+        keyMin,
+        keyMax,
+        rootKey,
+        velocityMin,
+        velocityMax
+      });
+    });
+
+    // Close on background click
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) {
+        dialog.remove();
+        resolve(null);
+      }
+    });
   });
 }
 

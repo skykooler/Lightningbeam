@@ -12,6 +12,7 @@ serde = { version = "1.0", features = ["derive"] }
 ratatui = "0.26"
 crossterm = "0.27"
 rand = "0.8"
+base64 = "0.22"
 
 # Node-based audio graph dependencies
 dasp_graph = "0.11"

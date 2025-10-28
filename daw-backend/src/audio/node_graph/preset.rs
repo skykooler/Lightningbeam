@@ -1,6 +1,44 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Sample data for preset serialization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SampleData {
+    #[serde(rename = "simple_sampler")]
+    SimpleSampler {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        embedded_data: Option<EmbeddedSampleData>,
+    },
+    #[serde(rename = "multi_sampler")]
+    MultiSampler { layers: Vec<LayerData> },
+}
+
+/// Embedded sample data (base64-encoded for JSON compatibility)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddedSampleData {
+    /// Base64-encoded audio samples (f32 little-endian)
+    pub data_base64: String,
+    /// Original sample rate
+    pub sample_rate: u32,
+}
+
+/// Layer data for MultiSampler
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedded_data: Option<EmbeddedSampleData>,
+    pub key_min: u8,
+    pub key_max: u8,
+    pub root_key: u8,
+    pub velocity_min: u8,
+    pub velocity_max: u8,
+}
+
 /// Serializable representation of a node graph preset
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphPreset {
@@ -66,6 +104,10 @@ pub struct SerializedNode {
     /// For VoiceAllocator nodes: the nested template graph
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_graph: Option<Box<GraphPreset>>,
+
+    /// For sampler nodes: loaded sample data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_data: Option<SampleData>,
 }
 
 /// Serialized connection between nodes
@@ -132,6 +174,7 @@ impl SerializedNode {
             parameters: HashMap::new(),
             position: (0.0, 0.0),
             template_graph: None,
+            sample_data: None,
         }
     }
 

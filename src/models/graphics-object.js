@@ -31,7 +31,7 @@ export function initializeGraphicsObjectDependencies(deps) {
 }
 
 class GraphicsObject extends Widget {
-  constructor(uuid) {
+  constructor(uuid, initialChildType = 'layer') {
     super(0, 0)
     this.rotation = 0; // in radians
     this.scale_x = 1;
@@ -48,10 +48,31 @@ class GraphicsObject extends Widget {
     this.currentTime = 0; // New: continuous time for AnimationData curves
     this.currentLayer = 0;
     this._activeAudioTrack = null; // Reference to active audio track (if any)
-    this.children = [new Layer(uuid + "-L1", this)];
-    // this.layers = [new Layer(uuid + "-L1")];
+
+    // Initialize children and audioTracks based on initialChildType
+    this.children = [];
     this.audioTracks = [];
-    // this.children = []
+
+    if (initialChildType === 'layer') {
+      this.children = [new Layer(uuid + "-L1", this)];
+      this.currentLayer = 0;  // Set first layer as active
+    } else if (initialChildType === 'midi') {
+      const midiTrack = new AudioTrack(uuid + "-M1", "MIDI 1", 'midi');
+      this.audioTracks.push(midiTrack);
+      this._activeAudioTrack = midiTrack;  // Set MIDI track as active (the object, not index)
+      // Initialize the MIDI track in the audio backend
+      midiTrack.initializeTrack().catch(err => {
+        console.error('Failed to initialize MIDI track:', err);
+      });
+    } else if (initialChildType === 'audio') {
+      const audioTrack = new AudioTrack(uuid + "-A1", "Audio 1", 'audio');
+      this.audioTracks.push(audioTrack);
+      this._activeAudioTrack = audioTrack;  // Set audio track as active (the object, not index)
+      audioTrack.initializeTrack().catch(err => {
+        console.error('Failed to initialize audio track:', err);
+      });
+    }
+    // If initialChildType is 'none' or anything else, leave both arrays empty
 
     this.shapes = [];
 
