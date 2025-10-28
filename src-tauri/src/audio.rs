@@ -1131,6 +1131,22 @@ pub async fn multi_sampler_remove_layer(
     }
 }
 
+#[tauri::command]
+pub async fn get_oscilloscope_data(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    sample_count: usize,
+) -> Result<Vec<f32>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_oscilloscope_data(track_id, node_id, sample_count)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {

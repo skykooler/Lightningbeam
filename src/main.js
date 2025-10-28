@@ -6093,6 +6093,26 @@ function nodeEditor() {
   const container = document.createElement("div");
   container.id = "node-editor-container";
 
+  // Prevent text selection during drag operations
+  container.addEventListener('selectstart', (e) => {
+    // Allow selection on input elements
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+      return;
+    }
+    e.preventDefault();
+  });
+  container.addEventListener('mousedown', (e) => {
+    // Don't prevent default on inputs, textareas, or palette items (draggable)
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+      return;
+    }
+    // Don't prevent default on palette items or their children
+    if (e.target.closest('.node-palette-item') || e.target.closest('.node-category-item')) {
+      return;
+    }
+    e.preventDefault();
+  });
+
   // Track editing context: null = main graph, {voiceAllocatorId, voiceAllocatorName} = editing template
   let editingContext = null;
 
@@ -6207,6 +6227,97 @@ function nodeEditor() {
     // Store editor reference in context
     context.nodeEditor = editor;
 
+    // Add reconnection support: dragging from a connected input disconnects and starts new connection
+    drawflowDiv.addEventListener('mousedown', (e) => {
+      console.log('Mousedown on drawflow, target:', e.target);
+
+      // Check if clicking on an input port
+      const inputPort = e.target.closest('.input');
+      console.log('Found input port:', inputPort);
+
+      if (inputPort) {
+        // Get the node and port information - the drawflow-node div has the id
+        const drawflowNode = inputPort.closest('.drawflow-node');
+        console.log('Found drawflow node:', drawflowNode, 'ID:', drawflowNode?.id);
+        if (!drawflowNode) return;
+
+        const nodeId = parseInt(drawflowNode.id.replace('node-', ''));
+        console.log('Node ID:', nodeId);
+
+        // Access the node data directly from the current module
+        const moduleName = editor.module;
+        const node = editor.drawflow.drawflow[moduleName]?.data[nodeId];
+        console.log('Node data:', node);
+        if (!node) return;
+
+        // Get the port class (input_1, input_2, etc.)
+        const portClasses = Array.from(inputPort.classList);
+        const portClass = portClasses.find(c => c.startsWith('input_'));
+        console.log('Port class:', portClass, 'All classes:', portClasses);
+        if (!portClass) return;
+
+        // Check if this input has any connections
+        const inputConnections = node.inputs[portClass];
+        console.log('Input connections:', inputConnections);
+        if (inputConnections && inputConnections.connections && inputConnections.connections.length > 0) {
+          // Get the first connection (inputs should only have one connection)
+          const connection = inputConnections.connections[0];
+          console.log('Found connection to disconnect:', connection);
+
+          // Prevent default to avoid interfering with the drag
+          e.stopPropagation();
+          e.preventDefault();
+
+          // Remove the connection
+          editor.removeSingleConnection(
+            connection.node,
+            nodeId,
+            connection.input,
+            portClass
+          );
+
+          // Now trigger Drawflow's connection drag from the output that was connected
+          // We need to simulate starting a drag from the output port
+          const outputNodeElement = document.getElementById(`node-${connection.node}`);
+          console.log('Output node element:', outputNodeElement);
+          if (outputNodeElement) {
+            const outputPort = outputNodeElement.querySelector(`.${connection.input}`);
+            console.log('Output port:', outputPort, 'class:', connection.input);
+            if (outputPort) {
+              // Dispatch a synthetic mousedown event on the output port
+              // This will trigger Drawflow's normal connection start logic
+              setTimeout(() => {
+                const rect = outputPort.getBoundingClientRect();
+                const syntheticEvent = new MouseEvent('mousedown', {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window,
+                  clientX: rect.left + rect.width / 2,
+                  clientY: rect.top + rect.height / 2,
+                  button: 0
+                });
+                outputPort.dispatchEvent(syntheticEvent);
+
+                // Then immediately dispatch a mousemove to the original cursor position
+                // to start dragging the connection line
+                setTimeout(() => {
+                  const mousemoveEvent = new MouseEvent('mousemove', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: e.clientX,
+                    clientY: e.clientY,
+                    button: 0
+                  });
+                  document.dispatchEvent(mousemoveEvent);
+                }, 0);
+              }, 0);
+            }
+          }
+        }
+      }
+    }, true); // Use capture phase to intercept before Drawflow
+
     // Add trackpad/mousewheel scrolling support for panning
     drawflowDiv.addEventListener('wheel', (e) => {
       // Don't scroll if hovering over palette or other UI elements
@@ -6268,7 +6379,22 @@ function nodeEditor() {
       const item = e.target.closest(".node-palette-item");
       if (item) {
         const nodeType = item.getAttribute("data-node-type");
-        addNode(nodeType, 100, 100, null);
+
+        // Calculate center of visible canvas viewport
+        const rect = drawflowDiv.getBoundingClientRect();
+        const canvasX = editor.canvas_x || 0;
+        const canvasY = editor.canvas_y || 0;
+        const zoom = editor.zoom || 1;
+
+        // Approximate node dimensions (nodes have min-width: 160px, typical height ~150px)
+        const nodeWidth = 160;
+        const nodeHeight = 150;
+
+        // Center position in world coordinates, offset by half node size
+        const centerX = (rect.width / 2 - canvasX) / zoom - nodeWidth / 2;
+        const centerY = (rect.height / 2 - canvasY) / zoom - nodeHeight / 2;
+
+        addNode(nodeType, centerX, centerY, null);
       }
     });
 
@@ -6311,13 +6437,31 @@ function nodeEditor() {
 
       // Get drop position relative to the editor
       const rect = drawflowDiv.getBoundingClientRect();
-      const precanvasX = editor.precanvas?.x || 0;
-      const precanvasY = editor.precanvas?.y || 0;
-      const zoom = editor.zoom || 1;
-      const x = (e.clientX - rect.left - precanvasX) / zoom;
-      const y = (e.clientY - rect.top - precanvasY) / zoom;
 
-      console.log('Position calculation:', { clientX: e.clientX, clientY: e.clientY, rectLeft: rect.left, rectTop: rect.top, precanvasX, precanvasY, zoom, x, y });
+      // Use canvas_x and canvas_y which are set by the wheel scroll handler
+      const canvasX = editor.canvas_x || 0;
+      const canvasY = editor.canvas_y || 0;
+      const zoom = editor.zoom || 1;
+
+      // Approximate node dimensions (nodes have min-width: 160px, typical height ~150px)
+      const nodeWidth = 160;
+      const nodeHeight = 150;
+
+      // Calculate position accounting for canvas pan offset, centered on cursor
+      const x = (e.clientX - rect.left - canvasX) / zoom - nodeWidth / 2;
+      const y = (e.clientY - rect.top - canvasY) / zoom - nodeHeight / 2;
+
+      console.log('Position calculation:', JSON.stringify({
+        clientX: e.clientX,
+        clientY: e.clientY,
+        rectLeft: rect.left,
+        rectTop: rect.top,
+        canvasX,
+        canvasY,
+        zoom,
+        x,
+        y
+      }));
 
       // Check if dropping into an expanded VoiceAllocator
       let parentNodeId = null;
@@ -6385,6 +6529,9 @@ function nodeEditor() {
         return;
       }
 
+      // Stop oscilloscope visualization if this was an Oscilloscope node
+      stopOscilloscopeVisualization(nodeId);
+
       // Clean up parent-child tracking
       const parentId = nodeParents.get(nodeId);
       nodeParents.delete(nodeId);
@@ -6422,6 +6569,24 @@ function nodeEditor() {
       { nodeType, backendId: null, parentNodeId: parentNodeId },
       html
     );
+
+    // Update all IDs in the HTML to use drawflowNodeId instead of nodeId
+    // This ensures parameter setup can find the correct elements
+    if (nodeId !== drawflowNodeId) {
+      setTimeout(() => {
+        const nodeElement = document.getElementById(`node-${drawflowNodeId}`);
+        if (nodeElement) {
+          // Update all elements with IDs containing the old nodeId
+          const elementsWithIds = nodeElement.querySelectorAll('[id*="-' + nodeId + '"]');
+          elementsWithIds.forEach(el => {
+            const oldId = el.id;
+            const newId = oldId.replace('-' + nodeId, '-' + drawflowNodeId);
+            el.id = newId;
+            console.log(`Updated element ID: ${oldId} -> ${newId}`);
+          });
+        }
+      }, 10);
+    }
 
     // Track parent-child relationship
     if (parentNodeId !== null) {
@@ -6526,6 +6691,18 @@ function nodeEditor() {
         }
       }
 
+      // If this is an Oscilloscope node, start the visualization
+      if (nodeType === "Oscilloscope") {
+        const currentTrackId = getCurrentMidiTrack();
+        if (currentTrackId !== null) {
+          console.log(`Starting oscilloscope visualization for node ${drawflowNodeId} (backend ID: ${backendNodeId})`);
+          // Wait for DOM to update before starting visualization
+          setTimeout(() => {
+            startOscilloscopeVisualization(drawflowNodeId, currentTrackId, backendNodeId);
+          }, 100);
+        }
+      }
+
       // If this is a VoiceAllocator, automatically create template I/O nodes inside it
       if (nodeType === "VoiceAllocator") {
         setTimeout(() => {
@@ -6613,10 +6790,8 @@ function nodeEditor() {
     inputs.forEach((input, index) => {
       if (index < nodeDef.inputs.length) {
         const portDef = nodeDef.inputs[index];
-        const connector = input.querySelector(".input_0, .input_1, .input_2, .input_3");
-        if (connector) {
-          connector.classList.add(getPortClass(portDef.type));
-        }
+        // Add connector styling class directly to the input element
+        input.classList.add(getPortClass(portDef.type));
         // Add label
         const label = document.createElement("span");
         label.textContent = portDef.name;
@@ -6629,10 +6804,8 @@ function nodeEditor() {
     outputs.forEach((output, index) => {
       if (index < nodeDef.outputs.length) {
         const portDef = nodeDef.outputs[index];
-        const connector = output.querySelector(".output_0, .output_1, .output_2, .output_3");
-        if (connector) {
-          connector.classList.add(getPortClass(portDef.type));
-        }
+        // Add connector styling class directly to the output element
+        output.classList.add(getPortClass(portDef.type));
         // Add label
         const label = document.createElement("span");
         label.textContent = portDef.name;
@@ -6661,15 +6834,32 @@ function nodeEditor() {
           const paramId = parseInt(e.target.getAttribute("data-param"));
           const value = parseFloat(e.target.value);
 
+          console.log(`[setupNodeParameters] Slider input - nodeId: ${nodeId}, paramId: ${paramId}, value: ${value}`);
+
           // Update display
           const nodeData = editor.getNodeFromId(nodeId);
           if (nodeData) {
             const nodeDef = nodeTypes[nodeData.name];
+            console.log(`[setupNodeParameters] Found node type: ${nodeData.name}, parameters:`, nodeDef?.parameters);
             if (nodeDef && nodeDef.parameters[paramId]) {
               const param = nodeDef.parameters[paramId];
+              console.log(`[setupNodeParameters] Looking for span: #${param.name}-${nodeId}`);
               const displaySpan = nodeElement.querySelector(`#${param.name}-${nodeId}`);
+              console.log(`[setupNodeParameters] Found span:`, displaySpan);
               if (displaySpan) {
-                displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2);
+                // Special formatting for oscilloscope trigger mode
+                if (param.name === 'trigger_mode') {
+                  const modes = ['Free', 'Rising', 'Falling', 'V/oct'];
+                  displaySpan.textContent = modes[Math.round(value)] || 'Free';
+                } else {
+                  displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2);
+                }
+              }
+
+              // Update oscilloscope time scale if this is a time_scale parameter
+              if (param.name === 'time_scale' && oscilloscopeTimeScales) {
+                oscilloscopeTimeScales.set(nodeId, value);
+                console.log(`Updated oscilloscope time scale for node ${nodeId}: ${value}ms`);
               }
             }
 
@@ -7008,6 +7198,32 @@ function nodeEditor() {
 
       console.log("Types match - proceeding with connection");
 
+      // Auto-switch Oscilloscope to V/oct trigger mode when connecting to V/oct input
+      if (inputNode.name === 'Oscilloscope' && inputPort === 1) {
+        console.log(`Auto-switching Oscilloscope node ${connection.input_id} to V/oct trigger mode`);
+        // Set trigger_mode parameter (id: 1) to value 3 (V/oct)
+        const triggerModeSlider = document.querySelector(`#node-${connection.input_id} input[data-param="1"]`);
+        const triggerModeSpan = document.querySelector(`#trigger_mode-${connection.input_id}`);
+        if (triggerModeSlider) {
+          triggerModeSlider.value = 3;
+          if (triggerModeSpan) {
+            triggerModeSpan.textContent = 'V/oct';
+          }
+          // Update backend parameter
+          if (inputNode.data.backendId !== null) {
+            const currentTrackId = getCurrentMidiTrack();
+            if (currentTrackId !== null) {
+              invoke("graph_set_parameter", {
+                trackId: currentTrackId,
+                nodeId: inputNode.data.backendId,
+                paramId: 1,
+                value: 3.0
+              }).catch(err => console.error("Failed to set V/oct trigger mode:", err));
+            }
+          }
+        }
+      }
+
       // Style the connection based on signal type
       setTimeout(() => {
         const connectionElement = document.querySelector(
@@ -7122,6 +7338,31 @@ function nodeEditor() {
     // Drawflow uses 1-based indexing, but our arrays are 0-based
     const outputPort = parseInt(connection.output_class.replace("output_", "")) - 1;
     const inputPort = parseInt(connection.input_class.replace("input_", "")) - 1;
+
+    // Auto-switch Oscilloscope back to Free mode when disconnecting V/oct input
+    if (inputNode.name === 'Oscilloscope' && inputPort === 1) {
+      console.log(`Auto-switching Oscilloscope node ${connection.input_id} back to Free trigger mode`);
+      const triggerModeSlider = document.querySelector(`#node-${connection.input_id} input[data-param="1"]`);
+      const triggerModeSpan = document.querySelector(`#trigger_mode-${connection.input_id}`);
+      if (triggerModeSlider) {
+        triggerModeSlider.value = 0;
+        if (triggerModeSpan) {
+          triggerModeSpan.textContent = 'Free';
+        }
+        // Update backend parameter
+        if (inputNode.data.backendId !== null) {
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId !== null) {
+            invoke("graph_set_parameter", {
+              trackId: currentTrackId,
+              nodeId: inputNode.data.backendId,
+              paramId: 1,
+              value: 0.0
+            }).catch(err => console.error("Failed to set Free trigger mode:", err));
+          }
+        }
+      }
+    }
 
     // Send to backend
     if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
@@ -7483,6 +7724,11 @@ function nodeEditor() {
             }
           }
 
+          // For Oscilloscope nodes, start the visualization
+          if (nodeType === 'Oscilloscope' && serializedNode.id && trackId) {
+            startOscilloscopeVisualization(drawflowId, trackId, serializedNode.id);
+          }
+
           resolve();
         }, 100);
         }));
@@ -7501,6 +7747,28 @@ function nodeEditor() {
             `output_${conn.from_port + 1}`,
             `input_${conn.to_port + 1}`
           );
+
+          // Style the connection based on signal type
+          // We need to look up the node type and get the output port signal type
+          setupPromises.push(new Promise(resolve => {
+            setTimeout(() => {
+              const outputNode = editor.getNodeFromId(outputDrawflowId);
+              if (outputNode) {
+                const nodeType = outputNode.data.nodeType;
+                const nodeDef = nodeTypes[nodeType];
+                if (nodeDef && conn.from_port < nodeDef.outputs.length) {
+                  const signalType = nodeDef.outputs[conn.from_port].type;
+                  const connectionElement = document.querySelector(
+                    `.connection.node_in_node-${inputDrawflowId}.node_out_node-${outputDrawflowId}`
+                  );
+                  if (connectionElement) {
+                    connectionElement.classList.add(`connection-${signalType}`);
+                  }
+                }
+              }
+              resolve();
+            }, 10);
+          }));
         }
       }
 
@@ -8524,6 +8792,118 @@ async function loadMIDIFile(trackId, path, startTime) {
     throw error;
   }
 }
+
+// ========== Oscilloscope Visualization ==========
+
+// Store oscilloscope update intervals by node ID
+const oscilloscopeIntervals = new Map();
+// Store oscilloscope time scales by node ID
+const oscilloscopeTimeScales = new Map();
+
+// Start oscilloscope visualization for a node
+function startOscilloscopeVisualization(nodeId, trackId, backendNodeId) {
+  // Clear any existing interval for this node
+  stopOscilloscopeVisualization(nodeId);
+
+  // Find the canvas by traversing from the node element
+  const nodeElement = document.getElementById(`node-${nodeId}`);
+  if (!nodeElement) {
+    console.warn(`Node element not found for node ${nodeId}`);
+    return;
+  }
+
+  const canvas = nodeElement.querySelector('canvas[id^="oscilloscope-canvas-"]');
+  if (!canvas) {
+    console.warn(`Oscilloscope canvas not found in node ${nodeId}`);
+    return;
+  }
+
+  console.log(`Found oscilloscope canvas for node ${nodeId}:`, canvas.id);
+
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+
+  // Initialize time scale to default (100ms)
+  if (!oscilloscopeTimeScales.has(nodeId)) {
+    oscilloscopeTimeScales.set(nodeId, 100);
+  }
+
+  // Update function to fetch and draw oscilloscope data
+  const updateOscilloscope = async () => {
+    try {
+      // Calculate samples needed based on time scale
+      // Assuming 48kHz sample rate
+      const timeScaleMs = oscilloscopeTimeScales.get(nodeId) || 100;
+      const sampleRate = 48000;
+      const samplesNeeded = Math.floor((timeScaleMs / 1000) * sampleRate);
+      // Cap at 2 seconds worth of samples to avoid excessive memory usage
+      const sampleCount = Math.min(samplesNeeded, sampleRate * 2);
+
+      // Fetch oscilloscope data
+      const data = await invoke('get_oscilloscope_data', {
+        trackId: trackId,
+        nodeId: backendNodeId,
+        sampleCount: sampleCount
+      });
+
+      // Clear canvas
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, 0, width, height);
+
+      // Draw grid lines
+      ctx.strokeStyle = '#2a2a2a';
+      ctx.lineWidth = 1;
+
+      // Horizontal grid lines
+      ctx.beginPath();
+      ctx.moveTo(0, height / 2);
+      ctx.lineTo(width, height / 2);
+      ctx.stroke();
+
+      // Draw waveform
+      if (data && data.length > 0) {
+        ctx.strokeStyle = '#4CAF50';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        const xStep = width / data.length;
+        for (let i = 0; i < data.length; i++) {
+          const x = i * xStep;
+          // Map sample value from [-1, 1] to canvas height
+          const y = height / 2 - (data[i] * height / 2);
+
+          if (i === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+      }
+    } catch (error) {
+      console.error('Failed to update oscilloscope:', error);
+    }
+  };
+
+  // Initial update
+  updateOscilloscope();
+
+  // Update every 50ms (20 FPS)
+  const interval = setInterval(updateOscilloscope, 50);
+  oscilloscopeIntervals.set(nodeId, interval);
+}
+
+// Stop oscilloscope visualization for a node
+function stopOscilloscopeVisualization(nodeId) {
+  const interval = oscilloscopeIntervals.get(nodeId);
+  if (interval) {
+    clearInterval(interval);
+    oscilloscopeIntervals.delete(nodeId);
+  }
+}
+
+// ========== End Oscilloscope Visualization ==========
 
 async function testAudio() {
   console.log("Starting rust")

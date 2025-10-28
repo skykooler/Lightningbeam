@@ -207,6 +207,8 @@ pub enum Query {
     GetGraphState(TrackId),
     /// Get a voice allocator's template graph state as JSON (track_id, voice_allocator_id)
     GetTemplateState(TrackId, u32),
+    /// Get oscilloscope data from a node (track_id, node_id, sample_count)
+    GetOscilloscopeData(TrackId, u32, usize),
 }
 
 /// Responses to synchronous queries
@@ -214,4 +216,6 @@ pub enum Query {
 pub enum QueryResponse {
     /// Graph state as JSON string
     GraphState(Result<String, String>),
+    /// Oscilloscope data samples
+    OscilloscopeData(Result<Vec<f32>, String>),
 }

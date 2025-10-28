@@ -1204,6 +1204,15 @@ impl Engine {
                     QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
                 }
             }
+            Query::GetOscilloscopeData(track_id, node_id, sample_count) => {
+                match self.project.get_oscilloscope_data(track_id, node_id, sample_count) {
+                    Some(data) => QueryResponse::OscilloscopeData(Ok(data)),
+                    None => QueryResponse::OscilloscopeData(Err(format!(
+                        "Failed to get oscilloscope data from track {} node {}",
+                        track_id, node_id
+                    ))),
+                }
+            }
         };
 
         // Send response back
@@ -1755,6 +1764,28 @@ impl EngineController {
             }
             // Small sleep to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query oscilloscope data from a node
+    pub fn query_oscilloscope_data(&mut self, track_id: TrackId, node_id: u32, sample_count: usize) -> Result<Vec<f32>, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetOscilloscopeData(track_id, node_id, sample_count)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::OscilloscopeData(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
         }
 
         Err("Query timeout".to_string())

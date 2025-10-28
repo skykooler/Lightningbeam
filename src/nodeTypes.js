@@ -310,28 +310,29 @@ export const nodeTypes = {
     category: NodeCategory.UTILITY,
     description: 'Visual audio signal monitor (pass-through)',
     inputs: [
-      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 },
+      { name: 'V/oct', type: SignalType.CV, index: 1 }
     ],
     outputs: [
       { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
     ],
     parameters: [
       { id: 0, name: 'time_scale', label: 'Time Scale', min: 10, max: 1000, default: 100, unit: 'ms' },
-      { id: 1, name: 'trigger_mode', label: 'Trigger', min: 0, max: 2, default: 0, unit: '' },
+      { id: 1, name: 'trigger_mode', label: 'Trigger', min: 0, max: 3, default: 0, unit: '' },
       { id: 2, name: 'trigger_level', label: 'Trigger Level', min: -1, max: 1, default: 0, unit: '' }
     ],
     getHTML: (nodeId) => `
       <div class="node-content">
         <div class="node-title">Oscilloscope</div>
+        <canvas id="oscilloscope-canvas-${nodeId}" width="200" height="80" style="width: 200px; height: 80px; background: #1a1a1a; border: 1px solid #444; border-radius: 2px; display: block; margin: 4px 0;"></canvas>
         <div class="node-param">
-          <label>Time: <span id="time-${nodeId}">100</span>ms</label>
-          <input type="range" data-node="${nodeId}" data-param="0" min="10" max="1000" value="100" step="10">
+          <label>Time: <span id="time_scale-${nodeId}">100</span>ms</label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="0" min="10" max="1000" value="100" step="10">
         </div>
         <div class="node-param">
-          <label>Trigger: <span id="trig-${nodeId}">Free</span></label>
-          <input type="range" data-node="${nodeId}" data-param="1" min="0" max="2" value="0" step="1">
+          <label>Trigger: <span id="trigger_mode-${nodeId}">Free</span></label>
+          <input type="range" class="node-slider" data-node="${nodeId}" data-param="1" min="0" max="3" value="0" step="1">
         </div>
-        <div class="node-info" style="margin-top: 4px; font-size: 10px;">Pass-through monitor</div>
       </div>
     `
   },

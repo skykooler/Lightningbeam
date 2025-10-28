@@ -206,6 +206,19 @@ button {
   z-index: 1;
   display: flex;
   align-items: center;
+  user-select: none;
+}
+
+.header * {
+  user-select: none;
+}
+
+.pane {
+  user-select: none;
+}
+
+.vertical-grid, .horizontal-grid {
+  user-select: none;
 }
 
 .icon {
@@ -1182,6 +1195,7 @@ button {
   height: 100%;
   position: relative;
   background: var(--node-bg);
+  user-select: none;
 }
 
 /* Node editor header and breadcrumb */
@@ -1197,6 +1211,11 @@ button {
   align-items: center;
   padding: 0 16px;
   z-index: 200;
+  user-select: none;
+}
+
+.node-editor-header * {
+  user-select: none;
 }
 
 .context-breadcrumb {
@@ -1247,6 +1266,11 @@ button {
   max-height: calc(100% - 100px);
   overflow-y: auto;
   z-index: 100;
+  user-select: none;
+}
+
+.node-palette * {
+  user-select: none;
 }
 
 .node-palette h3 {
@@ -1454,7 +1478,8 @@ button {
 /* Signal Type Connectors */
 
 /* Audio ports - Blue circles (matches audio clips) */
-.connector-audio {
+.drawflow .drawflow-node .input.connector-audio,
+.drawflow .drawflow-node .output.connector-audio {
   width: 14px !important;
   height: 14px !important;
   border-radius: 50% !important;
@@ -1462,8 +1487,16 @@ button {
   border: 2px solid #1565C0 !important;
 }
 
+.drawflow .drawflow-node .input.connector-audio:hover,
+.drawflow .drawflow-node .output.connector-audio:hover {
+  background: #42A5F5 !important;
+  border: 2px solid #1976D2 !important;
+  border-radius: 50% !important;
+}
+
 /* MIDI ports - Green squares (matches MIDI clips) */
-.connector-midi {
+.drawflow .drawflow-node .input.connector-midi,
+.drawflow .drawflow-node .output.connector-midi {
   width: 14px !important;
   height: 14px !important;
   border-radius: 2px !important;
@@ -1471,14 +1504,30 @@ button {
   border: 2px solid #2E7D32 !important;
 }
 
+.drawflow .drawflow-node .input.connector-midi:hover,
+.drawflow .drawflow-node .output.connector-midi:hover {
+  background: #66BB6A !important;
+  border: 2px solid #388E3C !important;
+  border-radius: 2px !important;
+}
+
 /* CV ports - Orange diamonds */
-.connector-cv {
+.drawflow .drawflow-node .input.connector-cv,
+.drawflow .drawflow-node .output.connector-cv {
   width: 12px !important;
   height: 12px !important;
   background: #FF9800 !important;
   border: 2px solid #E65100 !important;
+  border-radius: 0 !important;
   transform: rotate(45deg) !important;
-  border-radius: 2px !important;
+}
+
+.drawflow .drawflow-node .input.connector-cv:hover,
+.drawflow .drawflow-node .output.connector-cv:hover {
+  background: #FFA726 !important;
+  border: 2px solid #EF6C00 !important;
+  border-radius: 0 !important;
+  transform: rotate(45deg) !important;
 }
 
 /* Connection line styling - Override Drawflow defaults */
@@ -1655,6 +1704,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  user-select: none;
 }
 
 .preset-item {

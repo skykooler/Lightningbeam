@@ -13,6 +13,7 @@ pub enum TriggerMode {
     FreeRunning = 0,
     RisingEdge = 1,
     FallingEdge = 2,
+    VoltPerOctave = 3,
 }
 
 impl TriggerMode {
@@ -20,6 +21,7 @@ impl TriggerMode {
         match value.round() as i32 {
             1 => TriggerMode::RisingEdge,
             2 => TriggerMode::FallingEdge,
+            3 => TriggerMode::VoltPerOctave,
             _ => TriggerMode::FreeRunning,
         }
     }
@@ -80,6 +82,9 @@ pub struct OscilloscopeNode {
     trigger_mode: TriggerMode,
     trigger_level: f32,   // -1.0 to 1.0
     last_sample: f32,     // For edge detection
+    voct_value: f32,      // Current V/oct input value
+    sample_counter: usize, // Counter for V/oct triggering
+    trigger_period: usize, // Period in samples for V/oct triggering
 
     // Shared buffer for reading from Tauri commands
     buffer: Arc<Mutex<CircularBuffer>>,
@@ -95,6 +100,7 @@ impl OscilloscopeNode {
 
         let inputs = vec![
             NodePort::new("Audio In", SignalType::Audio, 0),
+            NodePort::new("V/oct", SignalType::CV, 1),
         ];
 
         let outputs = vec![
@@ -103,7 +109,7 @@ impl OscilloscopeNode {
 
         let parameters = vec![
             Parameter::new(PARAM_TIME_SCALE, "Time Scale", 10.0, 1000.0, 100.0, ParameterUnit::Time),
-            Parameter::new(PARAM_TRIGGER_MODE, "Trigger", 0.0, 2.0, 0.0, ParameterUnit::Generic),
+            Parameter::new(PARAM_TRIGGER_MODE, "Trigger", 0.0, 3.0, 0.0, ParameterUnit::Generic),
             Parameter::new(PARAM_TRIGGER_LEVEL, "Trigger Level", -1.0, 1.0, 0.0, ParameterUnit::Generic),
         ];
 
@@ -113,6 +119,9 @@ impl OscilloscopeNode {
             trigger_mode: TriggerMode::FreeRunning,
             trigger_level: 0.0,
             last_sample: 0.0,
+            voct_value: 0.0,
+            sample_counter: 0,
+            trigger_period: 480, // Default to ~100Hz at 48kHz
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             inputs,
             outputs,
@@ -141,6 +150,12 @@ impl OscilloscopeNode {
         }
     }
 
+    /// Convert V/oct to frequency in Hz (matches oscillator convention)
+    /// 0V = A4 (440 Hz), ±1V per octave
+    fn voct_to_frequency(voct: f32) -> f32 {
+        440.0 * 2.0_f32.powf(voct)
+    }
+
     /// Check if trigger condition is met
     fn is_triggered(&self, current_sample: f32) -> bool {
         match self.trigger_mode {
@@ -150,6 +165,10 @@ impl OscilloscopeNode {
             }
             TriggerMode::FallingEdge => {
                 self.last_sample >= self.trigger_level && current_sample < self.trigger_level
+            }
+            TriggerMode::VoltPerOctave => {
+                // Trigger at the start of each period
+                self.sample_counter == 0
             }
         }
     }
@@ -196,7 +215,7 @@ impl AudioNode for OscilloscopeNode {
         outputs: &mut [&mut [f32]],
         _midi_inputs: &[&[MidiEvent]],
         _midi_outputs: &mut [&mut Vec<MidiEvent>],
-        _sample_rate: u32,
+        sample_rate: u32,
     ) {
         if inputs.is_empty() || outputs.is_empty() {
             return;
@@ -205,6 +224,20 @@ impl AudioNode for OscilloscopeNode {
         let input = inputs[0];
         let output = &mut outputs[0];
         let len = input.len().min(output.len());
+
+        // Read V/oct input if available and update trigger period
+        if inputs.len() > 1 && !inputs[1].is_empty() {
+            self.voct_value = inputs[1][0]; // Use first sample of V/oct input
+            let frequency = Self::voct_to_frequency(self.voct_value);
+            // Calculate period in samples, clamped to reasonable range
+            let period_samples = (sample_rate as f32 / frequency).max(1.0);
+            self.trigger_period = period_samples as usize;
+        }
+
+        // Update sample counter for V/oct triggering
+        if self.trigger_mode == TriggerMode::VoltPerOctave {
+            self.sample_counter = (self.sample_counter + len) % self.trigger_period;
+        }
 
         // Pass through audio (copy input to output)
         output[..len].copy_from_slice(&input[..len]);
@@ -222,6 +255,8 @@ impl AudioNode for OscilloscopeNode {
 
     fn reset(&mut self) {
         self.last_sample = 0.0;
+        self.voct_value = 0.0;
+        self.sample_counter = 0;
         self.clear_buffer();
     }
 
@@ -240,6 +275,9 @@ impl AudioNode for OscilloscopeNode {
             trigger_mode: self.trigger_mode,
             trigger_level: self.trigger_level,
             last_sample: 0.0,
+            voct_value: 0.0,
+            sample_counter: 0,
+            trigger_period: 480,
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),

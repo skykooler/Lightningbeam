@@ -118,6 +118,11 @@
   padding-bottom: var(--dfNodePaddingBottom);
   -webkit-box-shadow: var(--dfNodeBoxShadowHL) var(--dfNodeBoxShadowVL) var(--dfNodeBoxShadowBR) var(--dfNodeBoxShadowS) var(--dfNodeBoxShadowColor);
   box-shadow:  var(--dfNodeBoxShadowHL) var(--dfNodeBoxShadowVL) var(--dfNodeBoxShadowBR) var(--dfNodeBoxShadowS) var(--dfNodeBoxShadowColor);
+  user-select: none;
+}
+
+.drawflow .drawflow-node * {
+  user-select: none;
 }
 
 .drawflow .drawflow-node:hover {
