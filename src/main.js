@@ -6213,6 +6213,15 @@ function nodeEditor() {
   const expandedNodes = new Set(); // Set of node IDs that are expanded
   const nodeParents = new Map();   // Map of child node ID -> parent VoiceAllocator ID
 
+  // Cache node data for undo/redo (nodeId -> {nodeType, backendId, position, parameters})
+  const nodeDataCache = new Map();
+
+  // Track node movement for undo/redo (nodeId -> {oldX, oldY})
+  const nodeMoveTracker = new Map();
+
+  // Flag to prevent recording actions during undo/redo operations
+  let suppressActionRecording = false;
+
   // Wait for DOM insertion
   setTimeout(() => {
     const drawflowDiv = container.querySelector("#drawflow");
@@ -6226,43 +6235,39 @@ function nodeEditor() {
 
     // Store editor reference in context
     context.nodeEditor = editor;
+    context.reloadNodeEditor = reloadGraph;
+    context.nodeEditorState = {
+      get suppressActionRecording() { return suppressActionRecording; },
+      set suppressActionRecording(value) { suppressActionRecording = value; }
+    };
 
     // Add reconnection support: dragging from a connected input disconnects and starts new connection
     drawflowDiv.addEventListener('mousedown', (e) => {
-      console.log('Mousedown on drawflow, target:', e.target);
-
       // Check if clicking on an input port
       const inputPort = e.target.closest('.input');
-      console.log('Found input port:', inputPort);
 
       if (inputPort) {
         // Get the node and port information - the drawflow-node div has the id
         const drawflowNode = inputPort.closest('.drawflow-node');
-        console.log('Found drawflow node:', drawflowNode, 'ID:', drawflowNode?.id);
         if (!drawflowNode) return;
 
         const nodeId = parseInt(drawflowNode.id.replace('node-', ''));
-        console.log('Node ID:', nodeId);
 
         // Access the node data directly from the current module
         const moduleName = editor.module;
         const node = editor.drawflow.drawflow[moduleName]?.data[nodeId];
-        console.log('Node data:', node);
         if (!node) return;
 
         // Get the port class (input_1, input_2, etc.)
         const portClasses = Array.from(inputPort.classList);
         const portClass = portClasses.find(c => c.startsWith('input_'));
-        console.log('Port class:', portClass, 'All classes:', portClasses);
         if (!portClass) return;
 
         // Check if this input has any connections
         const inputConnections = node.inputs[portClass];
-        console.log('Input connections:', inputConnections);
         if (inputConnections && inputConnections.connections && inputConnections.connections.length > 0) {
           // Get the first connection (inputs should only have one connection)
           const connection = inputConnections.connections[0];
-          console.log('Found connection to disconnect:', connection);
 
           // Prevent default to avoid interfering with the drag
           e.stopPropagation();
@@ -6279,10 +6284,8 @@ function nodeEditor() {
           // Now trigger Drawflow's connection drag from the output that was connected
           // We need to simulate starting a drag from the output port
           const outputNodeElement = document.getElementById(`node-${connection.node}`);
-          console.log('Output node element:', outputNodeElement);
           if (outputNodeElement) {
             const outputPort = outputNodeElement.querySelector(`.${connection.input}`);
-            console.log('Output port:', outputPort, 'class:', connection.input);
             if (outputPort) {
               // Dispatch a synthetic mousedown event on the output port
               // This will trigger Drawflow's normal connection start logic
@@ -6512,12 +6515,47 @@ function nodeEditor() {
       }, 50);
     });
 
+    // Track node drag start for undo/redo
+    drawflowDiv.addEventListener('mousedown', (e) => {
+      const nodeElement = e.target.closest('.drawflow-node');
+      if (nodeElement && !e.target.closest('.input') && !e.target.closest('.output')) {
+        const nodeId = parseInt(nodeElement.id.replace('node-', ''));
+        const node = editor.getNodeFromId(nodeId);
+        if (node) {
+          nodeMoveTracker.set(nodeId, { x: node.pos_x, y: node.pos_y });
+        }
+      }
+    });
+
     // Node moved - resize parent VoiceAllocator
     editor.on("nodeMoved", (nodeId) => {
       const node = editor.getNodeFromId(nodeId);
       if (node && node.data.parentNodeId) {
         resizeVoiceAllocatorToFit(node.data.parentNodeId);
       }
+    });
+
+    // Track node drag end for undo/redo
+    drawflowDiv.addEventListener('mouseup', (e) => {
+      // Check all tracked nodes for position changes
+      for (const [nodeId, oldPos] of nodeMoveTracker.entries()) {
+        const node = editor.getNodeFromId(nodeId);
+        if (node && (node.pos_x !== oldPos.x || node.pos_y !== oldPos.y)) {
+          // Position changed - record action
+          redoStack.length = 0;
+          undoStack.push({
+            name: "graphMoveNode",
+            action: {
+              nodeId: nodeId,
+              oldPosition: oldPos,
+              newPosition: { x: node.pos_x, y: node.pos_y }
+            }
+          });
+          updateMenu();
+        }
+      }
+      // Clear tracker
+      nodeMoveTracker.clear();
     });
 
     // Node removed - prevent deletion of template nodes
@@ -6529,12 +6567,41 @@ function nodeEditor() {
         return;
       }
 
+      // Get cached node data before removal
+      const cachedData = nodeDataCache.get(nodeId);
+
+      if (cachedData && cachedData.backendId) {
+        // Call backend to remove the node
+        invoke('graph_remove_node', {
+          trackId: cachedData.trackId,
+          nodeId: cachedData.backendId
+        }).catch(err => {
+          console.error("Failed to remove node from backend:", err);
+        });
+
+        // Record action for undo (don't call execute since node is already removed from frontend)
+        redoStack.length = 0;
+        undoStack.push({
+          name: "graphRemoveNode",
+          action: {
+            trackId: cachedData.trackId,
+            nodeId: nodeId,
+            backendId: cachedData.backendId,
+            nodeData: cachedData
+          }
+        });
+        updateMenu();
+      }
+
       // Stop oscilloscope visualization if this was an Oscilloscope node
       stopOscilloscopeVisualization(nodeId);
 
       // Clean up parent-child tracking
       const parentId = nodeParents.get(nodeId);
       nodeParents.delete(nodeId);
+
+      // Clean up node data cache
+      nodeDataCache.delete(nodeId);
 
       // Resize parent if needed
       if (parentId) {
@@ -6674,6 +6741,29 @@ function nodeEditor() {
       editor.updateNodeDataFromId(drawflowNodeId, { nodeType, backendId: backendNodeId, parentNodeId: parentNodeId });
 
       console.log("Verifying stored backend ID:", editor.getNodeFromId(drawflowNodeId).data.backendId);
+
+      // Cache node data for undo/redo
+      nodeDataCache.set(drawflowNodeId, {
+        nodeType: nodeType,
+        backendId: backendNodeId,
+        position: { x, y },
+        parentNodeId: parentNodeId,
+        trackId: getCurrentMidiTrack()
+      });
+
+      // Record action for undo (node is already added to frontend and backend)
+      redoStack.length = 0;
+      undoStack.push({
+        name: "graphAddNode",
+        action: {
+          trackId: getCurrentMidiTrack(),
+          nodeType: nodeType,
+          position: { x, y },
+          nodeId: drawflowNodeId,
+          backendId: backendNodeId
+        }
+      });
+      updateMenu();
 
       // If this is an AudioOutput node, automatically set it as the graph output
       if (nodeType === "AudioOutput") {
@@ -6822,9 +6912,30 @@ function nodeEditor() {
 
       const sliders = nodeElement.querySelectorAll('input[type="range"]');
       sliders.forEach(slider => {
+        // Track parameter change action for undo/redo
+        let paramAction = null;
+
         // Prevent node dragging when interacting with slider
         slider.addEventListener("mousedown", (e) => {
           e.stopPropagation();
+
+          // Initialize undo action
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const currentValue = parseFloat(e.target.value);
+          const nodeData = editor.getNodeFromId(nodeId);
+
+          if (nodeData && nodeData.data.backendId !== null) {
+            const currentTrackId = getCurrentMidiTrack();
+            if (currentTrackId !== null) {
+              paramAction = actions.graphSetParameter.initialize(
+                currentTrackId,
+                nodeData.data.backendId,
+                paramId,
+                nodeId,
+                currentValue
+              );
+            }
+          }
         });
         slider.addEventListener("pointerdown", (e) => {
           e.stopPropagation();
@@ -6863,7 +6974,7 @@ function nodeEditor() {
               }
             }
 
-            // Send to backend
+            // Send to backend in real-time
             if (nodeData.data.backendId !== null) {
               const currentTrackId = getCurrentMidiTrack();
               if (currentTrackId !== null) {
@@ -6877,6 +6988,16 @@ function nodeEditor() {
                 });
               }
             }
+          }
+        });
+
+        // Finalize parameter change for undo/redo when slider is released
+        slider.addEventListener("change", (e) => {
+          const newValue = parseFloat(e.target.value);
+
+          if (paramAction) {
+            actions.graphSetParameter.finalize(paramAction, newValue);
+            paramAction = null;
           }
         });
       });
@@ -7234,9 +7355,9 @@ function nodeEditor() {
         }
       }, 10);
 
-      // Send to backend
+      // Send to backend (skip if action is handling it)
       console.log("Backend IDs - output:", outputNode.data.backendId, "input:", inputNode.data.backendId);
-      if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+      if (!suppressActionRecording && outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
         const currentTrackId = getCurrentMidiTrack();
         if (currentTrackId === null) return;
 
@@ -7298,7 +7419,7 @@ function nodeEditor() {
               );
             });
           } else {
-            // Normal connection in main graph
+            // Normal connection in main graph (skip if action is handling it)
             console.log(`Connecting: node ${outputNode.data.backendId} port ${outputPort} -> node ${inputNode.data.backendId} port ${inputPort}`);
             invoke("graph_connect", {
               trackId: currentTrackId,
@@ -7308,6 +7429,25 @@ function nodeEditor() {
               toPort: inputPort
             }).then(() => {
               console.log("Connection successful");
+
+              // Record action for undo
+              redoStack.length = 0;
+              undoStack.push({
+                name: "graphAddConnection",
+                action: {
+                  trackId: currentTrackId,
+                  fromNode: outputNode.data.backendId,
+                  fromPort: outputPort,
+                  toNode: inputNode.data.backendId,
+                  toPort: inputPort,
+                  // Store frontend IDs for disconnection
+                  frontendFromId: connection.output_id,
+                  frontendToId: connection.input_id,
+                  fromPortClass: connection.output_class,
+                  toPortClass: connection.input_class
+                }
+              });
+              updateMenu();
             }).catch(err => {
               console.error("Failed to connect nodes:", err);
               showError("Connection failed: " + err);
@@ -7364,8 +7504,8 @@ function nodeEditor() {
       }
     }
 
-    // Send to backend
-    if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+    // Send to backend (skip if action is handling it)
+    if (!suppressActionRecording && outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
       const currentTrackId = getCurrentMidiTrack();
       if (currentTrackId !== null) {
         invoke("graph_disconnect", {
@@ -7374,6 +7514,25 @@ function nodeEditor() {
           fromPort: outputPort,
           toNode: inputNode.data.backendId,
           toPort: inputPort
+        }).then(() => {
+          // Record action for undo
+          redoStack.length = 0;
+          undoStack.push({
+            name: "graphRemoveConnection",
+            action: {
+              trackId: currentTrackId,
+              fromNode: outputNode.data.backendId,
+              fromPort: outputPort,
+              toNode: inputNode.data.backendId,
+              toPort: inputPort,
+              // Store frontend IDs for reconnection
+              frontendFromId: connection.output_id,
+              frontendToId: connection.input_id,
+              fromPortClass: connection.output_class,
+              toPortClass: connection.input_class
+            }
+          });
+          updateMenu();
         }).catch(err => {
           console.error("Failed to disconnect nodes:", err);
         });

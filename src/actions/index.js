@@ -1957,4 +1957,354 @@ export const actions = {
       updateMenu();
     },
   },
+  // Node graph actions
+  graphAddNode: {
+    create: (trackId, nodeType, position, nodeId, backendId) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        nodeType: nodeType,
+        position: position,
+        nodeId: nodeId, // Frontend node ID from Drawflow
+        backendId: backendId
+      };
+      undoStack.push({ name: "graphAddNode", action: action });
+      actions.graphAddNode.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      // Re-add node via Tauri and reload frontend
+      const result = await invoke('graph_add_node', {
+        trackId: action.trackId,
+        nodeType: action.nodeType,
+        posX: action.position.x,
+        posY: action.position.y
+      });
+      // Reload the entire graph to show the restored node
+      if (context.reloadNodeEditor) {
+        await context.reloadNodeEditor();
+      }
+    },
+    rollback: async (action) => {
+      // Remove node from backend
+      await invoke('graph_remove_node', {
+        trackId: action.trackId,
+        nodeId: action.backendId
+      });
+      // Remove from frontend
+      if (context.nodeEditor) {
+        context.nodeEditor.removeNodeId(`node-${action.nodeId}`);
+      }
+    },
+  },
+  graphRemoveNode: {
+    create: (trackId, nodeId, backendId, nodeData) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        nodeId: nodeId,
+        backendId: backendId,
+        nodeData: nodeData, // Store full node data for restoration
+      };
+      undoStack.push({ name: "graphRemoveNode", action: action });
+      actions.graphRemoveNode.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      await invoke('graph_remove_node', {
+        trackId: action.trackId,
+        nodeId: action.backendId
+      });
+      if (context.nodeEditor) {
+        context.nodeEditor.removeNodeId(`node-${action.nodeId}`);
+      }
+    },
+    rollback: async (action) => {
+      // Re-add node to backend
+      const result = await invoke('graph_add_node', {
+        trackId: action.trackId,
+        nodeType: action.nodeData.nodeType,
+        posX: action.nodeData.position.x,
+        posY: action.nodeData.position.y
+      });
+
+      // Store new backend ID
+      const newBackendId = result.node_id || result;
+
+      // Re-add to frontend via reloadGraph
+      if (context.reloadNodeEditor) {
+        await context.reloadNodeEditor();
+      }
+    },
+  },
+  graphAddConnection: {
+    create: (trackId, fromNode, fromPort, toNode, toPort, frontendFromId, frontendToId, fromPortClass, toPortClass) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        fromNode: fromNode,
+        fromPort: fromPort,
+        toNode: toNode,
+        toPort: toPort,
+        frontendFromId: frontendFromId,
+        frontendToId: frontendToId,
+        fromPortClass: fromPortClass,
+        toPortClass: toPortClass
+      };
+      undoStack.push({ name: "graphAddConnection", action: action });
+      actions.graphAddConnection.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      // Suppress action recording during undo/redo
+      if (context.nodeEditorState) {
+        context.nodeEditorState.suppressActionRecording = true;
+      }
+
+      try {
+        await invoke('graph_connect', {
+          trackId: action.trackId,
+          fromNode: action.fromNode,
+          fromPort: action.fromPort,
+          toNode: action.toNode,
+          toPort: action.toPort
+        });
+        // Add connection in frontend only if it doesn't exist
+        if (context.nodeEditor) {
+          const inputNode = context.nodeEditor.getNodeFromId(action.frontendToId);
+          const inputConnections = inputNode?.inputs[action.toPortClass]?.connections;
+          const alreadyConnected = inputConnections?.some(conn =>
+            conn.node === action.frontendFromId && conn.input === action.fromPortClass
+          );
+
+          if (!alreadyConnected) {
+            context.nodeEditor.addConnection(
+              action.frontendFromId,
+              action.frontendToId,
+              action.fromPortClass,
+              action.toPortClass
+            );
+          }
+        }
+      } finally {
+        if (context.nodeEditorState) {
+          context.nodeEditorState.suppressActionRecording = false;
+        }
+      }
+    },
+    rollback: async (action) => {
+      // Suppress action recording during undo/redo
+      if (context.nodeEditorState) {
+        context.nodeEditorState.suppressActionRecording = true;
+      }
+
+      try {
+        await invoke('graph_disconnect', {
+          trackId: action.trackId,
+          fromNode: action.fromNode,
+          fromPort: action.fromPort,
+          toNode: action.toNode,
+          toPort: action.toPort
+        });
+        // Remove from frontend
+        if (context.nodeEditor) {
+          context.nodeEditor.removeSingleConnection(
+            action.frontendFromId,
+            action.frontendToId,
+            action.fromPortClass,
+            action.toPortClass
+          );
+        }
+      } finally {
+        if (context.nodeEditorState) {
+          context.nodeEditorState.suppressActionRecording = false;
+        }
+      }
+    },
+  },
+  graphRemoveConnection: {
+    create: (trackId, fromNode, fromPort, toNode, toPort, frontendFromId, frontendToId, fromPortClass, toPortClass) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        fromNode: fromNode,
+        fromPort: fromPort,
+        toNode: toNode,
+        toPort: toPort,
+        frontendFromId: frontendFromId,
+        frontendToId: frontendToId,
+        fromPortClass: fromPortClass,
+        toPortClass: toPortClass
+      };
+      undoStack.push({ name: "graphRemoveConnection", action: action });
+      actions.graphRemoveConnection.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      // Suppress action recording during undo/redo
+      if (context.nodeEditorState) {
+        context.nodeEditorState.suppressActionRecording = true;
+      }
+
+      try {
+        await invoke('graph_disconnect', {
+          trackId: action.trackId,
+          fromNode: action.fromNode,
+          fromPort: action.fromPort,
+          toNode: action.toNode,
+          toPort: action.toPort
+        });
+        if (context.nodeEditor) {
+          context.nodeEditor.removeSingleConnection(
+            action.frontendFromId,
+            action.frontendToId,
+            action.fromPortClass,
+            action.toPortClass
+          );
+        }
+      } finally {
+        if (context.nodeEditorState) {
+          context.nodeEditorState.suppressActionRecording = false;
+        }
+      }
+    },
+    rollback: async (action) => {
+      // Suppress action recording during undo/redo
+      if (context.nodeEditorState) {
+        context.nodeEditorState.suppressActionRecording = true;
+      }
+
+      try {
+        await invoke('graph_connect', {
+          trackId: action.trackId,
+          fromNode: action.fromNode,
+          fromPort: action.fromPort,
+          toNode: action.toNode,
+          toPort: action.toPort
+        });
+        // Re-add connection in frontend
+        if (context.nodeEditor) {
+          context.nodeEditor.addConnection(
+            action.frontendFromId,
+            action.frontendToId,
+            action.fromPortClass,
+            action.toPortClass
+          );
+        }
+      } finally {
+        if (context.nodeEditorState) {
+          context.nodeEditorState.suppressActionRecording = false;
+        }
+      }
+    },
+  },
+  graphSetParameter: {
+    initialize: (trackId, nodeId, paramId, frontendNodeId, currentValue) => {
+      return {
+        trackId: trackId,
+        nodeId: nodeId,
+        paramId: paramId,
+        frontendNodeId: frontendNodeId,
+        oldValue: currentValue,
+      };
+    },
+    finalize: (action, newValue) => {
+      action.newValue = newValue;
+      // Only record if value actually changed
+      if (action.oldValue !== action.newValue) {
+        undoStack.push({ name: "graphSetParameter", action: action });
+        updateMenu();
+      }
+    },
+    create: (trackId, nodeId, paramId, frontendNodeId, newValue, oldValue) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        nodeId: nodeId,
+        paramId: paramId,
+        frontendNodeId: frontendNodeId,
+        newValue: newValue,
+        oldValue: oldValue,
+      };
+      undoStack.push({ name: "graphSetParameter", action: action });
+      actions.graphSetParameter.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      await invoke('graph_set_parameter', {
+        trackId: action.trackId,
+        nodeId: action.nodeId,
+        paramId: action.paramId,
+        value: action.newValue
+      });
+      // Update frontend slider if it exists
+      const slider = document.querySelector(`#node-${action.frontendNodeId} input[data-param="${action.paramId}"]`);
+      if (slider) {
+        slider.value = action.newValue;
+        // Trigger display update
+        slider.dispatchEvent(new Event('input'));
+      }
+    },
+    rollback: async (action) => {
+      await invoke('graph_set_parameter', {
+        trackId: action.trackId,
+        nodeId: action.nodeId,
+        paramId: action.paramId,
+        value: action.oldValue
+      });
+      // Update frontend slider
+      const slider = document.querySelector(`#node-${action.frontendNodeId} input[data-param="${action.paramId}"]`);
+      if (slider) {
+        slider.value = action.oldValue;
+        slider.dispatchEvent(new Event('input'));
+      }
+    },
+  },
+  graphMoveNode: {
+    create: (trackId, nodeId, oldPosition, newPosition) => {
+      redoStack.length = 0;
+      let action = {
+        trackId: trackId,
+        nodeId: nodeId,
+        oldPosition: oldPosition,
+        newPosition: newPosition,
+      };
+      undoStack.push({ name: "graphMoveNode", action: action });
+      // Don't call execute - movement already happened in UI
+      updateMenu();
+    },
+    execute: (action) => {
+      // Move node in frontend
+      if (context.nodeEditor) {
+        const node = context.nodeEditor.getNodeFromId(action.nodeId);
+        if (node) {
+          context.nodeEditor.drawflow.drawflow[context.nodeEditor.module].data[action.nodeId].pos_x = action.newPosition.x;
+          context.nodeEditor.drawflow.drawflow[context.nodeEditor.module].data[action.nodeId].pos_y = action.newPosition.y;
+          // Update visual position
+          const nodeElement = document.getElementById(`node-${action.nodeId}`);
+          if (nodeElement) {
+            nodeElement.style.left = action.newPosition.x + 'px';
+            nodeElement.style.top = action.newPosition.y + 'px';
+          }
+          context.nodeEditor.updateConnectionNodes(`node-${action.nodeId}`);
+        }
+      }
+    },
+    rollback: (action) => {
+      // Move node back to old position
+      if (context.nodeEditor) {
+        const node = context.nodeEditor.getNodeFromId(action.nodeId);
+        if (node) {
+          context.nodeEditor.drawflow.drawflow[context.nodeEditor.module].data[action.nodeId].pos_x = action.oldPosition.x;
+          context.nodeEditor.drawflow.drawflow[context.nodeEditor.module].data[action.nodeId].pos_y = action.oldPosition.y;
+          const nodeElement = document.getElementById(`node-${action.nodeId}`);
+          if (nodeElement) {
+            nodeElement.style.left = action.oldPosition.x + 'px';
+            nodeElement.style.top = action.oldPosition.y + 'px';
+          }
+          context.nodeEditor.updateConnectionNodes(`node-${action.nodeId}`);
+        }
+      }
+    },
+  },
 };
