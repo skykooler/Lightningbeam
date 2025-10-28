@@ -1,0 +1,136 @@
+{
+  "metadata": {
+    "name": "Lush Pad",
+    "description": "Ambient pad with reverb and chorus",
+    "author": "Lightningbeam",
+    "version": 1,
+    "tags": ["pad", "ambient", "synth"]
+  },
+  "midi_targets": [0],
+  "output_node": 10,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [100.0, 150.0]
+    },
+    {
+      "id": 1,
+      "node_type": "MidiToCV",
+      "name": "MIDI→CV",
+      "parameters": {},
+      "position": [300.0, 150.0]
+    },
+    {
+      "id": 2,
+      "node_type": "Oscillator",
+      "name": "Osc 1",
+      "parameters": {
+        "0": 440.0,
+        "1": 0.4,
+        "2": 0.0
+      },
+      "position": [500.0, 100.0]
+    },
+    {
+      "id": 3,
+      "node_type": "Oscillator",
+      "name": "Osc 2",
+      "parameters": {
+        "0": 442.0,
+        "1": 0.4,
+        "2": 0.0
+      },
+      "position": [500.0, 200.0]
+    },
+    {
+      "id": 4,
+      "node_type": "Mixer",
+      "name": "Osc Mix",
+      "parameters": {
+        "0": 1.0,
+        "1": 1.0,
+        "2": 0.0,
+        "3": 0.0
+      },
+      "position": [700.0, 150.0]
+    },
+    {
+      "id": 5,
+      "node_type": "Filter",
+      "name": "LP Filter",
+      "parameters": {
+        "0": 1500.0,
+        "1": 0.707,
+        "2": 0.0
+      },
+      "position": [900.0, 150.0]
+    },
+    {
+      "id": 6,
+      "node_type": "ADSR",
+      "name": "Amp Env",
+      "parameters": {
+        "0": 0.5,
+        "1": 0.3,
+        "2": 0.7,
+        "3": 1.0
+      },
+      "position": [900.0, 280.0]
+    },
+    {
+      "id": 7,
+      "node_type": "Gain",
+      "name": "VCA",
+      "parameters": {
+        "0": 1.0
+      },
+      "position": [1100.0, 200.0]
+    },
+    {
+      "id": 8,
+      "node_type": "Chorus",
+      "name": "Chorus",
+      "parameters": {
+        "0": 0.5,
+        "1": 0.6,
+        "2": 0.4
+      },
+      "position": [1300.0, 200.0]
+    },
+    {
+      "id": 9,
+      "node_type": "Reverb",
+      "name": "Reverb",
+      "parameters": {
+        "0": 0.7,
+        "1": 0.5,
+        "2": 0.5
+      },
+      "position": [1500.0, 200.0]
+    },
+    {
+      "id": 10,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [1700.0, 200.0]
+    }
+  ],
+  "connections": [
+    { "from_node": 0, "from_port": 0, "to_node": 1, "to_port": 0 },
+    { "from_node": 1, "from_port": 0, "to_node": 2, "to_port": 0 },
+    { "from_node": 1, "from_port": 0, "to_node": 3, "to_port": 0 },
+    { "from_node": 1, "from_port": 1, "to_node": 6, "to_port": 0 },
+    { "from_node": 2, "from_port": 0, "to_node": 4, "to_port": 0 },
+    { "from_node": 3, "from_port": 0, "to_node": 4, "to_port": 1 },
+    { "from_node": 4, "from_port": 0, "to_node": 5, "to_port": 0 },
+    { "from_node": 5, "from_port": 0, "to_node": 7, "to_port": 0 },
+    { "from_node": 6, "from_port": 0, "to_node": 7, "to_port": 1 },
+    { "from_node": 7, "from_port": 0, "to_node": 8, "to_port": 0 },
+    { "from_node": 8, "from_port": 0, "to_node": 9, "to_port": 0 },
+    { "from_node": 9, "from_port": 0, "to_node": 10, "to_port": 0 }
+  ]
+}
