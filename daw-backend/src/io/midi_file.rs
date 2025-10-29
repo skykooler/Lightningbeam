@@ -6,7 +6,7 @@ use std::path::Path;
 pub fn load_midi_file<P: AsRef<Path>>(
     path: P,
     clip_id: MidiClipId,
-    sample_rate: u32,
+    _sample_rate: u32,
 ) -> Result<MidiClip, String> {
     // Read the MIDI file
     let data = fs::read(path.as_ref()).map_err(|e| format!("Failed to read MIDI file: {}", e))?;
@@ -109,7 +109,8 @@ pub fn load_midi_file<P: AsRef<Path>>(
                 accumulated_time += delta_time;
                 last_tick = tick;
 
-                let timestamp = (accumulated_time * sample_rate as f64) as u64;
+                // Store timestamp in seconds (sample-rate independent)
+                let timestamp = accumulated_time;
 
                 match message {
                     midly::MidiMessage::NoteOn { key, vel } => {

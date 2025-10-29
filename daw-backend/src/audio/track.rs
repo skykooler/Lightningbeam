@@ -374,8 +374,16 @@ impl MidiTrack {
     /// Stop all currently playing notes on this track's instrument
     /// Note: With node-based instruments, stopping is handled by ceasing MIDI input
     pub fn stop_all_notes(&mut self) {
-        // No-op: Node-based instruments stop when they receive no MIDI input
-        // Individual synthesizer nodes handle note-off events appropriately
+        // Send note-off for all 128 possible MIDI notes to silence the instrument
+        let mut note_offs = Vec::new();
+        for note in 0..128 {
+            note_offs.push(MidiEvent::note_off(0.0, 0, note, 0));
+        }
+
+        // Create a silent buffer to process the note-offs
+        let buffer_size = 512 * 2; // stereo
+        let mut silent_buffer = vec![0.0f32; buffer_size];
+        self.instrument_graph.process(&mut silent_buffer, &note_offs);
     }
 
     /// Queue a live MIDI event (from virtual keyboard or MIDI controller)
@@ -428,10 +436,13 @@ impl MidiTrack {
                 sample_rate,
             );
 
-            for (_timestamp, event) in events {
-                midi_events.push(event);
-            }
+            // Events now have timestamps in seconds relative to clip start
+            midi_events.extend(events);
         }
+
+        // Add live MIDI events (from virtual keyboard or MIDI controllers)
+        // This allows real-time input to be heard during playback/recording
+        midi_events.extend(self.live_midi_queue.drain(..));
 
         // Generate audio using instrument graph
         self.instrument_graph.process(output, &midi_events);

@@ -1,6 +1,7 @@
 /// Audio recording system for capturing microphone input
-use crate::audio::{ClipId, TrackId};
+use crate::audio::{ClipId, MidiClipId, TrackId};
 use crate::io::{WavWriter, WaveformPeak};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// State of an active recording session
@@ -202,5 +203,108 @@ impl RecordingState {
     /// Resume recording
     pub fn resume(&mut self) {
         self.paused = false;
+    }
+}
+
+/// Active MIDI note waiting for its noteOff event
+#[derive(Debug, Clone)]
+struct ActiveMidiNote {
+    /// MIDI note number (0-127)
+    note: u8,
+    /// Velocity (0-127)
+    velocity: u8,
+    /// Absolute time when note started (seconds)
+    start_time: f64,
+}
+
+/// State of an active MIDI recording session
+pub struct MidiRecordingState {
+    /// Track being recorded to
+    pub track_id: TrackId,
+    /// MIDI clip ID
+    pub clip_id: MidiClipId,
+    /// Timeline start position in seconds
+    pub start_time: f64,
+    /// Currently active notes (noteOn without matching noteOff)
+    /// Maps note number to ActiveMidiNote
+    active_notes: HashMap<u8, ActiveMidiNote>,
+    /// Completed notes ready to be added to clip
+    /// Format: (time_offset, note, velocity, duration)
+    pub completed_notes: Vec<(f64, u8, u8, f64)>,
+}
+
+impl MidiRecordingState {
+    /// Create a new MIDI recording state
+    pub fn new(track_id: TrackId, clip_id: MidiClipId, start_time: f64) -> Self {
+        Self {
+            track_id,
+            clip_id,
+            start_time,
+            active_notes: HashMap::new(),
+            completed_notes: Vec::new(),
+        }
+    }
+
+    /// Handle a MIDI note on event
+    pub fn note_on(&mut self, note: u8, velocity: u8, absolute_time: f64) {
+        // Store this note as active
+        self.active_notes.insert(note, ActiveMidiNote {
+            note,
+            velocity,
+            start_time: absolute_time,
+        });
+    }
+
+    /// Handle a MIDI note off event
+    pub fn note_off(&mut self, note: u8, absolute_time: f64) {
+        // Find the matching noteOn
+        if let Some(active_note) = self.active_notes.remove(&note) {
+            // Calculate relative time offset and duration
+            let time_offset = active_note.start_time - self.start_time;
+            let duration = absolute_time - active_note.start_time;
+
+            eprintln!("[MIDI_RECORDING_STATE] Completing note {}: note_start={:.3}s, note_end={:.3}s, recording_start={:.3}s, time_offset={:.3}s, duration={:.3}s",
+                      note, active_note.start_time, absolute_time, self.start_time, time_offset, duration);
+
+            // Add to completed notes
+            self.completed_notes.push((
+                time_offset,
+                active_note.note,
+                active_note.velocity,
+                duration,
+            ));
+        }
+        // If no matching noteOn found, ignore the noteOff
+    }
+
+    /// Get all completed notes
+    pub fn get_notes(&self) -> &[(f64, u8, u8, f64)] {
+        &self.completed_notes
+    }
+
+    /// Get the number of completed notes
+    pub fn note_count(&self) -> usize {
+        self.completed_notes.len()
+    }
+
+    /// Close out all active notes at the given time
+    /// This should be called when stopping recording to end any held notes
+    pub fn close_active_notes(&mut self, end_time: f64) {
+        // Collect all active notes and close them
+        let active_notes: Vec<_> = self.active_notes.drain().collect();
+
+        for (_note_num, active_note) in active_notes {
+            // Calculate relative time offset and duration
+            let time_offset = active_note.start_time - self.start_time;
+            let duration = end_time - active_note.start_time;
+
+            // Add to completed notes
+            self.completed_notes.push((
+                time_offset,
+                active_note.note,
+                active_note.velocity,
+                duration,
+            ));
+        }
     }
 }

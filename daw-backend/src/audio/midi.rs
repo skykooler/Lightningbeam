@@ -1,8 +1,8 @@
 /// MIDI event representing a single MIDI message
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct MidiEvent {
-    /// Sample position within the clip
-    pub timestamp: u64,
+    /// Time position within the clip in seconds (sample-rate independent)
+    pub timestamp: f64,
     /// MIDI status byte (includes channel)
     pub status: u8,
     /// First data byte (note number, CC number, etc.)
@@ -13,7 +13,7 @@ pub struct MidiEvent {
 
 impl MidiEvent {
     /// Create a new MIDI event
-    pub fn new(timestamp: u64, status: u8, data1: u8, data2: u8) -> Self {
+    pub fn new(timestamp: f64, status: u8, data1: u8, data2: u8) -> Self {
         Self {
             timestamp,
             status,
@@ -23,7 +23,7 @@ impl MidiEvent {
     }
 
     /// Create a note on event
-    pub fn note_on(timestamp: u64, channel: u8, note: u8, velocity: u8) -> Self {
+    pub fn note_on(timestamp: f64, channel: u8, note: u8, velocity: u8) -> Self {
         Self {
             timestamp,
             status: 0x90 | (channel & 0x0F),
@@ -33,7 +33,7 @@ impl MidiEvent {
     }
 
     /// Create a note off event
-    pub fn note_off(timestamp: u64, channel: u8, note: u8, velocity: u8) -> Self {
+    pub fn note_off(timestamp: f64, channel: u8, note: u8, velocity: u8) -> Self {
         Self {
             timestamp,
             status: 0x80 | (channel & 0x0F),
@@ -91,8 +91,8 @@ impl MidiClip {
     /// Add a MIDI event to the clip
     pub fn add_event(&mut self, event: MidiEvent) {
         self.events.push(event);
-        // Keep events sorted by timestamp
-        self.events.sort_by_key(|e| e.timestamp);
+        // Keep events sorted by timestamp (using partial_cmp for f64)
+        self.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
     }
 
     /// Get the end time of the clip
@@ -107,8 +107,8 @@ impl MidiClip {
         &self,
         range_start_seconds: f64,
         range_end_seconds: f64,
-        sample_rate: u32,
-    ) -> Vec<(u64, MidiEvent)> {
+        _sample_rate: u32,
+    ) -> Vec<MidiEvent> {
         let mut result = Vec::new();
 
         // Check if clip overlaps with the range
@@ -120,21 +120,16 @@ impl MidiClip {
         let play_start = range_start_seconds.max(self.start_time);
         let play_end = range_end_seconds.min(self.end_time());
 
-        // Convert to samples
-        let range_start_samples = (range_start_seconds * sample_rate as f64) as u64;
-
         // Position within the clip
         let clip_position_seconds = play_start - self.start_time;
-        let clip_position_samples = (clip_position_seconds * sample_rate as f64) as u64;
-        let clip_end_samples = ((play_end - self.start_time) * sample_rate as f64) as u64;
+        let clip_end_seconds = play_end - self.start_time;
 
         // Find events in this range
-        // Note: Using <= for the end boundary to include events exactly at the clip end
+        // Note: event.timestamp is now in seconds relative to clip start
+        // Use half-open interval [start, end) to avoid triggering events twice
         for event in &self.events {
-            if event.timestamp >= clip_position_samples && event.timestamp <= clip_end_samples {
-                // Calculate absolute timestamp in the output buffer
-                let absolute_timestamp = range_start_samples + (event.timestamp - clip_position_samples);
-                result.push((absolute_timestamp, *event));
+            if event.timestamp >= clip_position_seconds && event.timestamp < clip_end_seconds {
+                result.push(*event);
             }
         }
 

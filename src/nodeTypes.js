@@ -1015,6 +1015,135 @@ export const nodeTypes = {
     `
   },
 
+  Math: {
+    name: 'Math',
+    category: NodeCategory.UTILITY,
+    description: 'Mathematical and logical operations on CV signals',
+    inputs: [
+      { name: 'CV In A', type: SignalType.CV, index: 0 },
+      { name: 'CV In B', type: SignalType.CV, index: 1 }
+    ],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'operation', label: 'Operation', min: 0, max: 13, default: 0, unit: '' },
+      { id: 1, name: 'operand', label: 'Operand', min: -10, max: 10, default: 1, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Math</div>
+        <div class="node-param">
+          <label>Op: <span id="mathop-${nodeId}">Add</span></label>
+          <select class="node-select" data-node="${nodeId}" data-param="0" style="width: 100%; padding: 2px;">
+            <option value="0">Add</option>
+            <option value="1">Subtract</option>
+            <option value="2">Multiply</option>
+            <option value="3">Divide</option>
+            <option value="4">Min</option>
+            <option value="5">Max</option>
+            <option value="6">Average</option>
+            <option value="7">Invert</option>
+            <option value="8">Abs</option>
+            <option value="9">Clamp</option>
+            <option value="10">Wrap</option>
+            <option value="11">Greater</option>
+            <option value="12">Less</option>
+            <option value="13">Equal</option>
+          </select>
+        </div>
+        <div class="node-param">
+          <label>B: <span id="mathoperand-${nodeId}">1.0</span></label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="-10" max="10" value="1" step="0.1">
+        </div>
+      </div>
+    `
+  },
+
+  Quantizer: {
+    name: 'Quantizer',
+    category: NodeCategory.UTILITY,
+    description: 'Quantize CV to musical scales',
+    inputs: [
+      { name: 'CV In', type: SignalType.CV, index: 0 }
+    ],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 },
+      { name: 'Gate Out', type: SignalType.CV, index: 1 }
+    ],
+    parameters: [
+      { id: 0, name: 'scale', label: 'Scale', min: 0, max: 10, default: 0, unit: '' },
+      { id: 1, name: 'root', label: 'Root', min: 0, max: 11, default: 0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Quantizer</div>
+        <div class="node-param">
+          <label>Scale: <span id="quantscale-${nodeId}">Chromatic</span></label>
+          <select class="node-select" data-node="${nodeId}" data-param="0" style="width: 100%; padding: 2px;">
+            <option value="0">Chromatic</option>
+            <option value="1">Major</option>
+            <option value="2">Minor</option>
+            <option value="3">Pent. Major</option>
+            <option value="4">Pent. Minor</option>
+            <option value="5">Dorian</option>
+            <option value="6">Phrygian</option>
+            <option value="7">Lydian</option>
+            <option value="8">Mixolydian</option>
+            <option value="9">Whole Tone</option>
+            <option value="10">Octaves</option>
+          </select>
+        </div>
+        <div class="node-param">
+          <label>Root: <span id="quantroot-${nodeId}">C</span></label>
+          <select class="node-select" data-node="${nodeId}" data-param="1" style="width: 100%; padding: 2px;">
+            <option value="0">C</option>
+            <option value="1">C#</option>
+            <option value="2">D</option>
+            <option value="3">D#</option>
+            <option value="4">E</option>
+            <option value="5">F</option>
+            <option value="6">F#</option>
+            <option value="7">G</option>
+            <option value="8">G#</option>
+            <option value="9">A</option>
+            <option value="10">A#</option>
+            <option value="11">B</option>
+          </select>
+        </div>
+      </div>
+    `
+  },
+
+  SlewLimiter: {
+    name: 'SlewLimiter',
+    category: NodeCategory.UTILITY,
+    description: 'Limit rate of change for portamento/glide effects',
+    inputs: [
+      { name: 'CV In', type: SignalType.CV, index: 0 }
+    ],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'rise_time', label: 'Rise Time', min: 0, max: 5, default: 0.01, unit: 's' },
+      { id: 1, name: 'fall_time', label: 'Fall Time', min: 0, max: 5, default: 0.01, unit: 's' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Slew Limiter</div>
+        <div class="node-param">
+          <label>Rise: <span id="slewrise-${nodeId}">0.01</span>s</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0" max="5" value="0.01" step="0.001">
+        </div>
+        <div class="node-param">
+          <label>Fall: <span id="slewfall-${nodeId}">0.01</span>s</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="0" max="5" value="0.01" step="0.001">
+        </div>
+      </div>
+    `
+  },
+
   EQ: {
     name: 'EQ',
     category: NodeCategory.EFFECT,

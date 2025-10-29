@@ -450,11 +450,8 @@ export const actions = {
       let newMIDITrack = new AudioTrack(action.trackuuid, action.midiname, 'midi');
       let object = pointerList[action.object];
 
-      // Get available instruments and use the first one (SimpleSynth)
+      // Note: MIDI tracks now use node-based instruments via instrument_graph
       const { invoke } = window.__TAURI__.core;
-      const instruments = await invoke('audio_get_available_instruments');
-      const instrument = instruments.length > 0 ? instruments[0] : 'SimpleSynth';
-      newMIDITrack.instrument = instrument;
 
       // Add placeholder clip immediately so user sees feedback
       newMIDITrack.clips.push({

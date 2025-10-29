@@ -93,6 +93,12 @@ impl EventEmitter for TauriEventEmitter {
             AudioEvent::GraphPresetLoaded(track_id) => {
                 SerializedAudioEvent::GraphPresetLoaded { track_id }
             }
+            AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count) => {
+                SerializedAudioEvent::MidiRecordingStopped { track_id, clip_id, note_count }
+            }
+            AudioEvent::MidiRecordingProgress(track_id, clip_id, duration, notes) => {
+                SerializedAudioEvent::MidiRecordingProgress { track_id, clip_id, duration, notes }
+            }
             _ => return, // Ignore other event types for now
         };
 
@@ -382,6 +388,39 @@ pub async fn audio_resume_recording(
 }
 
 #[tauri::command]
+pub async fn audio_start_midi_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    start_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.start_midi_recording(track_id, clip_id, start_time);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_stop_midi_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+) -> Result<(), String> {
+    eprintln!("[TAURI] audio_stop_midi_recording called");
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        eprintln!("[TAURI] Calling controller.stop_midi_recording()");
+        controller.stop_midi_recording();
+        eprintln!("[TAURI] controller.stop_midi_recording() returned");
+        Ok(())
+    } else {
+        eprintln!("[TAURI] Audio not initialized!");
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn audio_create_midi_clip(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     track_id: u32,
@@ -390,9 +429,8 @@ pub async fn audio_create_midi_clip(
 ) -> Result<u32, String> {
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {
-        controller.create_midi_clip(track_id, start_time, duration);
-        // Return a clip ID (for now, just use 0 as clips are managed internally)
-        Ok(0)
+        let clip_id = controller.create_midi_clip(track_id, start_time, duration);
+        Ok(clip_id)
     } else {
         Err("Audio not initialized".to_string())
     }
@@ -498,6 +536,51 @@ pub async fn audio_load_midi_file(
 
         Ok(MidiFileMetadata {
             duration,
+            notes,
+        })
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_get_midi_clip_data(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+) -> Result<MidiFileMetadata, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Query the MIDI clip data from the backend
+        let clip_data = controller.query_midi_clip(track_id, clip_id)?;
+
+        // Convert MIDI events to MidiNote format
+        let mut notes = Vec::new();
+        let mut active_notes: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
+
+        for event in &clip_data.events {
+            // event.timestamp is already in seconds (sample-rate independent)
+            let time_seconds = event.timestamp;
+
+            if event.is_note_on() {
+                // Store note on event (time and velocity)
+                active_notes.insert(event.data1, (time_seconds, event.data2));
+            } else if event.is_note_off() {
+                // Find matching note on and create a MidiNote
+                if let Some((start, velocity)) = active_notes.remove(&event.data1) {
+                    notes.push(MidiNote {
+                        note: event.data1,
+                        start_time: start,
+                        duration: time_seconds - start,
+                        velocity,
+                    });
+                }
+            }
+        }
+
+        Ok(MidiFileMetadata {
+            duration: clip_data.duration,
             notes,
         })
     } else {
@@ -1133,6 +1216,8 @@ pub enum SerializedAudioEvent {
     RecordingProgress { clip_id: u32, duration: f64 },
     RecordingStopped { clip_id: u32, pool_index: usize, waveform: Vec<WaveformPeak> },
     RecordingError { message: String },
+    MidiRecordingStopped { track_id: u32, clip_id: u32, note_count: usize },
+    MidiRecordingProgress { track_id: u32, clip_id: u32, duration: f64, notes: Vec<(f64, u8, u8, f64)> },
     NoteOn { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     GraphNodeAdded { track_id: u32, node_id: u32, node_type: String },

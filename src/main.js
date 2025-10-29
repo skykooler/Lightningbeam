@@ -710,24 +710,11 @@ Object.defineProperty(globalThis, 'root', {
     return __root;
   },
   set(newRoot) {
-    console.error('[ROOT REPLACED] root is being replaced!');
-    console.error('[ROOT REPLACED] Old root idx:', __root?.idx, 'New root idx:', newRoot?.idx);
-    console.trace('[ROOT REPLACED] Stack trace:');
     __root = newRoot;
   },
   configurable: true,
   enumerable: true
 });
-
-// Set up a watchdog to monitor root.frameRate
-setInterval(() => {
-  if (root && root.frameRate === undefined) {
-    console.error('[WATCHDOG] root.frameRate is undefined!');
-    console.error('[WATCHDOG] root object idx:', root.idx);
-    console.error('[WATCHDOG] Has frameRate property?', 'frameRate' in root);
-    console.trace('[WATCHDOG] Stack trace:');
-  }
-}, 1000);
 
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -821,6 +808,7 @@ window.addEventListener("keydown", (e) => {
     case config.shortcuts.playAnimation:
       console.log("Spacebar pressed");
       playPause();
+      e.preventDefault(); // Prevent spacebar from clicking focused buttons
       break;
     case config.shortcuts.selectAll:
       e.preventDefault();
@@ -990,11 +978,6 @@ function playbackLoop() {
 
   if (playing) {
     const duration = context.activeObject.duration;
-
-    // Debug logging for recording
-    if (context.isRecording) {
-      console.log('playbackLoop - recording active, currentTime:', context.activeObject.currentTime, 'duration:', duration, 'isRecording:', context.isRecording);
-    }
 
     // Check if we've reached the end (but allow infinite playback when recording)
     if (context.isRecording || (duration > 0 && context.activeObject.currentTime < duration)) {
@@ -1203,6 +1186,98 @@ async function handleAudioEvent(event) {
       context.recordingClipId = null;
       break;
 
+    case 'MidiRecordingProgress':
+      // Update MIDI clip during recording with current duration and notes
+      const progressMidiTrack = context.activeObject.audioTracks.find(t => t.audioTrackId === event.track_id);
+      if (progressMidiTrack) {
+        const progressClip = progressMidiTrack.clips.find(c => c.clipId === event.clip_id);
+        if (progressClip) {
+          console.log('[MIDI_PROGRESS] Updating clip', event.clip_id, '- duration:', event.duration, 'notes:', event.notes.length, 'loading:', progressClip.loading);
+          progressClip.duration = event.duration;
+          progressClip.loading = false; // Make sure clip is not in loading state
+          // Convert backend note format to frontend format
+          progressClip.notes = event.notes.map(([start_time, note, velocity, duration]) => ({
+            note: note,
+            start_time: start_time,
+            duration: duration,
+            velocity: velocity
+          }));
+          console.log('[MIDI_PROGRESS] Clip now has', progressClip.notes.length, 'notes');
+
+          // Request redraw to show updated clip
+          updateLayers();
+          if (context.timelineWidget) {
+            context.timelineWidget.requestRedraw();
+          }
+        } else {
+          console.log('[MIDI_PROGRESS] Could not find clip', event.clip_id);
+        }
+      }
+      break;
+
+    case 'MidiRecordingStopped':
+      console.log('[FRONTEND] ========== MidiRecordingStopped EVENT ==========');
+      console.log('[FRONTEND] Event details - track:', event.track_id, 'clip:', event.clip_id, 'notes:', event.note_count);
+
+      // Find the track and update the clip
+      const midiTrack = context.activeObject.audioTracks.find(t => t.audioTrackId === event.track_id);
+      console.log('[FRONTEND] Found MIDI track:', midiTrack ? midiTrack.name : 'NOT FOUND');
+
+      if (midiTrack) {
+        console.log('[FRONTEND] Track has', midiTrack.clips.length, 'clips:', midiTrack.clips.map(c => `{id:${c.clipId}, name:"${c.name}", loading:${c.loading}}`));
+
+        // Find the clip we created when recording started
+        let existingClip = midiTrack.clips.find(c => c.clipId === event.clip_id);
+        console.log('[FRONTEND] Found existing clip:', existingClip ? `id:${existingClip.clipId}, name:"${existingClip.name}", loading:${existingClip.loading}` : 'NOT FOUND');
+
+        if (existingClip) {
+          // Fetch the clip data from the backend
+          try {
+            console.log('[FRONTEND] Fetching MIDI clip data from backend...');
+            const clipData = await invoke('audio_get_midi_clip_data', {
+              trackId: event.track_id,
+              clipId: event.clip_id
+            });
+            console.log('[FRONTEND] Received clip data:', clipData);
+
+            // Update the clip with the recorded notes
+            console.log('[FRONTEND] Updating clip - before:', { loading: existingClip.loading, name: existingClip.name, duration: existingClip.duration, noteCount: existingClip.notes?.length });
+            existingClip.loading = false;
+            existingClip.name = `MIDI Clip (${event.note_count} notes)`;
+            existingClip.duration = clipData.duration;
+            existingClip.notes = clipData.notes;
+            console.log('[FRONTEND] Updating clip - after:', { loading: existingClip.loading, name: existingClip.name, duration: existingClip.duration, noteCount: existingClip.notes?.length });
+          } catch (error) {
+            console.error('[FRONTEND] Failed to fetch MIDI clip data:', error);
+            existingClip.loading = false;
+            existingClip.name = `MIDI Clip (failed)`;
+          }
+        } else {
+          console.error('[FRONTEND] Could not find clip', event.clip_id, 'on track', event.track_id);
+        }
+
+        // Request redraw to show the clip with recorded notes
+        updateLayers();
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw();
+        }
+      }
+
+      // Clear recording state
+      console.log('[FRONTEND] Clearing MIDI recording state');
+      context.isRecording = false;
+      context.recordingTrackId = null;
+      context.recordingClipId = null;
+
+      // Update record button appearance
+      if (context.recordButton) {
+        context.recordButton.className = "playback-btn playback-btn-record";
+        context.recordButton.title = "Record";
+      }
+
+      console.log('[FRONTEND] MIDI recording complete - recorded', event.note_count, 'notes');
+      break;
+
     case 'GraphPresetLoaded':
       // Preset loaded - layers are already populated during graph reload
       console.log('GraphPresetLoaded event received for track:', event.track_id);
@@ -1330,47 +1405,116 @@ async function toggleRecording() {
     // Stop recording
     console.log('[FRONTEND] toggleRecording - stopping recording for clip:', context.recordingClipId);
     try {
-      await invoke('audio_stop_recording');
+      // Check if we're recording MIDI or audio
+      const track = context.activeObject.audioTracks.find(t => t.audioTrackId === context.recordingTrackId);
+      const isMidiRecording = track && track.type === 'midi';
+
+      console.log('[FRONTEND] Stopping recording - isMIDI:', isMidiRecording, 'track type:', track?.type, 'track ID:', context.recordingTrackId);
+
+      if (isMidiRecording) {
+        console.log('[FRONTEND] Calling audio_stop_midi_recording...');
+        await invoke('audio_stop_midi_recording');
+        console.log('[FRONTEND] audio_stop_midi_recording returned successfully');
+      } else {
+        console.log('[FRONTEND] Calling audio_stop_recording...');
+        await invoke('audio_stop_recording');
+        console.log('[FRONTEND] audio_stop_recording returned successfully');
+      }
+
+      console.log('[FRONTEND] Clearing recording state in toggleRecording');
       context.isRecording = false;
       context.recordingTrackId = null;
       context.recordingClipId = null;
-      console.log('[FRONTEND] Recording stopped via toggle button');
     } catch (error) {
       console.error('[FRONTEND] Failed to stop recording:', error);
     }
   } else {
-    // Start recording - check if activeLayer is an audio track
+    // Start recording - check if activeLayer is a track
     const audioTrack = context.activeObject.activeLayer;
     if (!audioTrack || !(audioTrack instanceof AudioTrack)) {
-      alert('Please select an audio track to record to');
+      alert('Please select a track to record to');
       return;
     }
 
     if (audioTrack.audioTrackId === null) {
-      alert('Audio track not properly initialized');
+      alert('Track not properly initialized');
       return;
     }
 
     // Start recording at current playhead position
     const startTime = context.activeObject.currentTime || 0;
 
-    console.log('[FRONTEND] Starting recording on track', audioTrack.audioTrackId, 'at time', startTime);
-    try {
-      await invoke('audio_start_recording', {
-        trackId: audioTrack.audioTrackId,
-        startTime: startTime
-      });
-      context.isRecording = true;
-      context.recordingTrackId = audioTrack.audioTrackId;
-      console.log('[FRONTEND] Recording started successfully, waiting for RecordingStarted event');
+    // Check if this is a MIDI track or audio track
+    if (audioTrack.type === 'midi') {
+      // MIDI recording
+      console.log('[FRONTEND] Starting MIDI recording on track', audioTrack.audioTrackId, 'at time', startTime);
+      try {
+        // First, create a MIDI clip at the current playhead position
+        const clipDuration = 4.0; // Default clip duration of 4 seconds (can be extended by recording)
+        const clipId = await invoke('audio_create_midi_clip', {
+          trackId: audioTrack.audioTrackId,
+          startTime: startTime,
+          duration: clipDuration
+        });
 
-      // Start playback so the timeline moves (if not already playing)
-      if (!playing) {
-        await playPause();
+        console.log('[FRONTEND] Created MIDI clip with ID:', clipId);
+
+        // Add clip to track immediately (similar to MIDI import)
+        audioTrack.clips.push({
+          clipId: clipId,
+          name: 'Recording...',
+          startTime: startTime,
+          duration: clipDuration,
+          notes: [],
+          loading: true
+        });
+
+        // Update UI to show the recording clip
+        updateLayers();
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw();
+        }
+
+        // Now start MIDI recording
+        await invoke('audio_start_midi_recording', {
+          trackId: audioTrack.audioTrackId,
+          clipId: clipId,
+          startTime: startTime
+        });
+
+        context.isRecording = true;
+        context.recordingTrackId = audioTrack.audioTrackId;
+        context.recordingClipId = clipId;
+        console.log('[FRONTEND] MIDI recording started successfully');
+
+        // Start playback so the timeline moves (if not already playing)
+        if (!playing) {
+          await playPause();
+        }
+      } catch (error) {
+        console.error('[FRONTEND] Failed to start MIDI recording:', error);
+        alert('Failed to start MIDI recording: ' + error);
       }
-    } catch (error) {
-      console.error('[FRONTEND] Failed to start recording:', error);
-      alert('Failed to start recording: ' + error);
+    } else {
+      // Audio recording
+      console.log('[FRONTEND] Starting audio recording on track', audioTrack.audioTrackId, 'at time', startTime);
+      try {
+        await invoke('audio_start_recording', {
+          trackId: audioTrack.audioTrackId,
+          startTime: startTime
+        });
+        context.isRecording = true;
+        context.recordingTrackId = audioTrack.audioTrackId;
+        console.log('[FRONTEND] Audio recording started successfully, waiting for RecordingStarted event');
+
+        // Start playback so the timeline moves (if not already playing)
+        if (!playing) {
+          await playPause();
+        }
+      } catch (error) {
+        console.error('[FRONTEND] Failed to start audio recording:', error);
+        alert('Failed to start audio recording: ' + error);
+      }
     }
   }
 }
@@ -7248,6 +7392,81 @@ function nodeEditor() {
         });
       });
 
+      // Handle select dropdowns
+      const selects = nodeElement.querySelectorAll('select[data-param]');
+      selects.forEach(select => {
+        // Track parameter change action for undo/redo
+        let paramAction = null;
+
+        // Prevent node dragging when interacting with select
+        select.addEventListener("mousedown", (e) => {
+          e.stopPropagation();
+
+          // Initialize undo action
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const currentValue = parseFloat(e.target.value);
+          const nodeData = editor.getNodeFromId(nodeId);
+
+          if (nodeData && nodeData.data.backendId !== null) {
+            const currentTrackId = getCurrentMidiTrack();
+            if (currentTrackId !== null) {
+              paramAction = actions.graphSetParameter.initialize(
+                currentTrackId,
+                nodeData.data.backendId,
+                paramId,
+                nodeId,
+                currentValue
+              );
+            }
+          }
+        });
+        select.addEventListener("pointerdown", (e) => {
+          e.stopPropagation();
+        });
+
+        select.addEventListener("change", (e) => {
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const value = parseFloat(e.target.value);
+
+          console.log(`[setupNodeParameters] Select change - nodeId: ${nodeId}, paramId: ${paramId}, value: ${value}`);
+
+          // Update display span if it exists
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (nodeData) {
+            const nodeDef = nodeTypes[nodeData.name];
+            if (nodeDef && nodeDef.parameters[paramId]) {
+              const param = nodeDef.parameters[paramId];
+              const displaySpan = nodeElement.querySelector(`#${param.name}-${nodeId}`);
+              if (displaySpan) {
+                // Update the span with the selected option text
+                displaySpan.textContent = e.target.options[e.target.selectedIndex].text;
+              }
+            }
+
+            // Send to backend
+            if (nodeData.data.backendId !== null) {
+              const currentTrackId = getCurrentMidiTrack();
+              if (currentTrackId !== null) {
+                invoke("graph_set_parameter", {
+                  trackId: currentTrackId,
+                  nodeId: nodeData.data.backendId,
+                  paramId: paramId,
+                  value: value
+                }).catch(err => {
+                  console.error("Failed to set parameter:", err);
+                });
+              }
+            }
+          }
+
+          // Finalize undo action
+          if (paramAction) {
+            actions.graphSetParameter.finalize(paramAction, value);
+            paramAction = null;
+          }
+        });
+      });
+
       // Handle Load Sample button for SimpleSampler
       const loadSampleBtn = nodeElement.querySelector(".load-sample-btn");
       if (loadSampleBtn) {
@@ -9107,20 +9326,15 @@ async function addEmptyMIDITrack() {
   const trackUuid = uuidv4();
 
   try {
-    // Get available instruments
-    const instruments = await getAvailableInstruments();
-
-    // Default to SimpleSynth for now (we can add UI selection later)
-    const instrument = instruments.length > 0 ? instruments[0] : 'SimpleSynth';
+    // Note: MIDI tracks now use node-based instruments via instrument_graph
 
     // Create new AudioTrack with type='midi'
     const newMIDITrack = new AudioTrack(trackUuid, trackName, 'midi');
-    newMIDITrack.instrument = instrument;
 
-    // Initialize track in backend (creates MIDI track with instrument)
+    // Initialize track in backend (creates MIDI track with node graph)
     await newMIDITrack.initializeTrack();
 
-    console.log('[addEmptyMIDITrack] After initializeTrack - instrument:', instrument);
+    console.log('[addEmptyMIDITrack] After initializeTrack - track created with node graph');
 
     // Add track to active object
     context.activeObject.audioTracks.push(newMIDITrack);
@@ -9144,16 +9358,7 @@ async function addEmptyMIDITrack() {
 }
 
 // MIDI Command Wrappers
-async function getAvailableInstruments() {
-  try {
-    const instruments = await invoke('audio_get_available_instruments');
-    console.log('Available instruments:', instruments);
-    return instruments;
-  } catch (error) {
-    console.error('Failed to get available instruments:', error);
-    throw error;
-  }
-}
+// Note: getAvailableInstruments() removed - now using node-based instruments
 
 async function createMIDITrack(name, instrument) {
   try {

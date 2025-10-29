@@ -98,6 +98,12 @@ pub enum Command {
     /// Resume the current recording
     ResumeRecording,
 
+    // MIDI Recording commands
+    /// Start MIDI recording on a track (track_id, clip_id, start_time)
+    StartMidiRecording(TrackId, MidiClipId, f64),
+    /// Stop the current MIDI recording
+    StopMidiRecording,
+
     // Project commands
     /// Reset the entire project (remove all tracks, clear audio pool, reset state)
     Reset,
@@ -172,6 +178,11 @@ pub enum AudioEvent {
     RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
     /// Recording error (error_message)
     RecordingError(String),
+    /// MIDI recording stopped (track_id, clip_id, note_count)
+    MidiRecordingStopped(TrackId, MidiClipId, usize),
+    /// MIDI recording progress (track_id, clip_id, duration, notes)
+    /// Notes format: (start_time, note, velocity, duration)
+    MidiRecordingProgress(TrackId, MidiClipId, f64, Vec<(f64, u8, u8, f64)>),
     /// Project has been reset
     ProjectReset,
     /// MIDI note started playing (note, velocity)
@@ -199,6 +210,8 @@ pub enum Query {
     GetTemplateState(TrackId, u32),
     /// Get oscilloscope data from a node (track_id, node_id, sample_count)
     GetOscilloscopeData(TrackId, u32, usize),
+    /// Get MIDI clip data (track_id, clip_id)
+    GetMidiClip(TrackId, MidiClipId),
 }
 
 /// Oscilloscope data from a node
@@ -210,6 +223,13 @@ pub struct OscilloscopeData {
     pub cv: Vec<f32>,
 }
 
+/// MIDI clip data for serialization
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MidiClipData {
+    pub duration: f64,
+    pub events: Vec<crate::audio::midi::MidiEvent>,
+}
+
 /// Responses to synchronous queries
 #[derive(Debug)]
 pub enum QueryResponse {
@@ -217,4 +237,6 @@ pub enum QueryResponse {
     GraphState(Result<String, String>),
     /// Oscilloscope data samples
     OscilloscopeData(Result<OscilloscopeData, String>),
+    /// MIDI clip data
+    MidiClipData(Result<MidiClipData, String>),
 }

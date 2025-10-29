@@ -405,7 +405,7 @@ impl Project {
     pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
         // Queue the MIDI note-on event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_on(0, 0, note, velocity);
+            let event = MidiEvent::note_on(0.0, 0, note, velocity);
             track.queue_live_midi(event);
         }
     }
@@ -414,7 +414,7 @@ impl Project {
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
         // Queue the MIDI note-off event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_off(0, 0, note, 0);
+            let event = MidiEvent::note_off(0.0, 0, note, 0);
             track.queue_live_midi(event);
         }
     }

@@ -4,11 +4,11 @@ use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
 use crate::audio::node_graph::{nodes::*, InstrumentGraph};
 use crate::audio::pool::AudioPool;
 use crate::audio::project::Project;
-use crate::audio::recording::RecordingState;
+use crate::audio::recording::{MidiRecordingState, RecordingState};
 use crate::audio::track::{Track, TrackId, TrackNode};
 use crate::command::{AudioEvent, Command, Query, QueryResponse};
 use petgraph::stable_graph::NodeIndex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Audio engine for Phase 6: hierarchical tracks with groups
@@ -30,6 +30,9 @@ pub struct Engine {
     // Shared playhead for UI reads
     playhead_atomic: Arc<AtomicU64>,
 
+    // Shared MIDI clip ID counter for synchronous access
+    next_midi_clip_id_atomic: Arc<AtomicU32>,
+
     // Event counter for periodic position updates
     frames_since_last_event: usize,
     event_interval_frames: usize,
@@ -38,13 +41,15 @@ pub struct Engine {
     mix_buffer: Vec<f32>,
 
     // ID counters
-    next_midi_clip_id: MidiClipId,
     next_clip_id: ClipId,
 
     // Recording state
     recording_state: Option<RecordingState>,
     input_rx: Option<rtrb::Consumer<f32>>,
     recording_progress_counter: usize,
+
+    // MIDI recording state
+    midi_recording_state: Option<MidiRecordingState>,
 }
 
 impl Engine {
@@ -75,14 +80,15 @@ impl Engine {
             query_rx,
             query_response_tx,
             playhead_atomic: Arc::new(AtomicU64::new(0)),
+            next_midi_clip_id_atomic: Arc::new(AtomicU32::new(0)),
             frames_since_last_event: 0,
             event_interval_frames,
             mix_buffer: Vec::new(),
-            next_midi_clip_id: 0,
             next_clip_id: 0,
             recording_state: None,
             input_rx: None,
             recording_progress_counter: 0,
+            midi_recording_state: None,
         }
     }
 
@@ -157,6 +163,7 @@ impl Engine {
             query_tx,
             query_response_rx,
             playhead: Arc::clone(&self.playhead_atomic),
+            next_midi_clip_id: Arc::clone(&self.next_midi_clip_id_atomic),
             sample_rate: self.sample_rate,
             channels: self.channels,
         }
@@ -192,8 +199,8 @@ impl Engine {
                 self.buffer_pool = BufferPool::new(8, output.len());
             }
 
-            // Convert playhead from samples to seconds for timeline-based rendering
-            let playhead_seconds = self.playhead as f64 / (self.sample_rate as f64 * self.channels as f64);
+            // Convert playhead from frames to seconds for timeline-based rendering
+            let playhead_seconds = self.playhead as f64 / self.sample_rate as f64;
 
             // Render the entire project hierarchy into the mix buffer
             self.project.render(
@@ -208,8 +215,8 @@ impl Engine {
             // Copy mix to output
             output.copy_from_slice(&self.mix_buffer);
 
-            // Update playhead
-            self.playhead += output.len() as u64;
+            // Update playhead (convert total samples to frames)
+            self.playhead += (output.len() / self.channels as usize) as u64;
 
             // Update atomic playhead for UI reads
             self.playhead_atomic
@@ -219,12 +226,24 @@ impl Engine {
             self.frames_since_last_event += output.len() / self.channels as usize;
             if self.frames_since_last_event >= self.event_interval_frames / self.channels as usize
             {
-                let position_seconds =
-                    self.playhead as f64 / (self.sample_rate as f64 * self.channels as f64);
+                let position_seconds = self.playhead as f64 / self.sample_rate as f64;
                 let _ = self
                     .event_tx
                     .push(AudioEvent::PlaybackPosition(position_seconds));
                 self.frames_since_last_event = 0;
+
+                // Send MIDI recording progress if active
+                if let Some(recording) = &self.midi_recording_state {
+                    let current_time = self.playhead as f64 / self.sample_rate as f64;
+                    let duration = current_time - recording.start_time;
+                    let notes = recording.get_notes().to_vec();
+                    let _ = self.event_tx.push(AudioEvent::MidiRecordingProgress(
+                        recording.track_id,
+                        recording.clip_id,
+                        duration,
+                        notes,
+                    ));
+                }
             }
         } else {
             // Not playing, but process live MIDI input
@@ -296,10 +315,12 @@ impl Engine {
                 self.project.stop_all_notes();
             }
             Command::Seek(seconds) => {
-                let samples = (seconds * self.sample_rate as f64 * self.channels as f64) as u64;
-                self.playhead = samples;
+                let frames = (seconds * self.sample_rate as f64) as u64;
+                self.playhead = frames;
                 self.playhead_atomic
                     .store(self.playhead, Ordering::Relaxed);
+                // Stop all MIDI notes when seeking to prevent stuck notes
+                self.project.stop_all_notes();
             }
             Command::SetTrackVolume(track_id, volume) => {
                 if let Some(track) = self.project.get_track_mut(track_id) {
@@ -393,28 +414,28 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
             Command::CreateMidiClip(track_id, start_time, duration) => {
-                // Create a new MIDI clip with unique ID
-                let clip_id = self.next_midi_clip_id;
-                self.next_midi_clip_id += 1;
+                // Get the next MIDI clip ID from the atomic counter
+                let clip_id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
                 let clip = MidiClip::new(clip_id, start_time, duration);
                 let _ = self.project.add_midi_clip(track_id, clip);
+                // Notify UI about the new clip with its ID
+                let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
             }
             Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration) => {
                 // Add a MIDI note event to the specified clip
                 if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                     if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        // Convert time to sample timestamp
-                        let timestamp = (time_offset * self.sample_rate as f64) as u64;
-                        let note_on = MidiEvent::note_on(timestamp, 0, note, velocity);
+                        // Timestamp is now in seconds (sample-rate independent)
+                        let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
                         clip.events.push(note_on);
 
                         // Add note off event
-                        let note_off_timestamp = ((time_offset + duration) * self.sample_rate as f64) as u64;
-                        let note_off = MidiEvent::note_off(note_off_timestamp, 0, note, 64);
+                        let note_off_time = time_offset + duration;
+                        let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
                         clip.events.push(note_off);
 
-                        // Sort events by timestamp
-                        clip.events.sort_by_key(|e| e.timestamp);
+                        // Sort events by timestamp (using partial_cmp for f64)
+                        clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                     }
                 }
             }
@@ -430,20 +451,19 @@ impl Engine {
                         clip.events.clear();
 
                         // Add new events from the notes array
+                        // Timestamps are now stored in seconds (sample-rate independent)
                         for (start_time, note, velocity, duration) in notes {
-                            // Convert time to sample timestamp
-                            let timestamp = (start_time * self.sample_rate as f64) as u64;
-                            let note_on = MidiEvent::note_on(timestamp, 0, note, velocity);
+                            let note_on = MidiEvent::note_on(start_time, 0, note, velocity);
                             clip.events.push(note_on);
 
                             // Add note off event
-                            let note_off_timestamp = ((start_time + duration) * self.sample_rate as f64) as u64;
-                            let note_off = MidiEvent::note_off(note_off_timestamp, 0, note, 64);
+                            let note_off_time = start_time + duration;
+                            let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
                             clip.events.push(note_off);
                         }
 
-                        // Sort events by timestamp
-                        clip.events.sort_by_key(|e| e.timestamp);
+                        // Sort events by timestamp (using partial_cmp for f64)
+                        clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                     }
                 }
             }
@@ -596,6 +616,16 @@ impl Engine {
                     recording.resume();
                 }
             }
+            Command::StartMidiRecording(track_id, clip_id, start_time) => {
+                // Start MIDI recording on the specified track
+                self.handle_start_midi_recording(track_id, clip_id, start_time);
+            }
+            Command::StopMidiRecording => {
+                eprintln!("[ENGINE] Received StopMidiRecording command");
+                // Stop the current MIDI recording
+                self.handle_stop_midi_recording();
+                eprintln!("[ENGINE] handle_stop_midi_recording() completed");
+            }
             Command::Reset => {
                 // Reset the entire project to initial state
                 // Stop playback
@@ -617,7 +647,7 @@ impl Engine {
                 self.buffer_pool = BufferPool::new(8, buffer_size);
 
                 // Reset ID counters
-                self.next_midi_clip_id = 0;
+                self.next_midi_clip_id_atomic.store(0, Ordering::Relaxed);
                 self.next_clip_id = 0;
 
                 // Clear mix buffer
@@ -630,11 +660,31 @@ impl Engine {
             Command::SendMidiNoteOn(track_id, note, velocity) => {
                 // Send a live MIDI note on event to the specified track's instrument
                 self.project.send_midi_note_on(track_id, note, velocity);
+
+                // If MIDI recording is active on this track, capture the event
+                if let Some(recording) = &mut self.midi_recording_state {
+                    if recording.track_id == track_id {
+                        let absolute_time = self.playhead as f64 / self.sample_rate as f64;
+                        eprintln!("[MIDI_RECORDING] NoteOn captured: note={}, velocity={}, absolute_time={:.3}s, playhead={}, sample_rate={}",
+                                  note, velocity, absolute_time, self.playhead, self.sample_rate);
+                        recording.note_on(note, velocity, absolute_time);
+                    }
+                }
             }
 
             Command::SendMidiNoteOff(track_id, note) => {
                 // Send a live MIDI note off event to the specified track's instrument
                 self.project.send_midi_note_off(track_id, note);
+
+                // If MIDI recording is active on this track, capture the event
+                if let Some(recording) = &mut self.midi_recording_state {
+                    if recording.track_id == track_id {
+                        let absolute_time = self.playhead as f64 / self.sample_rate as f64;
+                        eprintln!("[MIDI_RECORDING] NoteOff captured: note={}, absolute_time={:.3}s, playhead={}, sample_rate={}",
+                                  note, absolute_time, self.playhead, self.sample_rate);
+                        recording.note_off(note, absolute_time);
+                    }
+                }
             }
 
             // Node graph commands
@@ -654,17 +704,20 @@ impl Engine {
                             "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
+                            "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
                             "Delay" => Box::new(DelayNode::new("Delay".to_string())),
                             "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
                             "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
+                            "Math" => Box::new(MathNode::new("Math".to_string())),
                             "EQ" => Box::new(EQNode::new("EQ".to_string())),
                             "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
                             "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
                             "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
                             "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
+                            "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter".to_string())),
                             "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
@@ -718,17 +771,20 @@ impl Engine {
                             "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
+                            "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
                             "Delay" => Box::new(DelayNode::new("Delay".to_string())),
                             "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
                             "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
+                            "Math" => Box::new(MathNode::new("Math".to_string())),
                             "EQ" => Box::new(EQNode::new("EQ".to_string())),
                             "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
                             "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
                             "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
                             "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
+                            "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter".to_string())),
                             "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
@@ -1100,6 +1156,21 @@ impl Engine {
                     ))),
                 }
             }
+            Query::GetMidiClip(track_id, clip_id) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
+                        use crate::command::MidiClipData;
+                        QueryResponse::MidiClipData(Ok(MidiClipData {
+                            duration: clip.duration,
+                            events: clip.events.clone(),
+                        }))
+                    } else {
+                        QueryResponse::MidiClipData(Err(format!("Clip {} not found in track {}", clip_id, track_id)))
+                    }
+                } else {
+                    QueryResponse::MidiClipData(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
         };
 
         // Send response back
@@ -1193,6 +1264,15 @@ impl Engine {
     /// Handle stopping a recording
     fn handle_stop_recording(&mut self) {
         eprintln!("[STOP_RECORDING] handle_stop_recording called");
+
+        // Check if we have an active MIDI recording first
+        if self.midi_recording_state.is_some() {
+            eprintln!("[STOP_RECORDING] Detected active MIDI recording, delegating to handle_stop_midi_recording");
+            self.handle_stop_midi_recording();
+            return;
+        }
+
+        // Handle audio recording
         if let Some(recording) = self.recording_state.take() {
             let clip_id = recording.clip_id;
             let track_id = recording.track_id;
@@ -1248,6 +1328,90 @@ impl Engine {
         }
     }
 
+    /// Handle starting MIDI recording
+    fn handle_start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: f64) {
+        // Check if track exists and is a MIDI track
+        if let Some(crate::audio::track::TrackNode::Midi(_)) = self.project.get_track_mut(track_id) {
+            // Create MIDI recording state
+            let recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+            self.midi_recording_state = Some(recording_state);
+
+            eprintln!("[MIDI_RECORDING] Started MIDI recording on track {} for clip {}", track_id, clip_id);
+        } else {
+            // Send error event if track not found or not a MIDI track
+            let _ = self.event_tx.push(AudioEvent::RecordingError(
+                format!("Track {} not found or is not a MIDI track", track_id)
+            ));
+        }
+    }
+
+    /// Handle stopping MIDI recording
+    fn handle_stop_midi_recording(&mut self) {
+        eprintln!("[MIDI_RECORDING] handle_stop_midi_recording called");
+        if let Some(mut recording) = self.midi_recording_state.take() {
+            // Close out any active notes at the current playhead position
+            let end_time = self.playhead as f64 / self.sample_rate as f64;
+            eprintln!("[MIDI_RECORDING] Closing active notes at time {}", end_time);
+            recording.close_active_notes(end_time);
+
+            let clip_id = recording.clip_id;
+            let track_id = recording.track_id;
+            let notes = recording.get_notes().to_vec();
+            let note_count = notes.len();
+            let recording_duration = end_time - recording.start_time;
+
+            eprintln!("[MIDI_RECORDING] Stopping MIDI recording for clip_id={}, track_id={}, captured {} notes, duration={:.3}s",
+                      clip_id, track_id, note_count, recording_duration);
+
+            // Update the MIDI clip using the existing UpdateMidiClipNotes logic
+            eprintln!("[MIDI_RECORDING] Looking for track {} to update clip", track_id);
+            if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                eprintln!("[MIDI_RECORDING] Found MIDI track, looking for clip {}", clip_id);
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                    eprintln!("[MIDI_RECORDING] Found clip, clearing and adding {} notes", note_count);
+                    // Clear existing events
+                    clip.events.clear();
+
+                    // Update clip duration to match the actual recording time
+                    clip.duration = recording_duration;
+
+                    // Add new events from the recorded notes
+                    // Timestamps are now stored in seconds (sample-rate independent)
+                    for (start_time, note, velocity, duration) in notes.iter() {
+                        let note_on = MidiEvent::note_on(*start_time, 0, *note, *velocity);
+
+                        eprintln!("[MIDI_RECORDING] Note {}: start_time={:.3}s, duration={:.3}s",
+                                  note, start_time, duration);
+
+                        clip.events.push(note_on);
+
+                        // Add note off event
+                        let note_off_time = *start_time + *duration;
+                        let note_off = MidiEvent::note_off(note_off_time, 0, *note, 64);
+                        clip.events.push(note_off);
+                    }
+
+                    // Sort events by timestamp (using partial_cmp for f64)
+                    clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    eprintln!("[MIDI_RECORDING] Updated clip {} with {} notes ({} events)", clip_id, note_count, clip.events.len());
+                } else {
+                    eprintln!("[MIDI_RECORDING] ERROR: Clip {} not found on track!", clip_id);
+                }
+            } else {
+                eprintln!("[MIDI_RECORDING] ERROR: Track {} not found or not a MIDI track!", track_id);
+            }
+
+            // Send event to UI
+            eprintln!("[MIDI_RECORDING] Pushing MidiRecordingStopped event to event_tx...");
+            match self.event_tx.push(AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count)) {
+                Ok(_) => eprintln!("[MIDI_RECORDING] MidiRecordingStopped event pushed successfully"),
+                Err(e) => eprintln!("[MIDI_RECORDING] ERROR: Failed to push event: {:?}", e),
+            }
+        } else {
+            eprintln!("[MIDI_RECORDING] No active MIDI recording to stop");
+        }
+    }
+
     /// Get current sample rate
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
@@ -1270,6 +1434,7 @@ pub struct EngineController {
     query_tx: rtrb::Producer<Query>,
     query_response_rx: rtrb::Consumer<QueryResponse>,
     playhead: Arc<AtomicU64>,
+    next_midi_clip_id: Arc<AtomicU32>,
     sample_rate: u32,
     channels: u32,
 }
@@ -1331,8 +1496,8 @@ impl EngineController {
 
     /// Get current playhead position in seconds
     pub fn get_playhead_seconds(&self) -> f64 {
-        let samples = self.playhead.load(Ordering::Relaxed);
-        samples as f64 / (self.sample_rate as f64 * self.channels as f64)
+        let frames = self.playhead.load(Ordering::Relaxed);
+        frames as f64 / self.sample_rate as f64
     }
 
     /// Create a new metatrack
@@ -1388,8 +1553,11 @@ impl EngineController {
     }
 
     /// Create a new MIDI clip on a track
-    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) {
+    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) -> MidiClipId {
+        // Peek at the next clip ID that will be used
+        let clip_id = self.next_midi_clip_id.load(Ordering::Relaxed);
         let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time, duration));
+        clip_id
     }
 
     /// Add a MIDI note to a clip
@@ -1494,6 +1662,16 @@ impl EngineController {
     /// Resume the current recording
     pub fn resume_recording(&mut self) {
         let _ = self.command_tx.push(Command::ResumeRecording);
+    }
+
+    /// Start MIDI recording on a track
+    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: f64) {
+        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time));
+    }
+
+    /// Stop the current MIDI recording
+    pub fn stop_midi_recording(&mut self) {
+        let _ = self.command_tx.push(Command::StopMidiRecording);
     }
 
     /// Reset the entire project (clear all tracks, audio pool, and state)
@@ -1627,6 +1805,28 @@ impl EngineController {
 
         while start.elapsed() < timeout {
             if let Ok(QueryResponse::GraphState(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query MIDI clip data
+    pub fn query_midi_clip(&mut self, track_id: TrackId, clip_id: MidiClipId) -> Result<crate::command::MidiClipData, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetMidiClip(track_id, clip_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::MidiClipData(result)) = self.query_response_rx.pop() {
                 return result;
             }
             // Small sleep to avoid busy-waiting

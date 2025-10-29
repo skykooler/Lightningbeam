@@ -4285,9 +4285,20 @@ class VirtualPiano extends Widget {
 
     console.log(`Note ON: ${this.getMidiNoteInfo(midiNote).name} (${midiNote}) velocity: ${velocity}`);
 
-    // Send to backend - use track ID 0 (first MIDI track)
-    // TODO: Make this configurable to select which track to send to
-    invoke('audio_send_midi_note_on', { trackId: 0, note: midiNote, velocity }).catch(error => {
+    // Send to backend - use selected track or recording track
+    let trackId = 0; // Default to first track
+    if (typeof context !== 'undefined') {
+      // If recording, use the recording track
+      if (context.isRecording && context.recordingTrackId !== null) {
+        trackId = context.recordingTrackId;
+      }
+      // Otherwise use the selected track
+      else if (context.activeObject && context.activeObject.activeLayer && context.activeObject.activeLayer.audioTrackId !== null) {
+        trackId = context.activeObject.activeLayer.audioTrackId;
+      }
+    }
+
+    invoke('audio_send_midi_note_on', { trackId: trackId, note: midiNote, velocity }).catch(error => {
       console.error('Failed to send MIDI note on:', error);
     });
 
@@ -4305,8 +4316,20 @@ class VirtualPiano extends Widget {
 
     console.log(`Note OFF: ${this.getMidiNoteInfo(midiNote).name} (${midiNote})`);
 
-    // Send to backend - use track ID 0 (first MIDI track)
-    invoke('audio_send_midi_note_off', { trackId: 0, note: midiNote }).catch(error => {
+    // Send to backend - use selected track or recording track
+    let trackId = 0; // Default to first track
+    if (typeof context !== 'undefined') {
+      // If recording, use the recording track
+      if (context.isRecording && context.recordingTrackId !== null) {
+        trackId = context.recordingTrackId;
+      }
+      // Otherwise use the selected track
+      else if (context.activeObject && context.activeObject.activeLayer && context.activeObject.activeLayer.audioTrackId !== null) {
+        trackId = context.activeObject.activeLayer.audioTrackId;
+      }
+    }
+
+    invoke('audio_send_midi_note_off', { trackId: trackId, note: midiNote }).catch(error => {
       console.error('Failed to send MIDI note off:', error);
     });
 
