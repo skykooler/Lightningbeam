@@ -30,16 +30,6 @@ pub enum Command {
     /// Move a clip to a new timeline position
     MoveClip(TrackId, ClipId, f64),
 
-    // Effect management commands
-    /// Add or update gain effect on track (gain in dB)
-    AddGainEffect(TrackId, f32),
-    /// Add or update pan effect on track (-1.0 = left, 0.0 = center, 1.0 = right)
-    AddPanEffect(TrackId, f32),
-    /// Add or update EQ effect on track (low_db, mid_db, high_db)
-    AddEQEffect(TrackId, f32, f32, f32),
-    /// Clear all effects from a track
-    ClearEffects(TrackId),
-
     // Metatrack management commands
     /// Create a new metatrack with a name
     CreateMetatrack(String),
@@ -211,11 +201,20 @@ pub enum Query {
     GetOscilloscopeData(TrackId, u32, usize),
 }
 
+/// Oscilloscope data from a node
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OscilloscopeData {
+    /// Audio samples
+    pub audio: Vec<f32>,
+    /// CV samples (may be empty if no CV input)
+    pub cv: Vec<f32>,
+}
+
 /// Responses to synchronous queries
 #[derive(Debug)]
 pub enum QueryResponse {
     /// Graph state as JSON string
     GraphState(Result<String, String>),
     /// Oscilloscope data samples
-    OscilloscopeData(Result<Vec<f32>, String>),
+    OscilloscopeData(Result<OscilloscopeData, String>),
 }

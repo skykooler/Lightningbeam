@@ -7,7 +7,6 @@ use crate::audio::project::Project;
 use crate::audio::recording::RecordingState;
 use crate::audio::track::{Track, TrackId, TrackNode};
 use crate::command::{AudioEvent, Command, Query, QueryResponse};
-use crate::effects::{Effect, GainEffect, PanEffect, SimpleEQ};
 use petgraph::stable_graph::NodeIndex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -102,7 +101,6 @@ impl Engine {
         if let Some(node) = self.project.get_track_mut(id) {
             if let crate::audio::track::TrackNode::Audio(audio_track) = node {
                 audio_track.clips = track.clips;
-                audio_track.effects = track.effects;
                 audio_track.volume = track.volume;
                 audio_track.muted = track.muted;
                 audio_track.solo = track.solo;
@@ -324,106 +322,6 @@ impl Engine {
                         clip.start_time = new_start_time;
                     }
                 }
-            }
-            Command::AddGainEffect(track_id, gain_db) => {
-                // Get the track node and handle audio tracks, MIDI tracks, and groups
-                match self.project.get_track_mut(track_id) {
-                    Some(crate::audio::track::TrackNode::Audio(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Gain") {
-                            effect.set_parameter(0, gain_db);
-                        } else {
-                            track.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Midi(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Gain") {
-                            effect.set_parameter(0, gain_db);
-                        } else {
-                            track.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Group(group)) => {
-                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "Gain") {
-                            effect.set_parameter(0, gain_db);
-                        } else {
-                            group.add_effect(Box::new(GainEffect::with_gain_db(gain_db)));
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Command::AddPanEffect(track_id, pan) => {
-                match self.project.get_track_mut(track_id) {
-                    Some(crate::audio::track::TrackNode::Audio(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Pan") {
-                            effect.set_parameter(0, pan);
-                        } else {
-                            track.add_effect(Box::new(PanEffect::with_pan(pan)));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Midi(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "Pan") {
-                            effect.set_parameter(0, pan);
-                        } else {
-                            track.add_effect(Box::new(PanEffect::with_pan(pan)));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Group(group)) => {
-                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "Pan") {
-                            effect.set_parameter(0, pan);
-                        } else {
-                            group.add_effect(Box::new(PanEffect::with_pan(pan)));
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Command::AddEQEffect(track_id, low_db, mid_db, high_db) => {
-                match self.project.get_track_mut(track_id) {
-                    Some(crate::audio::track::TrackNode::Audio(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
-                            effect.set_parameter(0, low_db);
-                            effect.set_parameter(1, mid_db);
-                            effect.set_parameter(2, high_db);
-                        } else {
-                            let mut eq = SimpleEQ::new();
-                            eq.set_parameter(0, low_db);
-                            eq.set_parameter(1, mid_db);
-                            eq.set_parameter(2, high_db);
-                            track.add_effect(Box::new(eq));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Midi(track)) => {
-                        if let Some(effect) = track.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
-                            effect.set_parameter(0, low_db);
-                            effect.set_parameter(1, mid_db);
-                            effect.set_parameter(2, high_db);
-                        } else {
-                            let mut eq = SimpleEQ::new();
-                            eq.set_parameter(0, low_db);
-                            eq.set_parameter(1, mid_db);
-                            eq.set_parameter(2, high_db);
-                            track.add_effect(Box::new(eq));
-                        }
-                    }
-                    Some(crate::audio::track::TrackNode::Group(group)) => {
-                        if let Some(effect) = group.effects.iter_mut().find(|e| e.name() == "SimpleEQ") {
-                            effect.set_parameter(0, low_db);
-                            effect.set_parameter(1, mid_db);
-                            effect.set_parameter(2, high_db);
-                        } else {
-                            let mut eq = SimpleEQ::new();
-                            eq.set_parameter(0, low_db);
-                            eq.set_parameter(1, mid_db);
-                            eq.set_parameter(2, high_db);
-                            group.add_effect(Box::new(eq));
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Command::ClearEffects(track_id) => {
-                let _ = self.project.clear_effects(track_id);
             }
             Command::CreateMetatrack(name) => {
                 let track_id = self.project.add_group_track(name.clone(), None);
@@ -743,13 +641,8 @@ impl Engine {
             Command::GraphAddNode(track_id, node_type, x, y) => {
                 // Get MIDI track (graphs are only for MIDI tracks currently)
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    // Create graph if it doesn't exist
-                    if track.instrument_graph.is_none() {
-                        // Use large buffer to accommodate any audio callback size
-                        track.instrument_graph = Some(InstrumentGraph::new(self.sample_rate, 8192));
-                    }
-
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         // Create the node based on type
                         let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
                             "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
@@ -810,7 +703,8 @@ impl Engine {
 
             Command::GraphAddNodeToTemplate(track_id, voice_allocator_id, node_type, _x, _y) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let va_idx = NodeIndex::new(voice_allocator_id as usize);
 
                         // Create the node
@@ -871,7 +765,8 @@ impl Engine {
 
             Command::GraphRemoveNode(track_id, node_index) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let node_idx = NodeIndex::new(node_index as usize);
                         graph.remove_node(node_idx);
                         let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
@@ -881,7 +776,8 @@ impl Engine {
 
             Command::GraphConnect(track_id, from, from_port, to, to_port) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let from_idx = NodeIndex::new(from as usize);
                         let to_idx = NodeIndex::new(to as usize);
 
@@ -902,7 +798,8 @@ impl Engine {
 
             Command::GraphConnectInTemplate(track_id, voice_allocator_id, from, from_port, to, to_port) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let va_idx = NodeIndex::new(voice_allocator_id as usize);
 
                         match graph.connect_in_voice_allocator_template(va_idx, from, from_port, to, to_port) {
@@ -923,7 +820,8 @@ impl Engine {
 
             Command::GraphDisconnect(track_id, from, from_port, to, to_port) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let from_idx = NodeIndex::new(from as usize);
                         let to_idx = NodeIndex::new(to as usize);
                         graph.disconnect(from_idx, from_port, to_idx, to_port);
@@ -934,7 +832,8 @@ impl Engine {
 
             Command::GraphSetParameter(track_id, node_index, param_id, value) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let node_idx = NodeIndex::new(node_index as usize);
                         if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
                             graph_node.node.set_parameter(param_id, value);
@@ -945,7 +844,8 @@ impl Engine {
 
             Command::GraphSetMidiTarget(track_id, node_index, enabled) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let node_idx = NodeIndex::new(node_index as usize);
                         graph.set_midi_target(node_idx, enabled);
                     }
@@ -954,7 +854,8 @@ impl Engine {
 
             Command::GraphSetOutputNode(track_id, node_index) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(graph) = &mut track.instrument_graph {
+                    let graph = &mut track.instrument_graph;
+                    {
                         let node_idx = NodeIndex::new(node_index as usize);
                         graph.set_output_node(Some(node_idx));
                     }
@@ -963,27 +864,26 @@ impl Engine {
 
             Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref graph) = track.instrument_graph {
-                        // Serialize the graph to a preset
-                        let mut preset = graph.to_preset(&preset_name);
-                        preset.metadata.description = description;
-                        preset.metadata.tags = tags;
-                        preset.metadata.author = String::from("User");
+                    let graph = &track.instrument_graph;
+                    // Serialize the graph to a preset
+                    let mut preset = graph.to_preset(&preset_name);
+                    preset.metadata.description = description;
+                    preset.metadata.tags = tags;
+                    preset.metadata.author = String::from("User");
 
-                        // Write to file
-                        if let Ok(json) = preset.to_json() {
-                            if let Err(e) = std::fs::write(&preset_path, json) {
-                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
-                                    track_id,
-                                    format!("Failed to save preset: {}", e)
-                                ));
-                            }
-                        } else {
+                    // Write to file
+                    if let Ok(json) = preset.to_json() {
+                        if let Err(e) = std::fs::write(&preset_path, json) {
                             let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
                                 track_id,
-                                "Failed to serialize preset".to_string()
+                                format!("Failed to save preset: {}", e)
                             ));
                         }
+                    } else {
+                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                            track_id,
+                            "Failed to serialize preset".to_string()
+                        ));
                     }
                 }
             }
@@ -1001,7 +901,7 @@ impl Engine {
                                     Ok(graph) => {
                                         // Replace the track's graph
                                         if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                                            track.instrument_graph = Some(graph);
+                                            track.instrument_graph = graph;
                                             let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                                             // Emit preset loaded event after everything is loaded
                                             let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
@@ -1036,24 +936,23 @@ impl Engine {
                 use crate::audio::node_graph::nodes::VoiceAllocatorNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref graph) = track.instrument_graph {
-                        let va_idx = NodeIndex::new(voice_allocator_id as usize);
+                    let graph = &track.instrument_graph;
+                    let va_idx = NodeIndex::new(voice_allocator_id as usize);
 
-                        // Get the VoiceAllocator node and serialize its template
-                        if let Some(node) = graph.get_node(va_idx) {
-                            // Downcast to VoiceAllocatorNode
-                            let node_ptr = node as *const dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *const VoiceAllocatorNode;
+                    // Get the VoiceAllocator node and serialize its template
+                    if let Some(node) = graph.get_node(va_idx) {
+                        // Downcast to VoiceAllocatorNode
+                        let node_ptr = node as *const dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *const VoiceAllocatorNode;
 
-                            unsafe {
-                                let va_node = &*node_ptr;
-                                let template_preset = va_node.template_graph().to_preset(&preset_name);
+                        unsafe {
+                            let va_node = &*node_ptr;
+                            let template_preset = va_node.template_graph().to_preset(&preset_name);
 
-                                // Write to file
-                                if let Ok(json) = template_preset.to_json() {
-                                    if let Err(e) = std::fs::write(&preset_path, json) {
-                                        eprintln!("Failed to save template preset: {}", e);
-                                    }
+                            // Write to file
+                            if let Ok(json) = template_preset.to_json() {
+                                if let Err(e) = std::fs::write(&preset_path, json) {
+                                    eprintln!("Failed to save template preset: {}", e);
                                 }
                             }
                         }
@@ -1065,19 +964,18 @@ impl Engine {
                 use crate::audio::node_graph::nodes::SimpleSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref mut graph) = track.instrument_graph {
-                        let node_idx = NodeIndex::new(node_id as usize);
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
 
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            // Downcast to SimpleSamplerNode
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut SimpleSamplerNode;
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to SimpleSamplerNode
+                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *mut SimpleSamplerNode;
 
-                            unsafe {
-                                let sampler_node = &mut *node_ptr;
-                                if let Err(e) = sampler_node.load_sample_from_file(&file_path) {
-                                    eprintln!("Failed to load sample: {}", e);
-                                }
+                        unsafe {
+                            let sampler_node = &mut *node_ptr;
+                            if let Err(e) = sampler_node.load_sample_from_file(&file_path) {
+                                eprintln!("Failed to load sample: {}", e);
                             }
                         }
                     }
@@ -1088,19 +986,18 @@ impl Engine {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref mut graph) = track.instrument_graph {
-                        let node_idx = NodeIndex::new(node_id as usize);
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
 
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            // Downcast to MultiSamplerNode
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to MultiSamplerNode
+                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *mut MultiSamplerNode;
 
-                            unsafe {
-                                let multi_sampler_node = &mut *node_ptr;
-                                if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max) {
-                                    eprintln!("Failed to add sample layer: {}", e);
-                                }
+                        unsafe {
+                            let multi_sampler_node = &mut *node_ptr;
+                            if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max) {
+                                eprintln!("Failed to add sample layer: {}", e);
                             }
                         }
                     }
@@ -1111,19 +1008,18 @@ impl Engine {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref mut graph) = track.instrument_graph {
-                        let node_idx = NodeIndex::new(node_id as usize);
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
 
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            // Downcast to MultiSamplerNode
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to MultiSamplerNode
+                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *mut MultiSamplerNode;
 
-                            unsafe {
-                                let multi_sampler_node = &mut *node_ptr;
-                                if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max) {
-                                    eprintln!("Failed to update sample layer: {}", e);
-                                }
+                        unsafe {
+                            let multi_sampler_node = &mut *node_ptr;
+                            if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max) {
+                                eprintln!("Failed to update sample layer: {}", e);
                             }
                         }
                     }
@@ -1134,19 +1030,18 @@ impl Engine {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref mut graph) = track.instrument_graph {
-                        let node_idx = NodeIndex::new(node_id as usize);
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
 
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            // Downcast to MultiSamplerNode
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut MultiSamplerNode;
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to MultiSamplerNode
+                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *mut MultiSamplerNode;
 
-                            unsafe {
-                                let multi_sampler_node = &mut *node_ptr;
-                                if let Err(e) = multi_sampler_node.remove_layer(layer_index) {
-                                    eprintln!("Failed to remove sample layer: {}", e);
-                                }
+                        unsafe {
+                            let multi_sampler_node = &mut *node_ptr;
+                            if let Err(e) = multi_sampler_node.remove_layer(layer_index) {
+                                eprintln!("Failed to remove sample layer: {}", e);
                             }
                         }
                     }
@@ -1160,19 +1055,11 @@ impl Engine {
         let response = match query {
             Query::GetGraphState(track_id) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    if let Some(ref graph) = track.instrument_graph {
-                        let preset = graph.to_preset("temp");
-                        match preset.to_json() {
-                            Ok(json) => QueryResponse::GraphState(Ok(json)),
-                            Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
-                        }
-                    } else {
-                        // Empty graph
-                        let empty_preset = crate::audio::node_graph::preset::GraphPreset::new("empty");
-                        match empty_preset.to_json() {
-                            Ok(json) => QueryResponse::GraphState(Ok(json)),
-                            Err(_) => QueryResponse::GraphState(Err("Failed to serialize empty graph".to_string())),
-                        }
+                    let graph = &track.instrument_graph;
+                    let preset = graph.to_preset("temp");
+                    match preset.to_json() {
+                        Ok(json) => QueryResponse::GraphState(Ok(json)),
+                        Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
                     }
                 } else {
                     QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
@@ -1180,25 +1067,22 @@ impl Engine {
             }
             Query::GetTemplateState(track_id, voice_allocator_id) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(ref mut graph) = track.instrument_graph {
-                        let node_idx = NodeIndex::new(voice_allocator_id as usize);
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            // Downcast to VoiceAllocatorNode
-                            let node_ptr = &*graph_node.node as *const dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *const VoiceAllocatorNode;
-                            unsafe {
-                                let va_node = &*node_ptr;
-                                let template_preset = va_node.template_graph().to_preset("template");
-                                match template_preset.to_json() {
-                                    Ok(json) => QueryResponse::GraphState(Ok(json)),
-                                    Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize template: {:?}", e))),
-                                }
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(voice_allocator_id as usize);
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to VoiceAllocatorNode
+                        let node_ptr = &*graph_node.node as *const dyn crate::audio::node_graph::AudioNode;
+                        let node_ptr = node_ptr as *const VoiceAllocatorNode;
+                        unsafe {
+                            let va_node = &*node_ptr;
+                            let template_preset = va_node.template_graph().to_preset("template");
+                            match template_preset.to_json() {
+                                Ok(json) => QueryResponse::GraphState(Ok(json)),
+                                Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize template: {:?}", e))),
                             }
-                        } else {
-                            QueryResponse::GraphState(Err("Voice allocator node not found".to_string()))
                         }
                     } else {
-                        QueryResponse::GraphState(Err("Graph not found".to_string()))
+                        QueryResponse::GraphState(Err("Voice allocator node not found".to_string()))
                     }
                 } else {
                     QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
@@ -1206,7 +1090,10 @@ impl Engine {
             }
             Query::GetOscilloscopeData(track_id, node_id, sample_count) => {
                 match self.project.get_oscilloscope_data(track_id, node_id, sample_count) {
-                    Some(data) => QueryResponse::OscilloscopeData(Ok(data)),
+                    Some((audio, cv)) => {
+                        use crate::command::OscilloscopeData;
+                        QueryResponse::OscilloscopeData(Ok(OscilloscopeData { audio, cv }))
+                    }
                     None => QueryResponse::OscilloscopeData(Err(format!(
                         "Failed to get oscilloscope data from track {} node {}",
                         track_id, node_id
@@ -1435,26 +1322,6 @@ impl EngineController {
     /// Move a clip to a new timeline position
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
         let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
-    }
-
-    /// Add or update gain effect on track
-    pub fn add_gain_effect(&mut self, track_id: TrackId, gain_db: f32) {
-        let _ = self.command_tx.push(Command::AddGainEffect(track_id, gain_db));
-    }
-
-    /// Add or update pan effect on track
-    pub fn add_pan_effect(&mut self, track_id: TrackId, pan: f32) {
-        let _ = self.command_tx.push(Command::AddPanEffect(track_id, pan));
-    }
-
-    /// Add or update EQ effect on track
-    pub fn add_eq_effect(&mut self, track_id: TrackId, low_db: f32, mid_db: f32, high_db: f32) {
-        let _ = self.command_tx.push(Command::AddEQEffect(track_id, low_db, mid_db, high_db));
-    }
-
-    /// Clear all effects from a track
-    pub fn clear_effects(&mut self, track_id: TrackId) {
-        let _ = self.command_tx.push(Command::ClearEffects(track_id));
     }
 
     /// Get current playhead position in samples
@@ -1770,7 +1637,7 @@ impl EngineController {
     }
 
     /// Query oscilloscope data from a node
-    pub fn query_oscilloscope_data(&mut self, track_id: TrackId, node_id: u32, sample_count: usize) -> Result<Vec<f32>, String> {
+    pub fn query_oscilloscope_data(&mut self, track_id: TrackId, node_id: u32, sample_count: usize) -> Result<crate::command::OscilloscopeData, String> {
         // Send query
         if let Err(_) = self.query_tx.push(Query::GetOscilloscopeData(track_id, node_id, sample_count)) {
             return Err("Failed to send query - queue full".to_string());

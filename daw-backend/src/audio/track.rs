@@ -1,9 +1,8 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
 use super::clip::Clip;
-use super::midi::MidiClip;
+use super::midi::{MidiClip, MidiEvent};
 use super::node_graph::InstrumentGraph;
 use super::pool::AudioPool;
-use crate::effects::{Effect, SimpleSynth};
 use std::collections::HashMap;
 
 /// Track ID type
@@ -134,7 +133,6 @@ pub struct Metatrack {
     pub id: TrackId,
     pub name: String,
     pub children: Vec<TrackId>,
-    pub effects: Vec<Box<dyn Effect>>,
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
@@ -156,7 +154,6 @@ impl Metatrack {
             id,
             name,
             children: Vec::new(),
-            effects: Vec::new(),
             volume: 1.0,
             muted: false,
             solo: false,
@@ -240,16 +237,6 @@ impl Metatrack {
         self.children.retain(|&id| id != track_id);
     }
 
-    /// Add an effect to the group's effect chain
-    pub fn add_effect(&mut self, effect: Box<dyn Effect>) {
-        self.effects.push(effect);
-    }
-
-    /// Clear all effects from the group
-    pub fn clear_effects(&mut self) {
-        self.effects.clear();
-    }
-
     /// Set group volume
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.max(0.0);
@@ -297,38 +284,40 @@ impl Metatrack {
     }
 }
 
-/// MIDI track with MIDI clips and a virtual instrument
+/// MIDI track with MIDI clips and a node-based instrument
 pub struct MidiTrack {
     pub id: TrackId,
     pub name: String,
     pub clips: Vec<MidiClip>,
-    pub instrument: SimpleSynth,
-    pub effects: Vec<Box<dyn Effect>>,
+    pub instrument_graph: InstrumentGraph,
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
     /// Automation lanes for this track
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
-    /// Optional instrument graph (replaces SimpleSynth when present)
-    pub instrument_graph: Option<InstrumentGraph>,
+    /// Queue for live MIDI input (virtual keyboard, MIDI controllers)
+    live_midi_queue: Vec<MidiEvent>,
 }
 
 impl MidiTrack {
     /// Create a new MIDI track with default settings
     pub fn new(id: TrackId, name: String) -> Self {
+        // Use default sample rate and a large buffer size that can accommodate any callback
+        let default_sample_rate = 48000;
+        let default_buffer_size = 8192;
+
         Self {
             id,
             name,
             clips: Vec::new(),
-            instrument: SimpleSynth::new(),
-            effects: Vec::new(),
+            instrument_graph: InstrumentGraph::new(default_sample_rate, default_buffer_size),
             volume: 1.0,
             muted: false,
             solo: false,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
-            instrument_graph: None,
+            live_midi_queue: Vec::new(),
         }
     }
 
@@ -357,16 +346,6 @@ impl MidiTrack {
         self.automation_lanes.remove(&lane_id).is_some()
     }
 
-    /// Add an effect to the track's effect chain
-    pub fn add_effect(&mut self, effect: Box<dyn Effect>) {
-        self.effects.push(effect);
-    }
-
-    /// Clear all effects from the track
-    pub fn clear_effects(&mut self) {
-        self.effects.clear();
-    }
-
     /// Add a MIDI clip to this track
     pub fn add_clip(&mut self, clip: MidiClip) {
         self.clips.push(clip);
@@ -393,8 +372,20 @@ impl MidiTrack {
     }
 
     /// Stop all currently playing notes on this track's instrument
+    /// Note: With node-based instruments, stopping is handled by ceasing MIDI input
     pub fn stop_all_notes(&mut self) {
-        self.instrument.all_notes_off();
+        // No-op: Node-based instruments stop when they receive no MIDI input
+        // Individual synthesizer nodes handle note-off events appropriately
+    }
+
+    /// Queue a live MIDI event (from virtual keyboard or MIDI controller)
+    pub fn queue_live_midi(&mut self, event: MidiEvent) {
+        self.live_midi_queue.push(event);
+    }
+
+    /// Clear the live MIDI queue
+    pub fn clear_live_midi_queue(&mut self) {
+        self.live_midi_queue.clear();
     }
 
     /// Process only live MIDI input (queued events) without rendering clips
@@ -402,27 +393,14 @@ impl MidiTrack {
     pub fn process_live_input(
         &mut self,
         output: &mut [f32],
-        sample_rate: u32,
-        channels: u32,
+        _sample_rate: u32,
+        _channels: u32,
     ) {
-        // Generate audio - use instrument graph if available, otherwise SimpleSynth
-        if let Some(graph) = &mut self.instrument_graph {
-            // Get pending MIDI events from SimpleSynth (they're queued there by send_midi_note_on/off)
-            // We need to drain them so they're not processed again
-            let events: Vec<crate::audio::midi::MidiEvent> =
-                self.instrument.pending_events.drain(..).collect();
+        // Generate audio using instrument graph with live MIDI events
+        self.instrument_graph.process(output, &self.live_midi_queue);
 
-            // Process graph with MIDI events
-            graph.process(output, &events);
-        } else {
-            // Fallback to SimpleSynth (which processes queued events)
-            self.instrument.process(output, channels as usize, sample_rate);
-        }
-
-        // Apply effect chain
-        for effect in &mut self.effects {
-            effect.process(output, channels as usize, sample_rate);
-        }
+        // Clear the queue after processing
+        self.live_midi_queue.clear();
 
         // Apply track volume (no automation during live input)
         for sample in output.iter_mut() {
@@ -455,22 +433,8 @@ impl MidiTrack {
             }
         }
 
-        // Generate audio - use instrument graph if available, otherwise SimpleSynth
-        if let Some(graph) = &mut self.instrument_graph {
-            // Use node graph for audio generation
-            graph.process(output, &midi_events);
-        } else {
-            // Fallback to SimpleSynth
-            for event in &midi_events {
-                self.instrument.queue_event(*event);
-            }
-            self.instrument.process(output, channels as usize, sample_rate);
-        }
-
-        // Apply effect chain
-        for effect in &mut self.effects {
-            effect.process(output, channels as usize, sample_rate);
-        }
+        // Generate audio using instrument graph
+        self.instrument_graph.process(output, &midi_events);
 
         // Evaluate and apply automation
         let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
@@ -505,12 +469,11 @@ impl MidiTrack {
     }
 }
 
-/// Audio track with clips and effect chain
+/// Audio track with clips
 pub struct AudioTrack {
     pub id: TrackId,
     pub name: String,
     pub clips: Vec<Clip>,
-    pub effects: Vec<Box<dyn Effect>>,
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
@@ -526,7 +489,6 @@ impl AudioTrack {
             id,
             name,
             clips: Vec::new(),
-            effects: Vec::new(),
             volume: 1.0,
             muted: false,
             solo: false,
@@ -558,25 +520,6 @@ impl AudioTrack {
     /// Remove an automation lane
     pub fn remove_automation_lane(&mut self, lane_id: AutomationLaneId) -> bool {
         self.automation_lanes.remove(&lane_id).is_some()
-    }
-
-    /// Add an effect to the track's effect chain
-    pub fn add_effect(&mut self, effect: Box<dyn Effect>) {
-        self.effects.push(effect);
-    }
-
-    /// Remove an effect from the chain by index
-    pub fn remove_effect(&mut self, index: usize) -> Option<Box<dyn Effect>> {
-        if index < self.effects.len() {
-            Some(self.effects.remove(index))
-        } else {
-            None
-        }
-    }
-
-    /// Clear all effects from the track
-    pub fn clear_effects(&mut self) {
-        self.effects.clear();
     }
 
     /// Add a clip to this track
@@ -632,11 +575,6 @@ impl AudioTrack {
                     channels,
                 );
             }
-        }
-
-        // Apply effect chain
-        for effect in &mut self.effects {
-            effect.process(output, channels as usize, sample_rate);
         }
 
         // Evaluate and apply automation

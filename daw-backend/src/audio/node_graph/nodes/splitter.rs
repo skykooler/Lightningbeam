@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, SignalType};
 use crate::audio::midi::MidiEvent;
 
 /// Splitter node - copies input to multiple outputs for parallel routing

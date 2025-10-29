@@ -1,3 +1,3 @@
 pub mod types;
 
-pub use types::{AudioEvent, Command, Query, QueryResponse};
+pub use types::{AudioEvent, Command, OscilloscopeData, Query, QueryResponse};

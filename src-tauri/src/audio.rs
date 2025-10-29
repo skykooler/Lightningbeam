@@ -216,13 +216,6 @@ pub async fn audio_set_track_parameter(
             "volume" => controller.set_track_volume(track_id, value),
             "mute" => controller.set_track_mute(track_id, value > 0.5),
             "solo" => controller.set_track_solo(track_id, value > 0.5),
-            "pan" => {
-                // Pan effect - would need to add this via effects system
-                controller.add_pan_effect(track_id, value);
-            }
-            "gain_db" => {
-                controller.add_gain_effect(track_id, value);
-            }
             _ => return Err(format!("Unknown parameter: {}", parameter)),
         }
         Ok(())
@@ -232,18 +225,10 @@ pub async fn audio_set_track_parameter(
 }
 
 #[tauri::command]
-pub async fn audio_get_available_instruments() -> Result<Vec<String>, String> {
-    // Return list of available instruments
-    // For now, only SimpleSynth is available
-    Ok(vec!["SimpleSynth".to_string()])
-}
-
-#[tauri::command]
 pub async fn audio_create_track(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     name: String,
     track_type: String,
-    instrument: Option<String>,
 ) -> Result<u32, String> {
     let mut audio_state = state.lock().unwrap();
 
@@ -254,14 +239,7 @@ pub async fn audio_create_track(
     if let Some(controller) = &mut audio_state.controller {
         match track_type.as_str() {
             "audio" => controller.create_audio_track(name),
-            "midi" => {
-                // Validate instrument for MIDI tracks
-                let inst = instrument.unwrap_or_else(|| "SimpleSynth".to_string());
-                if inst != "SimpleSynth" {
-                    return Err(format!("Unknown instrument: {}", inst));
-                }
-                controller.create_midi_track(name)
-            },
+            "midi" => controller.create_midi_track(name),
             _ => return Err(format!("Unknown track type: {}", track_type)),
         }
         Ok(track_id)
@@ -1137,7 +1115,7 @@ pub async fn get_oscilloscope_data(
     track_id: u32,
     node_id: u32,
     sample_count: usize,
-) -> Result<Vec<f32>, String> {
+) -> Result<daw_backend::OscilloscopeData, String> {
     let mut audio_state = state.lock().unwrap();
 
     if let Some(controller) = &mut audio_state.controller {

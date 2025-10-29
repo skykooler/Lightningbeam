@@ -499,6 +499,11 @@ impl InstrumentGraph {
         self.get_node(idx).and_then(|node| node.get_oscilloscope_data(sample_count))
     }
 
+    /// Get oscilloscope CV data from a specific node
+    pub fn get_oscilloscope_cv_data(&self, idx: NodeIndex, sample_count: usize) -> Option<Vec<f32>> {
+        self.get_node(idx).and_then(|node| node.get_oscilloscope_cv_data(sample_count))
+    }
+
     /// Get node mutably by index
     /// Note: Due to lifetime constraints with trait objects, this returns a mutable reference
     /// to the GraphNode, from which you can access the node

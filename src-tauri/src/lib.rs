@@ -199,7 +199,6 @@ pub fn run() {
         audio::audio_seek,
         audio::audio_test_beep,
         audio::audio_set_track_parameter,
-        audio::audio_get_available_instruments,
         audio::audio_create_track,
         audio::audio_load_file,
         audio::audio_add_clip,

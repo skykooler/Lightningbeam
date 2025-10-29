@@ -120,7 +120,7 @@ impl AudioNode for PanNode {
             if inputs.len() > 1 && frame < inputs[1].len() {
                 let cv = inputs[1][frame]; // CV is mono
                 // CV is 0-1, map to -1 to +1 range
-                pan += (cv * 2.0 - 1.0);
+                pan += cv * 2.0 - 1.0;
                 pan = pan.clamp(-1.0, 1.0);
             }
 

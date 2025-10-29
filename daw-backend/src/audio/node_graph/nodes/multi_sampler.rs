@@ -330,61 +330,6 @@ impl MultiSamplerNode {
             }
         }
     }
-
-    /// Calculate playback speed from pitch difference
-    fn calculate_speed(&self, layer: &SampleLayer, note: u8) -> f32 {
-        let semitone_diff = note as i16 - layer.root_key as i16;
-        2.0_f32.powf(semitone_diff as f32 / 12.0)
-    }
-
-    /// Read sample at playhead with linear interpolation
-    fn read_sample(&self, playhead: f32, sample: &[f32]) -> f32 {
-        if sample.is_empty() || playhead < 0.0 {
-            return 0.0;
-        }
-
-        let index = playhead.floor() as usize;
-        if index >= sample.len() {
-            return 0.0;
-        }
-
-        let frac = playhead - playhead.floor();
-        let sample1 = sample[index];
-        let sample2 = if index + 1 < sample.len() {
-            sample[index + 1]
-        } else {
-            0.0
-        };
-
-        sample1 + (sample2 - sample1) * frac
-    }
-
-    /// Process envelope for a voice
-    fn process_envelope(&self, voice: &mut Voice, sample_rate: f32) -> f32 {
-        match voice.envelope_phase {
-            EnvelopePhase::Attack => {
-                let attack_samples = self.attack_time * sample_rate;
-                voice.envelope_value += 1.0 / attack_samples;
-                if voice.envelope_value >= 1.0 {
-                    voice.envelope_value = 1.0;
-                    voice.envelope_phase = EnvelopePhase::Sustain;
-                }
-            }
-            EnvelopePhase::Sustain => {
-                voice.envelope_value = 1.0;
-            }
-            EnvelopePhase::Release => {
-                let release_samples = self.release_time * sample_rate;
-                voice.envelope_value -= 1.0 / release_samples;
-                if voice.envelope_value <= 0.0 {
-                    voice.envelope_value = 0.0;
-                    voice.is_active = false;
-                }
-            }
-        }
-
-        voice.envelope_value.clamp(0.0, 1.0)
-    }
 }
 
 impl AudioNode for MultiSamplerNode {

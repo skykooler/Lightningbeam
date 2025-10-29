@@ -1,9 +1,8 @@
 use super::buffer_pool::BufferPool;
 use super::clip::Clip;
-use super::midi::MidiClip;
+use super::midi::{MidiClip, MidiEvent};
 use super::pool::AudioPool;
 use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
-use crate::effects::Effect;
 use std::collections::HashMap;
 
 /// Project manages the hierarchical track structure
@@ -199,12 +198,18 @@ impl Project {
     }
 
     /// Get oscilloscope data from a node in a track's graph
-    pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<Vec<f32>> {
+    pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
-            if let Some(ref graph) = track.instrument_graph {
-                let node_idx = petgraph::stable_graph::NodeIndex::new(node_id as usize);
-                return graph.get_oscilloscope_data(node_idx, sample_count);
-            }
+            let graph = &track.instrument_graph;
+            let node_idx = petgraph::stable_graph::NodeIndex::new(node_id as usize);
+
+            // Get audio data
+            let audio = graph.get_oscilloscope_data(node_idx, sample_count)?;
+
+            // Get CV data (may be empty if no CV input or not an oscilloscope node)
+            let cv = graph.get_oscilloscope_cv_data(node_idx, sample_count).unwrap_or_default();
+
+            return Some((audio, cv));
         }
         None
     }
@@ -241,44 +246,6 @@ impl Project {
             Ok(())
         } else {
             Err("Track not found or is not a MIDI track")
-        }
-    }
-
-    /// Add an effect to a track (audio, MIDI, or group)
-    pub fn add_effect(&mut self, track_id: TrackId, effect: Box<dyn Effect>) -> Result<(), &'static str> {
-        match self.tracks.get_mut(&track_id) {
-            Some(TrackNode::Audio(track)) => {
-                track.add_effect(effect);
-                Ok(())
-            }
-            Some(TrackNode::Midi(track)) => {
-                track.add_effect(effect);
-                Ok(())
-            }
-            Some(TrackNode::Group(group)) => {
-                group.add_effect(effect);
-                Ok(())
-            }
-            None => Err("Track not found"),
-        }
-    }
-
-    /// Clear effects from a track
-    pub fn clear_effects(&mut self, track_id: TrackId) -> Result<(), &'static str> {
-        match self.tracks.get_mut(&track_id) {
-            Some(TrackNode::Audio(track)) => {
-                track.clear_effects();
-                Ok(())
-            }
-            Some(TrackNode::Midi(track)) => {
-                track.clear_effects();
-                Ok(())
-            }
-            Some(TrackNode::Group(group)) => {
-                group.clear_effects();
-                Ok(())
-            }
-            None => Err("Track not found"),
         }
     }
 
@@ -399,13 +366,8 @@ impl Project {
                     );
                 }
 
-                // Apply group effects
+                // Apply group volume and mix into output
                 if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
-                    for effect in &mut group.effects {
-                        effect.process(&mut group_buffer, ctx.channels as usize, ctx.sample_rate);
-                    }
-
-                    // Apply group volume and mix into output
                     for (out_sample, group_sample) in output.iter_mut().zip(group_buffer.iter()) {
                         *out_sample += group_sample * group.volume;
                     }
@@ -439,30 +401,21 @@ impl Project {
     }
 
     /// Send a live MIDI note on event to a track's instrument
+    /// Note: With node-based instruments, MIDI events are handled during the process() call
     pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
+        // Queue the MIDI note-on event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            // Create a MIDI event and queue it to the instrument
-            let event = crate::audio::midi::MidiEvent {
-                timestamp: 0, // Immediate playback
-                status: 0x90, // Note on
-                data1: note,
-                data2: velocity,
-            };
-            track.instrument.queue_event(event);
+            let event = MidiEvent::note_on(0, 0, note, velocity);
+            track.queue_live_midi(event);
         }
     }
 
     /// Send a live MIDI note off event to a track's instrument
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
+        // Queue the MIDI note-off event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            // Create a MIDI event and queue it to the instrument
-            let event = crate::audio::midi::MidiEvent {
-                timestamp: 0, // Immediate playback
-                status: 0x80, // Note off
-                data1: note,
-                data2: 0,
-            };
-            track.instrument.queue_event(event);
+            let event = MidiEvent::note_off(0, 0, note, 0);
+            track.queue_live_midi(event);
         }
     }
 }

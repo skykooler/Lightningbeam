@@ -64,4 +64,10 @@ pub trait AudioNode: Send {
     fn get_oscilloscope_data(&self, _sample_count: usize) -> Option<Vec<f32>> {
         None
     }
+
+    /// Get oscilloscope CV data if this is an oscilloscope node
+    /// Returns None for non-oscilloscope nodes
+    fn get_oscilloscope_cv_data(&self, _sample_count: usize) -> Option<Vec<f32>> {
+        None
+    }
 }

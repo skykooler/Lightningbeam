@@ -28,7 +28,7 @@ impl TriggerMode {
 }
 
 /// Circular buffer for storing audio samples
-struct CircularBuffer {
+pub struct CircularBuffer {
     buffer: Vec<f32>,
     write_pos: usize,
     capacity: usize,
@@ -75,7 +75,7 @@ impl CircularBuffer {
     }
 }
 
-/// Oscilloscope node for visualizing audio signals
+/// Oscilloscope node for visualizing audio and CV signals
 pub struct OscilloscopeNode {
     name: String,
     time_scale: f32,      // Milliseconds to display (10-1000ms)
@@ -86,8 +86,9 @@ pub struct OscilloscopeNode {
     sample_counter: usize, // Counter for V/oct triggering
     trigger_period: usize, // Period in samples for V/oct triggering
 
-    // Shared buffer for reading from Tauri commands
-    buffer: Arc<Mutex<CircularBuffer>>,
+    // Shared buffers for reading from Tauri commands
+    buffer: Arc<Mutex<CircularBuffer>>,       // Audio buffer
+    cv_buffer: Arc<Mutex<CircularBuffer>>,    // CV buffer
 
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
@@ -101,6 +102,7 @@ impl OscilloscopeNode {
         let inputs = vec![
             NodePort::new("Audio In", SignalType::Audio, 0),
             NodePort::new("V/oct", SignalType::CV, 1),
+            NodePort::new("CV In", SignalType::CV, 2),
         ];
 
         let outputs = vec![
@@ -123,6 +125,7 @@ impl OscilloscopeNode {
             sample_counter: 0,
             trigger_period: 480, // Default to ~100Hz at 48kHz
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
+            cv_buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             inputs,
             outputs,
             parameters,
@@ -143,10 +146,22 @@ impl OscilloscopeNode {
         }
     }
 
+    /// Read CV samples from the CV buffer (for Tauri commands)
+    pub fn read_cv_samples(&self, count: usize) -> Vec<f32> {
+        if let Ok(buffer) = self.cv_buffer.lock() {
+            buffer.read(count)
+        } else {
+            vec![0.0; count]
+        }
+    }
+
     /// Clear the buffer
     pub fn clear_buffer(&self) {
         if let Ok(mut buffer) = self.buffer.lock() {
             buffer.clear();
+        }
+        if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
+            cv_buffer.clear();
         }
     }
 
@@ -154,23 +169,6 @@ impl OscilloscopeNode {
     /// 0V = A4 (440 Hz), ±1V per octave
     fn voct_to_frequency(voct: f32) -> f32 {
         440.0 * 2.0_f32.powf(voct)
-    }
-
-    /// Check if trigger condition is met
-    fn is_triggered(&self, current_sample: f32) -> bool {
-        match self.trigger_mode {
-            TriggerMode::FreeRunning => true,
-            TriggerMode::RisingEdge => {
-                self.last_sample <= self.trigger_level && current_sample > self.trigger_level
-            }
-            TriggerMode::FallingEdge => {
-                self.last_sample >= self.trigger_level && current_sample < self.trigger_level
-            }
-            TriggerMode::VoltPerOctave => {
-                // Trigger at the start of each period
-                self.sample_counter == 0
-            }
-        }
     }
 }
 
@@ -242,9 +240,17 @@ impl AudioNode for OscilloscopeNode {
         // Pass through audio (copy input to output)
         output[..len].copy_from_slice(&input[..len]);
 
-        // Capture samples to buffer
+        // Capture audio samples to buffer
         if let Ok(mut buffer) = self.buffer.lock() {
             buffer.write(&input[..len]);
+        }
+
+        // Capture CV samples if CV input is connected (input 2)
+        if inputs.len() > 2 && !inputs[2].is_empty() {
+            let cv_input = inputs[2];
+            if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
+                cv_buffer.write(&cv_input[..len.min(cv_input.len())]);
+            }
         }
 
         // Update last sample for trigger detection (use left channel, frame 0)
@@ -279,6 +285,7 @@ impl AudioNode for OscilloscopeNode {
             sample_counter: 0,
             trigger_period: 480,
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
+            cv_buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
@@ -287,5 +294,9 @@ impl AudioNode for OscilloscopeNode {
 
     fn get_oscilloscope_data(&self, sample_count: usize) -> Option<Vec<f32>> {
         Some(self.read_samples(sample_count))
+    }
+
+    fn get_oscilloscope_cv_data(&self, sample_count: usize) -> Option<Vec<f32>> {
+        Some(self.read_cv_samples(sample_count))
     }
 }
