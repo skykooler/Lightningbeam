@@ -45,14 +45,14 @@
           { "file_path": "samples/A7.mp3", "key_min": 101, "key_max": 127, "root_key": 105, "velocity_min": 0, "velocity_max": 127 }
         ]
       },
-      "position": [350.0, 100.0]
+      "position": [350.0, 0.0]
     },
     {
       "id": 2,
       "node_type": "AudioOutput",
       "name": "Out",
       "parameters": {},
-      "position": [600.0, 100.0]
+      "position": [700.0, 100.0]
     }
   ],
   "connections": [
