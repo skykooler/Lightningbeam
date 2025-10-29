@@ -83,28 +83,32 @@ impl QuantizerNode {
         // Clamp to reasonable range
         let input_midi_note = input_midi_note.clamp(0.0, 127.0);
 
-        // Get scale intervals
+        // Get scale intervals (relative to root)
         let intervals = self.get_scale_intervals();
 
         // Find which octave we're in (relative to C)
         let octave = (input_midi_note / 12.0).floor() as i32;
-        let note_in_octave = (input_midi_note % 12.0) as u32;
+        let note_in_octave = input_midi_note % 12.0;
 
-        // Find the nearest note in the scale
+        // Adjust note relative to root (e.g., if root is D (2), then C becomes 10, D becomes 0)
+        let note_relative_to_root = (note_in_octave - self.root_note as f32 + 12.0) % 12.0;
+
+        // Find the nearest note in the scale (scale intervals are relative to root)
         let mut closest_interval = intervals[0];
-        let mut min_distance = (note_in_octave as i32 - closest_interval as i32).abs();
+        let mut min_distance = (note_relative_to_root - closest_interval as f32).abs();
 
         for &interval in &intervals {
-            let distance = (note_in_octave as i32 - interval as i32).abs();
+            let distance = (note_relative_to_root - interval as f32).abs();
             if distance < min_distance {
                 min_distance = distance;
                 closest_interval = interval;
             }
         }
 
-        // Calculate final MIDI note (adjusted for root note)
-        // Start from the octave * 12, add root note, add scale interval
-        let quantized_midi_note = (octave * 12) as f32 + self.root_note as f32 + closest_interval as f32;
+        // Calculate final MIDI note
+        // The scale interval is relative to root, so add root back to get absolute note
+        let quantized_note_in_octave = (self.root_note + closest_interval) % 12;
+        let quantized_midi_note = (octave * 12) as f32 + quantized_note_in_octave as f32;
 
         // Clamp result
         let quantized_midi_note = quantized_midi_note.clamp(0.0, 127.0);

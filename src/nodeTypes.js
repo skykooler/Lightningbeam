@@ -1015,6 +1015,29 @@ export const nodeTypes = {
     `
   },
 
+  Constant: {
+    name: 'Constant',
+    category: NodeCategory.UTILITY,
+    description: 'Constant CV source - outputs a fixed voltage',
+    inputs: [],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'value', label: 'Value', min: -10, max: 10, default: 0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Constant</div>
+        <div class="node-param">
+          <label>Value:</label>
+          <input type="number" class="node-number-input" data-node="${nodeId}" data-param="0" min="-10" max="10" value="0" step="0.01" style="width: 60px; padding: 2px;">
+          <input type="range" data-node="${nodeId}" data-param="0" min="-10" max="10" value="0" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
   Math: {
     name: 'Math',
     category: NodeCategory.UTILITY,
@@ -1027,14 +1050,13 @@ export const nodeTypes = {
       { name: 'CV Out', type: SignalType.CV, index: 0 }
     ],
     parameters: [
-      { id: 0, name: 'operation', label: 'Operation', min: 0, max: 13, default: 0, unit: '' },
-      { id: 1, name: 'operand', label: 'Operand', min: -10, max: 10, default: 1, unit: '' }
+      { id: 0, name: 'operation', label: 'Operation', min: 0, max: 13, default: 0, unit: '' }
     ],
     getHTML: (nodeId) => `
       <div class="node-content">
         <div class="node-title">Math</div>
         <div class="node-param">
-          <label>Op: <span id="mathop-${nodeId}">Add</span></label>
+          <label>Op: <span id="operation-${nodeId}">Add</span></label>
           <select class="node-select" data-node="${nodeId}" data-param="0" style="width: 100%; padding: 2px;">
             <option value="0">Add</option>
             <option value="1">Subtract</option>
@@ -1051,10 +1073,6 @@ export const nodeTypes = {
             <option value="12">Less</option>
             <option value="13">Equal</option>
           </select>
-        </div>
-        <div class="node-param">
-          <label>B: <span id="mathoperand-${nodeId}">1.0</span></label>
-          <input type="range" data-node="${nodeId}" data-param="1" min="-10" max="10" value="1" step="0.1">
         </div>
       </div>
     `
@@ -1079,7 +1097,7 @@ export const nodeTypes = {
       <div class="node-content">
         <div class="node-title">Quantizer</div>
         <div class="node-param">
-          <label>Scale: <span id="quantscale-${nodeId}">Chromatic</span></label>
+          <label>Scale: <span id="scale-${nodeId}">Chromatic</span></label>
           <select class="node-select" data-node="${nodeId}" data-param="0" style="width: 100%; padding: 2px;">
             <option value="0">Chromatic</option>
             <option value="1">Major</option>
@@ -1095,7 +1113,7 @@ export const nodeTypes = {
           </select>
         </div>
         <div class="node-param">
-          <label>Root: <span id="quantroot-${nodeId}">C</span></label>
+          <label>Root: <span id="root-${nodeId}">C</span></label>
           <select class="node-select" data-node="${nodeId}" data-param="1" style="width: 100%; padding: 2px;">
             <option value="0">C</option>
             <option value="1">C#</option>
@@ -1196,6 +1214,200 @@ export const nodeTypes = {
         <div class="node-param">
           <label>Gain: <span id="highgain-${nodeId}">0</span> dB</label>
           <input type="range" data-node="${nodeId}" data-param="6" min="-24" max="24" value="0" step="0.1">
+        </div>
+      </div>
+    `
+  },
+
+  SampleHold: {
+    name: 'Sample & Hold',
+    category: NodeCategory.UTILITY,
+    description: 'Samples CV input when gate signal goes high',
+    inputs: [
+      { name: 'CV In', type: SignalType.CV, index: 0 },
+      { name: 'Gate In', type: SignalType.CV, index: 1 }
+    ],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Sample & Hold</div>
+        <div style="padding: 8px; font-size: 11px; color: #888;">
+          Samples CV input<br>on gate rising edge
+        </div>
+      </div>
+    `
+  },
+
+  EnvelopeFollower: {
+    name: 'Envelope Follower',
+    category: NodeCategory.UTILITY,
+    description: 'Extracts amplitude envelope from audio signal',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'attack', label: 'Attack', min: 0.001, max: 1.0, default: 0.01, unit: 's' },
+      { id: 1, name: 'release', label: 'Release', min: 0.001, max: 1.0, default: 0.1, unit: 's' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Envelope Follower</div>
+        <div class="node-param">
+          <label>Attack: <span id="attack-${nodeId}">0.01</span> s</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0.001" max="1.0" value="0.01" step="0.001">
+        </div>
+        <div class="node-param">
+          <label>Release: <span id="release-${nodeId}">0.1</span> s</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="0.001" max="1.0" value="0.1" step="0.001">
+        </div>
+      </div>
+    `
+  },
+
+  RingModulator: {
+    name: 'Ring Modulator',
+    category: NodeCategory.EFFECT,
+    description: 'Multiplies carrier and modulator for metallic timbres',
+    inputs: [
+      { name: 'Carrier', type: SignalType.AUDIO, index: 0 },
+      { name: 'Modulator', type: SignalType.AUDIO, index: 1 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'mix', label: 'Mix', min: 0.0, max: 1.0, default: 1.0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Ring Modulator</div>
+        <div class="node-param">
+          <label>Mix: <span id="mix-${nodeId}">1.00</span></label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0.0" max="1.0" value="1.0" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  Phaser: {
+    name: 'Phaser',
+    category: NodeCategory.EFFECT,
+    description: 'Sweeping all-pass filters for phase shifting effect',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'rate', label: 'Rate', min: 0.1, max: 10.0, default: 0.5, unit: 'Hz' },
+      { id: 1, name: 'depth', label: 'Depth', min: 0.0, max: 1.0, default: 0.7, unit: '' },
+      { id: 2, name: 'stages', label: 'Stages', min: 2, max: 8, default: 6, unit: '' },
+      { id: 3, name: 'feedback', label: 'Feedback', min: -0.95, max: 0.95, default: 0.5, unit: '' },
+      { id: 4, name: 'wetdry', label: 'Wet/Dry', min: 0.0, max: 1.0, default: 0.5, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Phaser</div>
+        <div class="node-param">
+          <label>Rate: <span id="rate-${nodeId}">0.5</span> Hz</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0.1" max="10.0" value="0.5" step="0.1">
+        </div>
+        <div class="node-param">
+          <label>Depth: <span id="depth-${nodeId}">0.7</span></label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="0.0" max="1.0" value="0.7" step="0.01">
+        </div>
+        <div class="node-param">
+          <label>Stages: <span id="stages-${nodeId}">6</span></label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="2" max="8" value="6" step="2">
+        </div>
+        <div class="node-param">
+          <label>Feedback: <span id="feedback-${nodeId}">0.5</span></label>
+          <input type="range" data-node="${nodeId}" data-param="3" min="-0.95" max="0.95" value="0.5" step="0.01">
+        </div>
+        <div class="node-param">
+          <label>Wet/Dry: <span id="wetdry-${nodeId}">0.5</span></label>
+          <input type="range" data-node="${nodeId}" data-param="4" min="0.0" max="1.0" value="0.5" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  BitCrusher: {
+    name: 'Bit Crusher',
+    category: NodeCategory.EFFECT,
+    description: 'Lo-fi effect via bit depth and sample rate reduction',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'bitdepth', label: 'Bit Depth', min: 1, max: 16, default: 8, unit: 'bits' },
+      { id: 1, name: 'samplerate', label: 'Sample Rate', min: 100, max: 48000, default: 8000, unit: 'Hz' },
+      { id: 2, name: 'mix', label: 'Mix', min: 0.0, max: 1.0, default: 1.0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Bit Crusher</div>
+        <div class="node-param">
+          <label>Bit Depth: <span id="bitdepth-${nodeId}">8</span> bits</label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="1" max="16" value="8" step="1">
+        </div>
+        <div class="node-param">
+          <label>Sample Rate: <span id="samplerate-${nodeId}">8000</span> Hz</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="100" max="48000" value="8000" step="100">
+        </div>
+        <div class="node-param">
+          <label>Mix: <span id="mix-${nodeId}">1.0</span></label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="0.0" max="1.0" value="1.0" step="0.01">
+        </div>
+      </div>
+    `
+  },
+
+  Vocoder: {
+    name: 'Vocoder',
+    category: NodeCategory.EFFECT,
+    description: 'Multi-band vocoder - modulator controls carrier spectrum',
+    inputs: [
+      { name: 'Modulator', type: SignalType.AUDIO, index: 0 },
+      { name: 'Carrier', type: SignalType.AUDIO, index: 1 }
+    ],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'bands', label: 'Bands', min: 8, max: 32, default: 16, unit: '' },
+      { id: 1, name: 'attack', label: 'Attack', min: 0.001, max: 0.1, default: 0.01, unit: 's' },
+      { id: 2, name: 'release', label: 'Release', min: 0.001, max: 1.0, default: 0.05, unit: 's' },
+      { id: 3, name: 'mix', label: 'Mix', min: 0.0, max: 1.0, default: 1.0, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Vocoder</div>
+        <div class="node-param">
+          <label>Bands: <span id="bands-${nodeId}">16</span></label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="8" max="32" value="16" step="1">
+        </div>
+        <div class="node-param">
+          <label>Attack: <span id="attack-${nodeId}">0.01</span> s</label>
+          <input type="range" data-node="${nodeId}" data-param="1" min="0.001" max="0.1" value="0.01" step="0.001">
+        </div>
+        <div class="node-param">
+          <label>Release: <span id="release-${nodeId}">0.05</span> s</label>
+          <input type="range" data-node="${nodeId}" data-param="2" min="0.001" max="1.0" value="0.05" step="0.001">
+        </div>
+        <div class="node-param">
+          <label>Mix: <span id="mix-${nodeId}">1.0</span></label>
+          <input type="range" data-node="${nodeId}" data-param="3" min="0.0" max="1.0" value="1.0" step="0.01">
         </div>
       </div>
     `

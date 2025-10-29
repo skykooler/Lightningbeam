@@ -7467,6 +7467,87 @@ function nodeEditor() {
         });
       });
 
+      // Handle number inputs
+      const numberInputs = nodeElement.querySelectorAll('input[type="number"][data-param]');
+      numberInputs.forEach(numberInput => {
+        // Track parameter change action for undo/redo
+        let paramAction = null;
+
+        // Prevent node dragging when interacting with number input
+        numberInput.addEventListener("mousedown", (e) => {
+          e.stopPropagation();
+
+          // Initialize undo action
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const currentValue = parseFloat(e.target.value);
+          const nodeData = editor.getNodeFromId(nodeId);
+
+          if (nodeData && nodeData.data.backendId !== null) {
+            const currentTrackId = getCurrentMidiTrack();
+            if (currentTrackId !== null) {
+              paramAction = actions.graphSetParameter.initialize(
+                currentTrackId,
+                nodeData.data.backendId,
+                paramId,
+                nodeId,
+                currentValue
+              );
+            }
+          }
+        });
+        numberInput.addEventListener("pointerdown", (e) => {
+          e.stopPropagation();
+        });
+
+        numberInput.addEventListener("input", (e) => {
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          let value = parseFloat(e.target.value);
+
+          // Validate and clamp to min/max
+          const min = parseFloat(e.target.min);
+          const max = parseFloat(e.target.max);
+          if (!isNaN(value)) {
+            value = Math.max(min, Math.min(max, value));
+          } else {
+            value = 0;
+          }
+
+          console.log(`[setupNodeParameters] Number input - nodeId: ${nodeId}, paramId: ${paramId}, value: ${value}`);
+
+          // Update corresponding slider
+          const slider = nodeElement.querySelector(`input[type="range"][data-param="${paramId}"]`);
+          if (slider) {
+            slider.value = value;
+          }
+
+          // Send to backend
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (nodeData && nodeData.data.backendId !== null) {
+            const currentTrackId = getCurrentMidiTrack();
+            if (currentTrackId !== null) {
+              invoke("graph_set_parameter", {
+                trackId: currentTrackId,
+                nodeId: nodeData.data.backendId,
+                paramId: paramId,
+                value: value
+              }).catch(err => {
+                console.error("Failed to set parameter:", err);
+              });
+            }
+          }
+        });
+
+        numberInput.addEventListener("change", (e) => {
+          const value = parseFloat(e.target.value);
+
+          // Finalize undo action
+          if (paramAction) {
+            actions.graphSetParameter.finalize(paramAction, value);
+            paramAction = null;
+          }
+        });
+      });
+
       // Handle Load Sample button for SimpleSampler
       const loadSampleBtn = nodeElement.querySelector(".load-sample-btn");
       if (loadSampleBtn) {

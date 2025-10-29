@@ -2,7 +2,6 @@ use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, Par
 use crate::audio::midi::MidiEvent;
 
 const PARAM_OPERATION: u32 = 0;
-const PARAM_OPERAND: u32 = 1;
 
 /// Mathematical and logical operations on CV signals
 /// Operations:
@@ -14,7 +13,6 @@ const PARAM_OPERAND: u32 = 1;
 pub struct MathNode {
     name: String,
     operation: u32,
-    operand: f32,
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -35,13 +33,11 @@ impl MathNode {
 
         let parameters = vec![
             Parameter::new(PARAM_OPERATION, "Operation", 0.0, 13.0, 0.0, ParameterUnit::Generic),
-            Parameter::new(PARAM_OPERAND, "Operand", -10.0, 10.0, 1.0, ParameterUnit::Generic),
         ];
 
         Self {
             name,
             operation: 0,
-            operand: 1.0,
             inputs,
             outputs,
             parameters,
@@ -98,7 +94,6 @@ impl AudioNode for MathNode {
     fn set_parameter(&mut self, id: u32, value: f32) {
         match id {
             PARAM_OPERATION => self.operation = (value as u32).clamp(0, 13),
-            PARAM_OPERAND => self.operand = value.clamp(-10.0, 10.0),
             _ => {}
         }
     }
@@ -106,7 +101,6 @@ impl AudioNode for MathNode {
     fn get_parameter(&self, id: u32) -> f32 {
         match id {
             PARAM_OPERATION => self.operation as f32,
-            PARAM_OPERAND => self.operand,
             _ => 0.0,
         }
     }
@@ -126,27 +120,20 @@ impl AudioNode for MathNode {
         let output = &mut outputs[0];
         let length = output.len();
 
-        // Get input A (or use 0.0)
-        let input_a = if !inputs.is_empty() && !inputs[0].is_empty() {
-            inputs[0]
-        } else {
-            &[]
-        };
-
-        // Get input B (or use operand parameter)
-        let input_b = if inputs.len() > 1 && !inputs[1].is_empty() {
-            inputs[1]
-        } else {
-            &[]
-        };
-
         // Process each sample
         for i in 0..length {
-            let a = if i < input_a.len() { input_a[i] } else { 0.0 };
-            let b = if i < input_b.len() {
-                input_b[i]
+            // Get input A (or 0.0 if not connected)
+            let a = if !inputs.is_empty() && i < inputs[0].len() {
+                inputs[0][i]
             } else {
-                self.operand
+                0.0
+            };
+
+            // Get input B (or 0.0 if not connected)
+            let b = if inputs.len() > 1 && i < inputs[1].len() {
+                inputs[1][i]
+            } else {
+                0.0
             };
 
             output[i] = self.apply_operation(a, b);
@@ -169,7 +156,6 @@ impl AudioNode for MathNode {
         Box::new(Self {
             name: self.name.clone(),
             operation: self.operation,
-            operand: self.operand,
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
