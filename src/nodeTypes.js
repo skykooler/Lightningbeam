@@ -311,7 +311,8 @@ export const nodeTypes = {
     description: 'Visual audio signal monitor (pass-through)',
     inputs: [
       { name: 'Audio In', type: SignalType.AUDIO, index: 0 },
-      { name: 'V/oct', type: SignalType.CV, index: 1 }
+      { name: 'V/oct', type: SignalType.CV, index: 1 },
+      { name: 'CV In', type: SignalType.CV, index: 2 }
     ],
     outputs: [
       { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }

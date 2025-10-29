@@ -7034,7 +7034,7 @@ function nodeEditor() {
           console.log(`Starting oscilloscope visualization for node ${drawflowNodeId} (backend ID: ${backendNodeId})`);
           // Wait for DOM to update before starting visualization
           setTimeout(() => {
-            startOscilloscopeVisualization(drawflowNodeId, currentTrackId, backendNodeId);
+            startOscilloscopeVisualization(drawflowNodeId, currentTrackId, backendNodeId, editor);
           }, 100);
         }
       }
@@ -8131,7 +8131,7 @@ function nodeEditor() {
 
           // For Oscilloscope nodes, start the visualization
           if (nodeType === 'Oscilloscope' && serializedNode.id && trackId) {
-            startOscilloscopeVisualization(drawflowId, trackId, serializedNode.id);
+            startOscilloscopeVisualization(drawflowId, trackId, serializedNode.id, editor);
           }
 
           resolve();
@@ -9206,7 +9206,7 @@ const oscilloscopeIntervals = new Map();
 const oscilloscopeTimeScales = new Map();
 
 // Start oscilloscope visualization for a node
-function startOscilloscopeVisualization(nodeId, trackId, backendNodeId) {
+function startOscilloscopeVisualization(nodeId, trackId, backendNodeId, editorRef) {
   // Clear any existing interval for this node
   stopOscilloscopeVisualization(nodeId);
 
@@ -9266,17 +9266,17 @@ function startOscilloscopeVisualization(nodeId, trackId, backendNodeId) {
       ctx.lineTo(width, height / 2);
       ctx.stroke();
 
-      // Draw waveform
-      if (data && data.length > 0) {
+      // Draw audio waveform
+      if (data && data.audio && data.audio.length > 0) {
         ctx.strokeStyle = '#4CAF50';
         ctx.lineWidth = 2;
         ctx.beginPath();
 
-        const xStep = width / data.length;
-        for (let i = 0; i < data.length; i++) {
+        const xStep = width / data.audio.length;
+        for (let i = 0; i < data.audio.length; i++) {
           const x = i * xStep;
           // Map sample value from [-1, 1] to canvas height
-          const y = height / 2 - (data[i] * height / 2);
+          const y = height / 2 - (data.audio[i] * height / 2);
 
           if (i === 0) {
             ctx.moveTo(x, y);
@@ -9285,6 +9285,34 @@ function startOscilloscopeVisualization(nodeId, trackId, backendNodeId) {
           }
         }
         ctx.stroke();
+      }
+
+      // Draw CV trace in orange if present and CV input is connected
+      if (data && data.cv && data.cv.length > 0 && editorRef) {
+        // Check if CV input (port index 2 = input_3 in drawflow) is connected
+        const node = editorRef.getNodeFromId(nodeId);
+        const cvInput = node?.inputs?.input_3;
+        const isCvConnected = cvInput && cvInput.connections && cvInput.connections.length > 0;
+
+        if (isCvConnected) {
+          ctx.strokeStyle = '#FF9800';  // Orange color
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+
+          const xStep = width / data.cv.length;
+          for (let i = 0; i < data.cv.length; i++) {
+            const x = i * xStep;
+            // Map CV value from [-1, 1] to canvas height
+            const y = height / 2 - (data.cv[i] * height / 2);
+
+            if (i === 0) {
+              ctx.moveTo(x, y);
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+          ctx.stroke();
+        }
       }
     } catch (error) {
       console.error('Failed to update oscilloscope:', error);
