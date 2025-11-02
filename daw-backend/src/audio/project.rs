@@ -13,15 +13,17 @@ pub struct Project {
     tracks: HashMap<TrackId, TrackNode>,
     next_track_id: TrackId,
     root_tracks: Vec<TrackId>, // Top-level tracks (not in any group)
+    sample_rate: u32, // System sample rate
 }
 
 impl Project {
     /// Create a new empty project
-    pub fn new() -> Self {
+    pub fn new(sample_rate: u32) -> Self {
         Self {
             tracks: HashMap::new(),
             next_track_id: 0,
             root_tracks: Vec::new(),
+            sample_rate,
         }
     }
 
@@ -42,7 +44,7 @@ impl Project {
     /// The new track's ID
     pub fn add_audio_track(&mut self, name: String, parent_id: Option<TrackId>) -> TrackId {
         let id = self.next_id();
-        let track = AudioTrack::new(id, name);
+        let track = AudioTrack::new(id, name, self.sample_rate);
         self.tracks.insert(id, TrackNode::Audio(track));
 
         if let Some(parent) = parent_id {
@@ -94,7 +96,7 @@ impl Project {
     /// The new track's ID
     pub fn add_midi_track(&mut self, name: String, parent_id: Option<TrackId>) -> TrackId {
         let id = self.next_id();
-        let track = MidiTrack::new(id, name);
+        let track = MidiTrack::new(id, name, self.sample_rate);
         self.tracks.insert(id, TrackNode::Midi(track));
 
         if let Some(parent) = parent_id {
@@ -422,6 +424,6 @@ impl Project {
 
 impl Default for Project {
     fn default() -> Self {
-        Self::new()
+        Self::new(48000) // Use 48kHz as default, will be overridden when created with actual sample rate
     }
 }

@@ -10,6 +10,7 @@ pub struct AudioFileMetadata {
     pub sample_rate: u32,
     pub channels: u32,
     pub waveform: Vec<WaveformPeak>,
+    pub detected_bpm: Option<f32>,  // Detected BPM from audio analysis
 }
 
 #[derive(serde::Serialize)]
@@ -272,6 +273,18 @@ pub async fn audio_load_file(
     let sample_rate = audio_file.sample_rate;
     let channels = audio_file.channels;
 
+    // Detect BPM from audio (mix to mono if stereo)
+    let mono_audio: Vec<f32> = if channels == 2 {
+        // Mix stereo to mono
+        audio_file.data.chunks(2)
+            .map(|chunk| (chunk[0] + chunk.get(1).unwrap_or(&0.0)) * 0.5)
+            .collect()
+    } else {
+        audio_file.data.clone()
+    };
+
+    let detected_bpm = daw_backend::audio::bpm_detector::detect_bpm_offline(&mono_audio, sample_rate);
+
     // Get a lock on the audio state and send the loaded data to the audio thread
     let mut audio_state = state.lock().unwrap();
 
@@ -293,6 +306,7 @@ pub async fn audio_load_file(
             sample_rate,
             channels,
             waveform,
+            detected_bpm,
         })
     } else {
         Err("Audio not initialized".to_string())

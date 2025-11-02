@@ -1,4 +1,5 @@
 pub mod automation;
+pub mod bpm_detector;
 pub mod buffer_pool;
 pub mod clip;
 pub mod engine;

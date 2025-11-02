@@ -303,16 +303,15 @@ pub struct MidiTrack {
 
 impl MidiTrack {
     /// Create a new MIDI track with default settings
-    pub fn new(id: TrackId, name: String) -> Self {
-        // Use default sample rate and a large buffer size that can accommodate any callback
-        let default_sample_rate = 48000;
+    pub fn new(id: TrackId, name: String, sample_rate: u32) -> Self {
+        // Use a large buffer size that can accommodate any callback
         let default_buffer_size = 8192;
 
         Self {
             id,
             name,
             clips: Vec::new(),
-            instrument_graph: AudioGraph::new(default_sample_rate, default_buffer_size),
+            instrument_graph: AudioGraph::new(sample_rate, default_buffer_size),
             volume: 1.0,
             muted: false,
             solo: false,
@@ -498,21 +497,24 @@ pub struct AudioTrack {
 
 impl AudioTrack {
     /// Create a new audio track with default settings
-    pub fn new(id: TrackId, name: String) -> Self {
-        // Use default sample rate and a large buffer size that can accommodate any callback
-        let default_sample_rate = 48000;
+    pub fn new(id: TrackId, name: String, sample_rate: u32) -> Self {
+        // Use a large buffer size that can accommodate any callback
         let default_buffer_size = 8192;
 
         // Create the effects graph with default AudioInput -> AudioOutput chain
-        let mut effects_graph = AudioGraph::new(default_sample_rate, default_buffer_size);
+        let mut effects_graph = AudioGraph::new(sample_rate, default_buffer_size);
 
         // Add AudioInput node
         let input_node = Box::new(AudioInputNode::new("Audio Input"));
         let input_id = effects_graph.add_node(input_node);
+        // Set position for AudioInput (left side, similar to instrument preset spacing)
+        effects_graph.set_node_position(input_id, 100.0, 150.0);
 
         // Add AudioOutput node
         let output_node = Box::new(AudioOutputNode::new("Audio Output"));
         let output_id = effects_graph.add_node(output_node);
+        // Set position for AudioOutput (right side, spaced apart)
+        effects_graph.set_node_position(output_id, 500.0, 150.0);
 
         // Connect AudioInput -> AudioOutput
         let _ = effects_graph.connect(input_id, 0, output_id, 0);

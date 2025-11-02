@@ -4293,6 +4293,10 @@ function timelineV2() {
           if (timelineWidget.requestRedraw) {
             timelineWidget.requestRedraw();
           }
+          // Notify all registered listeners of BPM change
+          if (context.notifyBpmChange) {
+            context.notifyBpmChange(bpm);
+          }
         }
       } else if (action === 'edit-time-signature') {
         // Clicked on time signature - show custom dropdown with common options
@@ -6681,6 +6685,84 @@ function nodeEditor() {
       set suppressActionRecording(value) { suppressActionRecording = value; }
     };
 
+    // Initialize BPM change notification system
+    // This allows nodes to register callbacks to be notified when BPM changes
+    const bpmChangeListeners = new Set();
+
+    context.registerBpmChangeListener = (callback) => {
+      bpmChangeListeners.add(callback);
+      return () => bpmChangeListeners.delete(callback); // Return unregister function
+    };
+
+    context.notifyBpmChange = (newBpm) => {
+      console.log(`BPM changed to ${newBpm}, notifying ${bpmChangeListeners.size} listeners`);
+      bpmChangeListeners.forEach(callback => {
+        try {
+          callback(newBpm);
+        } catch (error) {
+          console.error('Error in BPM change listener:', error);
+        }
+      });
+    };
+
+    // Register a listener to update all synced Phaser nodes when BPM changes
+    context.registerBpmChangeListener((newBpm) => {
+      if (!editor) return;
+
+      const module = editor.module;
+      const allNodes = editor.drawflow.drawflow[module]?.data || {};
+
+      // Beat division definitions for conversion
+      const beatDivisions = [
+        { label: '4 bars', multiplier: 16.0 },
+        { label: '2 bars', multiplier: 8.0 },
+        { label: '1 bar', multiplier: 4.0 },
+        { label: '1/2', multiplier: 2.0 },
+        { label: '1/4', multiplier: 1.0 },
+        { label: '1/8', multiplier: 0.5 },
+        { label: '1/16', multiplier: 0.25 },
+        { label: '1/32', multiplier: 0.125 },
+        { label: '1/2T', multiplier: 2.0/3.0 },
+        { label: '1/4T', multiplier: 1.0/3.0 },
+        { label: '1/8T', multiplier: 0.5/3.0 }
+      ];
+
+      // Iterate through all nodes to find synced Phaser nodes
+      for (const [nodeId, nodeData] of Object.entries(allNodes)) {
+        // Check if this is a Phaser node with sync enabled
+        if (nodeData.name === 'Phaser' && nodeData.data.backendId !== null) {
+          const nodeElement = document.getElementById(`node-${nodeId}`);
+          if (!nodeElement) continue;
+
+          const syncCheckbox = nodeElement.querySelector(`#sync-${nodeId}`);
+          if (!syncCheckbox || !syncCheckbox.checked) continue;
+
+          // Get the current rate slider value (beat division index)
+          const rateSlider = nodeElement.querySelector(`input[data-param="0"]`); // rate is param 0
+          if (!rateSlider) continue;
+
+          const beatDivisionIndex = Math.min(10, Math.max(0, Math.round(parseFloat(rateSlider.value))));
+          const beatsPerSecond = newBpm / 60.0;
+          const quarterNotesPerCycle = beatDivisions[beatDivisionIndex].multiplier;
+          const hz = beatsPerSecond / quarterNotesPerCycle;
+
+          // Update the backend parameter
+          const trackInfo = getCurrentTrack();
+          if (trackInfo !== null) {
+            invoke("graph_set_parameter", {
+              trackId: trackInfo.trackId,
+              nodeId: nodeData.data.backendId,
+              paramId: 0, // rate parameter
+              value: hz
+            }).catch(err => {
+              console.error("Failed to update Phaser rate after BPM change:", err);
+            });
+            console.log(`Updated Phaser node ${nodeId} rate to ${hz} Hz for BPM ${newBpm}`);
+          }
+        }
+      }
+    });
+
     // Initialize minimap
     const minimapCanvas = container.querySelector("#minimap-canvas");
     const minimapViewport = container.querySelector(".minimap-viewport");
@@ -7679,11 +7761,41 @@ function nodeEditor() {
             if (nodeData.data.backendId !== null) {
               const trackInfo = getCurrentTrack();
               if (trackInfo !== null) {
+                // Convert beat divisions to Hz for Phaser rate in sync mode
+                let backendValue = value;
+                if (nodeDef && nodeDef.parameters[paramId]) {
+                  const param = nodeDef.parameters[paramId];
+                  if (param.name === 'rate' && nodeData.name === 'Phaser') {
+                    const syncCheckbox = nodeElement.querySelector(`#sync-${nodeId}`);
+                    if (syncCheckbox && syncCheckbox.checked && context.timelineWidget) {
+                      const beatDivisions = [
+                        { label: '4 bars', multiplier: 16.0 },
+                        { label: '2 bars', multiplier: 8.0 },
+                        { label: '1 bar', multiplier: 4.0 },
+                        { label: '1/2', multiplier: 2.0 },
+                        { label: '1/4', multiplier: 1.0 },
+                        { label: '1/8', multiplier: 0.5 },
+                        { label: '1/16', multiplier: 0.25 },
+                        { label: '1/32', multiplier: 0.125 },
+                        { label: '1/2T', multiplier: 2.0/3.0 },
+                        { label: '1/4T', multiplier: 1.0/3.0 },
+                        { label: '1/8T', multiplier: 0.5/3.0 }
+                      ];
+                      const idx = Math.min(10, Math.max(0, Math.round(value)));
+                      const bpm = context.timelineWidget.timelineState.bpm;
+                      const beatsPerSecond = bpm / 60.0;
+                      const quarterNotesPerCycle = beatDivisions[idx].multiplier;
+                      // Hz = how many cycles per second
+                      backendValue = beatsPerSecond / quarterNotesPerCycle;
+                    }
+                  }
+                }
+
                 invoke("graph_set_parameter", {
                   trackId: trackInfo.trackId,
                   nodeId: nodeData.data.backendId,
                   paramId: paramId,
-                  value: value
+                  value: backendValue
                 }).catch(err => {
                   console.error("Failed to set parameter:", err);
                 });

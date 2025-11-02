@@ -1283,6 +1283,33 @@ export const nodeTypes = {
     `
   },
 
+  BpmDetector: {
+    name: 'BPM Detector',
+    category: NodeCategory.UTILITY,
+    description: 'Detects tempo from audio and outputs BPM as CV',
+    inputs: [
+      { name: 'Audio In', type: SignalType.AUDIO, index: 0 }
+    ],
+    outputs: [
+      { name: 'BPM CV', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [
+      { id: 0, name: 'smoothing', label: 'Smoothing', min: 0.0, max: 1.0, default: 0.9, unit: '' }
+    ],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">BPM Detector</div>
+        <div class="node-param">
+          <label>Smoothing: <span id="smoothing-${nodeId}">0.90</span></label>
+          <input type="range" data-node="${nodeId}" data-param="0" min="0.0" max="1.0" value="0.9" step="0.01">
+        </div>
+        <div class="node-info" style="font-size: 10px; color: #888; margin-top: 5px;">
+          Analyzes incoming audio and outputs detected BPM as CV signal
+        </div>
+      </div>
+    `
+  },
+
   EnvelopeFollower: {
     name: 'Envelope Follower',
     category: NodeCategory.UTILITY,

@@ -536,6 +536,37 @@ export const actions = {
         if (context.timelineWidget) {
           context.timelineWidget.requestRedraw();
         }
+
+        // Make this the active track
+        if (context.activeObject) {
+          context.activeObject.activeLayer = newAudioTrack;
+          updateLayers(); // Refresh to show active state
+          // Reload node editor to show the new track's graph
+          if (context.reloadNodeEditor) {
+            await context.reloadNodeEditor();
+          }
+        }
+
+        // Prompt user to set BPM if detected
+        if (metadata.detected_bpm && context.timelineWidget) {
+          const currentBpm = context.timelineWidget.timelineState.bpm;
+          const detectedBpm = metadata.detected_bpm;
+          const shouldSetBpm = confirm(
+            `Detected BPM: ${detectedBpm}\n\n` +
+            `Current project BPM: ${currentBpm}\n\n` +
+            `Would you like to set the project BPM to ${detectedBpm}?`
+          );
+
+          if (shouldSetBpm) {
+            context.timelineWidget.timelineState.bpm = detectedBpm;
+            context.timelineWidget.requestRedraw(); // Redraw to show updated BPM
+            console.log(`Project BPM set to ${detectedBpm}`);
+            // Notify all registered listeners of BPM change
+            if (context.notifyBpmChange) {
+              context.notifyBpmChange(detectedBpm);
+            }
+          }
+        }
       } catch (error) {
         console.error('Failed to load audio:', error);
         // Update clip to show error

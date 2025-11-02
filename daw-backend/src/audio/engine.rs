@@ -68,7 +68,7 @@ impl Engine {
         let buffer_size = 512 * channels as usize;
 
         Self {
-            project: Project::new(),
+            project: Project::new(sample_rate),
             audio_pool: AudioPool::new(),
             buffer_pool: BufferPool::new(8, buffer_size), // 8 buffers should handle deep nesting
             playhead: 0,
@@ -637,7 +637,7 @@ impl Engine {
                 self.recording_state = None;
 
                 // Clear all project data
-                self.project = Project::new();
+                self.project = Project::new(self.sample_rate);
 
                 // Clear audio pool
                 self.audio_pool = AudioPool::new();
@@ -726,6 +726,7 @@ impl Engine {
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
                             "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
                             "Constant" => Box::new(ConstantNode::new("Constant".to_string())),
+                            "BpmDetector" => Box::new(BpmDetectorNode::new("BPM Detector".to_string())),
                             "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
                             "Math" => Box::new(MathNode::new("Math".to_string())),
@@ -810,6 +811,7 @@ impl Engine {
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
                             "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
                             "Constant" => Box::new(ConstantNode::new("Constant".to_string())),
+                            "BpmDetector" => Box::new(BpmDetectorNode::new("BPM Detector".to_string())),
                             "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
                             "Math" => Box::new(MathNode::new("Math".to_string())),
@@ -1668,6 +1670,7 @@ pub struct EngineController {
     playhead: Arc<AtomicU64>,
     next_midi_clip_id: Arc<AtomicU32>,
     sample_rate: u32,
+    #[allow(dead_code)] // Used in public getter method
     channels: u32,
 }
 
