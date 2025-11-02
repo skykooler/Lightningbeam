@@ -1,5 +1,5 @@
 use crate::audio::midi::MidiEvent;
-use crate::audio::node_graph::{AudioNode, InstrumentGraph, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, AudioGraph, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
 
 const PARAM_VOICE_COUNT: u32 = 0;
 const MAX_VOICES: usize = 16; // Maximum allowed voices
@@ -34,10 +34,10 @@ pub struct VoiceAllocatorNode {
     name: String,
 
     /// The template graph (edited by user via UI)
-    template_graph: InstrumentGraph,
+    template_graph: AudioGraph,
 
     /// Runtime voice instances (clones of template)
-    voice_instances: Vec<InstrumentGraph>,
+    voice_instances: Vec<AudioGraph>,
 
     /// Voice allocation state
     voices: [VoiceState; MAX_VOICES],
@@ -73,11 +73,11 @@ impl VoiceAllocatorNode {
         ];
 
         // Create empty template graph
-        let template_graph = InstrumentGraph::new(sample_rate, buffer_size);
+        let template_graph = AudioGraph::new(sample_rate, buffer_size);
 
         // Create voice instances (initially empty clones of template)
-        let voice_instances: Vec<InstrumentGraph> = (0..MAX_VOICES)
-            .map(|_| InstrumentGraph::new(sample_rate, buffer_size))
+        let voice_instances: Vec<AudioGraph> = (0..MAX_VOICES)
+            .map(|_| AudioGraph::new(sample_rate, buffer_size))
             .collect();
 
         Self {
@@ -94,12 +94,12 @@ impl VoiceAllocatorNode {
     }
 
     /// Get mutable reference to template graph (for UI editing)
-    pub fn template_graph_mut(&mut self) -> &mut InstrumentGraph {
+    pub fn template_graph_mut(&mut self) -> &mut AudioGraph {
         &mut self.template_graph
     }
 
     /// Get reference to template graph (for serialization)
-    pub fn template_graph(&self) -> &InstrumentGraph {
+    pub fn template_graph(&self) -> &AudioGraph {
         &self.template_graph
     }
 

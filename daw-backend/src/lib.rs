@@ -17,7 +17,7 @@ pub use audio::{
     Metatrack, MidiClip, MidiClipId, MidiEvent, MidiTrack, ParameterId, PoolAudioFile, Project, RecordingState, RenderContext, Track, TrackId,
     TrackNode,
 };
-pub use audio::node_graph::{GraphPreset, InstrumentGraph, PresetMetadata, SerializedConnection, SerializedNode};
+pub use audio::node_graph::{GraphPreset, AudioGraph, PresetMetadata, SerializedConnection, SerializedNode};
 pub use command::{AudioEvent, Command, OscilloscopeData};
 pub use command::types::AutomationKeyframeData;
 pub use io::{load_midi_file, AudioFile, WaveformPeak, WavWriter};

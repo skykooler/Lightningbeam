@@ -1,7 +1,8 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
 use super::clip::Clip;
 use super::midi::{MidiClip, MidiEvent};
-use super::node_graph::InstrumentGraph;
+use super::node_graph::AudioGraph;
+use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
 use super::pool::AudioPool;
 use std::collections::HashMap;
 
@@ -289,7 +290,7 @@ pub struct MidiTrack {
     pub id: TrackId,
     pub name: String,
     pub clips: Vec<MidiClip>,
-    pub instrument_graph: InstrumentGraph,
+    pub instrument_graph: AudioGraph,
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
@@ -311,7 +312,7 @@ impl MidiTrack {
             id,
             name,
             clips: Vec::new(),
-            instrument_graph: InstrumentGraph::new(default_sample_rate, default_buffer_size),
+            instrument_graph: AudioGraph::new(default_sample_rate, default_buffer_size),
             volume: 1.0,
             muted: false,
             solo: false,
@@ -491,11 +492,34 @@ pub struct AudioTrack {
     /// Automation lanes for this track
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
+    /// Effects processing graph for this audio track
+    pub effects_graph: AudioGraph,
 }
 
 impl AudioTrack {
     /// Create a new audio track with default settings
     pub fn new(id: TrackId, name: String) -> Self {
+        // Use default sample rate and a large buffer size that can accommodate any callback
+        let default_sample_rate = 48000;
+        let default_buffer_size = 8192;
+
+        // Create the effects graph with default AudioInput -> AudioOutput chain
+        let mut effects_graph = AudioGraph::new(default_sample_rate, default_buffer_size);
+
+        // Add AudioInput node
+        let input_node = Box::new(AudioInputNode::new("Audio Input"));
+        let input_id = effects_graph.add_node(input_node);
+
+        // Add AudioOutput node
+        let output_node = Box::new(AudioOutputNode::new("Audio Output"));
+        let output_id = effects_graph.add_node(output_node);
+
+        // Connect AudioInput -> AudioOutput
+        let _ = effects_graph.connect(input_id, 0, output_id, 0);
+
+        // Set the AudioOutput node as the graph's output
+        effects_graph.set_output_node(Some(output_id));
+
         Self {
             id,
             name,
@@ -505,6 +529,7 @@ impl AudioTrack {
             solo: false,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
+            effects_graph,
         }
     }
 
@@ -571,15 +596,17 @@ impl AudioTrack {
         let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
         let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
 
+        // Create a temporary buffer for clip rendering
+        let mut clip_buffer = vec![0.0f32; output.len()];
         let mut rendered = 0;
 
-        // Render all active clips
+        // Render all active clips into the temporary buffer
         for clip in &self.clips {
             // Check if clip overlaps with current buffer time range
             if clip.start_time < buffer_end_seconds && clip.end_time() > playhead_seconds {
                 rendered += self.render_clip(
                     clip,
-                    output,
+                    &mut clip_buffer,
                     pool,
                     playhead_seconds,
                     sample_rate,
@@ -587,6 +614,25 @@ impl AudioTrack {
                 );
             }
         }
+
+        // Clear output buffer before graph processing to ensure clean output
+        output.fill(0.0);
+
+        // Find and inject audio into the AudioInputNode
+        let node_indices: Vec<_> = self.effects_graph.node_indices().collect();
+        for node_idx in node_indices {
+            if let Some(graph_node) = self.effects_graph.get_graph_node_mut(node_idx) {
+                if graph_node.node.node_type() == "AudioInput" {
+                    if let Some(input_node) = graph_node.node.as_any_mut().downcast_mut::<AudioInputNode>() {
+                        input_node.inject_audio(&clip_buffer);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Process through the effects graph (this will write to output buffer)
+        self.effects_graph.process(output, &[], playhead_seconds);
 
         // Evaluate and apply automation
         let effective_volume = self.evaluate_automation_at_time(playhead_seconds);

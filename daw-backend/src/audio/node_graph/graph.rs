@@ -57,7 +57,7 @@ impl GraphNode {
 }
 
 /// Audio processing graph for instruments/effects
-pub struct InstrumentGraph {
+pub struct AudioGraph {
     /// The audio graph (StableGraph allows node removal without index invalidation)
     graph: StableGraph<GraphNode, Connection>,
 
@@ -86,8 +86,8 @@ pub struct InstrumentGraph {
     playback_time: f64,
 }
 
-impl InstrumentGraph {
-    /// Create a new empty instrument graph
+impl AudioGraph {
+    /// Create a new empty audio graph
     pub fn new(sample_rate: u32, buffer_size: usize) -> Self {
         Self {
             graph: StableGraph::new(),

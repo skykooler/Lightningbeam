@@ -2929,8 +2929,8 @@ class TimelineWindowV2 extends Widget {
       this.context.selection = []
       this.context.shapeselection = []
 
-      // If this is a MIDI track, reload the node editor
-      if (track.object.type === 'midi') {
+      // Reload the node editor for both MIDI and audio tracks
+      if (track.object.type === 'midi' || track.object.type === 'audio') {
         setTimeout(() => this.context.reloadNodeEditor?.(), 50);
       }
     }

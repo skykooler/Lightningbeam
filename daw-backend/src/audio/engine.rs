@@ -1,7 +1,7 @@
 use crate::audio::buffer_pool::BufferPool;
 use crate::audio::clip::ClipId;
 use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
-use crate::audio::node_graph::{nodes::*, InstrumentGraph};
+use crate::audio::node_graph::{nodes::*, AudioGraph};
 use crate::audio::pool::AudioPool;
 use crate::audio::project::Project;
 use crate::audio::recording::{MidiRecordingState, RecordingState};
@@ -689,12 +689,27 @@ impl Engine {
 
             // Node graph commands
             Command::GraphAddNode(track_id, node_type, x, y) => {
-                // Get MIDI track (graphs are only for MIDI tracks currently)
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        // Create the node based on type
-                        let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
+                eprintln!("[DEBUG] GraphAddNode received: track_id={}, node_type={}, x={}, y={}", track_id, node_type, x, y);
+
+                // Get the track's graph (works for both MIDI and Audio tracks)
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => {
+                        eprintln!("[DEBUG] Found MIDI track, using instrument_graph");
+                        Some(&mut track.instrument_graph)
+                    },
+                    Some(TrackNode::Audio(track)) => {
+                        eprintln!("[DEBUG] Found Audio track, using effects_graph");
+                        Some(&mut track.effects_graph)
+                    },
+                    _ => {
+                        eprintln!("[DEBUG] Track not found or invalid type!");
+                        None
+                    }
+                };
+
+                if let Some(graph) = graph {
+                    // Create the node based on type
+                    let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
                             "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
                             "Gain" => Box::new(GainNode::new("Gain".to_string())),
                             "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
@@ -729,6 +744,7 @@ impl Engine {
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
+                            "AudioInput" => Box::new(AudioInputNode::new("Audio Input".to_string())),
                             "AutomationInput" => Box::new(AutomationInputNode::new("Automation".to_string())),
                             "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
                             "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
@@ -744,21 +760,29 @@ impl Engine {
                             }
                         };
 
-                        // Add node to graph
-                        let node_idx = graph.add_node(node);
-                        let node_id = node_idx.index() as u32;
+                    // Add node to graph
+                    let node_idx = graph.add_node(node);
+                    let node_id = node_idx.index() as u32;
+                    eprintln!("[DEBUG] Node added with index: {:?}, converted to u32 id: {}", node_idx, node_id);
 
-                        // Save position
-                        graph.set_node_position(node_idx, x, y);
+                    // Save position
+                    graph.set_node_position(node_idx, x, y);
 
-                        // Automatically set MIDI-receiving nodes as MIDI targets
-                        if node_type == "MidiInput" || node_type == "VoiceAllocator" {
-                            graph.set_midi_target(node_idx, true);
-                        }
-
-                        // Emit success event
-                        let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
+                    // Automatically set MIDI-receiving nodes as MIDI targets
+                    if node_type == "MidiInput" || node_type == "VoiceAllocator" {
+                        graph.set_midi_target(node_idx, true);
                     }
+
+                    // Automatically set AudioOutput nodes as the graph output
+                    if node_type == "AudioOutput" {
+                        graph.set_output_node(Some(node_idx));
+                    }
+
+                    eprintln!("[DEBUG] Emitting GraphNodeAdded event: track_id={}, node_id={}, node_type={}", track_id, node_id, node_type);
+                    // Emit success event
+                    let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
+                } else {
+                    eprintln!("[DEBUG] Graph was None, node not added!");
                 }
             }
 
@@ -836,35 +860,55 @@ impl Engine {
             }
 
             Command::GraphRemoveNode(track_id, node_index) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        let node_idx = NodeIndex::new(node_index as usize);
-                        graph.remove_node(node_idx);
-                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                    }
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(node_index as usize);
+                    graph.remove_node(node_idx);
+                    let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                 }
             }
 
             Command::GraphConnect(track_id, from, from_port, to, to_port) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        let from_idx = NodeIndex::new(from as usize);
-                        let to_idx = NodeIndex::new(to as usize);
+                eprintln!("[DEBUG] GraphConnect received: track_id={}, from={}, from_port={}, to={}, to_port={}", track_id, from, from_port, to, to_port);
 
-                        match graph.connect(from_idx, from_port, to_idx, to_port) {
-                            Ok(()) => {
-                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                            }
-                            Err(e) => {
-                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
-                                    track_id,
-                                    format!("{:?}", e)
-                                ));
-                            }
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => {
+                        eprintln!("[DEBUG] Found MIDI track for connection");
+                        Some(&mut track.instrument_graph)
+                    },
+                    Some(TrackNode::Audio(track)) => {
+                        eprintln!("[DEBUG] Found Audio track for connection");
+                        Some(&mut track.effects_graph)
+                    },
+                    _ => {
+                        eprintln!("[DEBUG] Track not found for connection!");
+                        None
+                    }
+                };
+                if let Some(graph) = graph {
+                    let from_idx = NodeIndex::new(from as usize);
+                    let to_idx = NodeIndex::new(to as usize);
+                    eprintln!("[DEBUG] Attempting to connect nodes: {:?} port {} -> {:?} port {}", from_idx, from_port, to_idx, to_port);
+
+                    match graph.connect(from_idx, from_port, to_idx, to_port) {
+                        Ok(()) => {
+                            eprintln!("[DEBUG] Connection successful!");
+                            let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                        }
+                        Err(e) => {
+                            eprintln!("[DEBUG] Connection failed: {:?}", e);
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("{:?}", e)
+                            ));
                         }
                     }
+                } else {
+                    eprintln!("[DEBUG] No graph found, connection not made");
                 }
             }
 
@@ -891,25 +935,37 @@ impl Engine {
             }
 
             Command::GraphDisconnect(track_id, from, from_port, to, to_port) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        let from_idx = NodeIndex::new(from as usize);
-                        let to_idx = NodeIndex::new(to as usize);
-                        graph.disconnect(from_idx, from_port, to_idx, to_port);
-                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                eprintln!("[AUDIO ENGINE] GraphDisconnect: track={}, from={}, from_port={}, to={}, to_port={}", track_id, from, from_port, to, to_port);
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => {
+                        eprintln!("[AUDIO ENGINE] Found audio track, disconnecting in effects_graph");
+                        Some(&mut track.effects_graph)
                     }
+                    _ => {
+                        eprintln!("[AUDIO ENGINE] Track not found!");
+                        None
+                    }
+                };
+                if let Some(graph) = graph {
+                    let from_idx = NodeIndex::new(from as usize);
+                    let to_idx = NodeIndex::new(to as usize);
+                    graph.disconnect(from_idx, from_port, to_idx, to_port);
+                    eprintln!("[AUDIO ENGINE] Disconnect completed");
+                    let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                 }
             }
 
             Command::GraphSetParameter(track_id, node_index, param_id, value) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        let node_idx = NodeIndex::new(node_index as usize);
-                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                            graph_node.node.set_parameter(param_id, value);
-                        }
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(node_index as usize);
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        graph_node.node.set_parameter(param_id, value);
                     }
                 }
             }
@@ -925,18 +981,24 @@ impl Engine {
             }
 
             Command::GraphSetOutputNode(track_id, node_index) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
-                    {
-                        let node_idx = NodeIndex::new(node_index as usize);
-                        graph.set_output_node(Some(node_idx));
-                    }
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(node_index as usize);
+                    graph.set_output_node(Some(node_idx));
                 }
             }
 
             Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &track.instrument_graph;
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     // Serialize the graph to a preset
                     let mut preset = graph.to_preset(&preset_name);
                     preset.metadata.description = description;
@@ -969,14 +1031,21 @@ impl Engine {
                                 // Extract the directory path from the preset path for resolving relative sample paths
                                 let preset_base_path = std::path::Path::new(&preset_path).parent();
 
-                                match InstrumentGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path) {
+                                match AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path) {
                                     Ok(graph) => {
                                         // Replace the track's graph
-                                        if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                                            track.instrument_graph = graph;
-                                            let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                            // Emit preset loaded event after everything is loaded
-                                            let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                        match self.project.get_track_mut(track_id) {
+                                            Some(TrackNode::Midi(track)) => {
+                                                track.instrument_graph = graph;
+                                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                            }
+                                            Some(TrackNode::Audio(track)) => {
+                                                track.effects_graph = graph;
+                                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     Err(e) => {
@@ -1197,15 +1266,26 @@ impl Engine {
     fn handle_query(&mut self, query: Query) {
         let response = match query {
             Query::GetGraphState(track_id) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    let graph = &track.instrument_graph;
-                    let preset = graph.to_preset("temp");
-                    match preset.to_json() {
-                        Ok(json) => QueryResponse::GraphState(Ok(json)),
-                        Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
+                match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(track)) => {
+                        let graph = &track.instrument_graph;
+                        let preset = graph.to_preset("temp");
+                        match preset.to_json() {
+                            Ok(json) => QueryResponse::GraphState(Ok(json)),
+                            Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
+                        }
                     }
-                } else {
-                    QueryResponse::GraphState(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                    Some(TrackNode::Audio(track)) => {
+                        let graph = &track.effects_graph;
+                        let preset = graph.to_preset("temp");
+                        match preset.to_json() {
+                            Ok(json) => QueryResponse::GraphState(Ok(json)),
+                            Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
+                        }
+                    }
+                    _ => {
+                        QueryResponse::GraphState(Err(format!("Track {} not found", track_id)))
+                    }
                 }
             }
             Query::GetTemplateState(track_id, voice_allocator_id) => {

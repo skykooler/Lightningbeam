@@ -1161,6 +1161,19 @@ async function handleAudioEvent(event) {
       updateRecordingClipDuration(event.clip_id, event.duration);
       break;
 
+    case 'GraphNodeAdded':
+      console.log('[FRONTEND] GraphNodeAdded event - track:', event.track_id, 'node_id:', event.node_id, 'node_type:', event.node_type);
+      // Resolve the pending promise with the correct backend ID
+      if (window.pendingNodeUpdate) {
+        const { drawflowNodeId, nodeType, resolve } = window.pendingNodeUpdate;
+        if (nodeType === event.node_type && resolve) {
+          console.log('[FRONTEND] Resolving promise for node', drawflowNodeId, 'with backend ID:', event.node_id);
+          resolve(event.node_id);
+          window.pendingNodeUpdate = null;
+        }
+      }
+      break;
+
     case 'RecordingStopped':
       console.log('[FRONTEND] RecordingStopped event - clip:', event.clip_id, 'pool_index:', event.pool_index, 'waveform peaks:', event.waveform?.length);
       console.log('[FRONTEND] Current recording state - isRecording:', context.isRecording, 'recordingClipId:', context.recordingClipId);
@@ -6367,16 +6380,29 @@ async function renderMenu() {
 }
 updateMenu();
 
-// Helper function to get the current MIDI track
-function getCurrentMidiTrack() {
+// Helper function to get the current track (MIDI or Audio) for node graph editing
+function getCurrentTrack() {
   const activeLayer = context.activeObject?.activeLayer;
-  if (!activeLayer || !(activeLayer instanceof AudioTrack) || activeLayer.type !== 'midi') {
+  if (!activeLayer || !(activeLayer instanceof AudioTrack)) {
     return null;
   }
   if (activeLayer.audioTrackId === null) {
     return null;
   }
-  return activeLayer.audioTrackId;
+  // Return both track ID and track type
+  return {
+    trackId: activeLayer.audioTrackId,
+    trackType: activeLayer.type  // 'midi' or 'audio'
+  };
+}
+
+// Backwards compatibility: function to get just the MIDI track ID
+function getCurrentMidiTrack() {
+  const trackInfo = getCurrentTrack();
+  if (trackInfo && trackInfo.trackType === 'midi') {
+    return trackInfo.trackId;
+  }
+  return null;
 }
 
 function nodeEditor() {
@@ -6413,7 +6439,8 @@ function nodeEditor() {
   // Create breadcrumb/context header
   const header = document.createElement("div");
   header.className = "node-editor-header";
-  header.innerHTML = '<div class="context-breadcrumb">Main Graph</div>';
+  // Initial header will be updated by updateBreadcrumb() after track info is available
+  header.innerHTML = '<div class="context-breadcrumb">Node Graph</div>';
   container.appendChild(header);
 
   // Create the Drawflow canvas
@@ -6490,6 +6517,9 @@ function nodeEditor() {
   // Function to update palette based on context and selected category
   function updatePalette() {
     const isTemplate = editingContext !== null;
+    const trackInfo = getCurrentTrack();
+    const isMIDI = trackInfo?.trackType === 'midi';
+    const isAudio = trackInfo?.trackType === 'audio';
 
     if (selectedCategory === null && !searchQuery) {
       // Show categories when no search query
@@ -6527,8 +6557,15 @@ function nodeEditor() {
         if (isTemplate) {
           // In template: hide VoiceAllocator, AudioOutput, MidiInput
           return node.type !== 'VoiceAllocator' && node.type !== 'AudioOutput' && node.type !== 'MidiInput';
+        } else if (isMIDI) {
+          // MIDI track: hide AudioInput, show synth nodes
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput' && node.type !== 'AudioInput';
+        } else if (isAudio) {
+          // Audio track: hide synth/MIDI nodes, show AudioInput
+          const synthNodes = ['Oscillator', 'FMSynth', 'WavetableOscillator', 'SimpleSampler', 'MultiSampler', 'VoiceAllocator', 'MidiInput', 'MidiToCV'];
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput' && !synthNodes.includes(node.type);
         } else {
-          // In main graph: hide TemplateInput/TemplateOutput
+          // Fallback: hide TemplateInput/TemplateOutput
           return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput';
         }
       });
@@ -6563,8 +6600,15 @@ function nodeEditor() {
         if (isTemplate) {
           // In template: hide VoiceAllocator, AudioOutput, MidiInput
           return node.type !== 'VoiceAllocator' && node.type !== 'AudioOutput' && node.type !== 'MidiInput';
+        } else if (isMIDI) {
+          // MIDI track: hide AudioInput, show synth nodes
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput' && node.type !== 'AudioInput';
+        } else if (isAudio) {
+          // Audio track: hide synth/MIDI nodes, show AudioInput
+          const synthNodes = ['Oscillator', 'FMSynth', 'WavetableOscillator', 'SimpleSampler', 'MultiSampler', 'VoiceAllocator', 'MidiInput', 'MidiToCV'];
+          return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput' && !synthNodes.includes(node.type);
         } else {
-          // In main graph: hide TemplateInput/TemplateOutput
+          // Fallback: hide TemplateInput/TemplateOutput
           return node.type !== 'TemplateInput' && node.type !== 'TemplateOutput';
         }
       });
@@ -7275,13 +7319,14 @@ function nodeEditor() {
 
     // Send command to backend
     // Check editing context first (dedicated template view), then parent node (inline editing)
-    const trackId = getCurrentMidiTrack();
-    if (trackId === null) {
-      console.error('No MIDI track selected');
-      showNodeEditorError(container, 'Please select a MIDI track first');
+    const trackInfo = getCurrentTrack();
+    if (trackInfo === null) {
+      console.error('No track selected');
+      alert('Please select a track first');
       editor.removeNodeId(`node-${drawflowNodeId}`);
       return;
     }
+    const trackId = trackInfo.trackId;
 
     // Determine if we're adding to a template or main graph
     let commandName, commandArgs;
@@ -7316,7 +7361,29 @@ function nodeEditor() {
       };
     }
 
-    invoke(commandName, commandArgs).then(backendNodeId => {
+    console.log(`[DEBUG] Invoking ${commandName} with args:`, commandArgs);
+
+    // Create a promise that resolves when the GraphNodeAdded event arrives
+    const eventPromise = new Promise((resolve) => {
+      window.pendingNodeUpdate = {
+        drawflowNodeId,
+        nodeType,
+        resolve: (backendNodeId) => {
+          console.log(`[DEBUG] Event promise resolved with backend ID: ${backendNodeId}`);
+          resolve(backendNodeId);
+        }
+      };
+    });
+
+    // Wait for both the invoke response and the event
+    Promise.all([
+      invoke(commandName, commandArgs),
+      eventPromise
+    ]).then(([invokeReturnedId, eventBackendId]) => {
+      console.log(`[DEBUG] Both returned - invoke: ${invokeReturnedId}, event: ${eventBackendId}`);
+
+      // Use the event's backend ID as it's the authoritative source
+      const backendNodeId = eventBackendId;
       console.log(`Node ${nodeType} added with backend ID: ${backendNodeId} (parent: ${parentNodeId})`);
 
       // Store backend node ID using Drawflow's update method
@@ -7325,12 +7392,13 @@ function nodeEditor() {
       console.log("Verifying stored backend ID:", editor.getNodeFromId(drawflowNodeId).data.backendId);
 
       // Cache node data for undo/redo
+      const trackInfo = getCurrentTrack();
       nodeDataCache.set(drawflowNodeId, {
         nodeType: nodeType,
         backendId: backendNodeId,
         position: { x, y },
         parentNodeId: parentNodeId,
-        trackId: getCurrentMidiTrack()
+        trackId: trackInfo ? trackInfo.trackId : null
       });
 
       // Record action for undo (node is already added to frontend and backend)
@@ -7350,10 +7418,10 @@ function nodeEditor() {
       // If this is an AudioOutput node, automatically set it as the graph output
       if (nodeType === "AudioOutput") {
         console.log(`Setting node ${backendNodeId} as graph output`);
-        const currentTrackId = getCurrentMidiTrack();
-        if (currentTrackId !== null) {
+        const trackInfo = getCurrentTrack();
+        if (trackInfo !== null) {
           invoke("graph_set_output_node", {
-            trackId: currentTrackId,
+            trackId: trackInfo.trackId,
             nodeId: backendNodeId
           }).then(() => {
             console.log("Output node set successfully");
@@ -7365,8 +7433,9 @@ function nodeEditor() {
 
       // If this is an AutomationInput node, create timeline curve
       if (nodeType === "AutomationInput" && !parentNodeId) {
-        const currentTrackId = getCurrentMidiTrack();
-        if (currentTrackId !== null) {
+        const trackInfo = getCurrentTrack();
+        if (trackInfo !== null) {
+          const currentTrackId = trackInfo.trackId;
           // Find the audio/MIDI track
           const track = root.audioTracks?.find(t => t.audioTrackId === currentTrackId);
           if (track) {
@@ -7398,8 +7467,9 @@ function nodeEditor() {
 
       // If this is an Oscilloscope node, start the visualization
       if (nodeType === "Oscilloscope") {
-        const currentTrackId = getCurrentMidiTrack();
-        if (currentTrackId !== null) {
+        const trackInfo = getCurrentTrack();
+        if (trackInfo !== null) {
+          const currentTrackId = trackInfo.trackId;
           console.log(`Starting oscilloscope visualization for node ${drawflowNodeId} (backend ID: ${backendNodeId})`);
           // Wait for DOM to update before starting visualization
           setTimeout(() => {
@@ -7579,7 +7649,21 @@ function nodeEditor() {
                 if (param.name === 'trigger_mode') {
                   const modes = ['Free', 'Rising', 'Falling', 'V/oct'];
                   displaySpan.textContent = modes[Math.round(value)] || 'Free';
-                } else {
+                }
+                // Special formatting for Phaser rate in sync mode
+                else if (param.name === 'rate' && nodeData.name === 'Phaser') {
+                  const syncCheckbox = nodeElement.querySelector(`#sync-${nodeId}`);
+                  if (syncCheckbox && syncCheckbox.checked) {
+                    const beatDivisions = [
+                      '4 bars', '2 bars', '1 bar', '1/2', '1/4', '1/8', '1/16', '1/32', '1/2T', '1/4T', '1/8T'
+                    ];
+                    const idx = Math.round(value);
+                    displaySpan.textContent = beatDivisions[Math.min(10, Math.max(0, idx))];
+                  } else {
+                    displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2);
+                  }
+                }
+                else {
                   displaySpan.textContent = value.toFixed(param.unit === 'Hz' ? 0 : 2);
                 }
               }
@@ -7593,10 +7677,10 @@ function nodeEditor() {
 
             // Send to backend in real-time
             if (nodeData.data.backendId !== null) {
-              const currentTrackId = getCurrentMidiTrack();
-              if (currentTrackId !== null) {
+              const trackInfo = getCurrentTrack();
+              if (trackInfo !== null) {
                 invoke("graph_set_parameter", {
-                  trackId: currentTrackId,
+                  trackId: trackInfo.trackId,
                   nodeId: nodeData.data.backendId,
                   paramId: paramId,
                   value: value
@@ -7672,10 +7756,10 @@ function nodeEditor() {
 
             // Send to backend
             if (nodeData.data.backendId !== null) {
-              const currentTrackId = getCurrentMidiTrack();
-              if (currentTrackId !== null) {
+              const trackInfo = getCurrentTrack();
+              if (trackInfo !== null) {
                 invoke("graph_set_parameter", {
-                  trackId: currentTrackId,
+                  trackId: trackInfo.trackId,
                   nodeId: nodeData.data.backendId,
                   paramId: paramId,
                   value: value
@@ -7750,10 +7834,10 @@ function nodeEditor() {
           // Send to backend
           const nodeData = editor.getNodeFromId(nodeId);
           if (nodeData && nodeData.data.backendId !== null) {
-            const currentTrackId = getCurrentMidiTrack();
-            if (currentTrackId !== null) {
+            const trackInfo = getCurrentTrack();
+            if (trackInfo !== null) {
               invoke("graph_set_parameter", {
-                trackId: currentTrackId,
+                trackId: trackInfo.trackId,
                 nodeId: nodeData.data.backendId,
                 paramId: paramId,
                 value: value
@@ -7771,6 +7855,78 @@ function nodeEditor() {
           if (paramAction) {
             actions.graphSetParameter.finalize(paramAction, value);
             paramAction = null;
+          }
+        });
+      });
+
+      // Handle checkboxes
+      const checkboxes = nodeElement.querySelectorAll('input[type="checkbox"][data-param]');
+      checkboxes.forEach(checkbox => {
+        checkbox.addEventListener("change", (e) => {
+          const paramId = parseInt(e.target.getAttribute("data-param"));
+          const value = e.target.checked ? 1.0 : 0.0;
+
+          console.log(`[setupNodeParameters] Checkbox change - nodeId: ${nodeId}, paramId: ${paramId}, value: ${value}`);
+
+          // Send to backend
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (nodeData && nodeData.data.backendId !== null) {
+            const trackInfo = getCurrentTrack();
+            if (trackInfo !== null) {
+              invoke("graph_set_parameter", {
+                trackId: trackInfo.trackId,
+                nodeId: nodeData.data.backendId,
+                paramId: paramId,
+                value: value
+              }).then(() => {
+                console.log(`Parameter ${paramId} set to ${value}`);
+              }).catch(err => {
+                console.error("Failed to set parameter:", err);
+              });
+            }
+          }
+
+          // Special handling for Phaser sync checkbox
+          if (checkbox.id.startsWith('sync-')) {
+            const rateSlider = nodeElement.querySelector(`#rate-slider-${nodeId}`);
+            const rateDisplay = nodeElement.querySelector(`#rate-${nodeId}`);
+            const rateUnit = nodeElement.querySelector(`#rate-unit-${nodeId}`);
+
+            if (rateSlider && rateDisplay && rateUnit) {
+              if (e.target.checked) {
+                // Sync mode: Use beat divisions
+                // Map slider 0-10 to different note divisions
+                // 0: 4 bars, 1: 2 bars, 2: 1 bar, 3: 1/2, 4: 1/4, 5: 1/8, 6: 1/16, 7: 1/32, 8: 1/2T, 9: 1/4T, 10: 1/8T
+                const beatDivisions = [
+                  { label: '4 bars', multiplier: 16.0 },
+                  { label: '2 bars', multiplier: 8.0 },
+                  { label: '1 bar', multiplier: 4.0 },
+                  { label: '1/2', multiplier: 2.0 },
+                  { label: '1/4', multiplier: 1.0 },
+                  { label: '1/8', multiplier: 0.5 },
+                  { label: '1/16', multiplier: 0.25 },
+                  { label: '1/32', multiplier: 0.125 },
+                  { label: '1/2T', multiplier: 2.0/3.0 },
+                  { label: '1/4T', multiplier: 1.0/3.0 },
+                  { label: '1/8T', multiplier: 0.5/3.0 }
+                ];
+
+                rateSlider.min = '0';
+                rateSlider.max = '10';
+                rateSlider.step = '1';
+                const idx = Math.round(parseFloat(rateSlider.value) * 10 / 10);
+                rateSlider.value = Math.min(10, Math.max(0, idx));
+                rateDisplay.textContent = beatDivisions[parseInt(rateSlider.value)].label;
+                rateUnit.textContent = '';
+              } else {
+                // Free mode: Hz
+                rateSlider.min = '0.1';
+                rateSlider.max = '10.0';
+                rateSlider.step = '0.1';
+                rateDisplay.textContent = parseFloat(rateSlider.value).toFixed(1);
+                rateUnit.textContent = ' Hz';
+              }
+            }
           }
         });
       });
@@ -8583,11 +8739,12 @@ function nodeEditor() {
         }
       }, 10);
 
-      // Send to backend (skip if action is handling it)
+      // Send to backend
       console.log("Backend IDs - output:", outputNode.data.backendId, "input:", inputNode.data.backendId);
-      if (!suppressActionRecording && outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
-        const currentTrackId = getCurrentMidiTrack();
-        if (currentTrackId === null) return;
+      if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+        const trackInfo = getCurrentTrack();
+        if (trackInfo === null) return;
+        const currentTrackId = trackInfo.trackId;
 
         // Check if we're in template editing mode (dedicated view)
         if (editingContext) {
@@ -8658,23 +8815,25 @@ function nodeEditor() {
             }).then(async () => {
               console.log("Connection successful");
 
-              // Record action for undo
-              redoStack.length = 0;
-              undoStack.push({
-                name: "graphAddConnection",
-                action: {
-                  trackId: currentTrackId,
-                  fromNode: outputNode.data.backendId,
-                  fromPort: outputPort,
-                  toNode: inputNode.data.backendId,
-                  toPort: inputPort,
-                  // Store frontend IDs for disconnection
-                  frontendFromId: connection.output_id,
-                  frontendToId: connection.input_id,
-                  fromPortClass: connection.output_class,
-                  toPortClass: connection.input_class
-                }
-              });
+              // Record action for undo (only if not suppressing)
+              if (!suppressActionRecording) {
+                redoStack.length = 0;
+                undoStack.push({
+                  name: "graphAddConnection",
+                  action: {
+                    trackId: currentTrackId,
+                    fromNode: outputNode.data.backendId,
+                    fromPort: outputPort,
+                    toNode: inputNode.data.backendId,
+                    toPort: inputPort,
+                    // Store frontend IDs for disconnection
+                    frontendFromId: connection.output_id,
+                    frontendToId: connection.input_id,
+                    fromPortClass: connection.output_class,
+                    toPortClass: connection.input_class
+                  }
+                });
+              }
 
               // Auto-name AutomationInput nodes when connected
               await updateAutomationName(
@@ -8741,35 +8900,37 @@ function nodeEditor() {
       }
     }
 
-    // Send to backend (skip if action is handling it)
-    if (!suppressActionRecording && outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
-      const currentTrackId = getCurrentMidiTrack();
-      if (currentTrackId !== null) {
+    // Send to backend
+    if (outputNode.data.backendId !== null && inputNode.data.backendId !== null) {
+      const trackInfo = getCurrentTrack();
+      if (trackInfo !== null) {
         invoke("graph_disconnect", {
-          trackId: currentTrackId,
+          trackId: trackInfo.trackId,
           fromNode: outputNode.data.backendId,
           fromPort: outputPort,
           toNode: inputNode.data.backendId,
           toPort: inputPort
         }).then(() => {
-          // Record action for undo
-          redoStack.length = 0;
-          undoStack.push({
-            name: "graphRemoveConnection",
-            action: {
-              trackId: currentTrackId,
-              fromNode: outputNode.data.backendId,
-              fromPort: outputPort,
-              toNode: inputNode.data.backendId,
-              toPort: inputPort,
-              // Store frontend IDs for reconnection
-              frontendFromId: connection.output_id,
-              frontendToId: connection.input_id,
-              fromPortClass: connection.output_class,
-              toPortClass: connection.input_class
-            }
-          });
-          updateMenu();
+          // Record action for undo (only if not suppressing)
+          if (!suppressActionRecording) {
+            redoStack.length = 0;
+            undoStack.push({
+              name: "graphRemoveConnection",
+              action: {
+                trackId: trackInfo.trackId,
+                fromNode: outputNode.data.backendId,
+                fromPort: outputPort,
+                toNode: inputNode.data.backendId,
+                toPort: inputPort,
+                // Store frontend IDs for reconnection
+                frontendFromId: connection.output_id,
+                frontendToId: connection.input_id,
+                fromPortClass: connection.output_class,
+                toPortClass: connection.input_class
+              }
+            });
+            updateMenu();
+          }
         }).catch(err => {
           console.error("Failed to disconnect nodes:", err);
         });
@@ -8793,15 +8954,24 @@ function nodeEditor() {
   function updateBreadcrumb() {
     const breadcrumb = header.querySelector('.context-breadcrumb');
     if (editingContext) {
+      // Determine main graph name based on track type
+      const trackInfo = getCurrentTrack();
+      const mainGraphName = trackInfo?.trackType === 'audio' ? 'Effects Graph' : 'Instrument Graph';
+
       breadcrumb.innerHTML = `
-        Main Graph &gt;
+        ${mainGraphName} &gt;
         <span class="template-name">${editingContext.voiceAllocatorName} Template</span>
         <button class="exit-template-btn">← Exit Template</button>
       `;
       const exitBtn = breadcrumb.querySelector('.exit-template-btn');
       exitBtn.addEventListener('click', exitTemplate);
     } else {
-      breadcrumb.textContent = 'Main Graph';
+      // Not in template mode - show main graph name based on track type
+      const trackInfo = getCurrentTrack();
+      const graphName = trackInfo?.trackType === 'audio' ? 'Effects Graph' :
+                        trackInfo?.trackType === 'midi' ? 'Instrument Graph' :
+                        'Node Graph';
+      breadcrumb.textContent = graphName;
     }
   }
 
@@ -8825,17 +8995,23 @@ function nodeEditor() {
   async function reloadGraph() {
     if (!editor) return;
 
-    const trackId = getCurrentMidiTrack();
+    const trackInfo = getCurrentTrack();
 
     // Clear editor first
     editor.clearModuleSelected();
     editor.clear();
 
-    // If no MIDI track selected, just leave it cleared
-    if (trackId === null) {
-      console.log('No MIDI track selected, editor cleared');
+    // Update UI based on track type
+    updateBreadcrumb();
+    updatePalette();
+
+    // If no track selected, just leave it cleared
+    if (trackInfo === null) {
+      console.log('No track selected, editor cleared');
       return;
     }
+
+    const trackId = trackInfo.trackId;
 
     try {
       // Get graph based on editing context
@@ -9545,11 +9721,12 @@ function addPresetItemHandlers(listElement) {
 }
 
 async function loadPreset(presetPath) {
-  const trackId = getCurrentMidiTrack();
-  if (trackId === null) {
-    alert('Please select a MIDI track first');
+  const trackInfo = getCurrentTrack();
+  if (trackInfo === null) {
+    alert('Please select a track first');
     return;
   }
+  const trackId = trackInfo.trackId;
 
   try {
     await invoke('graph_load_preset', {
@@ -9567,9 +9744,9 @@ async function loadPreset(presetPath) {
 }
 
 function showSavePresetDialog(container) {
-  const currentTrackId = getCurrentMidiTrack();
-  if (currentTrackId === null) {
-    alert('Please select a MIDI track first');
+  const trackInfo = getCurrentTrack();
+  if (trackInfo === null) {
+    alert('Please select a track first');
     return;
   }
 
@@ -9626,7 +9803,7 @@ function showSavePresetDialog(container) {
 
     try {
       await invoke('graph_save_preset', {
-        trackId: currentTrackId,
+        trackId: trackInfo.trackId,
         presetName: name,
         description,
         tags

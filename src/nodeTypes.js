@@ -373,6 +373,23 @@ export const nodeTypes = {
     `
   },
 
+  AudioInput: {
+    name: 'AudioInput',
+    category: NodeCategory.INPUT,
+    description: 'Audio track clip input - receives audio from timeline clips',
+    inputs: [],
+    outputs: [
+      { name: 'Audio Out', type: SignalType.AUDIO, index: 0 }
+    ],
+    parameters: [],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Audio Input</div>
+        <div class="node-info">Audio from clips</div>
+      </div>
+    `
+  },
+
   AudioOutput: {
     name: 'AudioOutput',
     category: NodeCategory.OUTPUT,
@@ -1335,14 +1352,21 @@ export const nodeTypes = {
       { id: 1, name: 'depth', label: 'Depth', min: 0.0, max: 1.0, default: 0.7, unit: '' },
       { id: 2, name: 'stages', label: 'Stages', min: 2, max: 8, default: 6, unit: '' },
       { id: 3, name: 'feedback', label: 'Feedback', min: -0.95, max: 0.95, default: 0.5, unit: '' },
-      { id: 4, name: 'wetdry', label: 'Wet/Dry', min: 0.0, max: 1.0, default: 0.5, unit: '' }
+      { id: 4, name: 'wetdry', label: 'Wet/Dry', min: 0.0, max: 1.0, default: 0.5, unit: '' },
+      { id: 5, name: 'sync', label: 'Sync to BPM', min: 0, max: 1, default: 0, unit: '' }
     ],
     getHTML: (nodeId) => `
       <div class="node-content">
         <div class="node-title">Phaser</div>
         <div class="node-param">
-          <label>Rate: <span id="rate-${nodeId}">0.5</span> Hz</label>
-          <input type="range" data-node="${nodeId}" data-param="0" min="0.1" max="10.0" value="0.5" step="0.1">
+          <label>
+            <input type="checkbox" id="sync-${nodeId}" data-node="${nodeId}" data-param="5">
+            Sync to BPM
+          </label>
+        </div>
+        <div class="node-param">
+          <label>Rate: <span id="rate-${nodeId}">0.5</span><span id="rate-unit-${nodeId}"> Hz</span></label>
+          <input type="range" id="rate-slider-${nodeId}" data-node="${nodeId}" data-param="0" min="0.1" max="10.0" value="0.5" step="0.1">
         </div>
         <div class="node-param">
           <label>Depth: <span id="depth-${nodeId}">0.7</span></label>

@@ -1,4 +1,5 @@
 mod adsr;
+mod audio_input;
 mod audio_to_cv;
 mod automation_input;
 mod bit_crusher;
@@ -39,6 +40,7 @@ mod voice_allocator;
 mod wavetable_oscillator;
 
 pub use adsr::ADSRNode;
+pub use audio_input::AudioInputNode;
 pub use audio_to_cv::AudioToCVNode;
 pub use automation_input::{AutomationInputNode, AutomationKeyframe, InterpolationType};
 pub use bit_crusher::BitCrusherNode;
