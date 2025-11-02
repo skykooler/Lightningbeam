@@ -1208,6 +1208,105 @@ pub async fn get_oscilloscope_data(
     }
 }
 
+// ===== Automation Input Node Commands =====
+
+#[tauri::command]
+pub async fn automation_add_keyframe(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    keyframe: daw_backend::AutomationKeyframeData,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationAddKeyframe(
+            track_id,
+            node_id,
+            keyframe.time,
+            keyframe.value,
+            keyframe.interpolation,
+            keyframe.ease_out,
+            keyframe.ease_in,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_remove_keyframe(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationRemoveKeyframe(
+            track_id,
+            node_id,
+            time,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_get_keyframes(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<Vec<daw_backend::AutomationKeyframeData>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_automation_keyframes(track_id, node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_set_name(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    name: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationSetName(
+            track_id,
+            node_id,
+            name,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_get_name(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_automation_name(track_id, node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum SerializedAudioEvent {

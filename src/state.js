@@ -77,6 +77,8 @@ export let config = {
   fileWidth: 800,
   fileHeight: 600,
   framerate: 24,
+  bpm: 120,
+  timeSignature: { numerator: 4, denominator: 4 },
   recentFiles: [],
   scrollSpeed: 1,
   debug: false,

@@ -70,4 +70,10 @@ pub trait AudioNode: Send {
     fn get_oscilloscope_cv_data(&self, _sample_count: usize) -> Option<Vec<f32>> {
         None
     }
+
+    /// Downcast to `&mut dyn Any` for type-specific operations
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Downcast to `&dyn Any` for type-specific read-only operations
+    fn as_any(&self) -> &dyn std::any::Any;
 }

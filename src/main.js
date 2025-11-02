@@ -49,6 +49,7 @@ import {
   multiplyMatrices,
   growBoundingBox,
   createMissingTexturePattern,
+  distanceToLineSegment,
 } from "./utils.js";
 import {
   backgroundColor,
@@ -107,7 +108,7 @@ import {
   initializeGraphicsObjectDependencies
 } from "./models/graphics-object.js";
 import { createRoot } from "./models/root.js";
-import { actions, initializeActions } from "./actions/index.js";
+import { actions, initializeActions, updateAutomationName } from "./actions/index.js";
 
 // Layout system
 import { defaultLayouts, getLayout, getLayoutNames } from "./layouts.js";
@@ -1540,6 +1541,11 @@ function _newFile(width, height, fps, layoutKey) {
     config.defaultLayout = layoutKey;
     console.log('[_newFile] Switching to layout:', layoutKey);
     switchLayout(layoutKey);
+
+    // Set default time format to measures for music mode
+    if (layoutKey === 'audioDaw' && context.timelineWidget?.timelineState) {
+      context.timelineWidget.timelineState.timeFormat = 'measures';
+    }
   }
 
   // Define frameRate as a non-configurable property with a backing variable
@@ -4160,6 +4166,8 @@ function timelineV2() {
       const currentTime = context.activeObject?.currentTime || 0;
       const timeFormat = timelineWidget.timelineState.timeFormat;
       const framerate = timelineWidget.timelineState.framerate;
+      const bpm = timelineWidget.timelineState.bpm;
+      const timeSignature = timelineWidget.timelineState.timeSignature;
 
       if (timeFormat === 'frames') {
         // Frames mode: show frame number and framerate
@@ -4171,6 +4179,22 @@ function timelineV2() {
           <div class="time-fps-group time-fps-clickable" data-action="edit-fps">
             <div class="time-value">${framerate}</div>
             <div class="time-label">FPS</div>
+          </div>
+        `;
+      } else if (timeFormat === 'measures') {
+        // Measures mode: show measure.beat, BPM, and time signature
+        const { measure, beat } = timelineWidget.timelineState.timeToMeasure(currentTime);
+
+        timeDisplay.innerHTML = `
+          <div class="time-value time-frame-clickable" data-action="toggle-format">${measure}.${beat}</div>
+          <div class="time-label">BAR</div>
+          <div class="time-fps-group time-fps-clickable" data-action="edit-bpm">
+            <div class="time-value">${bpm}</div>
+            <div class="time-label">BPM</div>
+          </div>
+          <div class="time-fps-group time-fps-clickable" data-action="edit-time-signature">
+            <div class="time-value">${timeSignature.numerator}/${timeSignature.denominator}</div>
+            <div class="time-label">TIME</div>
           </div>
         `;
       } else {
@@ -4243,6 +4267,129 @@ function timelineV2() {
           }
           console.log('[FPS Edit] Done');
         }
+      } else if (action === 'edit-bpm') {
+        // Clicked on BPM - show input to edit BPM
+        const currentBpm = timelineWidget.timelineState.bpm;
+        const newBpm = prompt('Enter BPM (Beats Per Minute):', currentBpm);
+
+        if (newBpm !== null && !isNaN(newBpm) && newBpm > 0) {
+          const bpm = parseFloat(newBpm);
+          timelineWidget.timelineState.bpm = bpm;
+          context.config.bpm = bpm;
+          updateTimeDisplay();
+          if (timelineWidget.requestRedraw) {
+            timelineWidget.requestRedraw();
+          }
+        }
+      } else if (action === 'edit-time-signature') {
+        // Clicked on time signature - show custom dropdown with common options
+        const currentTimeSig = timelineWidget.timelineState.timeSignature;
+        const currentValue = `${currentTimeSig.numerator}/${currentTimeSig.denominator}`;
+
+        // Create a custom dropdown list
+        const dropdown = document.createElement('div');
+        dropdown.className = 'time-signature-dropdown';
+        dropdown.style.position = 'absolute';
+        dropdown.style.left = e.clientX + 'px';
+        dropdown.style.top = e.clientY + 'px';
+        dropdown.style.fontSize = '14px';
+        dropdown.style.backgroundColor = 'var(--background-color)';
+        dropdown.style.color = 'var(--label-color)';
+        dropdown.style.border = '1px solid var(--shadow)';
+        dropdown.style.borderRadius = '4px';
+        dropdown.style.zIndex = '10000';
+        dropdown.style.maxHeight = '300px';
+        dropdown.style.overflowY = 'auto';
+        dropdown.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
+
+        // Common time signatures
+        const commonTimeSigs = ['2/4', '3/4', '4/4', '5/4', '6/8', '7/8', '9/8', '12/8', 'Other...'];
+
+        commonTimeSigs.forEach(sig => {
+          const item = document.createElement('div');
+          item.textContent = sig;
+          item.style.padding = '8px 12px';
+          item.style.cursor = 'pointer';
+          item.style.backgroundColor = 'var(--background-color)';
+          item.style.color = 'var(--label-color)';
+
+          if (sig === currentValue) {
+            item.style.backgroundColor = 'var(--foreground-color)';
+          }
+
+          item.addEventListener('mouseenter', () => {
+            item.style.backgroundColor = 'var(--foreground-color)';
+          });
+
+          item.addEventListener('mouseleave', () => {
+            if (sig !== currentValue) {
+              item.style.backgroundColor = 'var(--background-color)';
+            }
+          });
+
+          item.addEventListener('click', () => {
+            document.body.removeChild(dropdown);
+
+            if (sig === 'Other...') {
+              // Show prompt for custom time signature
+              const newTimeSig = prompt(
+                'Enter time signature (e.g., "4/4", "3/4", "6/8"):',
+                currentValue
+              );
+
+              if (newTimeSig !== null) {
+                const match = newTimeSig.match(/^(\d+)\/(\d+)$/);
+                if (match) {
+                  const numerator = parseInt(match[1]);
+                  const denominator = parseInt(match[2]);
+
+                  if (numerator > 0 && denominator > 0) {
+                    timelineWidget.timelineState.timeSignature = { numerator, denominator };
+                    context.config.timeSignature = { numerator, denominator };
+                    updateTimeDisplay();
+                    if (timelineWidget.requestRedraw) {
+                      timelineWidget.requestRedraw();
+                    }
+                  }
+                } else {
+                  alert('Invalid time signature format. Please use format like "4/4" or "6/8".');
+                }
+              }
+            } else {
+              // Parse the selected common time signature
+              const match = sig.match(/^(\d+)\/(\d+)$/);
+              if (match) {
+                const numerator = parseInt(match[1]);
+                const denominator = parseInt(match[2]);
+                timelineWidget.timelineState.timeSignature = { numerator, denominator };
+                context.config.timeSignature = { numerator, denominator };
+                updateTimeDisplay();
+                if (timelineWidget.requestRedraw) {
+                  timelineWidget.requestRedraw();
+                }
+              }
+            }
+          });
+
+          dropdown.appendChild(item);
+        });
+
+        document.body.appendChild(dropdown);
+        dropdown.focus();
+
+        // Close dropdown when clicking outside
+        const closeDropdown = (event) => {
+          if (!dropdown.contains(event.target)) {
+            if (document.body.contains(dropdown)) {
+              document.body.removeChild(dropdown);
+            }
+            document.removeEventListener('click', closeDropdown);
+          }
+        };
+
+        setTimeout(() => {
+          document.addEventListener('click', closeDropdown);
+        }, 0);
       }
     });
 
@@ -6814,6 +6961,15 @@ function nodeEditor() {
     drawflowDiv.addEventListener('dragover', (e) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
+
+      // Check if dragging over a connection for insertion
+      const nodeType = e.dataTransfer.getData('text/plain') || draggedNodeType;
+      if (nodeType) {
+        const nodeDef = nodeTypes[nodeType];
+        if (nodeDef) {
+          checkConnectionInsertionDuringDrag(e, nodeDef);
+        }
+      }
     });
 
     drawflowDiv.addEventListener('drop', (e) => {
@@ -6873,10 +7029,21 @@ function nodeEditor() {
 
       // Add the node
       console.log(`Adding node ${nodeType} at (${x}, ${y}) with parent ${parentNodeId}`);
-      addNode(nodeType, x, y, parentNodeId);
+      const newNodeId = addNode(nodeType, x, y, parentNodeId);
 
-      // Clear the draggedNodeType
+      // Check if we should insert into a connection
+      if (pendingInsertionFromDrag && newNodeId) {
+        console.log('Pending insertion detected, will insert node into connection');
+        // Defer insertion until after node is fully created
+        setTimeout(() => {
+          performConnectionInsertion(newNodeId, pendingInsertionFromDrag);
+          pendingInsertionFromDrag = null;
+        }, 100);
+      }
+
+      // Clear the draggedNodeType and highlights
       draggedNodeType = null;
+      clearConnectionHighlights();
     });
 
     // Connection event handlers
@@ -6905,7 +7072,10 @@ function nodeEditor() {
       }, 50);
     });
 
-    // Track node drag start for undo/redo
+    // Track which node is being dragged
+    let draggingNodeId = null;
+
+    // Track node drag start for undo/redo and connection insertion
     drawflowDiv.addEventListener('mousedown', (e) => {
       const nodeElement = e.target.closest('.drawflow-node');
       if (nodeElement && !e.target.closest('.input') && !e.target.closest('.output')) {
@@ -6913,39 +7083,61 @@ function nodeEditor() {
         const node = editor.getNodeFromId(nodeId);
         if (node) {
           nodeMoveTracker.set(nodeId, { x: node.pos_x, y: node.pos_y });
+          draggingNodeId = nodeId;
         }
       }
     });
 
-    // Node moved - resize parent VoiceAllocator
+    // Check for connection insertion while dragging existing nodes
+    drawflowDiv.addEventListener('mousemove', (e) => {
+      if (draggingNodeId !== null) {
+        checkConnectionInsertion(draggingNodeId);
+      }
+    });
+
+    // Node moved - resize parent VoiceAllocator and check for connection insertion
     editor.on("nodeMoved", (nodeId) => {
       const node = editor.getNodeFromId(nodeId);
       if (node && node.data.parentNodeId) {
         resizeVoiceAllocatorToFit(node.data.parentNodeId);
       }
+
+      // Check if node should be inserted into a connection
+      checkConnectionInsertion(nodeId);
     });
 
-    // Track node drag end for undo/redo
+    // Track node drag end for undo/redo and handle connection insertion
     drawflowDiv.addEventListener('mouseup', (e) => {
-      // Check all tracked nodes for position changes
+      // Check all tracked nodes for position changes and pending insertions
       for (const [nodeId, oldPos] of nodeMoveTracker.entries()) {
         const node = editor.getNodeFromId(nodeId);
-        if (node && (node.pos_x !== oldPos.x || node.pos_y !== oldPos.y)) {
-          // Position changed - record action
-          redoStack.length = 0;
-          undoStack.push({
-            name: "graphMoveNode",
-            action: {
-              nodeId: nodeId,
-              oldPosition: oldPos,
-              newPosition: { x: node.pos_x, y: node.pos_y }
-            }
-          });
-          updateMenu();
+        const hasPendingInsertion = pendingNodeInsertions.has(nodeId);
+
+        if (node) {
+          // Check for pending insertion first
+          if (hasPendingInsertion) {
+            const insertionMatch = pendingNodeInsertions.get(nodeId);
+            performConnectionInsertion(nodeId, insertionMatch);
+            pendingNodeInsertions.delete(nodeId);
+          } else if (node.pos_x !== oldPos.x || node.pos_y !== oldPos.y) {
+            // Position changed - record action
+            redoStack.length = 0;
+            undoStack.push({
+              name: "graphMoveNode",
+              action: {
+                nodeId: nodeId,
+                oldPosition: oldPos,
+                newPosition: { x: node.pos_x, y: node.pos_y }
+              }
+            });
+            updateMenu();
+          }
         }
       }
-      // Clear tracker
+      // Clear tracker, dragging state, and highlights
       nodeMoveTracker.clear();
+      draggingNodeId = null;
+      clearConnectionHighlights();
     });
 
     // Node removed - prevent deletion of template nodes
@@ -7171,6 +7363,39 @@ function nodeEditor() {
         }
       }
 
+      // If this is an AutomationInput node, create timeline curve
+      if (nodeType === "AutomationInput" && !parentNodeId) {
+        const currentTrackId = getCurrentMidiTrack();
+        if (currentTrackId !== null) {
+          // Find the audio/MIDI track
+          const track = root.audioTracks?.find(t => t.audioTrackId === currentTrackId);
+          if (track) {
+            // Create curve parameter name: "automation.{nodeId}"
+            const curveName = `automation.${backendNodeId}`;
+
+            // Check if curve already exists
+            if (!track.animationData.curves[curveName]) {
+              // Create the curve with a default keyframe at time 0, value 0
+              const curve = track.animationData.getOrCreateCurve(curveName);
+              curve.addKeyframe({
+                time: 0,
+                value: 0,
+                interpolation: 'linear',
+                easeIn: { x: 0.42, y: 0 },
+                easeOut: { x: 0.58, y: 1 },
+                idx: `${Date.now()}-${Math.random()}`
+              });
+              console.log(`Initialized automation curve: ${curveName}`);
+
+              // Redraw timeline if it's open
+              if (context.timeline?.requestRedraw) {
+                context.timeline.requestRedraw();
+              }
+            }
+          }
+        }
+      }
+
       // If this is an Oscilloscope node, start the visualization
       if (nodeType === "Oscilloscope") {
         const currentTrackId = getCurrentMidiTrack();
@@ -7200,6 +7425,8 @@ function nodeEditor() {
       console.error("Failed to add node to backend:", err);
       showError("Failed to add node: " + err);
     });
+
+    return drawflowNodeId;
   }
 
   // Auto-resize VoiceAllocator to fit its child nodes
@@ -7812,6 +8039,461 @@ function nodeEditor() {
     }
   }
 
+  // Push nodes away from a point using gaussian falloff
+  function pushNodesAway(centerX, centerY, maxDistance, excludeNodeId) {
+    const module = editor.module;
+    const allNodes = editor.drawflow.drawflow[module]?.data || {};
+
+    // Gaussian parameters
+    const sigma = maxDistance / 3; // Standard deviation for falloff
+    const maxPush = 150; // Maximum push distance at the center
+
+    for (const [id, node] of Object.entries(allNodes)) {
+      const nodeIdNum = parseInt(id);
+      if (nodeIdNum === excludeNodeId) continue;
+
+      // Calculate distance from center
+      const dx = node.pos_x - centerX;
+      const dy = node.pos_y - centerY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < maxDistance && distance > 0) {
+        // Calculate push strength using gaussian falloff
+        const falloff = Math.exp(-(distance * distance) / (2 * sigma * sigma));
+        const pushStrength = maxPush * falloff;
+
+        // Calculate push direction (normalized)
+        const dirX = dx / distance;
+        const dirY = dy / distance;
+
+        // Calculate new position
+        const newX = node.pos_x + dirX * pushStrength;
+        const newY = node.pos_y + dirY * pushStrength;
+
+        // Update position in the data structure
+        node.pos_x = newX;
+        node.pos_y = newY;
+
+        // Update the DOM element position
+        const nodeElement = document.getElementById(`node-${nodeIdNum}`);
+        if (nodeElement) {
+          nodeElement.style.left = newX + 'px';
+          nodeElement.style.top = newY + 'px';
+        }
+
+        // Trigger connection redraw
+        editor.updateConnectionNodes(`node-${nodeIdNum}`);
+      }
+    }
+  }
+
+  // Perform the actual connection insertion
+  function performConnectionInsertion(nodeId, match) {
+
+    const node = editor.getNodeFromId(nodeId);
+    const sourceNode = editor.getNodeFromId(match.sourceNodeId);
+    const targetNode = editor.getNodeFromId(match.targetNodeId);
+
+    if (!node || !sourceNode || !targetNode) {
+      console.error("Missing nodes for insertion");
+      return;
+    }
+
+    // Position the node between source and target
+    const sourceElement = document.getElementById(`node-${match.sourceNodeId}`);
+    const targetElement = document.getElementById(`node-${match.targetNodeId}`);
+
+    if (sourceElement && targetElement) {
+      const sourceRect = sourceElement.getBoundingClientRect();
+      const targetRect = targetElement.getBoundingClientRect();
+
+      // Calculate midpoint position
+      const newX = (sourceNode.pos_x + sourceRect.width + targetNode.pos_x) / 2 - 80; // Approximate node half-width
+      const newY = (sourceNode.pos_y + targetNode.pos_y) / 2 - 50; // Approximate node half-height
+
+      // Update node position in data structure
+      node.pos_x = newX;
+      node.pos_y = newY;
+
+      // Update the DOM element position
+      const nodeElement = document.getElementById(`node-${nodeId}`);
+      if (nodeElement) {
+        nodeElement.style.left = newX + 'px';
+        nodeElement.style.top = newY + 'px';
+      }
+
+      // Trigger connection redraw for this node
+      editor.updateConnectionNodes(`node-${nodeId}`);
+
+      // Push surrounding nodes away with gaussian falloff
+      pushNodesAway(newX, newY, 400, nodeId); // 400px influence radius
+    }
+
+    // Remove the old connection
+    suppressActionRecording = true;
+    editor.removeSingleConnection(
+      match.sourceNodeId,
+      match.targetNodeId,
+      match.sourceOutputClass,
+      match.targetInputClass
+    );
+
+    // Create new connections: source -> node -> target
+    // Connection 1: source output -> node input
+    setTimeout(() => {
+      editor.addConnection(
+        match.sourceNodeId,
+        nodeId,
+        match.sourceOutputClass,
+        `input_${match.nodeInputPort + 1}`
+      );
+
+      // Connection 2: node output -> target input
+      setTimeout(() => {
+        editor.addConnection(
+          nodeId,
+          match.targetNodeId,
+          `output_${match.nodeOutputPort + 1}`,
+          match.targetInputClass
+        );
+
+        suppressActionRecording = false;
+      }, 50);
+    }, 50);
+  }
+
+  // Check if cursor position during drag is near a connection
+  function checkConnectionInsertionDuringDrag(dragEvent, nodeDef) {
+    const drawflowDiv = container.querySelector("#drawflow");
+    if (!drawflowDiv || !editor) return;
+
+    const rect = drawflowDiv.getBoundingClientRect();
+    const canvasX = editor.canvas_x || 0;
+    const canvasY = editor.canvas_y || 0;
+    const zoom = editor.zoom || 1;
+
+    // Calculate cursor position in canvas coordinates
+    const cursorX = (dragEvent.clientX - rect.left - canvasX) / zoom;
+    const cursorY = (dragEvent.clientY - rect.top - canvasY) / zoom;
+
+    // Get all connections in the current module
+    const module = editor.module;
+    const allNodes = editor.drawflow.drawflow[module]?.data || {};
+
+    // Distance threshold for insertion (in pixels)
+    const insertionThreshold = 30;
+
+    let bestMatch = null;
+    let bestDistance = insertionThreshold;
+
+    // Check each connection
+    for (const [sourceNodeId, sourceNode] of Object.entries(allNodes)) {
+      for (const [outputKey, outputData] of Object.entries(sourceNode.outputs)) {
+        for (const connection of outputData.connections) {
+          const targetNodeId = connection.node;
+          const targetNode = allNodes[targetNodeId];
+
+          if (!targetNode) continue;
+
+          // Get source and target positions
+          const sourceElement = document.getElementById(`node-${sourceNodeId}`);
+          const targetElement = document.getElementById(`node-${targetNodeId}`);
+
+          if (!sourceElement || !targetElement) continue;
+
+          const sourceRect = sourceElement.getBoundingClientRect();
+          const targetRect = targetElement.getBoundingClientRect();
+
+          // Calculate output port position (right side of source node)
+          const sourceX = sourceNode.pos_x + sourceRect.width;
+          const sourceY = sourceNode.pos_y + sourceRect.height / 2;
+
+          // Calculate input port position (left side of target node)
+          const targetX = targetNode.pos_x;
+          const targetY = targetNode.pos_y + targetRect.height / 2;
+
+          // Calculate distance from cursor to connection line
+          const distance = distanceToLineSegment(
+            cursorX, cursorY,
+            sourceX, sourceY,
+            targetX, targetY
+          );
+
+          // Check if this is the closest connection
+          if (distance < bestDistance) {
+            // Check port compatibility
+            const sourcePortIndex = parseInt(outputKey.replace('output_', '')) - 1;
+            const targetPortIndex = parseInt(connection.output.replace('input_', '')) - 1;
+
+            const sourceDef = nodeTypes[sourceNode.name];
+            const targetDef = nodeTypes[targetNode.name];
+
+            if (!sourceDef || !targetDef) continue;
+
+            // Get the signal type of the connection
+            if (sourcePortIndex >= sourceDef.outputs.length ||
+                targetPortIndex >= targetDef.inputs.length) continue;
+
+            const connectionType = sourceDef.outputs[sourcePortIndex].type;
+
+            // Check if the dragged node has compatible input and output
+            let compatibleInputIndex = -1;
+            let compatibleOutputIndex = -1;
+
+            // Find first compatible input and output
+            for (let i = 0; i < nodeDef.inputs.length; i++) {
+              if (nodeDef.inputs[i].type === connectionType) {
+                compatibleInputIndex = i;
+                break;
+              }
+            }
+
+            for (let i = 0; i < nodeDef.outputs.length; i++) {
+              if (nodeDef.outputs[i].type === connectionType) {
+                compatibleOutputIndex = i;
+                break;
+              }
+            }
+
+            if (compatibleInputIndex !== -1 && compatibleOutputIndex !== -1) {
+              bestDistance = distance;
+              bestMatch = {
+                sourceNodeId: parseInt(sourceNodeId),
+                targetNodeId: parseInt(targetNodeId),
+                sourcePort: sourcePortIndex,
+                targetPort: targetPortIndex,
+                nodeInputPort: compatibleInputIndex,
+                nodeOutputPort: compatibleOutputIndex,
+                connectionType: connectionType,
+                sourceOutputClass: outputKey,
+                targetInputClass: connection.output,
+                insertX: cursorX,
+                insertY: cursorY
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // If we found a match, highlight the connection and store it
+    if (bestMatch) {
+      highlightConnectionForInsertion(bestMatch);
+      pendingInsertionFromDrag = bestMatch;
+    } else {
+      clearConnectionHighlights();
+      pendingInsertionFromDrag = null;
+    }
+  }
+
+  // Check if a node can be inserted into a connection
+  function checkConnectionInsertion(nodeId) {
+    const node = editor.getNodeFromId(nodeId);
+    if (!node) return;
+
+    const nodeDef = nodeTypes[node.name];
+    if (!nodeDef) return;
+
+    // Check if node has any connections - skip if it does
+    let hasConnections = false;
+    for (const [inputKey, inputData] of Object.entries(node.inputs)) {
+      if (inputData.connections && inputData.connections.length > 0) {
+        hasConnections = true;
+        break;
+      }
+    }
+    if (!hasConnections) {
+      for (const [outputKey, outputData] of Object.entries(node.outputs)) {
+        if (outputData.connections && outputData.connections.length > 0) {
+          hasConnections = true;
+          break;
+        }
+      }
+    }
+
+    if (hasConnections) {
+      clearConnectionHighlights();
+      pendingNodeInsertions.delete(nodeId);
+      return;
+    }
+
+    // Get node center position
+    const nodeElement = document.getElementById(`node-${nodeId}`);
+    if (!nodeElement) return;
+
+    const nodeRect = nodeElement.getBoundingClientRect();
+    const nodeCenterX = node.pos_x + nodeRect.width / 2;
+    const nodeCenterY = node.pos_y + nodeRect.height / 2;
+
+    // Get all connections in the current module
+    const module = editor.module;
+    const allNodes = editor.drawflow.drawflow[module]?.data || {};
+
+    // Distance threshold for insertion (in pixels)
+    const insertionThreshold = 30;
+
+    let bestMatch = null;
+    let bestDistance = insertionThreshold;
+
+    // Check each connection
+    for (const [sourceNodeId, sourceNode] of Object.entries(allNodes)) {
+      if (parseInt(sourceNodeId) === nodeId) continue; // Skip the node being dragged
+
+      for (const [outputKey, outputData] of Object.entries(sourceNode.outputs)) {
+        for (const connection of outputData.connections) {
+          const targetNodeId = connection.node;
+          const targetNode = allNodes[targetNodeId];
+
+          if (!targetNode || parseInt(targetNodeId) === nodeId) continue;
+
+          // Get source and target positions
+          const sourceElement = document.getElementById(`node-${sourceNodeId}`);
+          const targetElement = document.getElementById(`node-${targetNodeId}`);
+
+          if (!sourceElement || !targetElement) continue;
+
+          const sourceRect = sourceElement.getBoundingClientRect();
+          const targetRect = targetElement.getBoundingClientRect();
+
+          // Calculate output port position (right side of source node)
+          const sourceX = sourceNode.pos_x + sourceRect.width;
+          const sourceY = sourceNode.pos_y + sourceRect.height / 2;
+
+          // Calculate input port position (left side of target node)
+          const targetX = targetNode.pos_x;
+          const targetY = targetNode.pos_y + targetRect.height / 2;
+
+          // Calculate distance from node center to connection line
+          const distance = distanceToLineSegment(
+            nodeCenterX, nodeCenterY,
+            sourceX, sourceY,
+            targetX, targetY
+          );
+
+          // Check if this is the closest connection
+          if (distance < bestDistance) {
+            // Check port compatibility
+            const sourcePortIndex = parseInt(outputKey.replace('output_', '')) - 1;
+            const targetPortIndex = parseInt(connection.output.replace('input_', '')) - 1;
+
+            const sourceDef = nodeTypes[sourceNode.name];
+            const targetDef = nodeTypes[targetNode.name];
+
+            if (!sourceDef || !targetDef) continue;
+
+            // Get the signal type of the connection
+            if (sourcePortIndex >= sourceDef.outputs.length ||
+                targetPortIndex >= targetDef.inputs.length) continue;
+
+            const connectionType = sourceDef.outputs[sourcePortIndex].type;
+
+            // Check if the dragged node has compatible input and output
+            let hasCompatibleInput = false;
+            let hasCompatibleOutput = false;
+            let compatibleInputIndex = -1;
+            let compatibleOutputIndex = -1;
+
+            // Find first compatible input and output
+            for (let i = 0; i < nodeDef.inputs.length; i++) {
+              if (nodeDef.inputs[i].type === connectionType) {
+                hasCompatibleInput = true;
+                compatibleInputIndex = i;
+                break;
+              }
+            }
+
+            for (let i = 0; i < nodeDef.outputs.length; i++) {
+              if (nodeDef.outputs[i].type === connectionType) {
+                hasCompatibleOutput = true;
+                compatibleOutputIndex = i;
+                break;
+              }
+            }
+
+            if (hasCompatibleInput && hasCompatibleOutput) {
+              bestDistance = distance;
+              bestMatch = {
+                sourceNodeId: parseInt(sourceNodeId),
+                targetNodeId: parseInt(targetNodeId),
+                sourcePort: sourcePortIndex,
+                targetPort: targetPortIndex,
+                nodeInputPort: compatibleInputIndex,
+                nodeOutputPort: compatibleOutputIndex,
+                connectionType: connectionType,
+                sourceOutputClass: outputKey,
+                targetInputClass: connection.output
+              };
+            }
+          }
+        }
+      }
+    }
+
+    // If we found a match, highlight the connection
+    if (bestMatch) {
+      highlightConnectionForInsertion(bestMatch);
+      // Store the match in the Map for use on mouseup
+      pendingNodeInsertions.set(nodeId, bestMatch);
+    } else {
+      clearConnectionHighlights();
+      pendingNodeInsertions.delete(nodeId);
+    }
+  }
+
+  // Track which connection is highlighted for insertion
+  let highlightedConnection = null;
+  let highlightInterval = null;
+  let pendingInsertionFromDrag = null;
+
+  // Track pending insertions for existing nodes being dragged
+  const pendingNodeInsertions = new Map(); // nodeId -> insertion match
+
+  // Apply highlight to the tracked connection
+  function applyConnectionHighlight() {
+    if (!highlightedConnection) return;
+
+    const connectionElement = document.querySelector(
+      `.connection.node_in_node-${highlightedConnection.targetNodeId}.node_out_node-${highlightedConnection.sourceNodeId}`
+    );
+
+    if (connectionElement && !connectionElement.classList.contains('connection-insertion-highlight')) {
+      connectionElement.classList.add('connection-insertion-highlight');
+    }
+  }
+
+  // Highlight a connection that can receive the node
+  function highlightConnectionForInsertion(match) {
+    // Store the connection to highlight
+    highlightedConnection = match;
+
+    // Clear any existing interval
+    if (highlightInterval) {
+      clearInterval(highlightInterval);
+    }
+
+    // Apply highlight immediately
+    applyConnectionHighlight();
+
+    // Keep re-applying in case Drawflow redraws
+    highlightInterval = setInterval(applyConnectionHighlight, 50);
+  }
+
+  // Clear connection insertion highlights
+  function clearConnectionHighlights() {
+    // Stop the interval
+    if (highlightInterval) {
+      clearInterval(highlightInterval);
+      highlightInterval = null;
+    }
+
+    highlightedConnection = null;
+
+    // Remove all highlight classes
+    document.querySelectorAll('.connection-insertion-highlight').forEach(el => {
+      el.classList.remove('connection-insertion-highlight');
+    });
+  }
+
   // Handle connection creation
   function handleConnectionCreated(connection) {
     console.log("handleConnectionCreated called:", connection);
@@ -7973,7 +8655,7 @@ function nodeEditor() {
               fromPort: outputPort,
               toNode: inputNode.data.backendId,
               toPort: inputPort
-            }).then(() => {
+            }).then(async () => {
               console.log("Connection successful");
 
               // Record action for undo
@@ -7993,6 +8675,15 @@ function nodeEditor() {
                   toPortClass: connection.input_class
                 }
               });
+
+              // Auto-name AutomationInput nodes when connected
+              await updateAutomationName(
+                currentTrackId,
+                outputNode.data.backendId,
+                inputNode.data.backendId,
+                connection.input_class
+              );
+
               updateMenu();
             }).catch(err => {
               console.error("Failed to connect nodes:", err);

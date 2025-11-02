@@ -81,6 +81,9 @@ pub struct InstrumentGraph {
 
     /// UI positions for nodes (node_index -> (x, y))
     node_positions: std::collections::HashMap<u32, (f32, f32)>,
+
+    /// Current playback time (for automation nodes)
+    playback_time: f64,
 }
 
 impl InstrumentGraph {
@@ -98,6 +101,7 @@ impl InstrumentGraph {
             // Pre-allocate MIDI input buffers (max 128 events per port)
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
             node_positions: std::collections::HashMap::new(),
+            playback_time: 0.0,
         }
     }
 
@@ -319,7 +323,19 @@ impl InstrumentGraph {
     }
 
     /// Process the graph and produce audio output
-    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent]) {
+    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: f64) {
+        // Update playback time
+        self.playback_time = playback_time;
+
+        // Update playback time for all automation nodes before processing
+        use super::nodes::AutomationInputNode;
+        for node in self.graph.node_weights_mut() {
+            // Try to downcast to AutomationInputNode and update its playback time
+            if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                auto_node.set_playback_time(playback_time);
+            }
+        }
+
         // Use the requested output buffer size for processing
         let process_size = output_buffer.len();
 
@@ -502,6 +518,11 @@ impl InstrumentGraph {
     /// Get oscilloscope CV data from a specific node
     pub fn get_oscilloscope_cv_data(&self, idx: NodeIndex, sample_count: usize) -> Option<Vec<f32>> {
         self.get_node(idx).and_then(|node| node.get_oscilloscope_cv_data(sample_count))
+    }
+
+    /// Get node by index (read-only)
+    pub fn get_graph_node(&self, idx: NodeIndex) -> Option<&GraphNode> {
+        self.graph.node_weight(idx)
     }
 
     /// Get node mutably by index
@@ -816,6 +837,7 @@ impl InstrumentGraph {
                 "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
                 "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
                 "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
+                "AutomationInput" => Box::new(AutomationInputNode::new("Automation")),
                 "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
                 "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
                 "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),

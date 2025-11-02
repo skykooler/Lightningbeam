@@ -383,7 +383,7 @@ impl MidiTrack {
         // Create a silent buffer to process the note-offs
         let buffer_size = 512 * 2; // stereo
         let mut silent_buffer = vec![0.0f32; buffer_size];
-        self.instrument_graph.process(&mut silent_buffer, &note_offs);
+        self.instrument_graph.process(&mut silent_buffer, &note_offs, 0.0);
     }
 
     /// Queue a live MIDI event (from virtual keyboard or MIDI controller)
@@ -405,7 +405,7 @@ impl MidiTrack {
         _channels: u32,
     ) {
         // Generate audio using instrument graph with live MIDI events
-        self.instrument_graph.process(output, &self.live_midi_queue);
+        self.instrument_graph.process(output, &self.live_midi_queue, 0.0);
 
         // Clear the queue after processing
         self.live_midi_queue.clear();
@@ -445,7 +445,7 @@ impl MidiTrack {
         midi_events.extend(self.live_midi_queue.drain(..));
 
         // Generate audio using instrument graph
-        self.instrument_graph.process(output, &midi_events);
+        self.instrument_graph.process(output, &midi_events, playhead_seconds);
 
         // Evaluate and apply automation
         let effective_volume = self.evaluate_automation_at_time(playhead_seconds);

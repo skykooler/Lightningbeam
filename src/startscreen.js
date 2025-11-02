@@ -94,19 +94,19 @@ function createRightPanel() {
         {
             name: 'Animation',
             value: 'animation',
-            iconSvg: '<svg width="80" height="80" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><path d="M20,80 Q30,60 50,50 T80,20" stroke="currentColor" stroke-width="4" fill="none" stroke-linecap="round"/><circle cx="30" cy="70" r="8" fill="currentColor"/></svg>',
+            iconPath: '/assets/focus-animation.svg',
             description: 'Drawing tools and timeline'
         },
         {
             name: 'Music',
             value: 'audioDaw',
-            iconSvg: '<svg width="80" height="80" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect x="10" y="20" width="18" height="60" fill="none" stroke="currentColor" stroke-width="3"/><rect x="30" y="20" width="18" height="60" fill="none" stroke="currentColor" stroke-width="3"/><rect x="50" y="20" width="18" height="60" fill="none" stroke="currentColor" stroke-width="3"/><rect x="70" y="20" width="18" height="60" fill="none" stroke="currentColor" stroke-width="3"/><rect x="24" y="20" width="12" height="35" fill="currentColor"/><rect x="44" y="20" width="12" height="35" fill="currentColor"/><rect x="74" y="20" width="12" height="35" fill="currentColor"/></svg>',
+            iconPath: '/assets/focus-music.svg',
             description: 'Audio tracks and mixer'
         },
         {
             name: 'Video editing',
             value: 'videoEditing',
-            iconSvg: '<svg width="80" height="80" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect x="15" y="40" width="70" height="45" fill="currentColor" rx="4"/><rect x="15" y="25" width="70" height="15" fill="none" stroke="currentColor" stroke-width="3" rx="4"/><rect x="20" y="25" width="7" height="15" fill="currentColor"/><rect x="35" y="25" width="7" height="15" fill="currentColor"/><rect x="50" y="25" width="7" height="15" fill="currentColor"/><rect x="65" y="25" width="7" height="15" fill="currentColor"/></svg>',
+            iconPath: '/assets/focus-video.svg',
             description: 'Clip timeline and effects'
         }
     ];
@@ -121,6 +121,12 @@ function createRightPanel() {
     return rightPanel;
 }
 
+async function loadSVG(url, targetElement) {
+    const response = await fetch(url);
+    const svgText = await response.text();
+    targetElement.innerHTML = svgText;
+}
+
 function createFocusCard(focus) {
     const card = document.createElement('div');
     card.className = 'focus-card';
@@ -131,7 +137,10 @@ function createFocusCard(focus) {
 
     const iconWrapper = document.createElement('div');
     iconWrapper.className = 'focus-card-icon';
-    iconWrapper.innerHTML = focus.iconSvg;
+
+    // Load the SVG asynchronously
+    loadSVG(focus.iconPath, iconWrapper);
+
     iconContainer.appendChild(iconWrapper);
     card.appendChild(iconContainer);
 

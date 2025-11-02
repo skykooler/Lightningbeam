@@ -2,6 +2,9 @@
 
 import { context, config, pointerList, startProps } from '../state.js';
 
+// Get invoke from Tauri global
+const { invoke } = window.__TAURI__.core;
+
 // Helper function for UUID generation
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -181,6 +184,9 @@ class AnimationCurve {
       existingKeyframe.interpolation = keyframe.interpolation;
       if (keyframe.easeIn) existingKeyframe.easeIn = keyframe.easeIn;
       if (keyframe.easeOut) existingKeyframe.easeOut = keyframe.easeOut;
+
+      // Sync update to backend if this is an automation curve
+      this._syncAutomationKeyframeToBackend(existingKeyframe);
     } else {
       // Add new keyframe
       this.keyframes.push(keyframe);
@@ -192,6 +198,9 @@ class AnimationCurve {
     if (this.parentAnimationData) {
       this.parentAnimationData.updateDuration();
     }
+
+    // Sync to backend if this is an automation curve
+    this._syncAutomationKeyframeToBackend(keyframe);
   }
 
   removeKeyframe(keyframe) {
@@ -203,6 +212,9 @@ class AnimationCurve {
       if (this.parentAnimationData) {
         this.parentAnimationData.updateDuration();
       }
+
+      // Sync to backend if this is an automation curve
+      this._syncAutomationKeyframeRemovalToBackend(keyframe);
     }
   }
 
@@ -388,6 +400,85 @@ class AnimationCurve {
       parameter: this.parameter,
       keyframes: this.keyframes.map(kf => kf.toJSON())
     };
+  }
+
+  // Helper method to sync keyframe additions to backend for automation curves
+  _syncAutomationKeyframeToBackend(keyframe) {
+    // Check if this is an automation curve (parameter starts with "automation.")
+    if (!this.parameter.startsWith('automation.')) {
+      return; // Not an automation curve, skip backend sync
+    }
+
+    // Extract node ID from parameter (e.g., "automation.5" -> 5)
+    const nodeIdStr = this.parameter.split('.')[1];
+    const nodeId = parseInt(nodeIdStr, 10);
+    if (isNaN(nodeId)) {
+      console.error(`Invalid automation node ID: ${nodeIdStr}`);
+      return;
+    }
+
+    // Convert keyframe to backend format
+    const backendKeyframe = {
+      time: keyframe.time,
+      value: keyframe.value,
+      interpolation: keyframe.interpolation || 'linear',
+      ease_out: keyframe.easeOut ? [keyframe.easeOut.x, keyframe.easeOut.y] : [0.58, 1.0],
+      ease_in: keyframe.easeIn ? [keyframe.easeIn.x, keyframe.easeIn.y] : [0.42, 0.0]
+    };
+
+    // Call Tauri command (fire-and-forget)
+    // Note: Need to get track_id from context - for now, find it from the curve's parent
+    const track = window.root?.audioTracks?.find(t =>
+      t.animationData && Object.values(t.animationData.curves).includes(this)
+    );
+
+    if (!track || track.audioTrackId === null) {
+      console.error('Could not find track for automation curve sync');
+      return;
+    }
+
+    invoke('automation_add_keyframe', {
+      trackId: track.audioTrackId,
+      nodeId: nodeId,
+      keyframe: backendKeyframe
+    }).catch(err => {
+      console.error(`Failed to sync automation keyframe to backend: ${err}`);
+    });
+  }
+
+  // Helper method to sync keyframe removals to backend for automation curves
+  _syncAutomationKeyframeRemovalToBackend(keyframe) {
+    // Check if this is an automation curve (parameter starts with "automation.")
+    if (!this.parameter.startsWith('automation.')) {
+      return; // Not an automation curve, skip backend sync
+    }
+
+    // Extract node ID from parameter (e.g., "automation.5" -> 5)
+    const nodeIdStr = this.parameter.split('.')[1];
+    const nodeId = parseInt(nodeIdStr, 10);
+    if (isNaN(nodeId)) {
+      console.error(`Invalid automation node ID: ${nodeIdStr}`);
+      return;
+    }
+
+    // Call Tauri command (fire-and-forget)
+    // Note: Need to get track_id from context - for now, find it from the curve's parent
+    const track = window.root?.audioTracks?.find(t =>
+      t.animationData && Object.values(t.animationData.curves).includes(this)
+    );
+
+    if (!track || track.audioTrackId === null) {
+      console.error('Could not find track for automation curve sync');
+      return;
+    }
+
+    invoke('automation_remove_keyframe', {
+      trackId: track.audioTrackId,
+      nodeId: nodeId,
+      time: keyframe.time
+    }).catch(err => {
+      console.error(`Failed to sync automation keyframe removal to backend: ${err}`);
+    });
   }
 }
 

@@ -299,4 +299,12 @@ impl AudioNode for OscilloscopeNode {
     fn get_oscilloscope_cv_data(&self, sample_count: usize) -> Option<Vec<f32>> {
         Some(self.read_cv_samples(sample_count))
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

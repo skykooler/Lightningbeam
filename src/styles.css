@@ -1646,6 +1646,18 @@ button {
   stroke-width: 2px !important;
 }
 
+/* Connection insertion highlight */
+.connection-insertion-highlight .main-path {
+  stroke: #FFD700 !important;
+  stroke-width: 8px !important;
+  stroke-dasharray: none !important;
+  filter: drop-shadow(0 0 12px #FFD700) !important;
+}
+
+.connection-insertion-highlight {
+  z-index: 9999 !important;
+}
+
 /* Port label text styling - position labels away from connectors */
 .drawflow .drawflow-node .input > span,
 .drawflow .drawflow-node .output > span {

@@ -19,6 +19,7 @@ pub use audio::{
 };
 pub use audio::node_graph::{GraphPreset, InstrumentGraph, PresetMetadata, SerializedConnection, SerializedNode};
 pub use command::{AudioEvent, Command, OscilloscopeData};
+pub use command::types::AutomationKeyframeData;
 pub use io::{load_midi_file, AudioFile, WaveformPeak, WavWriter};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

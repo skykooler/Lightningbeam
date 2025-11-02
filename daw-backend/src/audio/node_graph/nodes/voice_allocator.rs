@@ -288,7 +288,8 @@ impl AudioNode for VoiceAllocatorNode {
                 mix_slice.fill(0.0);
 
                 // Process this voice's graph with its MIDI events
-                self.voice_instances[voice_idx].process(mix_slice, &midi_events);
+                // Note: playback_time is 0.0 since voice allocator doesn't track time
+                self.voice_instances[voice_idx].process(mix_slice, &midi_events, 0.0);
 
                 // Mix into output (accumulate)
                 for (i, sample) in mix_slice.iter().enumerate() {
@@ -340,5 +341,13 @@ impl AudioNode for VoiceAllocatorNode {
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
         })
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

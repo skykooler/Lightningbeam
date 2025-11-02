@@ -1038,6 +1038,31 @@ export const nodeTypes = {
     `
   },
 
+  AutomationInput: {
+    name: 'AutomationInput',
+    category: NodeCategory.UTILITY,
+    description: 'Timeline automation - outputs CV signal controlled by timeline curves',
+    inputs: [],
+    outputs: [
+      { name: 'CV Out', type: SignalType.CV, index: 0 }
+    ],
+    parameters: [],
+    getHTML: (nodeId) => `
+      <div class="node-content">
+        <div class="node-title">Automation</div>
+        <div class="node-info" style="font-size: 10px; padding: 8px; color: #888;">
+          Timeline-based automation
+        </div>
+        <div id="automation-name-${nodeId}" style="font-size: 9px; color: #aaa; text-align: center; padding: 4px;">
+          Not connected
+        </div>
+        <div style="font-size: 9px; color: #666; text-align: center; padding: 4px;">
+          Edit curves in timeline
+        </div>
+      </div>
+    `
+  },
+
   Math: {
     name: 'Math',
     category: NodeCategory.UTILITY,

@@ -359,4 +359,12 @@ impl AudioNode for VocoderNode {
         node.setup_bands();
         Box::new(node)
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

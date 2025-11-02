@@ -236,6 +236,11 @@ pub fn run() {
         audio::multi_sampler_update_layer,
         audio::multi_sampler_remove_layer,
         audio::get_oscilloscope_data,
+        audio::automation_add_keyframe,
+        audio::automation_remove_keyframe,
+        audio::automation_get_keyframes,
+        audio::automation_set_name,
+        audio::automation_get_name,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

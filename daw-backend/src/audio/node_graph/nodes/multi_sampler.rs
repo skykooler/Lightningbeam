@@ -508,4 +508,12 @@ impl AudioNode for MultiSamplerNode {
     fn clone_node(&self) -> Box<dyn AudioNode> {
         Box::new(Self::new(self.name.clone()))
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }

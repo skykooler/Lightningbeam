@@ -34,6 +34,127 @@ function uuidv4() {
   );
 }
 
+/**
+ * Initialize a timeline curve for an AutomationInput node
+ * Creates the curve with a default keyframe at time 0
+ * @param {number} trackId - Track ID
+ * @param {number} nodeId - Backend node ID
+ */
+async function initializeAutomationCurve(trackId, nodeId) {
+  try {
+    // Find the audio/MIDI track
+    const track = context.activeObject.audioTracks?.find(t => t.audioTrackId === trackId);
+    if (!track) {
+      console.error(`Track ${trackId} not found`);
+      return;
+    }
+
+    // Create curve parameter name: "automation.{nodeId}"
+    const curveName = `automation.${nodeId}`;
+
+    // Check if curve already exists
+    if (track.animationData.curves[curveName]) {
+      console.log(`Curve ${curveName} already exists`);
+      return;
+    }
+
+    // Create the curve with a default keyframe at time 0, value 0
+    const curve = track.animationData.getOrCreateCurve(curveName);
+    curve.addKeyframe({
+      time: 0,
+      value: 0,
+      interpolation: 'linear',
+      easeIn: { x: 0.42, y: 0 },
+      easeOut: { x: 0.58, y: 1 },
+      idx: `${Date.now()}-${Math.random()}`
+    });
+
+    console.log(`Initialized automation curve: ${curveName}`);
+
+    // Redraw timeline if it's open
+    if (context.timeline?.requestRedraw) {
+      context.timeline.requestRedraw();
+    }
+  } catch (err) {
+    console.error('Failed to initialize automation curve:', err);
+  }
+}
+
+/**
+ * Update automation node name based on its connection
+ * If the source node is an AutomationInput, generate a friendly name from the target
+ * @param {number} trackId - Track ID
+ * @param {number} fromNode - Source node ID
+ * @param {number} toNode - Target node ID
+ * @param {string} toPortClass - Target port name (frontend)
+ */
+async function updateAutomationName(trackId, fromNode, toNode, toPortClass) {
+  try {
+    // Get the full graph state to find node types and port information
+    const graphStateJson = await invoke('graph_get_state', { trackId });
+    const graphState = JSON.parse(graphStateJson);
+
+    // Find the source node
+    const sourceNode = graphState.nodes.find(n => n.id === fromNode);
+    if (!sourceNode || sourceNode.node_type !== 'AutomationInput') {
+      return; // Not an AutomationInput, nothing to do
+    }
+
+    // Find the target node
+    const targetNode = graphState.nodes.find(n => n.id === toNode);
+    if (!targetNode) {
+      return;
+    }
+
+    // Find the connection from this AutomationInput to the target node
+    const connection = graphState.connections.find(c =>
+      c.from_node === fromNode && c.to_node === toNode
+    );
+
+    if (!connection) {
+      return;
+    }
+
+    // Use the backend port name from the connection
+    // This will be something like "cutoff", "frequency", etc.
+    const portName = connection.to_port;
+
+    // Generate a friendly name: "{TargetType} {PortName}"
+    // e.g., "Filter cutoff" or "Oscillator frequency"
+    const name = `${targetNode.node_type} ${portName}`;
+
+    // Set the automation name in the backend
+    await invoke('automation_set_name', {
+      trackId: trackId,
+      nodeId: fromNode,
+      name
+    });
+
+    // Update the node UI display if the node editor is open
+    if (context.nodeEditor) {
+      const nameElement = document.getElementById(`automation-name-${fromNode}`);
+      if (nameElement) {
+        nameElement.textContent = name;
+      }
+    }
+
+    // Invalidate the timeline cache for this automation node
+    if (context.timelineWidget) {
+      const cacheKey = `${trackId}:${fromNode}`;
+      context.timelineWidget.automationNameCache.delete(cacheKey);
+
+      // Trigger a redraw to fetch and display the new name
+      if (context.timelineWidget.requestRedraw) {
+        context.timelineWidget.requestRedraw();
+      }
+    }
+
+    console.log(`Auto-named automation node ${fromNode}: "${name}"`);
+  } catch (err) {
+    console.error('Failed to update automation name:', err);
+  }
+}
+
 // Dependencies that will be injected
 let undoStack = null;
 let redoStack = null;
@@ -56,6 +177,9 @@ let config = null;
  * @param {Function} deps.invoke - Tauri invoke function
  * @param {Object} deps.config - Application config object
  */
+// Export the auto-naming function for use in main.js
+export { updateAutomationName };
+
 export function initializeActions(deps) {
   undoStack = deps.undoStack;
   redoStack = deps.redoStack;
@@ -1977,6 +2101,12 @@ export const actions = {
         posX: action.position.x,
         posY: action.position.y
       });
+
+      // If this is an AutomationInput node, create a timeline curve for it
+      if (action.nodeType === 'AutomationInput') {
+        await initializeAutomationCurve(action.trackId, result);
+      }
+
       // Reload the entire graph to show the restored node
       if (context.reloadNodeEditor) {
         await context.reloadNodeEditor();
@@ -2083,6 +2213,9 @@ export const actions = {
             );
           }
         }
+
+        // Auto-name AutomationInput nodes when connected
+        await updateAutomationName(action.trackId, action.fromNode, action.toNode, action.toPortClass);
       } finally {
         if (context.nodeEditorState) {
           context.nodeEditorState.suppressActionRecording = false;

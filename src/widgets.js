@@ -535,7 +535,11 @@ class TimelineWindowV2 extends Widget {
     this.trackHeaderWidth = 150
 
     // Create shared timeline state using config framerate
-    this.timelineState = new TimelineState(context.config?.framerate || 24)
+    this.timelineState = new TimelineState(
+      context.config?.framerate || 24,
+      context.config?.bpm || 120,
+      context.config?.timeSignature || { numerator: 4, denominator: 4 }
+    )
 
     // Create time ruler widget
     this.ruler = new TimeRuler(this.timelineState)
@@ -573,6 +577,9 @@ class TimelineWindowV2 extends Widget {
 
     // Selected audio track (for recording)
     this.selectedTrack = null
+
+    // Cache for automation node names (maps "trackId:nodeId" -> friendly name)
+    this.automationNameCache = new Map()
   }
 
   draw(ctx) {
@@ -792,8 +799,8 @@ class TimelineWindowV2 extends Widget {
         ctx.fillText(typeText, typeX, y + this.trackHierarchy.trackHeight / 2)
       }
 
-      // Draw toggle buttons for object/shape/audio tracks (Phase 3)
-      if (track.type === 'object' || track.type === 'shape' || track.type === 'audio') {
+      // Draw toggle buttons for object/shape/audio/midi tracks (Phase 3)
+      if (track.type === 'object' || track.type === 'shape' || track.type === 'audio' || track.type === 'midi') {
         const buttonSize = 14
         const buttonY = y + (this.trackHierarchy.trackHeight - buttonSize) / 2  // Use base height for button position
         let buttonX = this.trackHeaderWidth - 10  // Start from right edge
@@ -813,8 +820,8 @@ class TimelineWindowV2 extends Widget {
                            track.object.curvesMode === 'keyframe' ? '≈' : '-'
         ctx.fillText(curveSymbol, buttonX + buttonSize / 2, buttonY + buttonSize / 2)
 
-        // Segment visibility button (only for object/shape tracks, not audio)
-        if (track.type !== 'audio') {
+        // Segment visibility button (only for object/shape tracks, not audio/midi)
+        if (track.type !== 'audio' && track.type !== 'midi') {
           buttonX -= (buttonSize + 4)
           ctx.strokeStyle = foregroundColor
           ctx.lineWidth = 1
@@ -835,7 +842,10 @@ class TimelineWindowV2 extends Widget {
           let animationData = null
 
           // Find the AnimationData for this track
-          if (track.type === 'object') {
+          if (track.type === 'audio' || track.type === 'midi') {
+            // For audio/MIDI tracks, animation data is directly on the track object
+            animationData = obj.animationData
+          } else if (track.type === 'object') {
             for (let layer of this.context.activeObject.allLayers) {
               if (layer.children && layer.children.includes(obj)) {
                 animationData = layer.animationData
@@ -852,10 +862,18 @@ class TimelineWindowV2 extends Widget {
           }
 
           if (animationData) {
-            const prefix = track.type === 'object' ? `child.${obj.idx}.` : `shape.${obj.shapeId}.`
-            for (let curveName in animationData.curves) {
-              if (curveName.startsWith(prefix)) {
+            if (track.type === 'audio' || track.type === 'midi') {
+              // For audio/MIDI tracks, include all automation curves
+              for (let curveName in animationData.curves) {
                 curves.push(animationData.curves[curveName])
+              }
+            } else {
+              // For objects/shapes, filter by prefix
+              const prefix = track.type === 'object' ? `child.${obj.idx}.` : `shape.${obj.shapeId}.`
+              for (let curveName in animationData.curves) {
+                if (curveName.startsWith(prefix)) {
+                  curves.push(animationData.curves[curveName])
+                }
               }
             }
           }
@@ -883,9 +901,18 @@ class TimelineWindowV2 extends Widget {
               ctx.arc(10, itemY + 5, 3, 0, 2 * Math.PI)
               ctx.fill()
 
-              // Draw parameter name (extract last part after last dot)
+              // Draw parameter name
               ctx.fillStyle = isHidden ? foregroundColor : labelColor
-              const paramName = curve.parameter.split('.').pop()
+              let paramName = curve.parameter.split('.').pop()
+
+              // For automation curves, fetch the friendly name from backend
+              if (curve.parameter.startsWith('automation.') && (track.type === 'audio' || track.type === 'midi')) {
+                const nodeId = parseInt(paramName, 10)
+                if (!isNaN(nodeId) && obj.audioTrackId !== null) {
+                  paramName = this.getAutomationName(obj.audioTrackId, nodeId)
+                }
+              }
+
               const truncatedName = paramName.length > 12 ? paramName.substring(0, 10) + '...' : paramName
               ctx.fillText(truncatedName, 18, itemY)
 
@@ -972,6 +999,42 @@ class TimelineWindowV2 extends Widget {
               ctx.lineTo(x, y + trackHeight)
               ctx.stroke()
             }
+          }
+        }
+      } else if (this.timelineState.timeFormat === 'measures') {
+        // Measures mode: draw beats with varying opacity
+        const beatsPerSecond = this.timelineState.bpm / 60
+        const beatsPerMeasure = this.timelineState.timeSignature.numerator
+        const startBeat = Math.floor(visibleStartTime * beatsPerSecond)
+        const endBeat = Math.ceil(visibleEndTime * beatsPerSecond)
+
+        for (let beat = startBeat; beat <= endBeat; beat++) {
+          const time = beat / beatsPerSecond
+          const x = this.timelineState.timeToPixel(time)
+
+          if (x >= 0 && x <= trackAreaWidth) {
+            // Determine position within the measure
+            const beatInMeasure = beat % beatsPerMeasure
+            const isMeasureBoundary = beatInMeasure === 0
+            const isEvenBeatInMeasure = (beatInMeasure % 2) === 0
+
+            // Set opacity based on position
+            ctx.save()
+            if (isMeasureBoundary) {
+              ctx.globalAlpha = 1.0  // Full opacity for measure boundaries
+            } else if (isEvenBeatInMeasure) {
+              ctx.globalAlpha = 0.5  // Half opacity for even beats
+            } else {
+              ctx.globalAlpha = 0.25  // Quarter opacity for odd beats
+            }
+
+            ctx.strokeStyle = shadow
+            ctx.lineWidth = 1
+            ctx.beginPath()
+            ctx.moveTo(x, y)
+            ctx.lineTo(x, y + trackHeight)
+            ctx.stroke()
+            ctx.restore()
           }
         }
       } else {
@@ -1427,8 +1490,8 @@ class TimelineWindowV2 extends Widget {
     for (let i = 0; i < this.trackHierarchy.tracks.length; i++) {
       const track = this.trackHierarchy.tracks[i]
 
-      // Only draw curves for objects, shapes, and audio tracks
-      if (track.type !== 'object' && track.type !== 'shape' && track.type !== 'audio') continue
+      // Only draw curves for objects, shapes, audio tracks, and MIDI tracks
+      if (track.type !== 'object' && track.type !== 'shape' && track.type !== 'audio' && track.type !== 'midi') continue
 
       const obj = track.object
 
@@ -1439,8 +1502,8 @@ class TimelineWindowV2 extends Widget {
 
       // Find the layer containing this object/shape to get AnimationData
       let animationData = null
-      if (track.type === 'audio') {
-        // For audio tracks, animation data is directly on the track object
+      if (track.type === 'audio' || track.type === 'midi') {
+        // For audio/MIDI tracks, animation data is directly on the track object
         animationData = obj.animationData
       } else if (track.type === 'object') {
         // For objects, get curves from parent layer
@@ -1476,9 +1539,9 @@ class TimelineWindowV2 extends Widget {
       for (let curveName in animationData.curves) {
         const curve = animationData.curves[curveName]
 
-        // Filter to only curves for this specific object/shape/audio
-        if (track.type === 'audio') {
-          // Audio tracks: include all curves (they're prefixed with 'track.' or 'clip.')
+        // Filter to only curves for this specific object/shape/audio/MIDI
+        if (track.type === 'audio' || track.type === 'midi') {
+          // Audio/MIDI tracks: include all automation curves
           curves.push(curve)
         } else if (track.type === 'object' && curveName.startsWith(`child.${obj.idx}.`)) {
           curves.push(curve)
@@ -1858,7 +1921,7 @@ class TimelineWindowV2 extends Widget {
         }
 
         // Check if clicking on toggle buttons (Phase 3)
-        if (track.type === 'object' || track.type === 'shape') {
+        if (track.type === 'object' || track.type === 'shape' || track.type === 'audio' || track.type === 'midi') {
           const buttonSize = 14
           const trackIndex = this.trackHierarchy.tracks.indexOf(track)
           const trackY = this.trackHierarchy.getTrackY(trackIndex)
@@ -4032,9 +4095,59 @@ class TimelineWindowV2 extends Widget {
   toggleTimeFormat() {
     if (this.timelineState.timeFormat === 'frames') {
       this.timelineState.timeFormat = 'seconds'
+    } else if (this.timelineState.timeFormat === 'seconds') {
+      this.timelineState.timeFormat = 'measures'
     } else {
       this.timelineState.timeFormat = 'frames'
     }
+  }
+
+  // Fetch automation name from backend and cache it
+  async fetchAutomationName(trackId, nodeId) {
+    const cacheKey = `${trackId}:${nodeId}`
+
+    // Return cached value if available
+    if (this.automationNameCache.has(cacheKey)) {
+      return this.automationNameCache.get(cacheKey)
+    }
+
+    try {
+      const name = await invoke('automation_get_name', {
+        trackId: trackId,
+        nodeId: nodeId
+      })
+
+      // Cache the result
+      if (name && name !== '') {
+        this.automationNameCache.set(cacheKey, name)
+        return name
+      }
+    } catch (err) {
+      console.error(`Failed to fetch automation name for node ${nodeId}:`, err)
+    }
+
+    // Fallback to node ID if fetch fails or returns empty
+    return `${nodeId}`
+  }
+
+  // Get automation name synchronously from cache, trigger fetch if not cached
+  getAutomationName(trackId, nodeId) {
+    const cacheKey = `${trackId}:${nodeId}`
+
+    if (this.automationNameCache.has(cacheKey)) {
+      return this.automationNameCache.get(cacheKey)
+    }
+
+    // Trigger async fetch in background
+    this.fetchAutomationName(trackId, nodeId).then(() => {
+      // Redraw when name arrives
+      if (this.context.timelineWidget?.requestRedraw) {
+        this.context.timelineWidget.requestRedraw()
+      }
+    })
+
+    // Return node ID as placeholder while fetching
+    return `${nodeId}`
   }
 }
 

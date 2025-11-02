@@ -149,6 +149,14 @@ pub enum Command {
     MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8),
     /// Remove a layer from a MultiSampler node (track_id, node_id, layer_index)
     MultiSamplerRemoveLayer(TrackId, u32, usize),
+
+    // Automation Input Node commands
+    /// Add or update a keyframe on an AutomationInput node (track_id, node_id, time, value, interpolation, ease_out, ease_in)
+    AutomationAddKeyframe(TrackId, u32, f64, f32, String, (f32, f32), (f32, f32)),
+    /// Remove a keyframe from an AutomationInput node (track_id, node_id, time)
+    AutomationRemoveKeyframe(TrackId, u32, f64),
+    /// Set the display name of an AutomationInput node (track_id, node_id, name)
+    AutomationSetName(TrackId, u32, String),
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -212,6 +220,10 @@ pub enum Query {
     GetOscilloscopeData(TrackId, u32, usize),
     /// Get MIDI clip data (track_id, clip_id)
     GetMidiClip(TrackId, MidiClipId),
+    /// Get keyframes from an AutomationInput node (track_id, node_id)
+    GetAutomationKeyframes(TrackId, u32),
+    /// Get the display name of an AutomationInput node (track_id, node_id)
+    GetAutomationName(TrackId, u32),
 }
 
 /// Oscilloscope data from a node
@@ -230,6 +242,16 @@ pub struct MidiClipData {
     pub events: Vec<crate::audio::midi::MidiEvent>,
 }
 
+/// Automation keyframe data for serialization
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AutomationKeyframeData {
+    pub time: f64,
+    pub value: f32,
+    pub interpolation: String,
+    pub ease_out: (f32, f32),
+    pub ease_in: (f32, f32),
+}
+
 /// Responses to synchronous queries
 #[derive(Debug)]
 pub enum QueryResponse {
@@ -239,4 +261,8 @@ pub enum QueryResponse {
     OscilloscopeData(Result<OscilloscopeData, String>),
     /// MIDI clip data
     MidiClipData(Result<MidiClipData, String>),
+    /// Automation keyframes
+    AutomationKeyframes(Result<Vec<AutomationKeyframeData>, String>),
+    /// Automation node name
+    AutomationName(Result<String, String>),
 }

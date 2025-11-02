@@ -6,10 +6,12 @@ import { backgroundColor, foregroundColor, shadow, labelColor, scrubberColor } f
  * TimelineState - Global state for timeline display and interaction
  */
 class TimelineState {
-  constructor(framerate = 24) {
+  constructor(framerate = 24, bpm = 120, timeSignature = { numerator: 4, denominator: 4 }) {
     // Time format settings
     this.timeFormat = 'frames'  // 'frames' | 'seconds' | 'measures'
     this.framerate = framerate
+    this.bpm = bpm  // Beats per minute for measures mode
+    this.timeSignature = timeSignature  // Time signature for measures mode (e.g., {numerator: 4, denominator: 4} or {numerator: 6, denominator: 8})
 
     // Zoom and viewport
     this.pixelsPerSecond = 100  // Zoom level - how many pixels per second of animation
@@ -51,6 +53,30 @@ class TimelineState {
    */
   frameToTime(frame) {
     return frame / this.framerate
+  }
+
+  /**
+   * Convert time (seconds) to measure position
+   * Returns {measure, beat, tick} where tick is subdivision of beat (0-999)
+   */
+  timeToMeasure(time) {
+    const beatsPerSecond = this.bpm / 60
+    const totalBeats = time * beatsPerSecond
+    const beatsPerMeasure = this.timeSignature.numerator
+    const measure = Math.floor(totalBeats / beatsPerMeasure) + 1  // Measures are 1-indexed
+    const beat = Math.floor(totalBeats % beatsPerMeasure) + 1  // Beats are 1-indexed
+    const tick = Math.floor((totalBeats % 1) * 1000)  // Ticks are 0-999
+    return { measure, beat, tick }
+  }
+
+  /**
+   * Convert measure position to time (seconds)
+   */
+  measureToTime(measure, beat = 1, tick = 0) {
+    const beatsPerMeasure = this.timeSignature.numerator
+    const totalBeats = (measure - 1) * beatsPerMeasure + (beat - 1) + (tick / 1000)
+    const beatsPerSecond = this.bpm / 60
+    return totalBeats / beatsPerSecond
   }
 
   /**
@@ -113,6 +139,35 @@ class TimelineState {
   }
 
   /**
+   * Calculate appropriate ruler interval for measures mode
+   * Returns interval in beats that gives ~50-100px spacing
+   */
+  getRulerIntervalBeats() {
+    const targetPixelSpacing = 75
+    const beatsPerSecond = this.bpm / 60
+    const pixelsPerBeat = this.pixelsPerSecond / beatsPerSecond
+    const beatSpacing = targetPixelSpacing / pixelsPerBeat
+
+    const beatsPerMeasure = this.timeSignature.numerator
+    // Standard beat intervals: 1 beat, 2 beats, 1 measure, 2 measures, 4 measures, etc.
+    const intervals = [1, 2, beatsPerMeasure, beatsPerMeasure * 2, beatsPerMeasure * 4, beatsPerMeasure * 8, beatsPerMeasure * 16]
+
+    // Find closest interval
+    let bestInterval = intervals[0]
+    let bestDiff = Math.abs(beatSpacing - bestInterval)
+
+    for (let interval of intervals) {
+      const diff = Math.abs(beatSpacing - interval)
+      if (diff < bestDiff) {
+        bestDiff = diff
+        bestInterval = interval
+      }
+    }
+
+    return bestInterval
+  }
+
+  /**
    * Format time for display based on current format setting
    */
   formatTime(time) {
@@ -128,8 +183,10 @@ class TimelineState {
       } else {
         return `${seconds}.${ms}s`
       }
+    } else if (this.timeFormat === 'measures') {
+      const { measure, beat } = this.timeToMeasure(time)
+      return `${measure}.${beat}`
     }
-    // measures format - TODO when DAW features added
     return `${time.toFixed(2)}`
   }
 
@@ -182,24 +239,19 @@ class TimeRuler {
     ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, width, this.height)
 
-    // Determine interval based on current zoom and format
-    let interval, isFrameMode
-    if (this.state.timeFormat === 'frames') {
-      interval = this.state.getRulerIntervalFrames()  // In frames
-      isFrameMode = true
-    } else {
-      interval = this.state.getRulerInterval()  // In seconds
-      isFrameMode = false
-    }
-
     // Calculate visible time range
     const startTime = this.state.viewportStartTime
     const endTime = this.state.pixelToTime(width)
 
-    // Draw tick marks and labels
-    if (isFrameMode) {
+    // Draw tick marks and labels based on format
+    if (this.state.timeFormat === 'frames') {
+      const interval = this.state.getRulerIntervalFrames()  // In frames
       this.drawFrameTicks(ctx, width, interval, startTime, endTime)
+    } else if (this.state.timeFormat === 'measures') {
+      const interval = this.state.getRulerIntervalBeats()  // In beats
+      this.drawMeasureTicks(ctx, width, interval, startTime, endTime)
     } else {
+      const interval = this.state.getRulerInterval()  // In seconds
       this.drawSecondTicks(ctx, width, interval, startTime, endTime)
     }
 
@@ -299,6 +351,127 @@ class TimeRuler {
         ctx.moveTo(minorX, this.height - 5)
         ctx.lineTo(minorX, this.height)
         ctx.stroke()
+      }
+    }
+  }
+
+  /**
+   * Draw tick marks for measures mode
+   */
+  drawMeasureTicks(ctx, width, interval, startTime, endTime) {
+    const beatsPerSecond = this.state.bpm / 60
+    const beatsPerMeasure = this.state.timeSignature.numerator
+
+    // Always draw individual beats, regardless of interval
+    const startBeat = Math.floor(startTime * beatsPerSecond)
+    const endBeat = Math.ceil(endTime * beatsPerSecond)
+
+    ctx.fillStyle = labelColor
+    ctx.font = '11px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
+
+    // Draw all beats
+    for (let beat = startBeat; beat <= endBeat; beat++) {
+      const time = beat / beatsPerSecond
+      const x = this.state.timeToPixel(time)
+
+      if (x < 0 || x > width) continue
+
+      // Determine position within the measure
+      const beatInMeasure = beat % beatsPerMeasure
+      const isMeasureBoundary = beatInMeasure === 0
+      const isEvenBeatInMeasure = (beatInMeasure % 2) === 0
+
+      // Determine tick style based on position
+      let opacity, tickHeight
+      if (isMeasureBoundary) {
+        // Measure boundary: full opacity, tallest
+        opacity = 1.0
+        tickHeight = 12
+      } else if (isEvenBeatInMeasure) {
+        // Even beat within measure: half opacity, medium height
+        opacity = 0.5
+        tickHeight = 8
+      } else {
+        // Odd beat within measure: quarter opacity, shortest
+        opacity = 0.25
+        tickHeight = 5
+      }
+
+      // Draw tick with appropriate opacity
+      ctx.save()
+      ctx.globalAlpha = opacity
+      ctx.strokeStyle = foregroundColor
+      ctx.lineWidth = isMeasureBoundary ? 2 : 1
+      ctx.beginPath()
+      ctx.moveTo(x, this.height - tickHeight)
+      ctx.lineTo(x, this.height)
+      ctx.stroke()
+      ctx.restore()
+
+      // Determine if we're zoomed in enough to show individual beat labels
+      const pixelsPerBeat = this.state.pixelsPerSecond / beatsPerSecond
+      const beatFadeThreshold = 100  // Full opacity at 100px per beat
+      const beatFadeStart = 60       // Start fading in at 60px per beat
+
+      // Calculate fade opacity for beat labels (0 to 1)
+      const beatLabelOpacity = Math.max(0, Math.min(1, (pixelsPerBeat - beatFadeStart) / (beatFadeThreshold - beatFadeStart)))
+
+      // Calculate spacing-based fade for measure labels when zoomed out
+      const pixelsPerMeasure = pixelsPerBeat * beatsPerMeasure
+
+      // Determine which measures to show based on spacing
+      const { measure: measureNumber } = this.state.timeToMeasure(time)
+      let showThisMeasure = false
+      let measureLabelOpacity = 1
+
+      const isEvery16th = (measureNumber - 1) % 16 === 0
+      const isEvery4th = (measureNumber - 1) % 4 === 0
+
+      if (isEvery16th) {
+        // Always show every 16th measure when very zoomed out
+        showThisMeasure = true
+        if (pixelsPerMeasure < 20) {
+          // Fade in from 10-20px
+          measureLabelOpacity = Math.max(0, Math.min(1, (pixelsPerMeasure - 10) / 10))
+        } else {
+          measureLabelOpacity = 1
+        }
+      } else if (isEvery4th && pixelsPerMeasure >= 20) {
+        // Show every 4th measure when zoomed out but not too far
+        showThisMeasure = true
+        if (pixelsPerMeasure < 30) {
+          // Fade in from 20-30px
+          measureLabelOpacity = Math.max(0, Math.min(1, (pixelsPerMeasure - 20) / 10))
+        } else {
+          measureLabelOpacity = 1
+        }
+      } else if (pixelsPerMeasure >= 80) {
+        // Show all measures when zoomed in enough
+        showThisMeasure = true
+        if (pixelsPerMeasure < 100) {
+          // Fade in from 80-100px
+          measureLabelOpacity = Math.max(0, Math.min(1, (pixelsPerMeasure - 80) / 20))
+        } else {
+          measureLabelOpacity = 1
+        }
+      }
+
+      // Label logic
+      if (isMeasureBoundary && showThisMeasure) {
+        // Measure boundaries: show just the measure number with fade
+        const { measure } = this.state.timeToMeasure(time)
+        ctx.save()
+        ctx.globalAlpha = measureLabelOpacity
+        ctx.fillText(measure.toString(), x, 2)
+        ctx.restore()
+      } else if (beatLabelOpacity > 0) {
+        // Zoomed in: show measure.beat for all beats with fade
+        ctx.save()
+        ctx.globalAlpha = beatLabelOpacity
+        ctx.fillText(this.state.formatTime(time), x, 2)
+        ctx.restore()
       }
     }
   }

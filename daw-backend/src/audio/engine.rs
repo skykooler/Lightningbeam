@@ -729,6 +729,7 @@ impl Engine {
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
+                            "AutomationInput" => Box::new(AutomationInputNode::new("Automation".to_string())),
                             "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
                             "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
                             "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
@@ -803,6 +804,7 @@ impl Engine {
                             "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
                             "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
                             "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
+                            "AutomationInput" => Box::new(AutomationInputNode::new("Automation".to_string())),
                             "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
                             "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
                             "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
@@ -1117,6 +1119,77 @@ impl Engine {
                     }
                 }
             }
+
+            Command::AutomationAddKeyframe(track_id, node_id, time, value, interpolation_str, ease_out, ease_in) => {
+                use crate::audio::node_graph::nodes::{AutomationInputNode, AutomationKeyframe, InterpolationType};
+
+                // Parse interpolation type
+                let interpolation = match interpolation_str.to_lowercase().as_str() {
+                    "linear" => InterpolationType::Linear,
+                    "bezier" => InterpolationType::Bezier,
+                    "step" => InterpolationType::Step,
+                    "hold" => InterpolationType::Hold,
+                    _ => {
+                        eprintln!("Unknown interpolation type: {}, defaulting to Linear", interpolation_str);
+                        InterpolationType::Linear
+                    }
+                };
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        // Downcast to AutomationInputNode using as_any_mut
+                        if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                            let keyframe = AutomationKeyframe {
+                                time,
+                                value,
+                                interpolation,
+                                ease_out,
+                                ease_in,
+                            };
+                            auto_node.add_keyframe(keyframe);
+                        } else {
+                            eprintln!("Node {} is not an AutomationInputNode", node_id);
+                        }
+                    }
+                }
+            }
+
+            Command::AutomationRemoveKeyframe(track_id, node_id, time) => {
+                use crate::audio::node_graph::nodes::AutomationInputNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                            auto_node.remove_keyframe_at_time(time, 0.001); // 1ms tolerance
+                        } else {
+                            eprintln!("Node {} is not an AutomationInputNode", node_id);
+                        }
+                    }
+                }
+            }
+
+            Command::AutomationSetName(track_id, node_id, name) => {
+                use crate::audio::node_graph::nodes::AutomationInputNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                            auto_node.set_display_name(name);
+                        } else {
+                            eprintln!("Node {} is not an AutomationInputNode", node_id);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1183,6 +1256,71 @@ impl Engine {
                     }
                 } else {
                     QueryResponse::MidiClipData(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+
+            Query::GetAutomationKeyframes(track_id, node_id) => {
+                use crate::audio::node_graph::nodes::{AutomationInputNode, InterpolationType};
+                use crate::command::types::AutomationKeyframeData;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node(node_idx) {
+                        // Downcast to AutomationInputNode
+                        if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
+                            let keyframes: Vec<AutomationKeyframeData> = auto_node.keyframes()
+                                .iter()
+                                .map(|kf| {
+                                    let interpolation_str = match kf.interpolation {
+                                        InterpolationType::Linear => "linear",
+                                        InterpolationType::Bezier => "bezier",
+                                        InterpolationType::Step => "step",
+                                        InterpolationType::Hold => "hold",
+                                    }.to_string();
+
+                                    AutomationKeyframeData {
+                                        time: kf.time,
+                                        value: kf.value,
+                                        interpolation: interpolation_str,
+                                        ease_out: kf.ease_out,
+                                        ease_in: kf.ease_in,
+                                    }
+                                })
+                                .collect();
+
+                            QueryResponse::AutomationKeyframes(Ok(keyframes))
+                        } else {
+                            QueryResponse::AutomationKeyframes(Err(format!("Node {} is not an AutomationInputNode", node_id)))
+                        }
+                    } else {
+                        QueryResponse::AutomationKeyframes(Err(format!("Node {} not found in track {}", node_id, track_id)))
+                    }
+                } else {
+                    QueryResponse::AutomationKeyframes(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+
+            Query::GetAutomationName(track_id, node_id) => {
+                use crate::audio::node_graph::nodes::AutomationInputNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node(node_idx) {
+                        // Downcast to AutomationInputNode
+                        if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
+                            QueryResponse::AutomationName(Ok(auto_node.display_name().to_string()))
+                        } else {
+                            QueryResponse::AutomationName(Err(format!("Node {} is not an AutomationInputNode", node_id)))
+                        }
+                    } else {
+                        QueryResponse::AutomationName(Err(format!("Node {} not found in track {}", node_id, track_id)))
+                    }
+                } else {
+                    QueryResponse::AutomationName(Err(format!("Track {} not found or is not a MIDI track", track_id)))
                 }
             }
         };
@@ -1501,6 +1639,11 @@ impl EngineController {
     /// Move a clip to a new timeline position
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
         let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
+    }
+
+    /// Send a generic command to the audio thread
+    pub fn send_command(&mut self, command: Command) {
+        let _ = self.command_tx.push(command);
     }
 
     /// Get current playhead position in samples
@@ -1863,6 +2006,50 @@ impl EngineController {
 
         while start.elapsed() < timeout {
             if let Ok(QueryResponse::OscilloscopeData(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query automation keyframes from an AutomationInput node
+    pub fn query_automation_keyframes(&mut self, track_id: TrackId, node_id: u32) -> Result<Vec<crate::command::types::AutomationKeyframeData>, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetAutomationKeyframes(track_id, node_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AutomationKeyframes(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query automation node display name
+    pub fn query_automation_name(&mut self, track_id: TrackId, node_id: u32) -> Result<String, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetAutomationName(track_id, node_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AutomationName(result)) = self.query_response_rx.pop() {
                 return result;
             }
             // Small sleep to avoid busy-waiting

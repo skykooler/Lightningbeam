@@ -85,6 +85,14 @@ impl AudioNode for TemplateInputNode {
     fn handle_midi(&mut self, _event: &MidiEvent) {
         // Pass through to connected nodes
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Template Output node - represents the audio output from one voice in a VoiceAllocator
@@ -172,5 +180,13 @@ impl AudioNode for TemplateOutputNode {
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
         })
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
