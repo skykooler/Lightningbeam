@@ -4218,15 +4218,23 @@ class VirtualPiano extends Widget {
     this.visibleStartNote = 48; // C3 - will be adjusted based on pane width
     this.visibleEndNote = 72; // C5 - will be adjusted based on pane width
 
+    // Keyboard control state
+    this.octaveOffset = 0; // Octave transpose (-2 to +2)
+    this.velocity = 100; // Default velocity (0-127)
+    this.sustainActive = false; // Sustain pedal (Tab key)
+    this.activeKeyPresses = new Map(); // Map of keyboard key -> MIDI note that's currently playing
+    this.sustainedNotes = new Set(); // Notes being held by sustain
+
     // MIDI note mapping (white keys in an octave: C, D, E, F, G, A, B)
     this.whiteKeysInOctave = [0, 2, 4, 5, 7, 9, 11]; // Semitones from C
     // Black keys indexed by white key position (after which white key the black key appears)
     // Position 0 (after C), 1 (after D), null (no black after E), 3 (after F), 4 (after G), 5 (after A), null (no black after B)
     this.blackKeysInOctave = [1, 3, null, 6, 8, 10, null]; // Actual semitone values
 
-    // Keyboard bindings matching piano layout
-    // Black keys: W E (one group) T Y U (other group)
-    // White keys: A S D F G H J K
+    // Keyboard bindings matching piano layout (QWERTY)
+    // TODO: Auto-detect keyboard layout and generate mapping dynamically
+    // Black keys: W E (one group) T Y U (other group) O P (next group)
+    // White keys: A S D F G H J K L ; '
     this.keyboardMap = {
       'a': 60, // C4
       'w': 61, // C#4
@@ -4241,6 +4249,11 @@ class VirtualPiano extends Widget {
       'u': 70, // A#4
       'j': 71, // B4
       'k': 72, // C5
+      'o': 73, // C#5
+      'l': 74, // D5
+      'p': 75, // D#5
+      ';': 76, // E5
+      "'": 77, // F5
     };
 
     // Reverse mapping for displaying keyboard keys on piano keys
@@ -4259,17 +4272,96 @@ class VirtualPiano extends Widget {
   setupKeyboardListeners() {
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return; // Ignore key repeats
-      const midiNote = this.keyboardMap[e.key.toLowerCase()];
-      if (midiNote !== undefined) {
-        this.noteOn(midiNote, 100); // Default velocity 100
+
+      const key = e.key.toLowerCase();
+
+      // Handle sustain (Tab key)
+      if (key === 'tab') {
+        this.sustainActive = true;
         e.preventDefault();
+        return;
+      }
+
+      // Handle control keys (Z, X for octave, C, V for velocity)
+      if (key === 'z') {
+        this.octaveOffset = Math.max(-2, this.octaveOffset - 1);
+        // Trigger a redraw to update the visible piano range
+        if (window.context && window.context.pianoRedraw) {
+          window.context.pianoRedraw();
+        }
+        e.preventDefault();
+        return;
+      }
+      if (key === 'x') {
+        this.octaveOffset = Math.min(2, this.octaveOffset + 1);
+        // Trigger a redraw to update the visible piano range
+        if (window.context && window.context.pianoRedraw) {
+          window.context.pianoRedraw();
+        }
+        e.preventDefault();
+        return;
+      }
+      if (key === 'c') {
+        this.velocity = Math.max(1, this.velocity - 10);
+        e.preventDefault();
+        return;
+      }
+      if (key === 'v') {
+        this.velocity = Math.min(127, this.velocity + 10);
+        e.preventDefault();
+        return;
+      }
+
+      // Handle piano keys
+      const baseNote = this.keyboardMap[key];
+      if (baseNote !== undefined) {
+        // Note: octave offset is applied by shifting the visible piano range
+        // so we play the base note directly
+        const note = baseNote + (this.octaveOffset * 12);
+        // Clamp to valid MIDI range (0-127)
+        if (note >= 0 && note <= 127) {
+          // Track which key is playing which note
+          this.activeKeyPresses.set(key, note);
+          this.noteOn(note, this.velocity);
+          e.preventDefault();
+        }
       }
     });
 
     window.addEventListener('keyup', (e) => {
-      const midiNote = this.keyboardMap[e.key.toLowerCase()];
-      if (midiNote !== undefined) {
-        this.noteOff(midiNote);
+      const key = e.key.toLowerCase();
+
+      // Handle sustain release
+      if (key === 'tab') {
+        this.sustainActive = false;
+        // Release only the sustained notes that aren't currently being held by a key
+        const currentlyPlayingNotes = new Set(this.activeKeyPresses.values());
+        for (const note of this.sustainedNotes) {
+          if (!currentlyPlayingNotes.has(note)) {
+            this.noteOff(note);
+          }
+        }
+        this.sustainedNotes.clear();
+        e.preventDefault();
+        return;
+      }
+
+      // Ignore control keys on keyup
+      if (['z', 'x', 'c', 'v'].includes(key)) {
+        return;
+      }
+
+      // Look up which note this key was playing
+      const transposedNote = this.activeKeyPresses.get(key);
+      if (transposedNote !== undefined) {
+        this.activeKeyPresses.delete(key);
+
+        // If sustain is active, add to sustained notes instead of releasing
+        if (this.sustainActive) {
+          this.sustainedNotes.add(transposedNote);
+        } else {
+          this.noteOff(transposedNote);
+        }
         e.preventDefault();
       }
     });
@@ -4349,15 +4441,15 @@ class VirtualPiano extends Widget {
     // Calculate how many white keys can fit in the pane (ceiling to fill space)
     const whiteKeysFit = Math.ceil(width / whiteKeyWidth);
 
-    // Keyboard-mapped range is C4 (60) to C5 (72)
+    // Keyboard-mapped range is C4 (60) to C5 (72), shifted by octave offset
     // This contains 8 white keys: C, D, E, F, G, A, B, C
-    const keyboardCenter = 60; // C4
+    const keyboardCenter = 60 + (this.octaveOffset * 12); // C4 + octave shift
     const keyboardWhiteKeys = 8;
 
     if (whiteKeysFit <= keyboardWhiteKeys) {
       // Not enough space to show all keyboard keys, just center what we have
-      this.visibleStartNote = 60; // C4
-      this.visibleEndNote = 72; // C5
+      this.visibleStartNote = keyboardCenter;
+      this.visibleEndNote = keyboardCenter + 12; // One octave up
       const totalWhiteKeyWidth = keyboardWhiteKeys * whiteKeyWidth;
       const offsetX = (width - totalWhiteKeyWidth) / 2;
       return { offsetX, whiteKeyWidth };
@@ -4368,8 +4460,8 @@ class VirtualPiano extends Widget {
     const leftExtra = Math.floor(extraWhiteKeys / 2);
     const rightExtra = extraWhiteKeys - leftExtra;
 
-    // Start from C4 and go back leftExtra white keys
-    let startNote = 60; // C4
+    // Start from shifted keyboard center and go back leftExtra white keys
+    let startNote = keyboardCenter;
     let leftCount = 0;
     while (leftCount < leftExtra && startNote > 0) {
       startNote--;
@@ -4507,7 +4599,7 @@ class VirtualPiano extends Widget {
     const { offsetX, whiteKeyWidth } = this.calculateVisibleRange(width, height);
     const key = this.findKeyAtPosition(x, y, height, whiteKeyWidth, offsetX);
     if (key !== null) {
-      this.noteOn(key, 100);
+      this.noteOn(key, this.velocity);
     }
   }
 
@@ -4574,7 +4666,9 @@ class VirtualPiano extends Widget {
       ctx.stroke();
 
       // Keyboard mapping label (if exists)
-      const keyLabel = this.noteToKeyMap[note];
+      // Subtract octave offset to get the base note for label lookup
+      const baseNote = note - (this.octaveOffset * 12);
+      const keyLabel = this.noteToKeyMap[baseNote];
       if (keyLabel) {
         ctx.fillStyle = isPressed ? '#000000' : '#333333';
         ctx.font = 'bold 16px sans-serif';
@@ -4637,7 +4731,9 @@ class VirtualPiano extends Widget {
       ctx.stroke();
 
       // Keyboard mapping label (if exists)
-      const keyLabel = this.noteToKeyMap[note];
+      // Subtract octave offset to get the base note for label lookup
+      const baseNote = note - (this.octaveOffset * 12);
+      const keyLabel = this.noteToKeyMap[baseNote];
       if (keyLabel) {
         ctx.fillStyle = isPressed ? '#ffffff' : 'rgba(255, 255, 255, 0.7)';
         ctx.font = 'bold 14px sans-serif';

@@ -9900,6 +9900,43 @@ function piano() {
   // Prevent text selection
   piano_cvs.addEventListener("selectstart", (e) => e.preventDefault());
 
+  // Add header controls for octave and velocity
+  piano_cvs.headerControls = function() {
+    const controls = [];
+
+    // Octave control
+    const octaveLabel = document.createElement("span");
+    octaveLabel.style.marginLeft = "auto";
+    octaveLabel.style.marginRight = "10px";
+    octaveLabel.style.fontSize = "12px";
+    octaveLabel.textContent = `Octave: ${piano_cvs.virtualPiano.octaveOffset >= 0 ? '+' : ''}${piano_cvs.virtualPiano.octaveOffset} (Z/X)`;
+
+    // Velocity control
+    const velocityLabel = document.createElement("span");
+    velocityLabel.style.marginRight = "10px";
+    velocityLabel.style.fontSize = "12px";
+    velocityLabel.textContent = `Velocity: ${piano_cvs.virtualPiano.velocity} (C/V)`;
+
+    // Update function to refresh labels
+    const updateLabels = () => {
+      octaveLabel.textContent = `Octave: ${piano_cvs.virtualPiano.octaveOffset >= 0 ? '+' : ''}${piano_cvs.virtualPiano.octaveOffset} (Z/X)`;
+      velocityLabel.textContent = `Velocity: ${piano_cvs.virtualPiano.velocity} (C/V)`;
+    };
+
+    // Listen for keyboard events to update labels
+    window.addEventListener('keydown', (e) => {
+      if (['z', 'x', 'c', 'v'].includes(e.key.toLowerCase())) {
+        // Delay slightly to let the piano widget update first
+        setTimeout(updateLabels, 10);
+      }
+    });
+
+    controls.push(octaveLabel);
+    controls.push(velocityLabel);
+
+    return controls;
+  };
+
   return piano_cvs;
 }
 
