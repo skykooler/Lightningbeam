@@ -112,7 +112,7 @@ import { actions, initializeActions, updateAutomationName } from "./actions/inde
 
 // Layout system
 import { defaultLayouts, getLayout, getLayoutNames } from "./layouts.js";
-import { buildLayout, loadLayoutByKeyOrName, saveCustomLayout } from "./layoutmanager.js";
+import { buildLayout, loadLayoutByKeyOrName, saveCustomLayout, serializeLayout } from "./layoutmanager.js";
 
 const {
   writeTextFile: writeTextFile,
@@ -1669,11 +1669,15 @@ async function _save(path) {
       }
     }
 
+    // Serialize current layout structure (panes, splits, sizes)
+    const serializedLayout = serializeLayout(rootPane);
+
     const fileData = {
       version: "2.0.0",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
+      layoutState: serializedLayout, // Save current layout structure
       actions: undoStack,
       json: root.toJSON(),
       // Audio pool at the end for human readability
@@ -2092,6 +2096,37 @@ async function _open(path, returnJson = false) {
           // Ensure there's an active layer - set to first layer if none is active
           if (!context.activeObject.activeLayer && context.activeObject.layers.length > 0) {
             context.activeObject.activeLayer = context.activeObject.layers[0];
+          }
+
+          // Restore layout if saved and preference is enabled
+          console.log('[JS] Layout restoration check:', {
+            restoreLayoutFromFile: config.restoreLayoutFromFile,
+            hasLayoutState: !!file.layoutState,
+            layoutState: file.layoutState
+          });
+
+          if (config.restoreLayoutFromFile && file.layoutState) {
+            try {
+              console.log('[JS] Restoring saved layout:', file.layoutState);
+              // Clear existing layout
+              while (rootPane.firstChild) {
+                rootPane.removeChild(rootPane.firstChild);
+              }
+              layoutElements.length = 0;
+              canvases.length = 0;
+
+              // Build layout from saved state
+              buildLayout(rootPane, file.layoutState, panes, createPane, splitPane);
+
+              // Update UI after layout change
+              updateAll();
+              updateUI();
+              console.log('[JS] Layout restored successfully');
+            } catch (error) {
+              console.error('[JS] Failed to restore layout, using default:', error);
+            }
+          } else {
+            console.log('[JS] Skipping layout restoration');
           }
 
           // Restore audio tracks and clips to the Rust backend
@@ -4994,15 +5029,25 @@ async function startup() {
     }
   });
 
+  console.log('[startup] window.openedFiles:', window.openedFiles);
+  console.log('[startup] config.reopenLastSession:', config.reopenLastSession);
+  console.log('[startup] config.recentFiles:', config.recentFiles);
+
+  // Always update start screen data so it's ready when needed
+  await updateStartScreen(config);
+
   if (!window.openedFiles?.length) {
     if (config.reopenLastSession && config.recentFiles?.length) {
+      console.log('[startup] Reopening last session:', config.recentFiles[0]);
       document.body.style.cursor = "wait"
       setTimeout(()=>_open(config.recentFiles[0]), 10)
     } else {
-      // Show start screen instead of new file dialog
-      await updateStartScreen(config);
+      console.log('[startup] Showing start screen');
+      // Show start screen
       showStartScreen();
     }
+  } else {
+    console.log('[startup] Files already opened, skipping start screen');
   }
 }
 
@@ -6440,6 +6485,11 @@ async function renderMenu() {
         enabled: true,
         action: actions.selectNone.create,
         accelerator: getShortcut("selectNone"),
+      },
+      {
+        text: "Preferences",
+        enabled: true,
+        action: showPreferencesDialog,
       },
     ],
   });
@@ -10221,6 +10271,100 @@ function showSavePresetDialog(container) {
     } catch (error) {
       alert(`Failed to save preset: ${error}`);
     }
+  });
+
+  // Close on background click
+  dialog.addEventListener('click', (e) => {
+    if (e.target === dialog) {
+      dialog.remove();
+    }
+  });
+}
+
+// Show preferences dialog
+function showPreferencesDialog() {
+  const dialog = document.createElement('div');
+  dialog.className = 'modal-overlay';
+  dialog.innerHTML = `
+    <div class="modal-dialog preferences-dialog">
+      <h3>Preferences</h3>
+      <form id="preferences-form">
+        <div class="form-group">
+          <label>Default BPM</label>
+          <input type="number" id="pref-bpm" min="20" max="300" value="${config.bpm}" />
+        </div>
+        <div class="form-group">
+          <label>Default Framerate</label>
+          <input type="number" id="pref-framerate" min="1" max="120" value="${config.framerate}" />
+        </div>
+        <div class="form-group">
+          <label>Default File Width</label>
+          <input type="number" id="pref-width" min="100" max="10000" value="${config.fileWidth}" />
+        </div>
+        <div class="form-group">
+          <label>Default File Height</label>
+          <input type="number" id="pref-height" min="100" max="10000" value="${config.fileHeight}" />
+        </div>
+        <div class="form-group">
+          <label>Scroll Speed</label>
+          <input type="number" id="pref-scroll-speed" min="0.1" max="10" step="0.1" value="${config.scrollSpeed}" />
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="pref-reopen-session" ${config.reopenLastSession ? 'checked' : ''} />
+            Reopen last session on startup
+          </label>
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="pref-restore-layout" ${config.restoreLayoutFromFile ? 'checked' : ''} />
+            Restore layout when opening files
+          </label>
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="pref-debug" ${config.debug ? 'checked' : ''} />
+            Enable debug mode
+          </label>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn-cancel">Cancel</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  document.body.appendChild(dialog);
+
+  // Focus first input
+  setTimeout(() => dialog.querySelector('#pref-bpm')?.focus(), 100);
+
+  // Handle cancel
+  dialog.querySelector('.btn-cancel').addEventListener('click', () => {
+    dialog.remove();
+  });
+
+  // Handle save
+  dialog.querySelector('#preferences-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    // Update config values
+    config.bpm = parseInt(dialog.querySelector('#pref-bpm').value);
+    config.framerate = parseInt(dialog.querySelector('#pref-framerate').value);
+    config.fileWidth = parseInt(dialog.querySelector('#pref-width').value);
+    config.fileHeight = parseInt(dialog.querySelector('#pref-height').value);
+    config.scrollSpeed = parseFloat(dialog.querySelector('#pref-scroll-speed').value);
+    config.reopenLastSession = dialog.querySelector('#pref-reopen-session').checked;
+    config.restoreLayoutFromFile = dialog.querySelector('#pref-restore-layout').checked;
+    config.debug = dialog.querySelector('#pref-debug').checked;
+
+    // Save config to localStorage
+    await saveConfig();
+
+    dialog.remove();
+
+    console.log('Preferences saved:', config);
   });
 
   // Close on background click

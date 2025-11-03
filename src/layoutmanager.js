@@ -104,7 +104,48 @@ function createPlaceholderPane(paneName) {
  * @returns {Object} Layout definition object
  */
 export function serializeLayout(rootElement) {
-  const layoutNode = serializeLayoutNode(rootElement.firstChild);
+  if (!rootElement.firstChild) {
+    throw new Error("No layout to serialize");
+  }
+
+  console.log('[serializeLayout] rootElement has', rootElement.children.length, 'children:');
+  for (let i = 0; i < rootElement.children.length; i++) {
+    console.log(`  [${i}]:`, rootElement.children[i].className);
+  }
+
+  let layoutNode;
+
+  // Check if rootElement itself acts as a grid (has 2 children from a split)
+  if (rootElement.children.length === 2) {
+    // rootElement is acting as a grid container
+    // Check if it has grid attributes
+    const isHorizontal = rootElement.classList.contains("horizontal-grid");
+    const isVertical = rootElement.classList.contains("vertical-grid");
+    const percent = parseFloat(rootElement.getAttribute("lb-percent")) || 50;
+
+    if (isHorizontal || isVertical) {
+      console.log('[serializeLayout] rootElement is a grid, serializing both children');
+      layoutNode = {
+        type: isHorizontal ? "horizontal-grid" : "vertical-grid",
+        percent: percent,
+        children: [
+          serializeLayoutNode(rootElement.children[0]),
+          serializeLayoutNode(rootElement.children[1])
+        ]
+      };
+    } else {
+      // No grid classes, but has 2 children - this shouldn't happen but handle it
+      console.warn('[serializeLayout] rootElement has 2 children but no grid classes, serializing first child only');
+      layoutNode = serializeLayoutNode(rootElement.firstChild);
+    }
+  } else {
+    // Single child, serialize it directly
+    console.log('[serializeLayout] Starting from element:', rootElement.firstChild.className);
+    layoutNode = serializeLayoutNode(rootElement.firstChild);
+  }
+
+  console.log('[serializeLayout] Serialized layout:', JSON.stringify(layoutNode, null, 2));
+
   return {
     name: "Custom Layout",
     description: "User-created layout",
@@ -116,25 +157,38 @@ export function serializeLayout(rootElement) {
  * Recursively serializes a layout node
  * @private
  */
-function serializeLayoutNode(element) {
+function serializeLayoutNode(element, depth = 0) {
+  const indent = '  '.repeat(depth);
+  console.log(`${indent}[serializeLayoutNode depth=${depth}] element:`, element.className, 'children:', element.children.length);
+
   if (!element) {
     throw new Error("Cannot serialize null element");
   }
 
-  // Check if this is a pane
-  if (element.classList.contains("pane") && !element.classList.contains("horizontal-grid") && !element.classList.contains("vertical-grid")) {
-    // Extract pane name from the element (stored in data attribute or class)
-    const paneName = element.getAttribute("data-pane-name") || "stage";
+  // Check if this is a pane (has data-pane-name attribute)
+  // This check must come first, as panes may also have grid classes for internal layout
+  if (element.hasAttribute("data-pane-name")) {
+    // The data-pane-name is kebab-case, but we need to save the camelCase key
+    // that matches the panes object keys, not the name property
+    const dataName = element.getAttribute("data-pane-name");
+
+    // Convert kebab-case to camelCase (e.g., "timeline-v2" -> "timelineV2")
+    const camelCaseName = dataName.replace(/-([a-z0-9])/g, (g) => g[1].toUpperCase());
+
+    console.log(`${indent}  -> Found pane: ${camelCaseName}`);
+
     return {
       type: "pane",
-      name: paneName
+      name: camelCaseName
     };
   }
 
-  // Check if this is a grid
+  // Check if this is a grid (split pane structure)
   if (element.classList.contains("horizontal-grid") || element.classList.contains("vertical-grid")) {
     const isHorizontal = element.classList.contains("horizontal-grid");
     const percent = parseFloat(element.getAttribute("lb-percent")) || 50;
+
+    console.log(`${indent}  -> Found ${isHorizontal ? 'horizontal' : 'vertical'} grid with ${percent}% split`);
 
     if (element.children.length !== 2) {
       throw new Error("Grid must have exactly 2 children");
@@ -144,15 +198,24 @@ function serializeLayoutNode(element) {
       type: isHorizontal ? "horizontal-grid" : "vertical-grid",
       percent: percent,
       children: [
-        serializeLayoutNode(element.children[0]),
-        serializeLayoutNode(element.children[1])
+        serializeLayoutNode(element.children[0], depth + 1),
+        serializeLayoutNode(element.children[1], depth + 1)
       ]
     };
   }
 
+  // Check if this is a panecontainer wrapper - recurse into it
+  if (element.classList.contains("panecontainer")) {
+    console.log(`${indent}  -> Found panecontainer, recursing into child`);
+    if (element.children.length === 1) {
+      return serializeLayoutNode(element.children[0], depth);
+    }
+  }
+
   // If element has only one child, recurse into it
   if (element.children.length === 1) {
-    return serializeLayoutNode(element.children[0]);
+    console.log(`${indent}  -> Element has 1 child, recursing`);
+    return serializeLayoutNode(element.children[0], depth);
   }
 
   throw new Error(`Cannot serialize element: ${element.className}`);

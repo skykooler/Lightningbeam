@@ -125,8 +125,26 @@ export async function loadConfig() {
     // Merge loaded config with defaults
     Object.assign(config, deepMerge({ ...config }, loaded));
 
+    // Ensure recentFiles is always an array (fix legacy string format)
+    let needsResave = false;
+    if (typeof config.recentFiles === 'string') {
+      config.recentFiles = config.recentFiles.split(',').filter(f => f.length > 0);
+      needsResave = true;
+    } else if (!Array.isArray(config.recentFiles)) {
+      config.recentFiles = [];
+      needsResave = true;
+    }
+
     // Make config accessible to widgets via context
     context.config = config;
+
+    console.log('[loadConfig] Loaded config.recentFiles:', config.recentFiles);
+
+    // Re-save config if we had to fix the format
+    if (needsResave) {
+      console.log('[loadConfig] Re-saving config to fix array format');
+      await saveConfig();
+    }
 
     return config;
   } catch (error) {
@@ -154,6 +172,7 @@ export async function addRecentFile(filePath) {
     filePath,
     ...config.recentFiles.filter(file => file !== filePath)
   ].slice(0, 10);
+  console.log('[addRecentFile] Added file, recentFiles now:', config.recentFiles);
   await saveConfig();
 }
 

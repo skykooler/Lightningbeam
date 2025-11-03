@@ -14,6 +14,7 @@ export function createStartScreen(callback) {
     startScreenContainer = document.createElement('div');
     startScreenContainer.id = 'startScreen';
     startScreenContainer.className = 'start-screen';
+    startScreenContainer.style.display = 'none'; // Hidden by default
 
     // Create welcome title
     const title = document.createElement('h1');
@@ -169,6 +170,8 @@ function createFocusCard(focus) {
  */
 export async function updateStartScreen(config) {
     if (!startScreenContainer) return;
+
+    console.log('[updateStartScreen] config.recentFiles:', config.recentFiles);
 
     // Update last session
     const lastSessionDiv = document.getElementById('lastSessionFile');

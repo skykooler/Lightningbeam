@@ -1992,7 +1992,8 @@ button {
   font-weight: 500;
 }
 
-.form-group input,
+.form-group input[type="text"],
+.form-group input[type="number"],
 .form-group textarea {
   width: 100%;
   background: #1e1e1e;
@@ -2003,6 +2004,19 @@ button {
   font-size: 13px;
   font-family: inherit;
   box-sizing: border-box;
+}
+
+.form-group input[type="checkbox"] {
+  width: auto;
+  margin-right: 8px;
+  cursor: pointer;
+}
+
+.form-group label:has(input[type="checkbox"]) {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: #ddd;
 }
 
 .form-group input:focus,
@@ -2219,7 +2233,7 @@ button {
   font-size: 1.1em;
   padding: 12px;
   background: var(--surface-light);
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--shadow);
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   transition: all 0.2s;
@@ -2267,7 +2281,7 @@ button {
   width: 180px;
   padding: 24px;
   background: var(--surface-light);
-  border: 2px solid var(--border-light);
+  border: 2px solid var(--shadow);
   border-radius: 12px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
   cursor: pointer;
@@ -2290,7 +2304,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 3px solid var(--button-hover);
+  border: 3px solid var(--shadow);
   border-radius: 8px;
   background: var(--surface);
 }
