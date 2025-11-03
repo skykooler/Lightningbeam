@@ -717,6 +717,9 @@ impl Engine {
                 // Send a live MIDI note on event to the specified track's instrument
                 self.project.send_midi_note_on(track_id, note, velocity);
 
+                // Emit event to UI for visual feedback
+                let _ = self.event_tx.push(AudioEvent::NoteOn(note, velocity));
+
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {
                     if recording.track_id == track_id {
@@ -731,6 +734,9 @@ impl Engine {
             Command::SendMidiNoteOff(track_id, note) => {
                 // Send a live MIDI note off event to the specified track's instrument
                 self.project.send_midi_note_off(track_id, note);
+
+                // Emit event to UI for visual feedback
+                let _ = self.event_tx.push(AudioEvent::NoteOff(note));
 
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {

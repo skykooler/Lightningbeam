@@ -751,7 +751,7 @@ window.addEventListener("DOMContentLoaded", () => {
   (async () => {
     try {
       console.log('Initializing audio system...');
-      const result = await invoke('audio_init');
+      const result = await invoke('audio_init', { bufferSize: config.audioBufferSize });
       console.log('Audio system initialized:', result);
     } catch (error) {
       if (error === 'Audio already initialized') {
@@ -1296,6 +1296,26 @@ async function handleAudioEvent(event) {
     case 'GraphPresetLoaded':
       // Preset loaded - layers are already populated during graph reload
       console.log('GraphPresetLoaded event received for track:', event.track_id);
+      break;
+
+    case 'NoteOn':
+      // MIDI note started - update virtual piano visual feedback
+      if (context.pianoWidget) {
+        context.pianoWidget.pressedKeys.add(event.note);
+        if (context.pianoRedraw) {
+          context.pianoRedraw();
+        }
+      }
+      break;
+
+    case 'NoteOff':
+      // MIDI note stopped - update virtual piano visual feedback
+      if (context.pianoWidget) {
+        context.pianoWidget.pressedKeys.delete(event.note);
+        if (context.pianoRedraw) {
+          context.pianoRedraw();
+        }
+      }
       break;
   }
 }
@@ -10347,6 +10367,18 @@ function showPreferencesDialog() {
           <input type="number" id="pref-scroll-speed" min="0.1" max="10" step="0.1" value="${config.scrollSpeed}" />
         </div>
         <div class="form-group">
+          <label>Audio Buffer Size (frames)</label>
+          <select id="pref-audio-buffer-size">
+            <option value="128" ${config.audioBufferSize === 128 ? 'selected' : ''}>128 (~3ms - Low latency)</option>
+            <option value="256" ${config.audioBufferSize === 256 ? 'selected' : ''}>256 (~6ms - Balanced)</option>
+            <option value="512" ${config.audioBufferSize === 512 ? 'selected' : ''}>512 (~12ms - Stable)</option>
+            <option value="1024" ${config.audioBufferSize === 1024 ? 'selected' : ''}>1024 (~23ms - Very stable)</option>
+            <option value="2048" ${config.audioBufferSize === 2048 ? 'selected' : ''}>2048 (~46ms - Low-end systems)</option>
+            <option value="4096" ${config.audioBufferSize === 4096 ? 'selected' : ''}>4096 (~93ms - Very low-end systems)</option>
+          </select>
+          <small style="display: block; margin-top: 4px; color: #888;">Requires app restart to take effect</small>
+        </div>
+        <div class="form-group">
           <label>
             <input type="checkbox" id="pref-reopen-session" ${config.reopenLastSession ? 'checked' : ''} />
             Reopen last session on startup
@@ -10392,6 +10424,7 @@ function showPreferencesDialog() {
     config.fileWidth = parseInt(dialog.querySelector('#pref-width').value);
     config.fileHeight = parseInt(dialog.querySelector('#pref-height').value);
     config.scrollSpeed = parseFloat(dialog.querySelector('#pref-scroll-speed').value);
+    config.audioBufferSize = parseInt(dialog.querySelector('#pref-audio-buffer-size').value);
     config.reopenLastSession = dialog.querySelector('#pref-reopen-session').checked;
     config.restoreLayoutFromFile = dialog.querySelector('#pref-restore-layout').checked;
     config.debug = dialog.querySelector('#pref-debug').checked;

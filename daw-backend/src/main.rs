@@ -46,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = rtrb::RingBuffer::new(256);
     let emitter = Arc::new(TuiEventEmitter::new(event_tx));
 
-    // Initialize audio system with event emitter
-    let mut audio_system = AudioSystem::new(Some(emitter))?;
+    // Initialize audio system with event emitter and default buffer size
+    let mut audio_system = AudioSystem::new(Some(emitter), 256)?;
 
     println!("Audio system initialized:");
     println!("  Sample rate: {} Hz", audio_system.sample_rate);

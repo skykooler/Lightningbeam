@@ -33,6 +33,7 @@ pub struct AudioState {
     controller: Option<EngineController>,
     sample_rate: u32,
     channels: u32,
+    buffer_size: u32,
     next_track_id: u32,
     next_pool_index: usize,
     next_graph_node_id: u32,
@@ -46,6 +47,7 @@ impl Default for AudioState {
             controller: None,
             sample_rate: 0,
             channels: 0,
+            buffer_size: 256, // Default buffer size
             next_track_id: 0,
             next_pool_index: 0,
             next_graph_node_id: 0,
@@ -116,8 +118,14 @@ impl EventEmitter for TauriEventEmitter {
 pub async fn audio_init(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     app_handle: tauri::AppHandle,
+    buffer_size: Option<u32>,
 ) -> Result<String, String> {
     let mut audio_state = state.lock().unwrap();
+
+    // Update buffer size if provided (from config)
+    if let Some(size) = buffer_size {
+        audio_state.buffer_size = size;
+    }
 
     // Check if already initialized - if so, reset DAW state (for hot-reload)
     if let Some(controller) = &mut audio_state.controller {
@@ -134,12 +142,15 @@ pub async fn audio_init(
     // Create TauriEventEmitter
     let emitter = Arc::new(TauriEventEmitter { app_handle });
 
+    // Get buffer size from audio_state (default is 256)
+    let buffer_size = audio_state.buffer_size;
+
     // AudioSystem handles all cpal initialization internally
-    let system = AudioSystem::new(Some(emitter))?;
+    let system = AudioSystem::new(Some(emitter), buffer_size)?;
 
     let info = format!(
-        "Audio initialized: {} Hz, {} ch",
-        system.sample_rate, system.channels
+        "Audio initialized: {} Hz, {} ch, {} frame buffer",
+        system.sample_rate, system.channels, buffer_size
     );
 
     // Leak the stream to keep it alive for the lifetime of the app
@@ -149,6 +160,7 @@ pub async fn audio_init(
     audio_state.controller = Some(system.controller);
     audio_state.sample_rate = system.sample_rate;
     audio_state.channels = system.channels;
+    audio_state.buffer_size = buffer_size;
     audio_state.next_track_id = 0;
     audio_state.next_pool_index = 0;
     audio_state.next_graph_node_id = 0;

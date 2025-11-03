@@ -44,7 +44,12 @@ impl AudioSystem {
     ///
     /// # Arguments
     /// * `event_emitter` - Optional event emitter for pushing events to external systems
-    pub fn new(event_emitter: Option<std::sync::Arc<dyn EventEmitter>>) -> Result<Self, String> {
+    /// * `buffer_size` - Audio buffer size in frames (128, 256, 512, 1024, etc.)
+    ///                   Smaller = lower latency but higher CPU usage. Default: 256
+    pub fn new(
+        event_emitter: Option<std::sync::Arc<dyn EventEmitter>>,
+        buffer_size: u32,
+    ) -> Result<Self, String> {
         let host = cpal::default_host();
 
         // Get output device
@@ -87,14 +92,38 @@ impl AudioSystem {
             }
         }
 
-        // Build output stream
-        let output_config: cpal::StreamConfig = default_output_config.clone().into();
+        // Build output stream with configurable buffer size
+        let mut output_config: cpal::StreamConfig = default_output_config.clone().into();
+
+        // Set the requested buffer size
+        output_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+
         let mut output_buffer = vec![0.0f32; 16384];
 
+        // Log audio configuration
+        println!("Audio Output Configuration:");
+        println!("  Sample Rate: {} Hz", output_config.sample_rate.0);
+        println!("  Channels: {}", output_config.channels);
+        println!("  Buffer Size: {:?}", output_config.buffer_size);
+
+        // Calculate expected latency
+        if let cpal::BufferSize::Fixed(size) = output_config.buffer_size {
+            let latency_ms = (size as f64 / output_config.sample_rate.0 as f64) * 1000.0;
+            println!("  Expected Latency: {:.2} ms", latency_ms);
+        }
+
+        let mut first_callback = true;
         let output_stream = output_device
             .build_output_stream(
                 &output_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if first_callback {
+                        let frames = data.len() / output_config.channels as usize;
+                        let latency_ms = (frames as f64 / output_config.sample_rate.0 as f64) * 1000.0;
+                        println!("Audio callback buffer size: {} samples ({} frames, {:.2} ms latency)",
+                                 data.len(), frames, latency_ms);
+                        first_callback = false;
+                    }
                     let buf = &mut output_buffer[..data.len()];
                     buf.fill(0.0);
                     engine.process(buf);
