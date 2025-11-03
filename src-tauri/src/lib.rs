@@ -217,6 +217,7 @@ pub fn run() {
         audio::audio_update_midi_clip_notes,
         audio::audio_send_midi_note_on,
         audio::audio_send_midi_note_off,
+        audio::audio_set_active_midi_track,
         audio::audio_get_pool_file_info,
         audio::audio_get_pool_waveform,
         audio::graph_add_node,

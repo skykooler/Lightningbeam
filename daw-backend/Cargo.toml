@@ -8,6 +8,7 @@ cpal = "0.15"
 symphonia = { version = "0.5", features = ["all"] }
 rtrb = "0.3"
 midly = "0.5"
+midir = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 ratatui = "0.26"
 crossterm = "0.27"

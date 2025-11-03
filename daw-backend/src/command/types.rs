@@ -113,6 +113,8 @@ pub enum Command {
     SendMidiNoteOn(TrackId, u8, u8),
     /// Send a live MIDI note off event to a track's instrument (track_id, note)
     SendMidiNoteOff(TrackId, u8),
+    /// Set the active MIDI track for external MIDI input routing (track_id or None)
+    SetActiveMidiTrack(Option<TrackId>),
 
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)

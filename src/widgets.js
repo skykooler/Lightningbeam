@@ -2938,6 +2938,18 @@ class TimelineWindowV2 extends Widget {
       if (track.object.type === 'midi' || track.object.type === 'audio') {
         setTimeout(() => this.context.reloadNodeEditor?.(), 50);
       }
+
+      // Set active MIDI track for external MIDI input routing
+      if (track.object.type === 'midi') {
+        invoke('audio_set_active_midi_track', { trackId: track.object.audioTrackId }).catch(err => {
+          console.error('Failed to set active MIDI track:', err);
+        });
+      }
+    } else {
+      // Non-audio track selected, clear active MIDI track
+      invoke('audio_set_active_midi_track', { trackId: null }).catch(err => {
+        console.error('Failed to clear active MIDI track:', err);
+      });
     }
 
     // Update the stage UI to reflect selection changes

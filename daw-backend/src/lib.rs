@@ -57,7 +57,7 @@ impl AudioSystem {
         let channels = default_output_config.channels() as u32;
 
         // Create queues
-        let (command_tx, command_rx) = rtrb::RingBuffer::new(256);
+        let (command_tx, command_rx) = rtrb::RingBuffer::new(512); // Larger buffer for MIDI + UI commands
         let (event_tx, event_rx) = rtrb::RingBuffer::new(256);
         let (query_tx, query_rx) = rtrb::RingBuffer::new(16); // Smaller buffer for synchronous queries
         let (query_response_tx, query_response_rx) = rtrb::RingBuffer::new(16);
@@ -71,6 +71,21 @@ impl AudioSystem {
         let mut engine = Engine::new(sample_rate, channels, command_rx, event_tx, query_rx, query_response_tx);
         engine.set_input_rx(input_rx);
         let controller = engine.get_controller(command_tx, query_tx, query_response_rx);
+
+        // Initialize MIDI input manager for external MIDI devices
+        // Create a separate command channel for MIDI input
+        let (midi_command_tx, midi_command_rx) = rtrb::RingBuffer::new(256);
+        match io::MidiInputManager::new(midi_command_tx) {
+            Ok(midi_manager) => {
+                println!("MIDI input initialized successfully");
+                engine.set_midi_input_manager(midi_manager);
+                engine.set_midi_command_rx(midi_command_rx);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize MIDI input: {}", e);
+                eprintln!("External MIDI controllers will not be available");
+            }
+        }
 
         // Build output stream
         let output_config: cpal::StreamConfig = default_output_config.clone().into();

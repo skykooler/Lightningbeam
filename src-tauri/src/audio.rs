@@ -511,6 +511,20 @@ pub async fn audio_send_midi_note_off(
 }
 
 #[tauri::command]
+pub async fn audio_set_active_midi_track(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: Option<u32>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.set_active_midi_track(track_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn audio_load_midi_file(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     track_id: u32,

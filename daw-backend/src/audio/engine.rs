@@ -7,6 +7,7 @@ use crate::audio::project::Project;
 use crate::audio::recording::{MidiRecordingState, RecordingState};
 use crate::audio::track::{Track, TrackId, TrackNode};
 use crate::command::{AudioEvent, Command, Query, QueryResponse};
+use crate::io::MidiInputManager;
 use petgraph::stable_graph::NodeIndex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub struct Engine {
 
     // Lock-free communication
     command_rx: rtrb::Consumer<Command>,
+    midi_command_rx: Option<rtrb::Consumer<Command>>,
     event_tx: rtrb::Producer<AudioEvent>,
     query_rx: rtrb::Consumer<Query>,
     query_response_tx: rtrb::Producer<QueryResponse>,
@@ -50,6 +52,9 @@ pub struct Engine {
 
     // MIDI recording state
     midi_recording_state: Option<MidiRecordingState>,
+
+    // MIDI input manager for external MIDI devices
+    midi_input_manager: Option<MidiInputManager>,
 }
 
 impl Engine {
@@ -76,6 +81,7 @@ impl Engine {
             playing: false,
             channels,
             command_rx,
+            midi_command_rx: None,
             event_tx,
             query_rx,
             query_response_tx,
@@ -89,12 +95,23 @@ impl Engine {
             input_rx: None,
             recording_progress_counter: 0,
             midi_recording_state: None,
+            midi_input_manager: None,
         }
     }
 
     /// Set the input ringbuffer consumer for recording
     pub fn set_input_rx(&mut self, input_rx: rtrb::Consumer<f32>) {
         self.input_rx = Some(input_rx);
+    }
+
+    /// Set the MIDI input manager for external MIDI devices
+    pub fn set_midi_input_manager(&mut self, manager: MidiInputManager) {
+        self.midi_input_manager = Some(manager);
+    }
+
+    /// Set the MIDI command receiver for external MIDI input
+    pub fn set_midi_command_rx(&mut self, midi_command_rx: rtrb::Consumer<Command>) {
+        self.midi_command_rx = Some(midi_command_rx);
     }
 
     /// Add an audio track to the engine
@@ -180,6 +197,21 @@ impl Engine {
         // Process all pending commands
         while let Ok(cmd) = self.command_rx.pop() {
             self.handle_command(cmd);
+        }
+
+        // Process all pending MIDI commands
+        loop {
+            let midi_cmd = if let Some(ref mut midi_rx) = self.midi_command_rx {
+                midi_rx.pop().ok()
+            } else {
+                None
+            };
+
+            if let Some(cmd) = midi_cmd {
+                self.handle_command(cmd);
+            } else {
+                break;
+            }
         }
 
         // Process all pending queries
@@ -708,6 +740,13 @@ impl Engine {
                                   note, absolute_time, self.playhead, self.sample_rate);
                         recording.note_off(note, absolute_time);
                     }
+                }
+            }
+
+            Command::SetActiveMidiTrack(track_id) => {
+                // Update the active MIDI track for external MIDI input routing
+                if let Some(ref midi_manager) = self.midi_input_manager {
+                    midi_manager.set_active_track(track_id);
                 }
             }
 
@@ -2091,6 +2130,11 @@ impl EngineController {
     /// Send a live MIDI note off event to a track's instrument
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
         let _ = self.command_tx.push(Command::SendMidiNoteOff(track_id, note));
+    }
+
+    /// Set the active MIDI track for external MIDI input routing
+    pub fn set_active_midi_track(&mut self, track_id: Option<TrackId>) {
+        let _ = self.command_tx.push(Command::SetActiveMidiTrack(track_id));
     }
 
     // Node graph operations
