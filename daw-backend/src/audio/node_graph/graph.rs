@@ -494,12 +494,14 @@ impl AudioGraph {
             node.node.process(&input_slices, &mut output_slices, &midi_input_slices, &mut midi_output_refs, self.sample_rate);
         }
 
-        // Copy output node's first output to the provided buffer
+        // Mix output node's first output into the provided buffer
         if let Some(output_idx) = self.output_node {
             if let Some(output_node) = self.graph.node_weight(output_idx) {
                 if !output_node.output_buffers.is_empty() {
                     let len = output_buffer.len().min(output_node.output_buffers[0].len());
-                    output_buffer[..len].copy_from_slice(&output_node.output_buffers[0][..len]);
+                    for i in 0..len {
+                        output_buffer[i] += output_node.output_buffers[0][i];
+                    }
                 }
             }
         }
@@ -837,6 +839,7 @@ impl AudioGraph {
                 "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
                 "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
                 "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
+                "AudioInput" => Box::new(AudioInputNode::new("Audio Input")),
                 "AutomationInput" => Box::new(AutomationInputNode::new("Automation")),
                 "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
                 "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),

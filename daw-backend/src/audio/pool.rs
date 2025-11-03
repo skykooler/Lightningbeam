@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::f32::consts::PI;
+use serde::{Deserialize, Serialize};
 
 /// Windowed sinc interpolation for high-quality time stretching
 /// This is stateless and can handle arbitrary fractional positions
@@ -77,6 +78,45 @@ impl AudioFile {
     pub fn duration_seconds(&self) -> f64 {
         self.frames as f64 / self.sample_rate as f64
     }
+
+    /// Generate a waveform overview with the specified number of peaks
+    /// This creates a downsampled representation suitable for timeline visualization
+    pub fn generate_waveform_overview(&self, target_peaks: usize) -> Vec<crate::io::WaveformPeak> {
+        if self.frames == 0 || target_peaks == 0 {
+            return Vec::new();
+        }
+
+        let total_frames = self.frames as usize;
+        let frames_per_peak = (total_frames / target_peaks).max(1);
+        let actual_peaks = (total_frames + frames_per_peak - 1) / frames_per_peak;
+
+        let mut peaks = Vec::with_capacity(actual_peaks);
+
+        for peak_idx in 0..actual_peaks {
+            let start_frame = peak_idx * frames_per_peak;
+            let end_frame = ((peak_idx + 1) * frames_per_peak).min(total_frames);
+
+            let mut min = 0.0f32;
+            let mut max = 0.0f32;
+
+            // Scan all samples in this window
+            for frame_idx in start_frame..end_frame {
+                // For multi-channel audio, combine all channels
+                for ch in 0..self.channels as usize {
+                    let sample_idx = frame_idx * self.channels as usize + ch;
+                    if sample_idx < self.data.len() {
+                        let sample = self.data[sample_idx];
+                        min = min.min(sample);
+                        max = max.max(sample);
+                    }
+                }
+            }
+
+            peaks.push(crate::io::WaveformPeak { min, max });
+        }
+
+        peaks
+    }
 }
 
 /// Pool of shared audio files
@@ -90,6 +130,30 @@ impl AudioPool {
         Self {
             files: Vec::new(),
         }
+    }
+
+    /// Get the number of files in the pool
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Check if the pool is empty
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Get file info for waveform generation (duration, sample_rate, channels)
+    pub fn get_file_info(&self, pool_index: usize) -> Option<(f64, u32, u32)> {
+        self.files.get(pool_index).map(|file| {
+            (file.duration_seconds(), file.sample_rate, file.channels)
+        })
+    }
+
+    /// Generate waveform overview for a file in the pool
+    pub fn generate_waveform(&self, pool_index: usize, target_peaks: usize) -> Option<Vec<crate::io::WaveformPeak>> {
+        self.files.get(pool_index).map(|file| {
+            file.generate_waveform_overview(target_peaks)
+        })
     }
 
     /// Add an audio file to the pool and return its index
@@ -240,5 +304,347 @@ impl AudioPool {
 impl Default for AudioPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Embedded audio data stored as base64 in the project file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddedAudioData {
+    /// Base64-encoded audio data
+    pub data_base64: String,
+    /// Original file format (wav, mp3, etc.)
+    pub format: String,
+}
+
+/// Serializable audio pool entry for project save/load
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioPoolEntry {
+    /// Index in the audio pool
+    pub pool_index: usize,
+    /// Original filename
+    pub name: String,
+    /// Path relative to project file (None if embedded)
+    pub relative_path: Option<String>,
+    /// Duration in seconds
+    pub duration: f64,
+    /// Sample rate
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u32,
+    /// Embedded audio data (for files < 10MB)
+    pub embedded_data: Option<EmbeddedAudioData>,
+}
+
+impl AudioPool {
+    /// Serialize the audio pool for project saving
+    ///
+    /// Files smaller than 10MB are embedded as base64.
+    /// Larger files are stored as relative paths to the project file.
+    pub fn serialize(&self, project_path: &Path) -> Result<Vec<AudioPoolEntry>, String> {
+        let project_dir = project_path.parent()
+            .ok_or_else(|| "Project path has no parent directory".to_string())?;
+
+        let mut entries = Vec::new();
+
+        for (index, file) in self.files.iter().enumerate() {
+            let file_path = &file.path;
+            let file_path_str = file_path.to_string_lossy();
+
+            // Check if this is a temp file (from recording) or previously embedded audio
+            // Always embed these
+            let is_temp_file = file_path.starts_with(std::env::temp_dir());
+            let is_embedded = file_path_str.starts_with("<embedded:");
+
+            // Try to get relative path (unless it's a temp/embedded file)
+            let relative_path = if is_temp_file || is_embedded {
+                None  // Don't store path for temp/embedded files, they'll be embedded
+            } else if let Some(rel) = pathdiff::diff_paths(file_path, project_dir) {
+                Some(rel.to_string_lossy().to_string())
+            } else {
+                // Fall back to absolute path if relative path fails
+                Some(file_path.to_string_lossy().to_string())
+            };
+
+            // Check if we should embed this file
+            // Always embed temp files (recordings) and previously embedded audio,
+            // otherwise use size threshold
+            let embedded_data = if is_temp_file || is_embedded || Self::should_embed(file_path) {
+                // Embed from memory - we already have the audio data loaded
+                Some(Self::embed_from_memory(file))
+            } else {
+                None
+            };
+
+            let entry = AudioPoolEntry {
+                pool_index: index,
+                name: file_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| format!("file_{}", index)),
+                relative_path,
+                duration: file.duration_seconds(),
+                sample_rate: file.sample_rate,
+                channels: file.channels,
+                embedded_data,
+            };
+
+            entries.push(entry);
+        }
+
+        Ok(entries)
+    }
+
+    /// Check if a file should be embedded (< 10MB)
+    fn should_embed(file_path: &Path) -> bool {
+        const TEN_MB: u64 = 10_000_000;
+
+        std::fs::metadata(file_path)
+            .map(|m| m.len() < TEN_MB)
+            .unwrap_or(false)
+    }
+
+    /// Embed audio from memory (already loaded in the pool)
+    fn embed_from_memory(audio_file: &AudioFile) -> EmbeddedAudioData {
+        use base64::{Engine as _, engine::general_purpose};
+
+        // Convert the f32 interleaved samples to WAV format bytes
+        let wav_data = Self::encode_wav(
+            &audio_file.data,
+            audio_file.channels,
+            audio_file.sample_rate
+        );
+
+        let data_base64 = general_purpose::STANDARD.encode(&wav_data);
+
+        EmbeddedAudioData {
+            data_base64,
+            format: "wav".to_string(),
+        }
+    }
+
+    /// Encode f32 interleaved samples as WAV file bytes
+    fn encode_wav(samples: &[f32], channels: u32, sample_rate: u32) -> Vec<u8> {
+        let num_samples = samples.len();
+        let bytes_per_sample = 4; // 32-bit float
+        let data_size = num_samples * bytes_per_sample;
+        let file_size = 36 + data_size;
+
+        let mut wav_data = Vec::with_capacity(44 + data_size);
+
+        // RIFF header
+        wav_data.extend_from_slice(b"RIFF");
+        wav_data.extend_from_slice(&(file_size as u32).to_le_bytes());
+        wav_data.extend_from_slice(b"WAVE");
+
+        // fmt chunk
+        wav_data.extend_from_slice(b"fmt ");
+        wav_data.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+        wav_data.extend_from_slice(&3u16.to_le_bytes()); // format code (3 = IEEE float)
+        wav_data.extend_from_slice(&(channels as u16).to_le_bytes());
+        wav_data.extend_from_slice(&sample_rate.to_le_bytes());
+        wav_data.extend_from_slice(&(sample_rate * channels * bytes_per_sample as u32).to_le_bytes()); // byte rate
+        wav_data.extend_from_slice(&((channels * bytes_per_sample as u32) as u16).to_le_bytes()); // block align
+        wav_data.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
+
+        // data chunk
+        wav_data.extend_from_slice(b"data");
+        wav_data.extend_from_slice(&(data_size as u32).to_le_bytes());
+
+        // Write samples as little-endian f32
+        for &sample in samples {
+            wav_data.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        wav_data
+    }
+
+    /// Load audio pool from serialized entries
+    ///
+    /// Returns a list of pool indices that failed to load (missing files).
+    /// The caller should present these to the user for resolution.
+    pub fn load_from_serialized(
+        &mut self,
+        entries: Vec<AudioPoolEntry>,
+        project_path: &Path,
+    ) -> Result<Vec<usize>, String> {
+        let project_dir = project_path.parent()
+            .ok_or_else(|| "Project path has no parent directory".to_string())?;
+
+        let mut missing_indices = Vec::new();
+
+        // Clear existing pool
+        self.files.clear();
+
+        // Find the maximum pool index to determine required size
+        let max_index = entries.iter()
+            .map(|e| e.pool_index)
+            .max()
+            .unwrap_or(0);
+
+        // Ensure we have space for all entries
+        self.files.resize(max_index + 1, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
+
+        for entry in entries {
+            let success = if let Some(embedded) = entry.embedded_data {
+                // Load from embedded data
+                match Self::load_from_embedded_into_pool(self, entry.pool_index, embedded, &entry.name) {
+                    Ok(_) => {
+                        eprintln!("[AudioPool] Successfully loaded embedded audio: {}", entry.name);
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("[AudioPool] Failed to load embedded audio {}: {}", entry.name, e);
+                        false
+                    }
+                }
+            } else if let Some(rel_path) = entry.relative_path {
+                // Load from file path
+                let full_path = project_dir.join(&rel_path);
+
+                if full_path.exists() {
+                    Self::load_file_into_pool(self, entry.pool_index, &full_path).is_ok()
+                } else {
+                    eprintln!("[AudioPool] File not found: {:?}", full_path);
+                    false
+                }
+            } else {
+                eprintln!("[AudioPool] Entry has neither embedded data nor path: {}", entry.name);
+                false
+            };
+
+            if !success {
+                missing_indices.push(entry.pool_index);
+            }
+        }
+
+        Ok(missing_indices)
+    }
+
+    /// Load audio from embedded base64 data
+    fn load_from_embedded_into_pool(
+        &mut self,
+        pool_index: usize,
+        embedded: EmbeddedAudioData,
+        name: &str,
+    ) -> Result<(), String> {
+        use base64::{Engine as _, engine::general_purpose};
+
+        // Decode base64
+        let data = general_purpose::STANDARD
+            .decode(&embedded.data_base64)
+            .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+        // Write to temporary file for symphonia to decode
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join(format!("lightningbeam_embedded_{}.{}", pool_index, embedded.format));
+
+        std::fs::write(&temp_path, &data)
+            .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+
+        // Load the temporary file using existing infrastructure
+        let result = Self::load_file_into_pool(self, pool_index, &temp_path);
+
+        // Clean up temporary file
+        let _ = std::fs::remove_file(&temp_path);
+
+        // Update the path to reflect it was embedded
+        if result.is_ok() && pool_index < self.files.len() {
+            self.files[pool_index].path = PathBuf::from(format!("<embedded: {}>", name));
+        }
+
+        result
+    }
+
+    /// Load an audio file into a specific pool index
+    fn load_file_into_pool(&mut self, pool_index: usize, file_path: &Path) -> Result<(), String> {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let file = std::fs::File::open(file_path)
+            .map_err(|e| format!("Failed to open audio file: {}", e))?;
+
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+        let mut hint = Hint::new();
+        if let Some(ext) = file_path.extension() {
+            hint.with_extension(&ext.to_string_lossy());
+        }
+
+        let format_opts = FormatOptions::default();
+        let metadata_opts = MetadataOptions::default();
+        let decoder_opts = DecoderOptions::default();
+
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &format_opts, &metadata_opts)
+            .map_err(|e| format!("Failed to probe audio file: {}", e))?;
+
+        let mut format = probed.format;
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| "No audio track found".to_string())?;
+
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &decoder_opts)
+            .map_err(|e| format!("Failed to create decoder: {}", e))?;
+
+        let track_id = track.id;
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2) as u32;
+
+        let mut samples = Vec::new();
+        let mut sample_buf = None;
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(_) => break,
+            };
+
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            match decoder.decode(&packet) {
+                Ok(decoded) => {
+                    if sample_buf.is_none() {
+                        let spec = *decoded.spec();
+                        let duration = decoded.capacity() as u64;
+                        sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                    }
+
+                    if let Some(ref mut buf) = sample_buf {
+                        buf.copy_interleaved_ref(decoded);
+                        samples.extend_from_slice(buf.samples());
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+
+        let audio_file = AudioFile::new(
+            file_path.to_path_buf(),
+            samples,
+            channels,
+            sample_rate,
+        );
+
+        if pool_index >= self.files.len() {
+            return Err(format!("Pool index {} out of bounds", pool_index));
+        }
+
+        self.files[pool_index] = audio_file;
+        Ok(())
+    }
+
+    /// Resolve a missing audio file by loading from a new path
+    /// This is called from the UI when the user manually locates a missing file
+    pub fn resolve_missing_file(&mut self, pool_index: usize, new_path: &Path) -> Result<(), String> {
+        Self::load_file_into_pool(self, pool_index, new_path)
     }
 }

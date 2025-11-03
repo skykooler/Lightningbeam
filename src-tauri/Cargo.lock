@@ -1025,6 +1025,7 @@ dependencies = [
  "dasp_sample",
  "dasp_signal",
  "midly",
+ "pathdiff",
  "petgraph 0.6.5",
  "rand 0.8.5",
  "ratatui",

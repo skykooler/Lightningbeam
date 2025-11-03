@@ -211,7 +211,7 @@ let layoutElements = [];
 // 1.6: object coordinates are created relative to their location
 
 let minFileVersion = "1.3";
-let maxFileVersion = "2.0";
+let maxFileVersion = "2.1";
 
 let filePath = undefined;
 let fileExportPath = undefined;
@@ -1138,6 +1138,7 @@ async function handleAudioEvent(event) {
         console.log('[FRONTEND] Creating clip object for clip', event.clip_id, 'on track', event.track_id, 'at time', startTime);
         recordingTrack.clips.push({
           clipId: event.clip_id,
+          name: recordingTrack.name,
           poolIndex: null,  // Will be set when recording stops
           startTime: startTime,
           duration: 0,  // Will grow as recording progresses
@@ -1537,12 +1538,19 @@ function newWindow(path) {
   invoke("create_window", {app: window.__TAURI__.app, path: path})
 }
 
-function _newFile(width, height, fps, layoutKey) {
+async function _newFile(width, height, fps, layoutKey) {
   console.log('[_newFile] REPLACING ROOT - Creating new file with fps:', fps, 'layout:', layoutKey);
   console.trace('[_newFile] Stack trace for root replacement:');
 
   const oldRoot = root;
   console.log('[_newFile] Old root:', oldRoot, 'frameRate:', oldRoot?.frameRate);
+
+  // Reset audio engine to clear any previous session data
+  try {
+    await invoke('audio_reset');
+  } catch (error) {
+    console.warn('Failed to reset audio engine:', error);
+  }
 
   // Determine initial child type based on layout
   const initialChildType = layoutKey === 'audioDaw' ? 'midi' : 'layer';
@@ -1598,6 +1606,12 @@ function _newFile(width, height, fps, layoutKey) {
   undoStack.length = 0;  // Clear without breaking reference
   redoStack.length = 0;  // Clear without breaking reference
   console.log('[_newFile] Before updateUI - root.frameRate:', root.frameRate);
+
+  // Ensure there's an active layer - set to first layer if none is active
+  if (!context.activeObject.activeLayer && context.activeObject.layers.length > 0) {
+    context.activeObject.activeLayer = context.activeObject.layers[0];
+  }
+
   updateUI();
   console.log('[_newFile] After updateUI - root.frameRate:', root.frameRate);
   updateLayers();
@@ -1629,13 +1643,43 @@ async function _save(path) {
     // for (let action of undoStack) {
     //   console.log(action.name);
     // }
+
+    // Serialize audio pool (files < 10MB embedded, larger files saved as relative paths)
+    let audioPool = [];
+    try {
+      audioPool = await invoke('audio_serialize_pool', { projectPath: path });
+    } catch (error) {
+      console.warn('Failed to serialize audio pool:', error);
+      // Continue saving without audio pool - user may not have audio initialized
+    }
+
+    // Serialize track graphs (node graphs for each track)
+    const trackGraphs = {};
+    for (const track of root.audioTracks) {
+      if (track.audioTrackId !== null) {
+        try {
+          const graphJson = await invoke('audio_serialize_track_graph', {
+            trackId: track.audioTrackId,
+            projectPath: path
+          });
+          trackGraphs[track.idx] = graphJson;
+        } catch (error) {
+          console.warn(`Failed to serialize graph for track ${track.name}:`, error);
+        }
+      }
+    }
+
     const fileData = {
-      version: "1.7.7",
+      version: "2.0.0",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
       actions: undoStack,
       json: root.toJSON(),
+      // Audio pool at the end for human readability
+      audioPool: audioPool,
+      // Track graphs for instruments/effects
+      trackGraphs: trackGraphs,
     };
     if (config.debug) {
       // Pretty print file structure when debugging
@@ -1677,6 +1721,58 @@ async function saveAs() {
   if (path != undefined) _save(path);
 }
 
+/**
+ * Handle missing audio files by prompting the user to locate them
+ * @param {number[]} missingIndices - Array of pool indices that failed to load
+ * @param {Object[]} audioPool - The audio pool entries from the project file
+ * @param {string} projectPath - Path to the project file
+ */
+async function handleMissingAudioFiles(missingIndices, audioPool, projectPath) {
+  const { open } = window.__TAURI__.dialog;
+
+  for (const poolIndex of missingIndices) {
+    const entry = audioPool[poolIndex];
+    if (!entry) continue;
+
+    const message = `Cannot find audio file:\n${entry.name}\n\nExpected location: ${entry.relativePath || 'embedded'}\n\nWould you like to locate this file?`;
+
+    const result = await window.__TAURI__.dialog.confirm(message, {
+      title: 'Missing Audio File',
+      kind: 'warning',
+      okLabel: 'Locate File',
+      cancelLabel: 'Skip'
+    });
+
+    if (result) {
+      // Let user browse for the file
+      const selected = await open({
+        title: `Locate ${entry.name}`,
+        multiple: false,
+        filters: [{
+          name: 'Audio Files',
+          extensions: audioExtensions
+        }]
+      });
+
+      if (selected) {
+        try {
+          await invoke('audio_resolve_missing_file', {
+            poolIndex: poolIndex,
+            newPath: selected
+          });
+          console.log(`Successfully loaded ${entry.name} from ${selected}`);
+        } catch (error) {
+          console.error(`Failed to load ${entry.name}:`, error);
+          await messageDialog(
+            `Failed to load file: ${error}`,
+            { title: "Load Error", kind: "error" }
+          );
+        }
+      }
+    }
+  }
+}
+
 async function _open(path, returnJson = false) {
   document.body.style.cursor = "wait"
   closeDialog();
@@ -1702,7 +1798,7 @@ async function _open(path, returnJson = false) {
           document.body.style.cursor = "default"
           return file.json;
         } else {
-          _newFile(file.width, file.height, file.fps);
+          await _newFile(file.width, file.height, file.fps);
           if (file.actions == undefined) {
             await messageDialog("File has no content!", {
               title: "Parse error",
@@ -1902,12 +1998,207 @@ async function _open(path, returnJson = false) {
             context.objectStack = [root]
           }
 
+          // Reset audio engine to clear any previous session data
+          try {
+            await invoke('audio_reset');
+          } catch (error) {
+            console.warn('Failed to reset audio engine:', error);
+          }
+
+          // Load audio pool if present
+          if (file.audioPool && file.audioPool.length > 0) {
+            console.log('[JS] Loading audio pool with', file.audioPool.length, 'entries');
+
+            // Validate audioPool entries - skip if they don't have the expected structure
+            const validEntries = file.audioPool.filter(entry => {
+              // Check basic structure
+              if (!entry || typeof entry.name !== 'string' || typeof entry.pool_index !== 'number') {
+                console.warn('[JS] Skipping invalid audio pool entry (bad structure):', entry);
+                return false;
+              }
+
+              // Log the full entry structure for debugging
+              console.log('[JS] Validating entry:', JSON.stringify({
+                name: entry.name,
+                pool_index: entry.pool_index,
+                has_embedded_data: !!entry.embedded_data,
+                embedded_data_keys: entry.embedded_data ? Object.keys(entry.embedded_data) : [],
+                relative_path: entry.relative_path,
+                all_keys: Object.keys(entry)
+              }, null, 2));
+
+              // Check if it has either embedded data or a valid file path
+              const hasEmbedded = entry.embedded_data &&
+                                  entry.embedded_data.data_base64 &&
+                                  entry.embedded_data.format;
+              const hasValidPath = entry.relative_path &&
+                                   entry.relative_path.length > 0 &&
+                                   !entry.relative_path.startsWith('<embedded:');
+
+              if (!hasEmbedded && !hasValidPath) {
+                console.warn('[JS] Skipping invalid audio pool entry (no valid data or path):', {
+                  name: entry.name,
+                  pool_index: entry.pool_index,
+                  hasEmbedded: !!entry.embedded_data,
+                  relativePath: entry.relative_path
+                });
+                return false;
+              }
+
+              return true;
+            });
+
+            if (validEntries.length === 0) {
+              console.warn('[JS] No valid audio pool entries found, skipping audio pool load');
+            } else {
+              validEntries.forEach((entry, i) => {
+                console.log(`[JS] Entry ${i}:`, JSON.stringify({
+                  pool_index: entry.pool_index,
+                  name: entry.name,
+                  hasEmbedded: !!entry.embedded_data,
+                  hasPath: !!entry.relative_path,
+                  relativePath: entry.relative_path,
+                  embeddedFormat: entry.embedded_data?.format,
+                  embeddedSize: entry.embedded_data?.data_base64?.length
+                }, null, 2));
+              });
+
+              try {
+                const missingIndices = await invoke('audio_load_pool', {
+                  entries: validEntries,
+                  projectPath: path
+                });
+
+                // If there are missing files, show a dialog to help user locate them
+                if (missingIndices.length > 0) {
+                  await handleMissingAudioFiles(missingIndices, validEntries, path);
+                }
+              } catch (error) {
+                console.error('Failed to load audio pool:', error);
+                await messageDialog(
+                  `Failed to load audio files: ${error}`,
+                  { title: "Audio Load Error", kind: "warning" }
+                );
+              }
+            }
+          }
+
           lastSaveIndex = undoStack.length;
           filePath = path;
           // Tauri thinks it is setting the title here, but it isn't getting updated
           await getCurrentWindow().setTitle(await basename(filePath));
           addRecentFile(path);
+
+          // Ensure there's an active layer - set to first layer if none is active
+          if (!context.activeObject.activeLayer && context.activeObject.layers.length > 0) {
+            context.activeObject.activeLayer = context.activeObject.layers[0];
+          }
+
+          // Restore audio tracks and clips to the Rust backend
+          // The fromJSON method only creates JavaScript objects,
+          // but doesn't initialize them in the audio engine
+          for (const audioTrack of context.activeObject.audioTracks) {
+            // First, initialize the track in the Rust backend
+            if (audioTrack.audioTrackId === null) {
+              console.log(`[JS] Initializing track ${audioTrack.name} in audio engine`);
+              try {
+                await audioTrack.initializeTrack();
+              } catch (error) {
+                console.error(`[JS] Failed to initialize track ${audioTrack.name}:`, error);
+                continue;
+              }
+            }
+
+            // Then restore clips if any
+            if (audioTrack.clips && audioTrack.clips.length > 0) {
+              console.log(`[JS] Restoring ${audioTrack.clips.length} clips for track ${audioTrack.name}`);
+              for (const clip of audioTrack.clips) {
+                try {
+                  // Handle MIDI clips differently from audio clips
+                  if (audioTrack.type === 'midi') {
+                    // For MIDI clips, restore the notes
+                    if (clip.notes && clip.notes.length > 0) {
+                      // Create the clip first
+                      await invoke('audio_create_midi_clip', {
+                        trackId: audioTrack.audioTrackId,
+                        startTime: clip.startTime,
+                        duration: clip.duration
+                      });
+
+                      // Update with notes
+                      const noteData = clip.notes.map(note => [
+                        note.startTime || note.start_time,
+                        note.note,
+                        note.velocity,
+                        note.duration
+                      ]);
+
+                      await invoke('audio_update_midi_clip_notes', {
+                        trackId: audioTrack.audioTrackId,
+                        clipId: clip.clipId,
+                        notes: noteData
+                      });
+
+                      console.log(`[JS] Restored MIDI clip ${clip.name} with ${clip.notes.length} notes`);
+                    }
+                  } else {
+                    // For audio clips, restore from pool
+                    await invoke('audio_add_clip', {
+                      trackId: audioTrack.audioTrackId,
+                      poolIndex: clip.poolIndex,
+                      startTime: clip.startTime,
+                      duration: clip.duration,
+                      offset: clip.offset || 0.0
+                    });
+                    console.log(`[JS] Restored clip ${clip.name} at poolIndex ${clip.poolIndex}`);
+
+                    // Generate waveform for the restored clip
+                    try {
+                      const fileInfo = await invoke('audio_get_pool_file_info', {
+                        poolIndex: clip.poolIndex
+                      });
+                      const duration = fileInfo[0];
+                      const targetPeaks = Math.floor(duration * 300);
+                      const clampedPeaks = Math.max(1000, Math.min(20000, targetPeaks));
+
+                      const waveform = await invoke('audio_get_pool_waveform', {
+                        poolIndex: clip.poolIndex,
+                        targetPeaks: clampedPeaks
+                      });
+
+                      clip.waveform = waveform;
+                      console.log(`[JS] Generated waveform for clip ${clip.name} (${waveform.length} peaks)`);
+                    } catch (waveformError) {
+                      console.error(`[JS] Failed to generate waveform for clip ${clip.name}:`, waveformError);
+                    }
+                  }
+                } catch (error) {
+                  console.error(`[JS] Failed to restore clip ${clip.name}:`, error);
+                }
+              }
+            }
+
+            // Restore track graph (node graph for instruments/effects)
+            if (file.trackGraphs && file.trackGraphs[audioTrack.idx]) {
+              try {
+                await invoke('audio_load_track_graph', {
+                  trackId: audioTrack.audioTrackId,
+                  presetJson: file.trackGraphs[audioTrack.idx],
+                  projectPath: path
+                });
+                console.log(`[JS] Restored graph for track ${audioTrack.name}`);
+              } catch (error) {
+                console.error(`[JS] Failed to restore graph for track ${audioTrack.name}:`, error);
+              }
+            }
+          }
+
+          // Trigger UI and timeline redraw after all waveforms are loaded
           updateUI();
+          updateLayers();
+          if (context.timelineWidget) {
+            context.timelineWidget.requestRedraw();
+          }
         }
       } else {
         await messageDialog(
@@ -4691,7 +4982,7 @@ async function startup() {
 
     if (options.type === 'new') {
       // Create new project with selected focus
-      _newFile(
+      await _newFile(
         options.width || 800,
         options.height || 600,
         options.fps || 24,
@@ -6205,12 +6496,12 @@ async function renderMenu() {
         action: actions.deleteLayer.create,
       },
       {
-        text: context.activeObject.activeLayer.visible
+        text: context.activeObject.activeLayer?.visible
           ? "Hide Layer"
           : "Show Layer",
-        enabled: true,
+        enabled: !!context.activeObject.activeLayer,
         action: () => {
-          context.activeObject.activeLayer.toggleVisibility();
+          context.activeObject.activeLayer?.toggleVisibility();
         },
       },
     ],

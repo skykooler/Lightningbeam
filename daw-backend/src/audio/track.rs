@@ -617,9 +617,6 @@ impl AudioTrack {
             }
         }
 
-        // Clear output buffer before graph processing to ensure clean output
-        output.fill(0.0);
-
         // Find and inject audio into the AudioInputNode
         let node_indices: Vec<_> = self.effects_graph.node_indices().collect();
         for node_idx in node_indices {

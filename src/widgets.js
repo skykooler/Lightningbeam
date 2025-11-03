@@ -2104,6 +2104,11 @@ class TimelineWindowV2 extends Widget {
         // Check if clicking on audio clip to start dragging
         const audioClipInfo = this.getAudioClipAtPoint(track, adjustedX, adjustedY)
         if (audioClipInfo) {
+          // Skip drag if right-clicking (button 2)
+          if (this.lastClickEvent?.button === 2) {
+            return false
+          }
+
           // Select the track
           this.selectTrack(track)
 
@@ -3674,12 +3679,21 @@ class TimelineWindowV2 extends Widget {
    * Shift+right-click for quick delete
    */
   contextmenu(x, y, event) {
-    // Check if right-clicking in timeline area with curves
+    // Check if right-clicking in timeline area
     const trackY = y - this.ruler.height
     if (trackY >= 0 && x >= this.trackHeaderWidth) {
       const adjustedY = trackY - this.trackScrollOffset
       const adjustedX = x - this.trackHeaderWidth
       const track = this.trackHierarchy.getTrackAtY(adjustedY)
+
+      // First check if clicking on a clip (audio or MIDI)
+      if (track && (track.type === 'audio')) {
+        const clipInfo = this.getAudioClipAtPoint(track, adjustedX, adjustedY)
+        if (clipInfo) {
+          this.showClipContextMenu(clipInfo.clip, clipInfo.audioTrack)
+          return true
+        }
+      }
 
       if (track && (track.type === 'object' || track.type === 'shape') && track.object.curvesMode === 'curve') {
         // Use similar logic to handleCurveClick to find if we're clicking on a keyframe
@@ -3940,6 +3954,38 @@ class TimelineWindowV2 extends Widget {
     const position = new PhysicalPosition(clientX, clientY)
     console.log(position)
     // await menu.popup({ at: position })
+    await menu.popup(position)
+  }
+
+  /**
+   * Show context menu for audio/MIDI clips
+   * Currently supports: Rename
+   */
+  async showClipContextMenu(clip, audioTrack) {
+    const { Menu, MenuItem } = window.__TAURI__.menu
+    const { PhysicalPosition } = window.__TAURI__.dpi
+
+    const items = []
+
+    // Rename option
+    items.push(await MenuItem.new({
+      text: 'Rename',
+      action: async () => {
+        const newName = prompt('Enter new name for clip:', clip.name || '')
+        if (newName !== null && newName.trim() !== '') {
+          clip.name = newName.trim()
+          console.log(`Renamed clip to "${clip.name}"`)
+          if (this.requestRedraw) this.requestRedraw()
+        }
+      }
+    }))
+
+    const menu = await Menu.new({ items })
+
+    // Show menu at mouse position
+    const clientX = this.lastEvent?.clientX || 0
+    const clientY = this.lastEvent?.clientY || 0
+    const position = new PhysicalPosition(clientX, clientY)
     await menu.popup(position)
   }
 

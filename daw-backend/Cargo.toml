@@ -13,6 +13,7 @@ ratatui = "0.26"
 crossterm = "0.27"
 rand = "0.8"
 base64 = "0.22"
+pathdiff = "0.2"
 
 # Node-based audio graph dependencies
 dasp_graph = "0.11"

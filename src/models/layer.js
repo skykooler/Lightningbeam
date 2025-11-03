@@ -1163,7 +1163,7 @@ class AudioTrack {
   }
 
   static fromJSON(json) {
-    const audioTrack = new AudioTrack(json.idx, json.name);
+    const audioTrack = new AudioTrack(json.idx, json.name, json.trackType || 'audio');
 
     // Load AnimationData if present
     if (json.animationData) {
@@ -1172,14 +1172,27 @@ class AudioTrack {
 
     // Load clips if present
     if (json.clips) {
-      audioTrack.clips = json.clips.map(clip => ({
-        clipId: clip.clipId,
-        poolIndex: clip.poolIndex,
-        name: clip.name,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        offset: clip.offset
-      }));
+      audioTrack.clips = json.clips.map(clip => {
+        const clipData = {
+          clipId: clip.clipId,
+          name: clip.name,
+          startTime: clip.startTime,
+          duration: clip.duration,
+        };
+
+        // Restore audio-specific fields
+        if (clip.poolIndex !== undefined) {
+          clipData.poolIndex = clip.poolIndex;
+          clipData.offset = clip.offset;
+        }
+
+        // Restore MIDI-specific fields
+        if (clip.notes) {
+          clipData.notes = clip.notes;
+        }
+
+        return clipData;
+      });
     }
 
     audioTrack.audible = json.audible;
@@ -1191,20 +1204,34 @@ class AudioTrack {
       type: "AudioTrack",
       idx: randomizeUuid ? uuidv4() : this.idx,
       name: randomizeUuid ? this.name + " copy" : this.name,
+      trackType: this.type, // 'audio' or 'midi'
       audible: this.audible,
 
       // AnimationData (includes automation curves)
       animationData: this.animationData.toJSON(),
 
       // Clips
-      clips: this.clips.map(clip => ({
-        clipId: clip.clipId,
-        poolIndex: clip.poolIndex,
-        name: clip.name,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        offset: clip.offset
-      }))
+      clips: this.clips.map(clip => {
+        const clipData = {
+          clipId: clip.clipId,
+          name: clip.name,
+          startTime: clip.startTime,
+          duration: clip.duration,
+        };
+
+        // Add audio-specific fields
+        if (clip.poolIndex !== undefined) {
+          clipData.poolIndex = clip.poolIndex;
+          clipData.offset = clip.offset;
+        }
+
+        // Add MIDI-specific fields
+        if (clip.notes) {
+          clipData.notes = clip.notes;
+        }
+
+        return clipData;
+      })
     };
 
     return json;

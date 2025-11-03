@@ -194,6 +194,7 @@ pub fn run() {
       .invoke_handler(tauri::generate_handler![
         greet, trace, debug, info, warn, error, create_window,
         audio::audio_init,
+        audio::audio_reset,
         audio::audio_play,
         audio::audio_stop,
         audio::audio_seek,
@@ -216,6 +217,8 @@ pub fn run() {
         audio::audio_update_midi_clip_notes,
         audio::audio_send_midi_note_on,
         audio::audio_send_midi_note_off,
+        audio::audio_get_pool_file_info,
+        audio::audio_get_pool_waveform,
         audio::graph_add_node,
         audio::graph_add_node_to_template,
         audio::graph_remove_node,
@@ -241,6 +244,11 @@ pub fn run() {
         audio::automation_get_keyframes,
         audio::automation_set_name,
         audio::automation_get_name,
+        audio::audio_serialize_pool,
+        audio::audio_load_pool,
+        audio::audio_resolve_missing_file,
+        audio::audio_serialize_track_graph,
+        audio::audio_load_track_graph,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

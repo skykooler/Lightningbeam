@@ -224,6 +224,24 @@ pub enum Query {
     GetAutomationKeyframes(TrackId, u32),
     /// Get the display name of an AutomationInput node (track_id, node_id)
     GetAutomationName(TrackId, u32),
+    /// Serialize audio pool for project saving (project_path)
+    SerializeAudioPool(std::path::PathBuf),
+    /// Load audio pool from serialized entries (entries, project_path)
+    LoadAudioPool(Vec<crate::audio::pool::AudioPoolEntry>, std::path::PathBuf),
+    /// Resolve a missing audio file (pool_index, new_path)
+    ResolveMissingAudioFile(usize, std::path::PathBuf),
+    /// Serialize a track's effects/instrument graph (track_id, project_path)
+    SerializeTrackGraph(TrackId, std::path::PathBuf),
+    /// Load a track's effects/instrument graph (track_id, preset_json, project_path)
+    LoadTrackGraph(TrackId, String, std::path::PathBuf),
+    /// Create a new audio track (name) - returns track ID synchronously
+    CreateAudioTrackSync(String),
+    /// Create a new MIDI track (name) - returns track ID synchronously
+    CreateMidiTrackSync(String),
+    /// Get waveform data from audio pool (pool_index, target_peaks)
+    GetPoolWaveform(usize, usize),
+    /// Get file info from audio pool (pool_index) - returns (duration, sample_rate, channels)
+    GetPoolFileInfo(usize),
 }
 
 /// Oscilloscope data from a node
@@ -265,4 +283,20 @@ pub enum QueryResponse {
     AutomationKeyframes(Result<Vec<AutomationKeyframeData>, String>),
     /// Automation node name
     AutomationName(Result<String, String>),
+    /// Serialized audio pool entries
+    AudioPoolSerialized(Result<Vec<crate::audio::pool::AudioPoolEntry>, String>),
+    /// Audio pool loaded (returns list of missing pool indices)
+    AudioPoolLoaded(Result<Vec<usize>, String>),
+    /// Audio file resolved
+    AudioFileResolved(Result<(), String>),
+    /// Track graph serialized as JSON
+    TrackGraphSerialized(Result<String, String>),
+    /// Track graph loaded
+    TrackGraphLoaded(Result<(), String>),
+    /// Track created (returns track ID)
+    TrackCreated(Result<TrackId, String>),
+    /// Pool waveform data
+    PoolWaveform(Result<Vec<crate::io::WaveformPeak>, String>),
+    /// Pool file info (duration, sample_rate, channels)
+    PoolFileInfo(Result<(f64, u32, u32), String>),
 }

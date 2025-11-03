@@ -338,10 +338,18 @@ impl Engine {
                 }
             }
             Command::MoveClip(track_id, clip_id, new_start_time) => {
-                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        clip.start_time = new_start_time;
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.start_time = new_start_time;
+                        }
                     }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.start_time = new_start_time;
+                        }
+                    }
+                    _ => {}
                 }
             }
             Command::CreateMetatrack(name) => {
@@ -390,6 +398,19 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
             }
             Command::AddAudioClip(track_id, pool_index, start_time, duration, offset) => {
+                eprintln!("[Engine] AddAudioClip: track_id={}, pool_index={}, start_time={}, duration={}",
+                    track_id, pool_index, start_time, duration);
+
+                // Check if pool index is valid
+                let pool_size = self.audio_pool.len();
+                if pool_index >= pool_size {
+                    eprintln!("[Engine] ERROR: pool_index {} is out of bounds (pool size: {})",
+                        pool_index, pool_size);
+                } else {
+                    eprintln!("[Engine] Pool index {} is valid, pool has {} files",
+                        pool_index, pool_size);
+                }
+
                 // Create a new clip with unique ID
                 let clip_id = self.next_clip_id;
                 self.next_clip_id += 1;
@@ -404,8 +425,11 @@ impl Engine {
                 // Add clip to track
                 if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
                     track.clips.push(clip);
+                    eprintln!("[Engine] Clip {} added to track {} successfully", clip_id, track_id);
                     // Notify UI about the new clip
                     let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
+                } else {
+                    eprintln!("[Engine] ERROR: Track {} not found or is not an audio track", track_id);
                 }
             }
             Command::CreateMidiTrack(name) => {
@@ -1405,6 +1429,106 @@ impl Engine {
                     QueryResponse::AutomationName(Err(format!("Track {} not found or is not a MIDI track", track_id)))
                 }
             }
+
+            Query::SerializeAudioPool(project_path) => {
+                QueryResponse::AudioPoolSerialized(self.audio_pool.serialize(&project_path))
+            }
+
+            Query::LoadAudioPool(entries, project_path) => {
+                QueryResponse::AudioPoolLoaded(self.audio_pool.load_from_serialized(entries, &project_path))
+            }
+
+            Query::ResolveMissingAudioFile(pool_index, new_path) => {
+                QueryResponse::AudioFileResolved(self.audio_pool.resolve_missing_file(pool_index, &new_path))
+            }
+
+            Query::SerializeTrackGraph(track_id, _project_path) => {
+                // Get the track and serialize its graph
+                if let Some(track_node) = self.project.get_track(track_id) {
+                    let preset_json = match track_node {
+                        TrackNode::Audio(track) => {
+                            // Serialize effects graph
+                            let preset = track.effects_graph.to_preset(format!("track_{}_effects", track_id));
+                            serde_json::to_string_pretty(&preset)
+                                .map_err(|e| format!("Failed to serialize effects graph: {}", e))
+                        }
+                        TrackNode::Midi(track) => {
+                            // Serialize instrument graph
+                            let preset = track.instrument_graph.to_preset(format!("track_{}_instrument", track_id));
+                            serde_json::to_string_pretty(&preset)
+                                .map_err(|e| format!("Failed to serialize instrument graph: {}", e))
+                        }
+                        TrackNode::Group(_) => {
+                            // TODO: Add graph serialization when we add graphs to group tracks
+                            Err("Group tracks don't have graphs to serialize yet".to_string())
+                        }
+                    };
+                    QueryResponse::TrackGraphSerialized(preset_json)
+                } else {
+                    QueryResponse::TrackGraphSerialized(Err(format!("Track {} not found", track_id)))
+                }
+            }
+
+            Query::LoadTrackGraph(track_id, preset_json, project_path) => {
+                // Parse preset and load into track's graph
+                use crate::audio::node_graph::preset::GraphPreset;
+
+                let result = (|| -> Result<(), String> {
+                    let preset: GraphPreset = serde_json::from_str(&preset_json)
+                        .map_err(|e| format!("Failed to parse preset JSON: {}", e))?;
+
+                    let preset_base_path = project_path.parent();
+
+                    if let Some(track_node) = self.project.get_track_mut(track_id) {
+                        match track_node {
+                            TrackNode::Audio(track) => {
+                                // Load into effects graph with proper buffer size (8192 to handle any callback size)
+                                track.effects_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                Ok(())
+                            }
+                            TrackNode::Midi(track) => {
+                                // Load into instrument graph with proper buffer size (8192 to handle any callback size)
+                                track.instrument_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                Ok(())
+                            }
+                            TrackNode::Group(_) => {
+                                // TODO: Add graph loading when we add graphs to group tracks
+                                Err("Group tracks don't have graphs to load yet".to_string())
+                            }
+                        }
+                    } else {
+                        Err(format!("Track {} not found", track_id))
+                    }
+                })();
+
+                QueryResponse::TrackGraphLoaded(result)
+            }
+            Query::CreateAudioTrackSync(name) => {
+                let track_id = self.project.add_audio_track(name.clone(), None);
+                eprintln!("[Engine] Created audio track '{}' with ID {}", name, track_id);
+                // Notify UI about the new audio track
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
+                QueryResponse::TrackCreated(Ok(track_id))
+            }
+            Query::CreateMidiTrackSync(name) => {
+                let track_id = self.project.add_midi_track(name.clone(), None);
+                eprintln!("[Engine] Created MIDI track '{}' with ID {}", name, track_id);
+                // Notify UI about the new MIDI track
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
+                QueryResponse::TrackCreated(Ok(track_id))
+            }
+            Query::GetPoolWaveform(pool_index, target_peaks) => {
+                match self.audio_pool.generate_waveform(pool_index, target_peaks) {
+                    Some(waveform) => QueryResponse::PoolWaveform(Ok(waveform)),
+                    None => QueryResponse::PoolWaveform(Err(format!("Pool index {} not found", pool_index))),
+                }
+            }
+            Query::GetPoolFileInfo(pool_index) => {
+                match self.audio_pool.get_file_info(pool_index) {
+                    Some(info) => QueryResponse::PoolFileInfo(Ok(info)),
+                    None => QueryResponse::PoolFileInfo(Err(format!("Pool index {} not found", pool_index))),
+                }
+            }
         };
 
         // Send response back
@@ -1792,6 +1916,46 @@ impl EngineController {
         let _ = self.command_tx.push(Command::CreateMidiTrack(name));
     }
 
+    /// Create a new audio track synchronously (waits for creation to complete)
+    pub fn create_audio_track_sync(&mut self, name: String) -> Result<TrackId, String> {
+        if let Err(_) = self.query_tx.push(Query::CreateAudioTrackSync(name)) {
+            return Err("Failed to send track creation query".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::TrackCreated(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Track creation timeout".to_string())
+    }
+
+    /// Create a new MIDI track synchronously (waits for creation to complete)
+    pub fn create_midi_track_sync(&mut self, name: String) -> Result<TrackId, String> {
+        if let Err(_) = self.query_tx.push(Query::CreateMidiTrackSync(name)) {
+            return Err("Failed to send track creation query".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::TrackCreated(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Track creation timeout".to_string())
+    }
+
     /// Create a new MIDI clip on a track
     pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) -> MidiClipId {
         // Peek at the next clip ID that will be used
@@ -2137,6 +2301,153 @@ impl EngineController {
             }
             // Small sleep to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Serialize the audio pool for project saving
+    pub fn serialize_audio_pool(&mut self, project_path: &std::path::Path) -> Result<Vec<crate::audio::pool::AudioPoolEntry>, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::SerializeAudioPool(project_path.to_path_buf())) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5); // Longer timeout for file operations
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AudioPoolSerialized(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Get waveform for a pool index
+    pub fn get_pool_waveform(&mut self, pool_index: usize, target_peaks: usize) -> Result<Vec<crate::io::WaveformPeak>, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetPoolWaveform(pool_index, target_peaks)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::PoolWaveform(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Get file info from pool (duration, sample_rate, channels)
+    pub fn get_pool_file_info(&mut self, pool_index: usize) -> Result<(f64, u32, u32), String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetPoolFileInfo(pool_index)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::PoolFileInfo(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Load audio pool from serialized entries
+    pub fn load_audio_pool(&mut self, entries: Vec<crate::audio::pool::AudioPoolEntry>, project_path: &std::path::Path) -> Result<Vec<usize>, String> {
+        // Send command via query mechanism
+        if let Err(_) = self.query_tx.push(Query::LoadAudioPool(entries, project_path.to_path_buf())) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10); // Long timeout for loading multiple files
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AudioPoolLoaded(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Resolve a missing audio file by loading from a new path
+    pub fn resolve_missing_audio_file(&mut self, pool_index: usize, new_path: &std::path::Path) -> Result<(), String> {
+        // Send command via query mechanism
+        if let Err(_) = self.query_tx.push(Query::ResolveMissingAudioFile(pool_index, new_path.to_path_buf())) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AudioFileResolved(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Serialize a track's effects/instrument graph to JSON
+    pub fn serialize_track_graph(&mut self, track_id: TrackId, project_path: &std::path::Path) -> Result<String, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::SerializeTrackGraph(track_id, project_path.to_path_buf())) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::TrackGraphSerialized(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Load a track's effects/instrument graph from JSON
+    pub fn load_track_graph(&mut self, track_id: TrackId, preset_json: &str, project_path: &std::path::Path) -> Result<(), String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::LoadTrackGraph(track_id, preset_json.to_string(), project_path.to_path_buf())) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10); // Longer timeout for loading presets
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::TrackGraphLoaded(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         Err("Query timeout".to_string())
