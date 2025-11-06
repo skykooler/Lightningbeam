@@ -1281,7 +1281,8 @@ class VideoLayer extends Widget {
     this.linkedAudioTrack = null;  // Reference to AudioTrack
 
     // Performance settings
-    this.useJpegCompression = true;  // Enable JPEG compression for faster transfer (default: true)
+    this.useJpegCompression = false;  // JPEG compression adds more overhead than it saves (default: false)
+    this.prefetchCount = 3;  // Number of frames to prefetch ahead of playhead
 
     // Timeline display
     this.collapsed = false;
@@ -1291,12 +1292,12 @@ class VideoLayer extends Widget {
     pointerList[this.idx] = this;
   }
 
-  async addClip(poolIndex, startTime, duration, offset = 0.0, name = '', sourceDuration = null) {
+  async addClip(poolIndex, startTime, duration, offset = 0.0, name = '', sourceDuration = null, metadata = null) {
     const poolInfo = await invoke('video_get_pool_info', { poolIndex });
     // poolInfo is [width, height, fps] tuple from Rust
     const [width, height, fps] = poolInfo;
 
-    this.clips.push({
+    const clip = {
       clipId: this.clips.length,
       poolIndex,
       name: name || `Video ${this.clips.length + 1}`,
@@ -1305,10 +1306,124 @@ class VideoLayer extends Widget {
       offset,
       width,
       height,
-      sourceDuration: sourceDuration || duration  // Store original file duration
+      sourceDuration: sourceDuration || duration,  // Store original file duration
+      httpUrl: metadata?.http_url || null,
+      isBrowserCompatible: metadata?.is_browser_compatible || false,
+      transcoding: metadata?.transcoding || false,
+      videoElement: null,  // Will hold HTML5 video element if using browser playback
+      useBrowserVideo: false,  // Switch to true when video element is ready
+      isPlaying: false,  // Track if video element is actively playing
+    };
+
+    this.clips.push(clip);
+
+    console.log(`Video clip added: ${name}, ${width}x${height}, duration: ${duration}s, browser-compatible: ${clip.isBrowserCompatible}, http_url: ${clip.httpUrl}`);
+
+    // If HTTP URL is available, create video element immediately
+    if (clip.httpUrl) {
+      await this._createVideoElement(clip);
+      clip.useBrowserVideo = true;
+    }
+    // If transcoding is in progress, start polling
+    else if (clip.transcoding) {
+      console.log(`[Video] Starting transcode polling for ${clip.name}`);
+      this._pollTranscodeStatus(clip);
+    }
+  }
+
+  async _createVideoElement(clip) {
+    // Create hidden video element for hardware-accelerated decoding
+    const video = document.createElement('video');
+    // DEBUG: Make video visible on top of everything
+    video.style.position = 'fixed';
+    video.style.top = '10px';
+    video.style.right = '10px';
+    video.style.width = '400px';
+    video.style.height = '225px';
+    video.style.zIndex = '99999';
+    video.style.border = '3px solid red';
+    video.controls = true;  // DEBUG: Add controls
+    video.preload = 'auto';
+    video.muted = true;  // Mute video element (audio plays separately)
+    video.playsInline = true;
+    video.autoplay = false;
+    video.crossOrigin = 'anonymous';  // Required for canvas drawing - prevent CORS taint
+
+    // Add event listeners for debugging
+    video.addEventListener('loadedmetadata', () => {
+      console.log(`[Video] Loaded metadata for ${clip.name}: ${video.videoWidth}x${video.videoHeight}, duration: ${video.duration}s`);
     });
 
-    console.log(`Video clip added: ${name}, ${width}x${height}, duration: ${duration}s`);
+    video.addEventListener('loadeddata', () => {
+      console.log(`[Video] Loaded data for ${clip.name}, readyState: ${video.readyState}`);
+    });
+
+    video.addEventListener('canplay', () => {
+      console.log(`[Video] Can play ${clip.name}, duration: ${video.duration}s`);
+      // Mark video as ready for seeking once we can play AND have valid duration
+      if (video.duration > 0 && !isNaN(video.duration) && video.duration !== Infinity) {
+        clip.videoReady = true;
+        console.log(`[Video] Video is ready for seeking`);
+      }
+    });
+
+    // When seek completes, trigger UI redraw to show the new frame
+    video.addEventListener('seeked', () => {
+      if (updateUI) {
+        updateUI();
+      }
+    });
+
+    video.addEventListener('error', (e) => {
+      const error = video.error;
+      const errorMessages = {
+        1: 'MEDIA_ERR_ABORTED - Fetching aborted',
+        2: 'MEDIA_ERR_NETWORK - Network error',
+        3: 'MEDIA_ERR_DECODE - Decoding error',
+        4: 'MEDIA_ERR_SRC_NOT_SUPPORTED - Format not supported or file not accessible'
+      };
+      const errorMsg = errorMessages[error?.code] || 'Unknown error';
+      console.error(`[Video] Error loading ${clip.name}: ${errorMsg}`, error?.message);
+    });
+
+    // Use HTTP URL from local server (supports range requests for seeking)
+    video.src = clip.httpUrl;
+
+    // Try to load the video
+    video.load();
+
+    document.body.appendChild(video);
+    clip.videoElement = video;
+
+    console.log(`[Video] Created video element for clip ${clip.name}: ${clip.httpUrl}`);
+  }
+
+  async _pollTranscodeStatus(clip) {
+    // Poll transcode status every 2 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await invoke('video_get_transcode_status', { poolIndex: clip.poolIndex });
+
+        if (status && status[2]) {  // [path, progress, completed, httpUrl]
+          // Transcode complete!
+          clearInterval(pollInterval);
+          const [outputPath, progress, completed, httpUrl] = status;
+
+          clip.transcodedPath = outputPath;
+          clip.httpUrl = httpUrl;
+          clip.transcoding = false;
+          clip.useBrowserVideo = true;
+
+          console.log(`[Video] Transcode complete for ${clip.name}, switching to browser playback: ${httpUrl}`);
+
+          // Create video element for browser playback
+          await this._createVideoElement(clip);
+        }
+      } catch (error) {
+        console.error('Failed to poll transcode status:', error);
+        clearInterval(pollInterval);
+      }
+    }, 2000);
   }
 
   // Pre-fetch frames for current time (call before draw)
@@ -1325,126 +1440,224 @@ class VideoLayer extends Widget {
         if (currentTime < clip.startTime ||
             currentTime >= clip.startTime + clip.duration) {
           clip.currentFrame = null;
+
+          // Pause video element if we left its time range
+          if (clip.videoElement && clip.isPlaying) {
+            clip.videoElement.pause();
+            clip.isPlaying = false;
+          }
+
           continue;
         }
 
-        // Calculate video timestamp from clip time
-        const clipTime = currentTime - clip.startTime;
-        const videoTimestamp = clip.offset + clipTime;
+        // If using browser video element
+        if (clip.useBrowserVideo && clip.videoElement) {
+          const videoTime = clip.offset + (currentTime - clip.startTime);
 
-        // Only fetch if timestamp changed
-        if (clip.lastFetchedTimestamp === videoTimestamp && clip.currentFrame) {
+          // Don't do anything until video is fully ready
+          if (!clip.videoReady) {
+            if (!clip._notReadyWarned) {
+              console.warn(`[Video updateFrame] Video not ready yet (duration=${clip.videoElement.duration})`);
+              clip._notReadyWarned = true;
+            }
+            continue;
+          }
+
+          // During playback: let video play naturally
+          if (context.playing) {
+            // Check if we just entered this clip (need to start playing)
+            if (!clip.isPlaying) {
+              // Start playing one frame ahead to compensate for canvas drawing lag
+              const frameDuration = 1 / (clip.fps || 30); // Use clip's actual framerate
+              const startTime = videoTime + frameDuration;
+              console.log(`[Video updateFrame] Starting playback at ${startTime.toFixed(3)}s (compensated by ${frameDuration.toFixed(3)}s for ${clip.fps}fps)`);
+              clip.videoElement.currentTime = startTime;
+              clip.videoElement.play().catch(e => console.error('Failed to play video:', e));
+              clip.isPlaying = true;
+            }
+            // Otherwise, let it play naturally - don't seek!
+          }
+          // When scrubbing (not playing): seek to exact position and pause
+          else {
+            if (clip.isPlaying) {
+              clip.videoElement.pause();
+              clip.isPlaying = false;
+            }
+
+            // Only seek if the time is actually different
+            if (!clip.videoElement.seeking) {
+              const timeDiff = Math.abs(clip.videoElement.currentTime - videoTime);
+              if (timeDiff > 0.016) { // ~1 frame tolerance at 60fps
+                clip.videoElement.currentTime = videoTime;
+              }
+            }
+          }
+
+          continue;  // Skip frame fetching
+        }
+
+        // Use frame batching for frame-based playback
+
+        // Initialize frame cache if needed
+        if (!clip.frameCache) {
+          clip.frameCache = new Map();
+        }
+
+        // Check if current frame is already cached
+        if (clip.frameCache.has(currentVideoTimestamp)) {
+          clip.currentFrame = clip.frameCache.get(currentVideoTimestamp);
+          clip.lastFetchedTimestamp = currentVideoTimestamp;
           continue;
         }
 
-        // Skip if already fetching this frame
-        if (clip.fetchInProgress === videoTimestamp) {
+        // Skip if already fetching
+        if (clip.fetchInProgress) {
           continue;
         }
 
-        clip.fetchInProgress = videoTimestamp;
-        clip.lastFetchedTimestamp = videoTimestamp;
+        clip.fetchInProgress = true;
 
         try {
-          // Request frame from Rust backend using IPC Channel for efficient binary transfer
+          // Calculate timestamps to prefetch (current + next N frames)
+          const frameDuration = 1 / 30; // Assume 30fps for now, could get from clip metadata
+          const timestamps = [];
+          for (let i = 0; i < this.prefetchCount; i++) {
+            const ts = currentVideoTimestamp + (i * frameDuration);
+            // Don't exceed clip duration
+            if (ts <= clip.offset + clip.sourceDuration) {
+              timestamps.push(ts);
+            }
+          }
+
+          if (timestamps.length === 0) {
+            continue;
+          }
+
           const t_start = performance.now();
 
-          // Create a promise that resolves when channel receives data
-          const frameDataPromise = new Promise((resolve, reject) => {
+          // Request batch of frames using IPC Channel
+          const batchDataPromise = new Promise((resolve, reject) => {
             const channel = new Channel();
 
             channel.onmessage = (data) => {
               resolve(data);
             };
 
-            // Invoke command with channel
-            invoke('video_get_frame', {
+            invoke('video_get_frames_batch', {
               poolIndex: clip.poolIndex,
-              timestamp: videoTimestamp,
+              timestamps: timestamps,
               useJpeg: this.useJpegCompression,
               channel: channel
             }).catch(reject);
           });
 
-          // Wait for the frame data
-          let frameData = await frameDataPromise;
+          let batchData = await batchDataPromise;
           const t_after_ipc = performance.now();
 
           // Ensure data is Uint8Array
-          if (!(frameData instanceof Uint8Array)) {
-            frameData = new Uint8Array(frameData);
+          if (!(batchData instanceof Uint8Array)) {
+            batchData = new Uint8Array(batchData);
           }
 
-          let imageData;
+          // Unpack the batch format: [frame_count: u32][frame1_size: u32][frame1_data...][frame2_size: u32][frame2_data...]...
+          const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
+          let offset = 0;
+
+          // Read frame count
+          const frameCount = view.getUint32(offset, true); // little-endian
+          offset += 4;
+
+          if (frameCount !== timestamps.length) {
+            console.warn(`Expected ${timestamps.length} frames, got ${frameCount}`);
+          }
+
           const t_before_conversion = performance.now();
 
-          if (this.useJpegCompression) {
-            // Decode JPEG data
-            const blob = new Blob([frameData], { type: 'image/jpeg' });
-            const imageUrl = URL.createObjectURL(blob);
+          // Process each frame
+          for (let i = 0; i < frameCount; i++) {
+            // Read frame size
+            const frameSize = view.getUint32(offset, true);
+            offset += 4;
 
-            // Load and decode JPEG
-            const img = new Image();
-            await new Promise((resolve, reject) => {
-              img.onload = resolve;
-              img.onerror = reject;
-              img.src = imageUrl;
-            });
+            // Extract frame data
+            const frameData = new Uint8Array(batchData.buffer, batchData.byteOffset + offset, frameSize);
+            offset += frameSize;
 
-            // Create temporary canvas to extract ImageData
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = clip.width;
-            tempCanvas.height = clip.height;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(img, 0, 0);
-            imageData = tempCtx.getImageData(0, 0, clip.width, clip.height);
+            let imageData;
 
-            // Cleanup
-            URL.revokeObjectURL(imageUrl);
-          } else {
-            // Raw RGBA data
-            const expectedSize = clip.width * clip.height * 4; // RGBA = 4 bytes per pixel
+            if (this.useJpegCompression) {
+              // Decode JPEG using createImageBitmap
+              const blob = new Blob([frameData], { type: 'image/jpeg' });
+              const imageBitmap = await createImageBitmap(blob);
 
-            if (frameData.length !== expectedSize) {
-              throw new Error(`Invalid frame data size: got ${frameData.length}, expected ${expectedSize}`);
+              // Create temporary canvas to extract ImageData
+              const tempCanvas = document.createElement('canvas');
+              tempCanvas.width = clip.width;
+              tempCanvas.height = clip.height;
+              const tempCtx = tempCanvas.getContext('2d');
+              tempCtx.drawImage(imageBitmap, 0, 0);
+              imageData = tempCtx.getImageData(0, 0, clip.width, clip.height);
+
+              imageBitmap.close();
+            } else {
+              // Raw RGBA data
+              const expectedSize = clip.width * clip.height * 4;
+
+              if (frameData.length !== expectedSize) {
+                console.error(`Invalid frame ${i} data size: got ${frameData.length}, expected ${expectedSize}`);
+                continue;
+              }
+
+              imageData = new ImageData(
+                new Uint8ClampedArray(frameData),
+                clip.width,
+                clip.height
+              );
             }
 
-            imageData = new ImageData(
-              new Uint8ClampedArray(frameData),
-              clip.width,
-              clip.height
-            );
+            // Create canvas for this frame
+            const frameCanvas = document.createElement('canvas');
+            frameCanvas.width = clip.width;
+            frameCanvas.height = clip.height;
+            const frameCtx = frameCanvas.getContext('2d');
+            frameCtx.putImageData(imageData, 0, 0);
+
+            // Cache the frame
+            clip.frameCache.set(timestamps[i], frameCanvas);
+
+            // Set as current frame if it's the first one
+            if (i === 0) {
+              clip.currentFrame = frameCanvas;
+              clip.lastFetchedTimestamp = timestamps[i];
+            }
           }
 
           const t_after_conversion = performance.now();
 
-          // Create or reuse temp canvas
-          if (!clip.frameCanvas) {
-            clip.frameCanvas = document.createElement('canvas');
-            clip.frameCanvas.width = clip.width;
-            clip.frameCanvas.height = clip.height;
+          // Limit cache size to avoid memory issues
+          const maxCacheSize = this.prefetchCount * 2;
+          if (clip.frameCache.size > maxCacheSize) {
+            // Remove oldest entries (simple LRU by keeping only recent timestamps)
+            const sortedKeys = Array.from(clip.frameCache.keys()).sort((a, b) => a - b);
+            const toRemove = sortedKeys.slice(0, sortedKeys.length - maxCacheSize);
+            for (let key of toRemove) {
+              clip.frameCache.delete(key);
+            }
           }
 
-          const tempCtx = clip.frameCanvas.getContext('2d');
-          const t_before_putimage = performance.now();
-          tempCtx.putImageData(imageData, 0, 0);
-          const t_after_putimage = performance.now();
-
-          clip.currentFrame = clip.frameCanvas;
-
-          // Log detailed timing breakdown
-          const total_time = t_after_putimage - t_start;
+          // Log timing breakdown
+          const total_time = t_after_conversion - t_start;
           const ipc_time = t_after_ipc - t_start;
           const conversion_time = t_after_conversion - t_before_conversion;
-          const putimage_time = t_after_putimage - t_before_putimage;
           const compression_mode = this.useJpegCompression ? 'JPEG' : 'RAW';
+          const avg_per_frame = total_time / frameCount;
 
-          console.log(`[JS Video Timing ${compression_mode}] ts=${videoTimestamp.toFixed(3)}s | Total: ${total_time.toFixed(1)}ms | IPC: ${ipc_time.toFixed(1)}ms (${(ipc_time/total_time*100).toFixed(0)}%) | Convert: ${conversion_time.toFixed(1)}ms | PutImage: ${putimage_time.toFixed(1)}ms | Size: ${(frameData.length/1024/1024).toFixed(2)}MB`);
+          console.log(`[JS Video Batch ${compression_mode}] Fetched ${frameCount} frames | Total: ${total_time.toFixed(1)}ms | IPC: ${ipc_time.toFixed(1)}ms (${(ipc_time/total_time*100).toFixed(0)}%) | Convert: ${conversion_time.toFixed(1)}ms | Avg/frame: ${avg_per_frame.toFixed(1)}ms | Size: ${(batchData.length/1024/1024).toFixed(2)}MB`);
         } catch (error) {
-          console.error('Failed to get video frame:', error);
+          console.error('Failed to get video frames batch:', error);
           clip.currentFrame = null;
         } finally {
-          clip.fetchInProgress = null;
+          clip.fetchInProgress = false;
         }
       }
     } finally {
@@ -1472,8 +1685,89 @@ class VideoLayer extends Widget {
         continue;
       }
 
-      // Draw cached frame if available
-      if (clip.currentFrame) {
+      // Debug: log what path we're taking
+      if (!clip._drawPathLogged) {
+        console.log(`[Video Draw] useBrowserVideo=${clip.useBrowserVideo}, videoElement=${!!clip.videoElement}, currentFrame=${!!clip.currentFrame}`);
+        clip._drawPathLogged = true;
+      }
+
+      // Prefer browser video element if available
+      if (clip.useBrowserVideo && clip.videoElement) {
+        // Debug: log readyState issues
+        if (clip.videoElement.readyState < 2) {
+          if (!clip._readyStateWarned) {
+            console.warn(`[Video] Video not ready: readyState=${clip.videoElement.readyState}, src=${clip.videoElement.src}`);
+            clip._readyStateWarned = true;
+          }
+        }
+
+        // Draw if video is ready (shows last frame while seeking, updates when seek completes)
+        if (clip.videoElement.readyState >= 2) {
+          try {
+            // Calculate expected video time
+            const expectedVideoTime = clip.offset + (currentTime - clip.startTime);
+            const actualVideoTime = clip.videoElement.currentTime;
+            const timeDiff = Math.abs(expectedVideoTime - actualVideoTime);
+
+            // Debug: log if time is significantly different
+            if (timeDiff > 0.1 && (!clip._lastTimeDiffWarning || Date.now() - clip._lastTimeDiffWarning > 1000)) {
+              console.warn(`[Video Draw] Time mismatch: expected ${expectedVideoTime.toFixed(2)}s, actual ${actualVideoTime.toFixed(2)}s, diff=${timeDiff.toFixed(2)}s`);
+              clip._lastTimeDiffWarning = Date.now();
+            }
+
+            // Debug: log successful draw periodically
+            if (!clip._lastDrawLog || Date.now() - clip._lastDrawLog > 1000) {
+              console.log(`[Video Draw] Drawing at currentTime=${actualVideoTime.toFixed(2)}s (expected ${expectedVideoTime.toFixed(2)}s)`);
+              clip._lastDrawLog = Date.now();
+            }
+
+            // Scale to fit canvas while maintaining aspect ratio
+            const canvasWidth = config.fileWidth;
+            const canvasHeight = config.fileHeight;
+            const scale = Math.min(
+              canvasWidth / clip.videoElement.videoWidth,
+              canvasHeight / clip.videoElement.videoHeight
+            );
+            const scaledWidth = clip.videoElement.videoWidth * scale;
+            const scaledHeight = clip.videoElement.videoHeight * scale;
+            const x = (canvasWidth - scaledWidth) / 2;
+            const y = (canvasHeight - scaledHeight) / 2;
+
+            // Debug: draw a test rectangle to verify canvas is working
+            if (!clip._canvasTestDone) {
+              ctx.save();
+              ctx.fillStyle = 'red';
+              ctx.fillRect(10, 10, 100, 100);
+              ctx.restore();
+              console.log(`[Video Draw] Drew test rectangle at (10, 10, 100, 100)`);
+              console.log(`[Video Draw] Canvas dimensions: ${canvasWidth}x${canvasHeight}`);
+              console.log(`[Video Draw] Scaled video dimensions: ${scaledWidth}x${scaledHeight} at (${x}, ${y})`);
+              clip._canvasTestDone = true;
+            }
+
+            // Debug: Check if video element has dimensions
+            if (!clip._videoDimensionsLogged) {
+              console.log(`[Video Draw] Video element dimensions: videoWidth=${clip.videoElement.videoWidth}, videoHeight=${clip.videoElement.videoHeight}, naturalWidth=${clip.videoElement.videoWidth}, naturalHeight=${clip.videoElement.videoHeight}`);
+              console.log(`[Video Draw] Video element state: paused=${clip.videoElement.paused}, ended=${clip.videoElement.ended}, seeking=${clip.videoElement.seeking}, readyState=${clip.videoElement.readyState}`);
+              clip._videoDimensionsLogged = true;
+            }
+
+            ctx.drawImage(clip.videoElement, x, y, scaledWidth, scaledHeight);
+
+            // Debug: Sample a pixel to see if video is actually drawing
+            if (!clip._pixelTestDone) {
+              const imageData = ctx.getImageData(canvasWidth / 2, canvasHeight / 2, 1, 1);
+              const pixel = imageData.data;
+              console.log(`[Video Draw] Center pixel after drawImage: R=${pixel[0]}, G=${pixel[1]}, B=${pixel[2]}, A=${pixel[3]}`);
+              clip._pixelTestDone = true;
+            }
+          } catch (error) {
+            console.error('Failed to draw video element:', error);
+          }
+        }
+      }
+      // Fall back to cached frame if available
+      else if (clip.currentFrame) {
         try {
           // Scale to fit canvas while maintaining aspect ratio
           const canvasWidth = config.fileWidth;
@@ -1500,7 +1794,8 @@ class VideoLayer extends Widget {
         ctx.font = '24px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Loading...', config.fileWidth / 2, config.fileHeight / 2);
+        const msg = clip.transcoding ? 'Transcoding...' : 'Loading...';
+        ctx.fillText(msg, config.fileWidth / 2, config.fileHeight / 2);
         ctx.restore();
       }
     }

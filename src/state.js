@@ -36,7 +36,8 @@ export let context = {
   timelineWidget: null, // Reference to TimelineWindowV2 widget for zoom controls
   config: null, // Reference to config object (set after config is initialized)
   mode: "select", // Current tool mode
-  // Recording state
+  // Playback and recording state
+  playing: false,
   isRecording: false,
   recordingTrackId: null,
   recordingClipId: null,

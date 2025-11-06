@@ -629,7 +629,8 @@ export const actions = {
           metadata.duration,
           0, // offset
           action.videoname,
-          metadata.duration // sourceDuration
+          metadata.duration, // sourceDuration
+          metadata  // Pass full metadata for browser playback support
         );
 
         // If video has audio, create linked AudioTrack

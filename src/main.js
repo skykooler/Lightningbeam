@@ -220,7 +220,6 @@ let fileExportPath = undefined;
 
 let state = "normal";
 
-let playing = false;
 let lastFrameTime;
 
 let uiDirty = false;
@@ -346,6 +345,65 @@ window.context = context;
 window.actions = actions;
 window.addKeyframeAtPlayhead = addKeyframeAtPlayhead;
 window.updateVideoFrames = null; // Will be set after function is defined
+
+// IPC Benchmark function - run from console: testIPCBenchmark()
+window.testIPCBenchmark = async function() {
+  const { invoke, Channel } = window.__TAURI__.core;
+
+  // Test sizes: 1KB, 10KB, 50KB, 100KB, 500KB, 1MB, 2MB, 5MB
+  const testSizes = [
+    1024,           // 1 KB
+    10 * 1024,      // 10 KB
+    50 * 1024,      // 50 KB
+    100 * 1024,     // 100 KB
+    500 * 1024,     // 500 KB
+    1024 * 1024,    // 1 MB
+    2 * 1024 * 1024,  // 2 MB
+    5 * 1024 * 1024   // 5 MB
+  ];
+
+  console.log('\n=== IPC Benchmark Starting ===\n');
+  console.log('Size (KB)\tJS Total (ms)\tJS IPC (ms)\tJS Recv (ms)\tThroughput (MB/s)');
+  console.log('─'.repeat(80));
+
+  for (const sizeBytes of testSizes) {
+    const t_start = performance.now();
+
+    let receivedData = null;
+    const dataPromise = new Promise((resolve, reject) => {
+      const channel = new Channel();
+
+      channel.onmessage = (data) => {
+        const t_recv_start = performance.now();
+        receivedData = data;
+        const t_recv_end = performance.now();
+        resolve(t_recv_end - t_recv_start);
+      };
+
+      invoke('video_ipc_benchmark', {
+        sizeBytes: sizeBytes,
+        channel: channel
+      }).catch(reject);
+    });
+
+    const recv_time = await dataPromise;
+    const t_after_ipc = performance.now();
+
+    const total_time = t_after_ipc - t_start;
+    const ipc_time = total_time - recv_time;
+    const size_kb = sizeBytes / 1024;
+    const size_mb = sizeBytes / (1024 * 1024);
+    const throughput = size_mb / (total_time / 1000);
+
+    console.log(`${size_kb.toFixed(0)}\t\t${total_time.toFixed(2)}\t\t${ipc_time.toFixed(2)}\t\t${recv_time.toFixed(2)}\t\t${throughput.toFixed(2)}`);
+
+    // Small delay between tests
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  console.log('\n=== IPC Benchmark Complete ===\n');
+  console.log('Run again with: testIPCBenchmark()');
+};
 
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -907,8 +965,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 async function playPause() {
-  playing = !playing;
-  if (playing) {
+  context.playing = !context.playing;
+  if (context.playing) {
     // Reset to start if we're at the end
     const duration = context.activeObject.duration;
     if (duration > 0 && context.activeObject.currentTime >= duration) {
@@ -966,8 +1024,8 @@ async function playPause() {
 
   // Update play/pause button appearance if it exists
   if (context.playPauseButton) {
-    context.playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
-    context.playPauseButton.title = playing ? "Pause" : "Play";
+    context.playPauseButton.className = context.playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    context.playPauseButton.title = context.playing ? "Pause" : "Play";
   }
 }
 
@@ -980,7 +1038,7 @@ function playbackLoop() {
     context.timelineWidget.requestRedraw();
   }
 
-  if (playing) {
+  if (context.playing) {
     const duration = context.activeObject.duration;
 
     // Check if we've reached the end (but allow infinite playback when recording)
@@ -989,7 +1047,7 @@ function playbackLoop() {
       requestAnimationFrame(playbackLoop);
     } else {
       // Animation finished
-      playing = false;
+      context.playing = false;
 
       // Stop DAW backend audio playback
       invoke('audio_stop').catch(error => {
@@ -1136,7 +1194,7 @@ async function handleAudioEvent(event) {
   switch (event.type) {
     case 'PlaybackPosition':
       // Sync frontend time with DAW time
-      if (playing) {
+      if (context.playing) {
         // Quantize time to framerate for animation playback
         const framerate = context.activeObject.frameRate;
         const frameDuration = 1 / framerate;
@@ -1565,7 +1623,7 @@ async function toggleRecording() {
         console.log('[FRONTEND] MIDI recording started successfully');
 
         // Start playback so the timeline moves (if not already playing)
-        if (!playing) {
+        if (!context.playing) {
           await playPause();
         }
       } catch (error) {
@@ -1585,7 +1643,7 @@ async function toggleRecording() {
         console.log('[FRONTEND] Audio recording started successfully, waiting for RecordingStarted event');
 
         // Start playback so the timeline moves (if not already playing)
-        if (!playing) {
+        if (!context.playing) {
           await playPause();
         }
       } catch (error) {
@@ -4528,8 +4586,8 @@ function timelineV2() {
 
     // Play/Pause button
     const playPauseButton = document.createElement("button");
-    playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
-    playPauseButton.title = playing ? "Pause" : "Play";
+    playPauseButton.className = context.playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    playPauseButton.title = context.playing ? "Pause" : "Play";
     playPauseButton.addEventListener("click", playPause);
 
     // Store reference so playPause() can update it
@@ -6709,7 +6767,7 @@ async function renderMenu() {
       },
       {
         text: "Play",
-        enabled: !playing,
+        enabled: !context.playing,
         action: playPause,
         accelerator: getShortcut("playAnimation"),
       },
@@ -10916,7 +10974,7 @@ async function renderAll() {
     renderInProgress = false;
 
     // FPS logging (only when playing)
-    if (playing) {
+    if (context.playing) {
       frameCount++;
       const now = performance.now();
       const renderTime = now - renderStartTime;
