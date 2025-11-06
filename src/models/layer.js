@@ -18,7 +18,7 @@ import {
 const Tone = window.Tone;
 
 // Tauri API
-const { invoke } = window.__TAURI__.core;
+const { invoke, Channel } = window.__TAURI__.core;
 
 // Helper function for UUID generation
 function uuidv4() {
@@ -1280,6 +1280,9 @@ class VideoLayer extends Widget {
     // Associated audio track (if video has audio)
     this.linkedAudioTrack = null;  // Reference to AudioTrack
 
+    // Performance settings
+    this.useJpegCompression = true;  // Enable JPEG compression for faster transfer (default: true)
+
     // Timeline display
     this.collapsed = false;
     this.curvesMode = 'segment';
@@ -1343,34 +1346,76 @@ class VideoLayer extends Widget {
         clip.lastFetchedTimestamp = videoTimestamp;
 
         try {
-          // Request frame from Rust backend
+          // Request frame from Rust backend using IPC Channel for efficient binary transfer
           const t_start = performance.now();
-          let frameData = await invoke('video_get_frame', {
-            poolIndex: clip.poolIndex,
-            timestamp: videoTimestamp
+
+          // Create a promise that resolves when channel receives data
+          const frameDataPromise = new Promise((resolve, reject) => {
+            const channel = new Channel();
+
+            channel.onmessage = (data) => {
+              resolve(data);
+            };
+
+            // Invoke command with channel
+            invoke('video_get_frame', {
+              poolIndex: clip.poolIndex,
+              timestamp: videoTimestamp,
+              useJpeg: this.useJpegCompression,
+              channel: channel
+            }).catch(reject);
           });
+
+          // Wait for the frame data
+          let frameData = await frameDataPromise;
           const t_after_ipc = performance.now();
 
-          // Handle different formats that Tauri might return
-          // ByteBuf from Rust can come as Uint8Array or Array depending on serialization
+          // Ensure data is Uint8Array
           if (!(frameData instanceof Uint8Array)) {
             frameData = new Uint8Array(frameData);
           }
 
-          // Validate frame data size
-          const expectedSize = clip.width * clip.height * 4; // RGBA = 4 bytes per pixel
+          let imageData;
+          const t_before_conversion = performance.now();
 
-          if (frameData.length !== expectedSize) {
-            throw new Error(`Invalid frame data size: got ${frameData.length}, expected ${expectedSize}`);
+          if (this.useJpegCompression) {
+            // Decode JPEG data
+            const blob = new Blob([frameData], { type: 'image/jpeg' });
+            const imageUrl = URL.createObjectURL(blob);
+
+            // Load and decode JPEG
+            const img = new Image();
+            await new Promise((resolve, reject) => {
+              img.onload = resolve;
+              img.onerror = reject;
+              img.src = imageUrl;
+            });
+
+            // Create temporary canvas to extract ImageData
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = clip.width;
+            tempCanvas.height = clip.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(img, 0, 0);
+            imageData = tempCtx.getImageData(0, 0, clip.width, clip.height);
+
+            // Cleanup
+            URL.revokeObjectURL(imageUrl);
+          } else {
+            // Raw RGBA data
+            const expectedSize = clip.width * clip.height * 4; // RGBA = 4 bytes per pixel
+
+            if (frameData.length !== expectedSize) {
+              throw new Error(`Invalid frame data size: got ${frameData.length}, expected ${expectedSize}`);
+            }
+
+            imageData = new ImageData(
+              new Uint8ClampedArray(frameData),
+              clip.width,
+              clip.height
+            );
           }
 
-          // Convert to ImageData
-          const t_before_conversion = performance.now();
-          const imageData = new ImageData(
-            new Uint8ClampedArray(frameData),
-            clip.width,
-            clip.height
-          );
           const t_after_conversion = performance.now();
 
           // Create or reuse temp canvas
@@ -1392,8 +1437,9 @@ class VideoLayer extends Widget {
           const ipc_time = t_after_ipc - t_start;
           const conversion_time = t_after_conversion - t_before_conversion;
           const putimage_time = t_after_putimage - t_before_putimage;
+          const compression_mode = this.useJpegCompression ? 'JPEG' : 'RAW';
 
-          console.log(`[JS Video Timing] ts=${videoTimestamp.toFixed(3)}s | Total: ${total_time.toFixed(1)}ms | IPC: ${ipc_time.toFixed(1)}ms (${(ipc_time/total_time*100).toFixed(0)}%) | Convert: ${conversion_time.toFixed(1)}ms | PutImage: ${putimage_time.toFixed(1)}ms | Size: ${(frameData.length/1024/1024).toFixed(2)}MB`);
+          console.log(`[JS Video Timing ${compression_mode}] ts=${videoTimestamp.toFixed(3)}s | Total: ${total_time.toFixed(1)}ms | IPC: ${ipc_time.toFixed(1)}ms (${(ipc_time/total_time*100).toFixed(0)}%) | Convert: ${conversion_time.toFixed(1)}ms | PutImage: ${putimage_time.toFixed(1)}ms | Size: ${(frameData.length/1024/1024).toFixed(2)}MB`);
         } catch (error) {
           console.error('Failed to get video frame:', error);
           clip.currentFrame = null;
@@ -1479,6 +1525,11 @@ class VideoLayer extends Widget {
     videoLayer.visible = json.visible;
     videoLayer.audible = json.audible;
 
+    // Restore compression setting (default to true if not specified for backward compatibility)
+    if (json.useJpegCompression !== undefined) {
+      videoLayer.useJpegCompression = json.useJpegCompression;
+    }
+
     return videoLayer;
   }
 
@@ -1491,7 +1542,8 @@ class VideoLayer extends Widget {
       audible: this.audible,
       animationData: this.animationData.toJSON(),
       clips: this.clips,
-      linkedAudioTrack: this.linkedAudioTrack?.idx
+      linkedAudioTrack: this.linkedAudioTrack?.idx,
+      useJpegCompression: this.useJpegCompression
     };
   }
 

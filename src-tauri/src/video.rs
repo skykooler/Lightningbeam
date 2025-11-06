@@ -1,8 +1,10 @@
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
+use std::io::Cursor;
 use ffmpeg_next as ffmpeg;
 use lru::LruCache;
 use daw_backend::WaveformPeak;
+use image::{RgbaImage, ImageEncoder};
 
 #[derive(serde::Serialize, Clone)]
 pub struct VideoFileMetadata {
@@ -453,16 +455,16 @@ fn generate_waveform(audio_data: &[f32], channels: u32, target_peaks: usize) -> 
     waveform
 }
 
-// Use a custom serializer wrapper for efficient binary transfer
-#[derive(serde::Serialize)]
-struct BinaryFrame(#[serde(with = "serde_bytes")] Vec<u8>);
-
 #[tauri::command]
 pub async fn video_get_frame(
     state: tauri::State<'_, Arc<Mutex<VideoState>>>,
     pool_index: usize,
     timestamp: f64,
-) -> Result<Vec<u8>, String> {
+    use_jpeg: bool,
+    channel: tauri::ipc::Channel,
+) -> Result<(), String> {
+    use std::time::Instant;
+
     let video_state = state.lock().unwrap();
 
     let decoder = video_state.pool.get(pool_index)
@@ -472,7 +474,51 @@ pub async fn video_get_frame(
     drop(video_state);
 
     let mut decoder = decoder.lock().unwrap();
-    decoder.get_frame(timestamp)
+    let frame_data = decoder.get_frame(timestamp)?;
+
+    let data_to_send = if use_jpeg {
+        let t_compress_start = Instant::now();
+
+        // Get frame dimensions from decoder
+        let width = decoder.output_width;
+        let height = decoder.output_height;
+
+        // Create image from raw RGBA data
+        let img = RgbaImage::from_raw(width, height, frame_data)
+            .ok_or("Failed to create image from frame data")?;
+
+        // Convert RGBA to RGB (JPEG doesn't support alpha)
+        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
+
+        // Encode to JPEG with quality 85 (good balance of size/quality)
+        let mut jpeg_data = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, 85);
+        encoder.encode(
+            rgb_img.as_raw(),
+            rgb_img.width(),
+            rgb_img.height(),
+            image::ColorType::Rgb8
+        ).map_err(|e| format!("JPEG encoding failed: {}", e))?;
+
+        let compress_time = t_compress_start.elapsed().as_millis();
+        let original_size = width as usize * height as usize * 4;
+        let compressed_size = jpeg_data.len();
+        let ratio = original_size as f32 / compressed_size as f32;
+
+        eprintln!("[Video JPEG] Compressed {}KB -> {}KB ({}x) in {}ms",
+            original_size / 1024, compressed_size / 1024, ratio, compress_time);
+
+        jpeg_data
+    } else {
+        frame_data
+    };
+
+    // Send binary data through channel (bypasses JSON serialization)
+    // InvokeResponseBody::Raw sends raw binary data without JSON encoding
+    channel.send(tauri::ipc::InvokeResponseBody::Raw(data_to_send))
+        .map_err(|e| format!("Channel send error: {}", e))?;
+
+    Ok(())
 }
 
 #[tauri::command]
