@@ -202,6 +202,20 @@ pub async fn audio_stop(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Resu
 }
 
 #[tauri::command]
+pub async fn set_metronome_enabled(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    enabled: bool
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.set_metronome_enabled(enabled);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn audio_test_beep(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<(), String> {
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {

@@ -43,6 +43,10 @@ export let context = {
   playPauseButton: null, // Reference to play/pause button for updating appearance
   // MIDI activity indicator
   lastMidiInputTime: 0, // Timestamp (Date.now()) of last MIDI input
+  // Metronome state
+  metronomeEnabled: false,
+  metronomeButton: null, // Reference to metronome button for updating appearance
+  metronomeGroup: null, // Reference to metronome button group for showing/hiding
 };
 
 // Application configuration

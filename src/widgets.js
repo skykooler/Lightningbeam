@@ -814,27 +814,11 @@ class TimelineWindowV2 extends Widget {
             const fadeTime = 1000 // Fade out over 1 second (increased for visibility)
 
             if (elapsed < fadeTime) {
-              // const mindicatorSize = 12 // Made larger
-              // const mindicatorX = this.trackHeaderWidth - 35 // Position to the left of buttons
-              // const mindicatorY = y + this.trackHierarchy.trackHeight / 2
-    
-              // console.log(`[MIDI mIndicator] Drawing at (${mindicatorX}, ${mindicatorY}) with alpha ${1}`)
-    
-              // // Draw pulsing circle with border
-              // ctx.strokeStyle = `rgba(0, 255, 0, ${1})`
-              // ctx.fillStyle = `rgba(0, 255, 0, ${1 * 0.5})`
-              // ctx.lineWidth = 2
-              // ctx.beginPath()
-              // ctx.arc(mindicatorX, mindicatorY, mindicatorSize / 2, 0, Math.PI * 2)
-              // ctx.fill()
-              // ctx.stroke()
-              
               const alpha = Math.max(0.2, 1 - (elapsed / fadeTime)) // Minimum alpha of 0.3 for visibility
               const indicatorSize = 10
               const indicatorX = this.trackHeaderWidth - 35 // Position to the left of buttons
               const indicatorY = y + this.trackHierarchy.trackHeight / 2
 
-              console.log(`[MIDI Indicator] Drawing at (${indicatorX}, ${indicatorY}) with alpha ${alpha}`)
 
               // Draw pulsing circle with border
               ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`

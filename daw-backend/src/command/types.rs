@@ -116,6 +116,10 @@ pub enum Command {
     /// Set the active MIDI track for external MIDI input routing (track_id or None)
     SetActiveMidiTrack(Option<TrackId>),
 
+    // Metronome command
+    /// Enable or disable the metronome click track
+    SetMetronomeEnabled(bool),
+
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)
     GraphAddNode(TrackId, String, f32, f32),

@@ -1608,6 +1608,10 @@ async function _newFile(width, height, fps, layoutKey) {
     // Set default time format to measures for music mode
     if (layoutKey === 'audioDaw' && context.timelineWidget?.timelineState) {
       context.timelineWidget.timelineState.timeFormat = 'measures';
+      // Show metronome button for audio projects
+      if (context.metronomeGroup) {
+        context.metronomeGroup.style.display = '';
+      }
     }
   }
 
@@ -4536,6 +4540,54 @@ function timelineV2() {
 
     controls.push(recordGroup);
 
+    // Metronome button (only visible in measures mode)
+    const metronomeGroup = document.createElement("div");
+    metronomeGroup.className = "playback-controls-group";
+
+    // Initially hide if not in measures mode
+    if (timelineWidget.timelineState.timeFormat !== 'measures') {
+      metronomeGroup.style.display = 'none';
+    }
+
+    const metronomeButton = document.createElement("button");
+    metronomeButton.className = context.metronomeEnabled
+      ? "playback-btn playback-btn-metronome active"
+      : "playback-btn playback-btn-metronome";
+    metronomeButton.title = context.metronomeEnabled ? "Disable Metronome" : "Enable Metronome";
+
+    // Load SVG inline for currentColor support
+    (async () => {
+      try {
+        const response = await fetch('./assets/metronome.svg');
+        const svgText = await response.text();
+        metronomeButton.innerHTML = svgText;
+      } catch (error) {
+        console.error('Failed to load metronome icon:', error);
+      }
+    })();
+
+    metronomeButton.addEventListener("click", async () => {
+      context.metronomeEnabled = !context.metronomeEnabled;
+      const { invoke } = window.__TAURI__.core;
+      try {
+        await invoke('set_metronome_enabled', { enabled: context.metronomeEnabled });
+        // Update button appearance
+        metronomeButton.className = context.metronomeEnabled
+          ? "playback-btn playback-btn-metronome active"
+          : "playback-btn playback-btn-metronome";
+        metronomeButton.title = context.metronomeEnabled ? "Disable Metronome" : "Enable Metronome";
+      } catch (error) {
+        console.error('Failed to set metronome:', error);
+      }
+    });
+    metronomeGroup.appendChild(metronomeButton);
+
+    // Store reference for state updates and visibility toggling
+    context.metronomeButton = metronomeButton;
+    context.metronomeGroup = metronomeGroup;
+
+    controls.push(metronomeGroup);
+
     // Time display
     const timeDisplay = document.createElement("div");
     timeDisplay.className = "time-display";
@@ -4610,6 +4662,10 @@ function timelineV2() {
         timelineWidget.toggleTimeFormat();
         updateTimeDisplay();
         updateCanvasSize();
+        // Update metronome button visibility
+        if (context.metronomeGroup) {
+          context.metronomeGroup.style.display = timelineWidget.timelineState.timeFormat === 'measures' ? '' : 'none';
+        }
         return;
       }
 
@@ -4620,6 +4676,10 @@ function timelineV2() {
         timelineWidget.toggleTimeFormat();
         updateTimeDisplay();
         updateCanvasSize();
+        // Update metronome button visibility
+        if (context.metronomeGroup) {
+          context.metronomeGroup.style.display = timelineWidget.timelineState.timeFormat === 'measures' ? '' : 'none';
+        }
       } else if (action === 'edit-fps') {
         // Clicked on FPS - show input to edit framerate
         console.log('[FPS Edit] Starting FPS edit');
@@ -10721,6 +10781,13 @@ function switchLayout(layoutKey) {
     updateUI();
     updateLayers();
     updateMenu();
+
+    // Update metronome button visibility based on timeline format
+    // (especially important when switching to audioDaw layout)
+    if (context.metronomeGroup && context.timelineWidget?.timelineState) {
+      const shouldShow = context.timelineWidget.timelineState.timeFormat === 'measures';
+      context.metronomeGroup.style.display = shouldShow ? '' : 'none';
+    }
 
     console.log(`Layout switched to: ${layoutDef.name}`);
   } catch (error) {

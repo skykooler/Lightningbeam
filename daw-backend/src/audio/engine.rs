@@ -1,5 +1,6 @@
 use crate::audio::buffer_pool::BufferPool;
 use crate::audio::clip::ClipId;
+use crate::audio::metronome::Metronome;
 use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
 use crate::audio::node_graph::{nodes::*, AudioGraph};
 use crate::audio::pool::AudioPool;
@@ -55,6 +56,9 @@ pub struct Engine {
 
     // MIDI input manager for external MIDI devices
     midi_input_manager: Option<MidiInputManager>,
+
+    // Metronome for click track
+    metronome: Metronome,
 }
 
 impl Engine {
@@ -96,6 +100,7 @@ impl Engine {
             recording_progress_counter: 0,
             midi_recording_state: None,
             midi_input_manager: None,
+            metronome: Metronome::new(sample_rate),
         }
     }
 
@@ -246,6 +251,15 @@ impl Engine {
 
             // Copy mix to output
             output.copy_from_slice(&self.mix_buffer);
+
+            // Mix in metronome clicks
+            self.metronome.process(
+                output,
+                self.playhead,
+                self.playing,
+                self.sample_rate,
+                self.channels,
+            );
 
             // Update playhead (convert total samples to frames)
             self.playhead += (output.len() / self.channels as usize) as u64;
@@ -754,6 +768,10 @@ impl Engine {
                 if let Some(ref midi_manager) = self.midi_input_manager {
                     midi_manager.set_active_track(track_id);
                 }
+            }
+
+            Command::SetMetronomeEnabled(enabled) => {
+                self.metronome.set_enabled(enabled);
             }
 
             // Node graph commands
@@ -2141,6 +2159,11 @@ impl EngineController {
     /// Set the active MIDI track for external MIDI input routing
     pub fn set_active_midi_track(&mut self, track_id: Option<TrackId>) {
         let _ = self.command_tx.push(Command::SetActiveMidiTrack(track_id));
+    }
+
+    /// Enable or disable the metronome click track
+    pub fn set_metronome_enabled(&mut self, enabled: bool) {
+        let _ = self.command_tx.push(Command::SetMetronomeEnabled(enabled));
     }
 
     // Node graph operations

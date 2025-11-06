@@ -197,6 +197,7 @@ pub fn run() {
         audio::audio_reset,
         audio::audio_play,
         audio::audio_stop,
+        audio::set_metronome_enabled,
         audio::audio_seek,
         audio::audio_test_beep,
         audio::audio_set_track_parameter,
