@@ -799,6 +799,56 @@ class TimelineWindowV2 extends Widget {
         ctx.fillText(typeText, typeX, y + this.trackHierarchy.trackHeight / 2)
       }
 
+
+      // Draw MIDI activity indicator for active MIDI track
+      if (track.type === 'audio' && track.object && track.object.type === 'midi') {
+
+        if (this.context && this.context.lastMidiInputTime > 0) {
+
+          // Check if this is the selected/active MIDI track
+          const isActiveMidiTrack = isSelected && track.object && track.object.audioTrackId !== undefined
+
+
+          if (isActiveMidiTrack) {
+            const elapsed = Date.now() - this.context.lastMidiInputTime
+            const fadeTime = 1000 // Fade out over 1 second (increased for visibility)
+
+            if (elapsed < fadeTime) {
+              // const mindicatorSize = 12 // Made larger
+              // const mindicatorX = this.trackHeaderWidth - 35 // Position to the left of buttons
+              // const mindicatorY = y + this.trackHierarchy.trackHeight / 2
+    
+              // console.log(`[MIDI mIndicator] Drawing at (${mindicatorX}, ${mindicatorY}) with alpha ${1}`)
+    
+              // // Draw pulsing circle with border
+              // ctx.strokeStyle = `rgba(0, 255, 0, ${1})`
+              // ctx.fillStyle = `rgba(0, 255, 0, ${1 * 0.5})`
+              // ctx.lineWidth = 2
+              // ctx.beginPath()
+              // ctx.arc(mindicatorX, mindicatorY, mindicatorSize / 2, 0, Math.PI * 2)
+              // ctx.fill()
+              // ctx.stroke()
+              
+              const alpha = Math.max(0.2, 1 - (elapsed / fadeTime)) // Minimum alpha of 0.3 for visibility
+              const indicatorSize = 10
+              const indicatorX = this.trackHeaderWidth - 35 // Position to the left of buttons
+              const indicatorY = y + this.trackHierarchy.trackHeight / 2
+
+              console.log(`[MIDI Indicator] Drawing at (${indicatorX}, ${indicatorY}) with alpha ${alpha}`)
+
+              // Draw pulsing circle with border
+              ctx.strokeStyle = `rgba(0, 255, 0, ${alpha})`
+              ctx.fillStyle = `rgba(0, 255, 0, ${alpha})`
+              ctx.lineWidth = 2
+              ctx.beginPath()
+              ctx.arc(indicatorX, indicatorY, indicatorSize / 2, 0, Math.PI * 2)
+              ctx.fill()
+              ctx.stroke()
+            }
+          }
+        }
+      }
+
       // Draw toggle buttons for object/shape/audio/midi tracks (Phase 3)
       if (track.type === 'object' || track.type === 'shape' || track.type === 'audio' || track.type === 'midi') {
         const buttonSize = 14

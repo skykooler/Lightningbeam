@@ -74,6 +74,26 @@ impl MidiInputManager {
         // Get all available MIDI input ports
         let ports = midi_in.ports();
 
+        // Get list of currently available device names
+        let mut available_devices = Vec::new();
+        for port in &ports {
+            if let Ok(port_name) = midi_in.port_name(port) {
+                available_devices.push(port_name);
+            }
+        }
+
+        // Remove disconnected devices from our connections list
+        {
+            let mut conns = connections.lock().unwrap();
+            let before_count = conns.len();
+            conns.retain(|conn| available_devices.contains(&conn.device_name));
+            let after_count = conns.len();
+
+            if before_count != after_count {
+                println!("MIDI: Removed {} disconnected device(s)", before_count - after_count);
+            }
+        }
+
         // Get list of already connected device names
         let connected_devices: Vec<String> = {
             let conns = connections.lock().unwrap();

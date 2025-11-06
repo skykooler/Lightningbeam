@@ -41,6 +41,8 @@ export let context = {
   recordingTrackId: null,
   recordingClipId: null,
   playPauseButton: null, // Reference to play/pause button for updating appearance
+  // MIDI activity indicator
+  lastMidiInputTime: 0, // Timestamp (Date.now()) of last MIDI input
 };
 
 // Application configuration

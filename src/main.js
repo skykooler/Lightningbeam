@@ -1306,6 +1306,28 @@ async function handleAudioEvent(event) {
           context.pianoRedraw();
         }
       }
+      // Update MIDI activity timestamp
+      context.lastMidiInputTime = Date.now();
+      console.log('[NoteOn] Set lastMidiInputTime to:', context.lastMidiInputTime);
+
+      // Start animation loop to keep redrawing the MIDI indicator
+      if (!context.midiIndicatorAnimating) {
+        context.midiIndicatorAnimating = true;
+        const animateMidiIndicator = () => {
+          if (context.timelineWidget && context.timelineWidget.requestRedraw) {
+            context.timelineWidget.requestRedraw();
+          }
+
+          // Keep animating for 1 second after last MIDI input
+          const elapsed = Date.now() - context.lastMidiInputTime;
+          if (elapsed < 1000) {
+            requestAnimationFrame(animateMidiIndicator);
+          } else {
+            context.midiIndicatorAnimating = false;
+          }
+        };
+        requestAnimationFrame(animateMidiIndicator);
+      }
       break;
 
     case 'NoteOff':
