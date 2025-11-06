@@ -1,4 +1,4 @@
-// Layer models: Layer and AudioLayer classes
+// Layer models: VectorLayer, AudioTrack, and VideoLayer classes
 
 import { context, config, pointerList } from '../state.js';
 import { Frame, AnimationData, Keyframe, tempFrame } from './animation.js';
@@ -65,7 +65,7 @@ export function initializeLayerDependencies(deps) {
   actions = deps.actions;
 }
 
-class Layer extends Widget {
+class VectorLayer extends Widget {
   constructor(uuid, parentObject = null) {
     super(0,0)
     if (!uuid) {
@@ -73,7 +73,7 @@ class Layer extends Widget {
     } else {
       this.idx = uuid;
     }
-    this.name = "Layer";
+    this.name = "VectorLayer";
     // LEGACY: Keep frames array for backwards compatibility during migration
     this.frames = [new Frame("keyframe", this.idx + "-F1")];
     this.animationData = new AnimationData(this);
@@ -86,7 +86,7 @@ class Layer extends Widget {
     this.shapes = []
   }
   static fromJSON(json, parentObject = null) {
-    const layer = new Layer(json.idx, parentObject);
+    const layer = new VectorLayer(json.idx, parentObject);
     for (let i in json.children) {
       const child = json.children[i];
       const childObject = GraphicsObject.fromJSON(child);
@@ -136,7 +136,7 @@ class Layer extends Widget {
   }
   toJSON(randomizeUuid = false) {
     const json = {};
-    json.type = "Layer";
+    json.type = "VectorLayer";
     if (randomizeUuid) {
       json.idx = uuidv4();
       json.name = this.name + " copy";
@@ -468,7 +468,7 @@ class Layer extends Widget {
     }
   }
   copy(idx) {
-    let newLayer = new Layer(idx.slice(0, 8) + this.idx.slice(8));
+    let newLayer = new VectorLayer(idx.slice(0, 8) + this.idx.slice(8));
     let idxMapping = {};
     for (let child of this.children) {
       let newChild = child.copy(idx);
@@ -1245,4 +1245,4 @@ class AudioTrack {
   }
 }
 
-export { Layer, AudioTrack };
+export { VectorLayer, AudioTrack };

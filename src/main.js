@@ -93,7 +93,7 @@ import {
   AnimationData
 } from "./models/animation.js";
 import {
-  Layer,
+  VectorLayer,
   AudioTrack,
   initializeLayerDependencies
 } from "./models/layer.js";
@@ -638,7 +638,7 @@ function redo() {
 // ============================================================================
 
 // ============================================================================
-// Layer system classes (Layer, AudioTrack)
+// Layer system classes (VectorLayer, AudioTrack, VideoLayer)
 // have been moved to src/models/layer.js and are imported at the top of this file
 // ============================================================================
 

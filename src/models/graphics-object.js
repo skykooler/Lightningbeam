@@ -1,7 +1,7 @@
 // GraphicsObject model: Main container for layers and animation
 
 import { context, config, pointerList, startProps } from '../state.js';
-import { Layer, AudioTrack } from './layer.js';
+import { VectorLayer, AudioTrack } from './layer.js';
 import { TempShape } from './shapes.js';
 import { AnimationCurve, Keyframe } from './animation.js';
 import { Widget } from '../widgets.js';
@@ -54,7 +54,7 @@ class GraphicsObject extends Widget {
     this.audioTracks = [];
 
     if (initialChildType === 'layer') {
-      this.children = [new Layer(uuid + "-L1", this)];
+      this.children = [new VectorLayer(uuid + "-L1", this)];
       this.currentLayer = 0;  // Set first layer as active
     } else if (initialChildType === 'midi') {
       const midiTrack = new AudioTrack(uuid + "-M1", "MIDI 1", 'midi');
@@ -103,7 +103,7 @@ class GraphicsObject extends Widget {
       graphicsObject.parent = pointerList[json.parent]
     }
     for (let layer of json.layers) {
-      graphicsObject.layers.push(Layer.fromJSON(layer, graphicsObject));
+      graphicsObject.layers.push(VectorLayer.fromJSON(layer, graphicsObject));
     }
     // Handle audioTracks (may not exist in older files)
     if (json.audioTracks) {
