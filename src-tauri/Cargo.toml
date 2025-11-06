@@ -36,6 +36,10 @@ daw-backend = { path = "../daw-backend" }
 cpal = "0.15"
 rtrb = "0.3"
 
+# Video decoding
+ffmpeg-next = "7.0"
+lru = "0.12"
+
 [profile.dev]
 opt-level = 1  # Enable basic optimizations in debug mode for audio decoding performance
 

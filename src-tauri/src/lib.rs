@@ -7,6 +7,7 @@ use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 mod audio;
+mod video;
 
 
 #[derive(Default)]
@@ -130,6 +131,7 @@ pub fn run() {
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
       .manage(Arc::new(Mutex::new(audio::AudioState::default())))
+      .manage(Arc::new(Mutex::new(video::VideoState::default())))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -204,6 +206,7 @@ pub fn run() {
         audio::audio_load_file,
         audio::audio_add_clip,
         audio::audio_move_clip,
+        audio::audio_trim_clip,
         audio::audio_start_recording,
         audio::audio_stop_recording,
         audio::audio_pause_recording,
@@ -250,6 +253,10 @@ pub fn run() {
         audio::audio_resolve_missing_file,
         audio::audio_serialize_track_graph,
         audio::audio_load_track_graph,
+        video::video_load_file,
+        video::video_get_frame,
+        video::video_set_cache_size,
+        video::video_get_pool_info,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

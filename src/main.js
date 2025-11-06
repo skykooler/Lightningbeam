@@ -95,6 +95,7 @@ import {
 import {
   VectorLayer,
   AudioTrack,
+  VideoLayer,
   initializeLayerDependencies
 } from "./models/layer.js";
 import {
@@ -135,6 +136,7 @@ const { getVersion } = window.__TAURI__.app;
 // Supported file extensions
 const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
 const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
+const videoExtensions = ["mp4", "mov", "avi", "mkv", "webm", "m4v"];
 const midiExtensions = ["mid", "midi"];
 const beamExtensions = ["beam"];
 
@@ -343,6 +345,7 @@ let mouseEvent;
 window.context = context;
 window.actions = actions;
 window.addKeyframeAtPlayhead = addKeyframeAtPlayhead;
+window.updateVideoFrames = null; // Will be set after function is defined
 
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -1009,6 +1012,38 @@ function playbackLoop() {
   }
 }
 
+// Update video frames for all VideoLayers in the scene
+async function updateVideoFrames(currentTime) {
+  // Recursively find all VideoLayers in the scene
+  function findVideoLayers(obj) {
+    const videoLayers = [];
+    if (obj.layers) {
+      for (let layer of obj.layers) {
+        if (layer.type === 'video') {
+          videoLayers.push(layer);
+        }
+      }
+    }
+    // Recursively check children (GraphicsObjects can contain other GraphicsObjects)
+    if (obj.children) {
+      for (let child of obj.children) {
+        videoLayers.push(...findVideoLayers(child));
+      }
+    }
+    return videoLayers;
+  }
+
+  const videoLayers = findVideoLayers(context.activeObject);
+
+  // Update all video layers in parallel
+  await Promise.all(videoLayers.map(layer => layer.updateFrame(currentTime)));
+
+  // Note: No updateUI() call here - renderUI() will draw after awaiting this function
+}
+
+// Expose updateVideoFrames globally
+window.updateVideoFrames = updateVideoFrames;
+
 // Single-step forward by one frame/second
 function advance() {
   if (context.timelineWidget?.timelineState?.timeFormat === "frames") {
@@ -1024,6 +1059,9 @@ function advance() {
 
   // Sync DAW backend
   invoke('audio_seek', { seconds: context.activeObject.currentTime });
+
+  // Update video frames
+  updateVideoFrames(context.activeObject.currentTime);
 
   updateLayers();
   updateMenu();
@@ -1108,6 +1146,10 @@ async function handleAudioEvent(event) {
         if (context.timelineWidget?.timelineState) {
           context.timelineWidget.timelineState.currentTime = quantizedTime;
         }
+
+        // Update video frames
+        updateVideoFrames(quantizedTime);
+
         // Update time display
         if (context.updateTimeDisplay) {
           context.updateTimeDisplay();
@@ -2330,6 +2372,10 @@ async function importFile() {
       extensions: audioExtensions,
     },
     {
+      name: "Video files",
+      extensions: videoExtensions,
+    },
+    {
       name: "MIDI files",
       extensions: midiExtensions,
     },
@@ -2384,10 +2430,12 @@ async function importFile() {
     let usedFilterIndex = 0;
     if (audioExtensions.includes(ext)) {
       usedFilterIndex = 1; // Audio
+    } else if (videoExtensions.includes(ext)) {
+      usedFilterIndex = 2; // Video
     } else if (midiExtensions.includes(ext)) {
-      usedFilterIndex = 2; // MIDI
+      usedFilterIndex = 3; // MIDI
     } else if (beamExtensions.includes(ext)) {
-      usedFilterIndex = 3; // Lightningbeam
+      usedFilterIndex = 4; // Lightningbeam
     } else {
       usedFilterIndex = 0; // Image (default)
     }
@@ -2454,6 +2502,9 @@ async function importFile() {
     } else if (audioExtensions.includes(ext)) {
       // Handle audio files - pass file path directly to backend
       actions.addAudio.create(path, context.activeObject, filename);
+    } else if (videoExtensions.includes(ext)) {
+      // Handle video files
+      actions.addVideo.create(path, context.activeObject, filename);
     } else if (midiExtensions.includes(ext)) {
       // Handle MIDI files
       actions.addMIDI.create(path, context.activeObject, filename);
@@ -4804,6 +4855,12 @@ function timelineV2() {
     timelineWidget.lastDragEvent = e;
 
     timelineWidget.handleMouseEvent("mousemove", x, y);
+
+    // Update cursor based on widget's cursor property
+    if (timelineWidget.cursor) {
+      canvas.style.cursor = timelineWidget.cursor;
+    }
+
     updateCanvasSize(); // Redraw after interaction
   });
 
@@ -5520,7 +5577,12 @@ function updateUI() {
 context.updateUI = updateUI;
 context.updateMenu = updateMenu;
 
-function renderUI() {
+async function renderUI() {
+  // Update video frames BEFORE drawing
+  if (context.activeObject) {
+    await updateVideoFrames(context.activeObject.currentTime);
+  }
+
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d");
     ctx.resetTransform();
@@ -6547,6 +6609,11 @@ async function renderMenu() {
         enabled: true,
         action: actions.addLayer.create,
         accelerator: getShortcut("addLayer"),
+      },
+      {
+        text: "Add Video Layer",
+        enabled: true,
+        action: addVideoLayer,
       },
       {
         text: "Add Audio Track",
@@ -10787,10 +10854,33 @@ function getMimeType(filePath) {
 }
 
 
-function renderAll() {
+let renderInProgress = false;
+let rafScheduled = false;
+
+// FPS tracking
+let lastFpsLogTime = 0;
+let frameCount = 0;
+let fpsHistory = [];
+
+async function renderAll() {
+  rafScheduled = false;
+
+  // Skip if a render is already in progress (prevent stacking async calls)
+  if (renderInProgress) {
+    // Schedule another attempt if not already scheduled
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderAll);
+    }
+    return;
+  }
+
+  renderInProgress = true;
+  const renderStartTime = performance.now();
+
   try {
     if (uiDirty) {
-      renderUI();
+      await renderUI();
       uiDirty = false;
     }
     if (layersDirty) {
@@ -10823,7 +10913,33 @@ function renderAll() {
       repeatCount = 2;
     }
   } finally {
-    requestAnimationFrame(renderAll);
+    renderInProgress = false;
+
+    // FPS logging (only when playing)
+    if (playing) {
+      frameCount++;
+      const now = performance.now();
+      const renderTime = now - renderStartTime;
+
+      if (now - lastFpsLogTime >= 1000) {
+        const fps = frameCount / ((now - lastFpsLogTime) / 1000);
+        fpsHistory.push({ fps, renderTime });
+        console.log(`[FPS] ${fps.toFixed(1)} fps | Render time: ${renderTime.toFixed(1)}ms`);
+        frameCount = 0;
+        lastFpsLogTime = now;
+
+        // Keep only last 10 samples
+        if (fpsHistory.length > 10) {
+          fpsHistory.shift();
+        }
+      }
+    }
+
+    // Schedule next frame if not already scheduled
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderAll);
+    }
   }
 }
 
@@ -10834,6 +10950,7 @@ initializeActions({
   updateMenu,
   updateLayers,
   updateUI,
+  updateVideoFrames,
   updateInfopanel,
   invoke,
   config
@@ -10920,6 +11037,33 @@ async function addEmptyMIDITrack() {
     console.log('Empty MIDI track created:', trackName, 'with ID:', newMIDITrack.audioTrackId);
   } catch (error) {
     console.error('Failed to create empty MIDI track:', error);
+  }
+}
+
+async function addVideoLayer() {
+  console.log('[addVideoLayer] Creating new video layer');
+  const layerName = `Video ${context.activeObject.layers.filter(l => l.type === 'video').length + 1}`;
+  const layerUuid = uuidv4();
+
+  try {
+    // Create new VideoLayer
+    const newVideoLayer = new VideoLayer(layerUuid, layerName);
+
+    // Add layer to active object
+    context.activeObject.layers.push(newVideoLayer);
+
+    // Select the newly created layer
+    context.activeObject.activeLayer = newVideoLayer;
+
+    // Update UI
+    updateLayers();
+    if (context.timelineWidget) {
+      context.timelineWidget.requestRedraw();
+    }
+
+    console.log('Empty video layer created:', layerName);
+  } catch (error) {
+    console.error('Failed to create video layer:', error);
   }
 }
 

@@ -947,6 +947,112 @@ class TimelineWindowV2 extends Widget {
   /**
    * Draw track backgrounds in timeline area (Phase 2)
    */
+  // Create a cached pattern for the timeline grid
+  createTimelinePattern(trackHeight) {
+    const cacheKey = `${this.timelineState.timeFormat}_${this.timelineState.pixelsPerSecond}_${this.timelineState.framerate}_${this.timelineState.bpm}_${trackHeight}`
+
+    // Return cached pattern if available
+    if (this.cachedPattern && this.cachedPatternKey === cacheKey) {
+      return this.cachedPattern
+    }
+
+    let patternWidth, patternHeight = trackHeight
+
+    if (this.timelineState.timeFormat === 'frames') {
+      // Pattern for 5 frames
+      const frameDuration = 1 / this.timelineState.framerate
+      const frameWidth = frameDuration * this.timelineState.pixelsPerSecond
+      patternWidth = frameWidth * 5
+    } else if (this.timelineState.timeFormat === 'measures') {
+      // Pattern for one measure
+      const beatsPerSecond = this.timelineState.bpm / 60
+      const beatsPerMeasure = this.timelineState.timeSignature.numerator
+      const beatWidth = (1 / beatsPerSecond) * this.timelineState.pixelsPerSecond
+      patternWidth = beatWidth * beatsPerMeasure
+    } else {
+      // Pattern for seconds - use 10 second intervals
+      patternWidth = this.timelineState.pixelsPerSecond * 10
+    }
+
+    // Create pattern canvas
+    const patternCanvas = document.createElement('canvas')
+    patternCanvas.width = Math.ceil(patternWidth)
+    patternCanvas.height = patternHeight
+    const pctx = patternCanvas.getContext('2d')
+
+    // Fill background
+    pctx.fillStyle = shade
+    pctx.fillRect(0, 0, patternWidth, patternHeight)
+
+    if (this.timelineState.timeFormat === 'frames') {
+      const frameDuration = 1 / this.timelineState.framerate
+      const frameWidth = frameDuration * this.timelineState.pixelsPerSecond
+
+      for (let i = 0; i < 5; i++) {
+        const x = i * frameWidth
+        if (i === 0) {
+          // First frame in pattern (every 5th): shade it
+          pctx.fillStyle = shadow
+          pctx.fillRect(x, 0, frameWidth, patternHeight)
+        } else {
+          // Regular frame: draw edge line
+          pctx.strokeStyle = shadow
+          pctx.lineWidth = 1
+          pctx.beginPath()
+          pctx.moveTo(x, 0)
+          pctx.lineTo(x, patternHeight)
+          pctx.stroke()
+        }
+      }
+    } else if (this.timelineState.timeFormat === 'measures') {
+      const beatsPerSecond = this.timelineState.bpm / 60
+      const beatsPerMeasure = this.timelineState.timeSignature.numerator
+      const beatWidth = (1 / beatsPerSecond) * this.timelineState.pixelsPerSecond
+
+      for (let i = 0; i < beatsPerMeasure; i++) {
+        const x = i * beatWidth
+        const isMeasureBoundary = i === 0
+        const isEvenBeat = (i % 2) === 0
+
+        pctx.save()
+        if (isMeasureBoundary) {
+          pctx.globalAlpha = 1.0
+        } else if (isEvenBeat) {
+          pctx.globalAlpha = 0.5
+        } else {
+          pctx.globalAlpha = 0.25
+        }
+
+        pctx.strokeStyle = shadow
+        pctx.lineWidth = 1
+        pctx.beginPath()
+        pctx.moveTo(x, 0)
+        pctx.lineTo(x, patternHeight)
+        pctx.stroke()
+        pctx.restore()
+      }
+    } else {
+      // Seconds mode: draw lines every second for 10 seconds
+      const secondWidth = this.timelineState.pixelsPerSecond
+
+      for (let i = 0; i < 10; i++) {
+        const x = i * secondWidth
+        pctx.strokeStyle = shadow
+        pctx.lineWidth = 1
+        pctx.beginPath()
+        pctx.moveTo(x, 0)
+        pctx.lineTo(x, patternHeight)
+        pctx.stroke()
+      }
+    }
+
+    // Cache the pattern
+    this.cachedPatternKey = cacheKey
+    this.cachedPattern = pctx.createPattern(patternCanvas, 'repeat')
+
+    return this.cachedPattern
+  }
+
   drawTracks(ctx) {
     ctx.save()
     ctx.translate(this.trackHeaderWidth, this.ruler.height)  // Start after headers, below ruler
@@ -966,96 +1072,18 @@ class TimelineWindowV2 extends Widget {
       const y = this.trackHierarchy.getTrackY(i)
       const trackHeight = this.trackHierarchy.getTrackHeight(track)
 
-      // Draw track background (same color for all tracks)
-      ctx.fillStyle = shade
-      ctx.fillRect(0, y, trackAreaWidth, trackHeight)
+      // Create and apply pattern for this track
+      const pattern = this.createTimelinePattern(trackHeight)
 
-      // Draw interval markings
+      // Calculate pattern offset based on viewport start time
       const visibleStartTime = this.timelineState.viewportStartTime
-      const visibleEndTime = visibleStartTime + (trackAreaWidth / this.timelineState.pixelsPerSecond)
+      const patternOffsetX = -this.timelineState.timeToPixel(visibleStartTime)
 
-      if (this.timelineState.timeFormat === 'frames') {
-        // Frames mode: mark every frame edge, with every 5th frame shaded
-        const frameDuration = 1 / this.timelineState.framerate
-        const startFrame = Math.floor(visibleStartTime / frameDuration)
-        const endFrame = Math.ceil(visibleEndTime / frameDuration)
-
-        for (let frame = startFrame; frame <= endFrame; frame++) {
-          const time = frame * frameDuration
-          const x = this.timelineState.timeToPixel(time)
-          const nextX = this.timelineState.timeToPixel((frame + 1) * frameDuration)
-
-          if (x >= 0 && x <= trackAreaWidth) {
-            if (frame % 5 === 0) {
-              // Every 5th frame: shade the entire frame width
-              ctx.fillStyle = shadow
-              ctx.fillRect(x, y, nextX - x, trackHeight)
-            } else {
-              // Regular frame: draw edge line
-              ctx.strokeStyle = shadow
-              ctx.lineWidth = 1
-              ctx.beginPath()
-              ctx.moveTo(x, y)
-              ctx.lineTo(x, y + trackHeight)
-              ctx.stroke()
-            }
-          }
-        }
-      } else if (this.timelineState.timeFormat === 'measures') {
-        // Measures mode: draw beats with varying opacity
-        const beatsPerSecond = this.timelineState.bpm / 60
-        const beatsPerMeasure = this.timelineState.timeSignature.numerator
-        const startBeat = Math.floor(visibleStartTime * beatsPerSecond)
-        const endBeat = Math.ceil(visibleEndTime * beatsPerSecond)
-
-        for (let beat = startBeat; beat <= endBeat; beat++) {
-          const time = beat / beatsPerSecond
-          const x = this.timelineState.timeToPixel(time)
-
-          if (x >= 0 && x <= trackAreaWidth) {
-            // Determine position within the measure
-            const beatInMeasure = beat % beatsPerMeasure
-            const isMeasureBoundary = beatInMeasure === 0
-            const isEvenBeatInMeasure = (beatInMeasure % 2) === 0
-
-            // Set opacity based on position
-            ctx.save()
-            if (isMeasureBoundary) {
-              ctx.globalAlpha = 1.0  // Full opacity for measure boundaries
-            } else if (isEvenBeatInMeasure) {
-              ctx.globalAlpha = 0.5  // Half opacity for even beats
-            } else {
-              ctx.globalAlpha = 0.25  // Quarter opacity for odd beats
-            }
-
-            ctx.strokeStyle = shadow
-            ctx.lineWidth = 1
-            ctx.beginPath()
-            ctx.moveTo(x, y)
-            ctx.lineTo(x, y + trackHeight)
-            ctx.stroke()
-            ctx.restore()
-          }
-        }
-      } else {
-        // Seconds mode: mark every second edge
-        const startSecond = Math.floor(visibleStartTime)
-        const endSecond = Math.ceil(visibleEndTime)
-
-        ctx.strokeStyle = shadow
-        ctx.lineWidth = 1
-
-        for (let second = startSecond; second <= endSecond; second++) {
-          const x = this.timelineState.timeToPixel(second)
-
-          if (x >= 0 && x <= trackAreaWidth) {
-            ctx.beginPath()
-            ctx.moveTo(x, y)
-            ctx.lineTo(x, y + trackHeight)
-            ctx.stroke()
-          }
-        }
-      }
+      ctx.save()
+      ctx.translate(patternOffsetX, y)
+      ctx.fillStyle = pattern
+      ctx.fillRect(-patternOffsetX, 0, trackAreaWidth, trackHeight)
+      ctx.restore()
 
       // Draw track border
       ctx.strokeStyle = shadow
@@ -1425,19 +1453,25 @@ class TimelineWindowV2 extends Widget {
               const waveformHeight = trackHeight - 14  // Leave padding at top/bottom
               const waveformData = clip.waveform
 
-              // Calculate how many pixels each waveform peak represents
-              const pixelsPerPeak = clipWidth / waveformData.length
+              // Calculate the full source audio duration and pixels per peak based on that
+              const sourceDuration = clip.sourceDuration || clip.duration
+              const pixelsPerSecond = this.timelineState.pixelsPerSecond
+              const fullSourceWidth = sourceDuration * pixelsPerSecond
+              const pixelsPerPeak = fullSourceWidth / waveformData.length
 
-              // Calculate the range of visible peaks
-              const firstVisiblePeak = Math.max(0, Math.floor((visibleStart - startX) / pixelsPerPeak))
-              const lastVisiblePeak = Math.min(waveformData.length - 1, Math.ceil((visibleEnd - startX) / pixelsPerPeak))
+              // Calculate which peak corresponds to the clip's offset (trimmed left edge)
+              const offsetPeakIndex = Math.floor((clip.offset / sourceDuration) * waveformData.length)
+
+              // Calculate the range of visible peaks, accounting for offset
+              const firstVisiblePeak = Math.max(offsetPeakIndex, Math.floor((visibleStart - startX) / pixelsPerPeak) + offsetPeakIndex)
+              const lastVisiblePeak = Math.min(waveformData.length - 1, Math.ceil((visibleEnd - startX) / pixelsPerPeak) + offsetPeakIndex)
 
               // Draw waveform as a filled path
               ctx.beginPath()
 
               // Trace along the max values (left to right)
               for (let i = firstVisiblePeak; i <= lastVisiblePeak; i++) {
-                const peakX = startX + (i * pixelsPerPeak)
+                const peakX = startX + ((i - offsetPeakIndex) * pixelsPerPeak)
                 const peak = waveformData[i]
                 const maxY = centerY + (peak.max * waveformHeight * 0.5)
 
@@ -1450,7 +1484,7 @@ class TimelineWindowV2 extends Widget {
 
               // Trace back along the min values (right to left)
               for (let i = lastVisiblePeak; i >= firstVisiblePeak; i--) {
-                const peakX = startX + (i * pixelsPerPeak)
+                const peakX = startX + ((i - offsetPeakIndex) * pixelsPerPeak)
                 const peak = waveformData[i]
                 const minY = centerY + (peak.min * waveformHeight * 0.5)
                 ctx.lineTo(peakX, minY)
@@ -1460,6 +1494,58 @@ class TimelineWindowV2 extends Widget {
               ctx.fill()
             }
             }
+          }
+        }
+      } else if (track.type === 'video') {
+        // Draw video clips for VideoLayer
+        const videoLayer = track.object
+        const y = this.trackHierarchy.getTrackY(i)
+        const trackHeight = this.trackHierarchy.trackHeight  // Use base height for clips
+
+        // Draw each clip
+        for (let clip of videoLayer.clips) {
+          const startX = this.timelineState.timeToPixel(clip.startTime)
+          const endX = this.timelineState.timeToPixel(clip.startTime + clip.duration)
+          const clipWidth = endX - startX
+
+          // Video clips use purple/magenta color
+          const clipColor = '#9b59b6'  // Purple for video clips
+
+          // Draw clip rectangle
+          ctx.fillStyle = clipColor
+          ctx.fillRect(
+            startX,
+            y + 5,
+            clipWidth,
+            trackHeight - 10
+          )
+
+          // Draw border
+          ctx.strokeStyle = shadow
+          ctx.lineWidth = 1
+          ctx.strokeRect(
+            startX,
+            y + 5,
+            clipWidth,
+            trackHeight - 10
+          )
+
+          // Draw clip name if there's enough space
+          const minWidthForLabel = 40
+          if (clipWidth >= minWidthForLabel) {
+            ctx.fillStyle = labelColor
+            ctx.font = '11px sans-serif'
+            ctx.textAlign = 'left'
+            ctx.textBaseline = 'middle'
+
+            // Clip text to clip bounds
+            ctx.save()
+            ctx.beginPath()
+            ctx.rect(startX + 2, y + 5, clipWidth - 4, trackHeight - 10)
+            ctx.clip()
+
+            ctx.fillText(clip.name, startX + 4, y + trackHeight / 2)
+            ctx.restore()
           }
         }
       }
@@ -2101,6 +2187,39 @@ class TimelineWindowV2 extends Widget {
           return true
         }
 
+        // Check if clicking on audio clip edge to start trimming
+        const audioEdgeInfo = this.getAudioClipEdgeAtPoint(track, adjustedX, adjustedY)
+        if (audioEdgeInfo) {
+          // Skip if right-clicking (button 2)
+          if (this.lastClickEvent?.button === 2) {
+            return false
+          }
+
+          // Select the track
+          this.selectTrack(track)
+
+          // Start audio clip edge dragging
+          this.draggingAudioClipEdge = {
+            track: track,
+            edge: audioEdgeInfo.edge,
+            clip: audioEdgeInfo.clip,
+            clipIndex: audioEdgeInfo.clipIndex,
+            audioTrack: audioEdgeInfo.audioTrack,
+            initialClipStart: audioEdgeInfo.clip.startTime,
+            initialClipDuration: audioEdgeInfo.clip.duration,
+            initialClipOffset: audioEdgeInfo.clip.offset,
+            initialLinkedVideoOffset: audioEdgeInfo.clip.linkedVideoClip?.offset || 0
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging audio clip', audioEdgeInfo.edge, 'edge')
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
         // Check if clicking on audio clip to start dragging
         const audioClipInfo = this.getAudioClipAtPoint(track, adjustedX, adjustedY)
         if (audioClipInfo) {
@@ -2128,6 +2247,70 @@ class TimelineWindowV2 extends Widget {
           this._globalEvents.add("mouseup")
 
           console.log('Started dragging audio clip at time', audioClipInfo.clip.startTime)
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
+        // Check if clicking on video clip edge to start trimming
+        const videoEdgeInfo = this.getVideoClipEdgeAtPoint(track, adjustedX, adjustedY)
+        if (videoEdgeInfo) {
+          // Skip if right-clicking (button 2)
+          if (this.lastClickEvent?.button === 2) {
+            return false
+          }
+
+          // Select the track
+          this.selectTrack(track)
+
+          // Start video clip edge dragging
+          this.draggingVideoClipEdge = {
+            track: track,
+            edge: videoEdgeInfo.edge,
+            clip: videoEdgeInfo.clip,
+            clipIndex: videoEdgeInfo.clipIndex,
+            videoLayer: videoEdgeInfo.videoLayer,
+            initialClipStart: videoEdgeInfo.clip.startTime,
+            initialClipDuration: videoEdgeInfo.clip.duration,
+            initialClipOffset: videoEdgeInfo.clip.offset,
+            initialLinkedAudioOffset: videoEdgeInfo.clip.linkedAudioClip?.offset || 0
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging video clip', videoEdgeInfo.edge, 'edge')
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
+        // Check if clicking on video clip to start dragging
+        const videoClipInfo = this.getVideoClipAtPoint(track, adjustedX, adjustedY)
+        if (videoClipInfo) {
+          // Skip drag if right-clicking (button 2)
+          if (this.lastClickEvent?.button === 2) {
+            return false
+          }
+
+          // Select the track
+          this.selectTrack(track)
+
+          // Start video clip dragging
+          const clickTime = this.timelineState.pixelToTime(adjustedX)
+          this.draggingVideoClip = {
+            track: track,
+            clip: videoClipInfo.clip,
+            clipIndex: videoClipInfo.clipIndex,
+            videoLayer: videoClipInfo.videoLayer,
+            initialMouseTime: clickTime,
+            initialClipStartTime: videoClipInfo.clip.startTime
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging video clip at time', videoClipInfo.clip.startTime)
           if (this.requestRedraw) this.requestRedraw()
           return true
         }
@@ -2651,6 +2834,115 @@ class TimelineWindowV2 extends Widget {
           clipIndex: i,
           audioTrack: audioTrack
         }
+      }
+    }
+
+    return null
+  }
+
+  getAudioClipEdgeAtPoint(track, x, y) {
+    const clipInfo = this.getAudioClipAtPoint(track, x, y)
+    if (!clipInfo) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const edgeThreshold = 8 / this.timelineState.pixelsPerSecond  // 8 pixels in time units
+
+    const clipStart = clipInfo.clip.startTime
+    const clipEnd = clipInfo.clip.startTime + clipInfo.clip.duration
+
+    // Check if near left edge
+    if (Math.abs(clickTime - clipStart) <= edgeThreshold) {
+      return {
+        edge: 'left',
+        clip: clipInfo.clip,
+        clipIndex: clipInfo.clipIndex,
+        audioTrack: clipInfo.audioTrack,
+        clipStart: clipStart,
+        clipEnd: clipEnd
+      }
+    }
+
+    // Check if near right edge
+    if (Math.abs(clickTime - clipEnd) <= edgeThreshold) {
+      return {
+        edge: 'right',
+        clip: clipInfo.clip,
+        clipIndex: clipInfo.clipIndex,
+        audioTrack: clipInfo.audioTrack,
+        clipStart: clipStart,
+        clipEnd: clipEnd
+      }
+    }
+
+    return null
+  }
+
+  getVideoClipAtPoint(track, x, y) {
+    if (track.type !== 'video') return null
+
+    const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+    if (trackIndex === -1) return null
+
+    const trackY = this.trackHierarchy.getTrackY(trackIndex)
+    const trackHeight = this.trackHierarchy.trackHeight
+    const clipTop = trackY + 5
+    const clipBottom = trackY + trackHeight - 5
+
+    // Check if y is within clip bounds
+    if (y < clipTop || y > clipBottom) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const videoLayer = track.object
+
+    // Check each clip
+    for (let i = 0; i < videoLayer.clips.length; i++) {
+      const clip = videoLayer.clips[i]
+      const clipStart = clip.startTime
+      const clipEnd = clip.startTime + clip.duration
+
+      if (clickTime >= clipStart && clickTime <= clipEnd) {
+        return {
+          clip: clip,
+          clipIndex: i,
+          videoLayer: videoLayer
+        }
+      }
+    }
+
+    return null
+  }
+
+  getVideoClipEdgeAtPoint(track, x, y) {
+    const clipInfo = this.getVideoClipAtPoint(track, x, y)
+    if (!clipInfo) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const edgeThreshold = 8 / this.timelineState.pixelsPerSecond  // 8 pixels in time units
+
+    const clipStart = clipInfo.clip.startTime
+    const clipEnd = clipInfo.clip.startTime + clipInfo.clip.duration
+
+    // Check if near left edge
+    if (Math.abs(clickTime - clipStart) <= edgeThreshold) {
+      return {
+        edge: 'left',
+        clip: clipInfo.clip,
+        clipIndex: clipInfo.clipIndex,
+        videoLayer: clipInfo.videoLayer,
+        clipStart: clipStart,
+        clipEnd: clipEnd
+      }
+    }
+
+    // Check if near right edge
+    if (Math.abs(clickTime - clipEnd) <= edgeThreshold) {
+      return {
+        edge: 'right',
+        clip: clipInfo.clip,
+        clipIndex: clipInfo.clipIndex,
+        videoLayer: clipInfo.videoLayer,
+        clipStart: clipStart,
+        clipEnd: clipEnd
       }
     }
 
@@ -3496,6 +3788,54 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Handle audio clip edge dragging (trimming)
+    if (this.draggingAudioClipEdge) {
+      const adjustedX = x - this.trackHeaderWidth
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+      const minClipDuration = this.context.config.minClipDuration
+
+      if (this.draggingAudioClipEdge.edge === 'left') {
+        // Dragging left edge - adjust startTime and offset
+        const initialEnd = this.draggingAudioClipEdge.initialClipStart + this.draggingAudioClipEdge.initialClipDuration
+        const maxStartTime = initialEnd - minClipDuration
+        const newStartTime = Math.max(0, Math.min(newTime, maxStartTime))
+        const startTimeDelta = newStartTime - this.draggingAudioClipEdge.initialClipStart
+
+        this.draggingAudioClipEdge.clip.startTime = newStartTime
+        this.draggingAudioClipEdge.clip.offset = this.draggingAudioClipEdge.initialClipOffset + startTimeDelta
+        this.draggingAudioClipEdge.clip.duration = this.draggingAudioClipEdge.initialClipDuration - startTimeDelta
+
+        // Also trim linked video clip if it exists
+        if (this.draggingAudioClipEdge.clip.linkedVideoClip) {
+          const videoClip = this.draggingAudioClipEdge.clip.linkedVideoClip
+          videoClip.startTime = newStartTime
+          videoClip.offset = (this.draggingAudioClipEdge.initialLinkedVideoOffset || 0) + startTimeDelta
+          videoClip.duration = this.draggingAudioClipEdge.initialClipDuration - startTimeDelta
+        }
+      } else {
+        // Dragging right edge - adjust duration
+        const minEndTime = this.draggingAudioClipEdge.initialClipStart + minClipDuration
+        const newEndTime = Math.max(minEndTime, newTime)
+        let newDuration = newEndTime - this.draggingAudioClipEdge.clip.startTime
+
+        // Constrain duration to not exceed source file duration minus offset
+        const maxAvailableDuration = this.draggingAudioClipEdge.clip.sourceDuration - this.draggingAudioClipEdge.clip.offset
+        newDuration = Math.min(newDuration, maxAvailableDuration)
+
+        this.draggingAudioClipEdge.clip.duration = newDuration
+
+        // Also trim linked video clip if it exists
+        if (this.draggingAudioClipEdge.clip.linkedVideoClip) {
+          const linkedMaxDuration = this.draggingAudioClipEdge.clip.linkedVideoClip.sourceDuration - this.draggingAudioClipEdge.clip.linkedVideoClip.offset
+          this.draggingAudioClipEdge.clip.linkedVideoClip.duration = Math.min(newDuration, linkedMaxDuration)
+        }
+      }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     // Handle audio clip dragging
     if (this.draggingAudioClip) {
       // Adjust coordinates to timeline area
@@ -3509,6 +3849,83 @@ class TimelineWindowV2 extends Widget {
 
       // Update clip's start time (ensure it doesn't go negative)
       this.draggingAudioClip.clip.startTime = Math.max(0, this.draggingAudioClip.initialClipStartTime + timeDelta)
+
+      // Also move linked video clip if it exists
+      if (this.draggingAudioClip.clip.linkedVideoClip) {
+        this.draggingAudioClip.clip.linkedVideoClip.startTime = this.draggingAudioClip.clip.startTime
+      }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Handle video clip edge dragging (trimming)
+    if (this.draggingVideoClipEdge) {
+      const adjustedX = x - this.trackHeaderWidth
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+      const minClipDuration = this.context.config.minClipDuration
+
+      if (this.draggingVideoClipEdge.edge === 'left') {
+        // Dragging left edge - adjust startTime and offset
+        const initialEnd = this.draggingVideoClipEdge.initialClipStart + this.draggingVideoClipEdge.initialClipDuration
+        const maxStartTime = initialEnd - minClipDuration
+        const newStartTime = Math.max(0, Math.min(newTime, maxStartTime))
+        const startTimeDelta = newStartTime - this.draggingVideoClipEdge.initialClipStart
+
+        this.draggingVideoClipEdge.clip.startTime = newStartTime
+        this.draggingVideoClipEdge.clip.offset = this.draggingVideoClipEdge.initialClipOffset + startTimeDelta
+        this.draggingVideoClipEdge.clip.duration = this.draggingVideoClipEdge.initialClipDuration - startTimeDelta
+
+        // Also trim linked audio clip if it exists
+        if (this.draggingVideoClipEdge.clip.linkedAudioClip) {
+          const audioClip = this.draggingVideoClipEdge.clip.linkedAudioClip
+          audioClip.startTime = newStartTime
+          audioClip.offset = (this.draggingVideoClipEdge.initialLinkedAudioOffset || 0) + startTimeDelta
+          audioClip.duration = this.draggingVideoClipEdge.initialClipDuration - startTimeDelta
+        }
+      } else {
+        // Dragging right edge - adjust duration
+        const minEndTime = this.draggingVideoClipEdge.initialClipStart + minClipDuration
+        const newEndTime = Math.max(minEndTime, newTime)
+        let newDuration = newEndTime - this.draggingVideoClipEdge.clip.startTime
+
+        // Constrain duration to not exceed source file duration minus offset
+        const maxAvailableDuration = this.draggingVideoClipEdge.clip.sourceDuration - this.draggingVideoClipEdge.clip.offset
+        newDuration = Math.min(newDuration, maxAvailableDuration)
+
+        this.draggingVideoClipEdge.clip.duration = newDuration
+
+        // Also trim linked audio clip if it exists
+        if (this.draggingVideoClipEdge.clip.linkedAudioClip) {
+          const linkedMaxDuration = this.draggingVideoClipEdge.clip.linkedAudioClip.sourceDuration - this.draggingVideoClipEdge.clip.linkedAudioClip.offset
+          this.draggingVideoClipEdge.clip.linkedAudioClip.duration = Math.min(newDuration, linkedMaxDuration)
+        }
+      }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Handle video clip dragging
+    if (this.draggingVideoClip) {
+      // Adjust coordinates to timeline area
+      const adjustedX = x - this.trackHeaderWidth
+
+      // Convert mouse position to time
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+
+      // Calculate time delta
+      const timeDelta = newTime - this.draggingVideoClip.initialMouseTime
+
+      // Update clip's start time (ensure it doesn't go negative)
+      this.draggingVideoClip.clip.startTime = Math.max(0, this.draggingVideoClip.initialClipStartTime + timeDelta)
+
+      // Also move linked audio clip if it exists
+      if (this.draggingVideoClip.clip.linkedAudioClip) {
+        this.draggingVideoClip.clip.linkedAudioClip.startTime = this.draggingVideoClip.clip.startTime
+      }
 
       // Trigger timeline redraw
       if (this.requestRedraw) this.requestRedraw()
@@ -3567,6 +3984,39 @@ class TimelineWindowV2 extends Widget {
       // Trigger timeline redraw
       if (this.requestRedraw) this.requestRedraw()
       return true
+    }
+
+    // Update cursor based on hover position (when not dragging)
+    if (!this.draggingAudioClip && !this.draggingVideoClip &&
+        !this.draggingAudioClipEdge && !this.draggingVideoClipEdge &&
+        !this.draggingKeyframe && !this.draggingPlayhead && !this.draggingSegment) {
+      const trackY = y - this.ruler.height
+      if (trackY >= 0 && x >= this.trackHeaderWidth) {
+        const adjustedY = trackY - this.trackScrollOffset
+        const adjustedX = x - this.trackHeaderWidth
+        const track = this.trackHierarchy.getTrackAtY(adjustedY)
+
+        if (track) {
+          // Check for audio clip edge
+          if (track.type === 'audio') {
+            const audioEdgeInfo = this.getAudioClipEdgeAtPoint(track, adjustedX, adjustedY)
+            if (audioEdgeInfo) {
+              this.cursor = audioEdgeInfo.edge === 'left' ? 'w-resize' : 'e-resize'
+              return false
+            }
+          }
+          // Check for video clip edge
+          else if (track.type === 'video') {
+            const videoEdgeInfo = this.getVideoClipEdgeAtPoint(track, adjustedX, adjustedY)
+            if (videoEdgeInfo) {
+              this.cursor = videoEdgeInfo.edge === 'left' ? 'w-resize' : 'e-resize'
+              return false
+            }
+          }
+        }
+      }
+      // Reset cursor if not over an edge
+      this.cursor = 'default'
     }
 
     return false
@@ -3631,6 +4081,67 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Complete audio clip edge dragging (trimming)
+    if (this.draggingAudioClipEdge) {
+      console.log('Finished trimming audio clip edge')
+
+      // Update backend with new clip trim
+      invoke('audio_trim_clip', {
+        trackId: this.draggingAudioClipEdge.audioTrack.audioTrackId,
+        clipId: this.draggingAudioClipEdge.clip.clipId,
+        newStartTime: this.draggingAudioClipEdge.clip.startTime,
+        newDuration: this.draggingAudioClipEdge.clip.duration,
+        newOffset: this.draggingAudioClipEdge.clip.offset
+      }).catch(error => {
+        console.error('Failed to trim audio clip in backend:', error)
+      })
+
+      // Also update linked video clip if it exists
+      if (this.draggingAudioClipEdge.clip.linkedVideoClip) {
+        console.log('Linked video clip also trimmed')
+      }
+
+      // Clean up dragging state
+      this.draggingAudioClipEdge = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Complete video clip edge dragging (trimming)
+    if (this.draggingVideoClipEdge) {
+      console.log('Finished trimming video clip edge')
+
+      // Update linked audio clip in backend if it exists
+      if (this.draggingVideoClipEdge.clip.linkedAudioClip) {
+        const linkedAudioClip = this.draggingVideoClipEdge.clip.linkedAudioClip
+        const audioTrack = this.draggingVideoClipEdge.videoLayer.linkedAudioTrack
+        if (audioTrack) {
+          invoke('audio_trim_clip', {
+            trackId: audioTrack.audioTrackId,
+            clipId: linkedAudioClip.clipId,
+            newStartTime: linkedAudioClip.startTime,
+            newDuration: linkedAudioClip.duration,
+            newOffset: linkedAudioClip.offset
+          }).catch(error => {
+            console.error('Failed to trim linked audio clip in backend:', error)
+          })
+        }
+      }
+
+      // Clean up dragging state
+      this.draggingVideoClipEdge = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     // Complete audio clip dragging
     if (this.draggingAudioClip) {
       console.log('Finished dragging audio clip')
@@ -3644,8 +4155,45 @@ class TimelineWindowV2 extends Widget {
         console.error('Failed to move clip in backend:', error)
       })
 
+      // Also update linked video clip in backend if it exists
+      if (this.draggingAudioClip.clip.linkedVideoClip) {
+        // Video clips don't have a backend move command yet, so just log for now
+        console.log('Linked video clip also moved to time', this.draggingAudioClip.clip.startTime)
+      }
+
       // Clean up dragging state
       this.draggingAudioClip = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Complete video clip dragging
+    if (this.draggingVideoClip) {
+      console.log('Finished dragging video clip')
+
+      // Video clips don't have a backend position yet (they're just visual)
+      // But we need to update the linked audio clip in the backend
+      if (this.draggingVideoClip.clip.linkedAudioClip) {
+        const linkedAudioClip = this.draggingVideoClip.clip.linkedAudioClip
+        // Find the audio track that contains this clip
+        const audioTrack = this.draggingVideoClip.videoLayer.linkedAudioTrack
+        if (audioTrack) {
+          invoke('audio_move_clip', {
+            trackId: audioTrack.audioTrackId,
+            clipId: linkedAudioClip.clipId,
+            newStartTime: linkedAudioClip.startTime
+          }).catch(error => {
+            console.error('Failed to move linked audio clip in backend:', error)
+          })
+        }
+      }
+
+      // Clean up dragging state
+      this.draggingVideoClip = null
       this._globalEvents.delete("mousemove")
       this._globalEvents.delete("mouseup")
 

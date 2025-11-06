@@ -571,9 +571,12 @@ class TrackHierarchy {
 
     // Iterate through layers (GraphicsObject.children are Layers)
     for (let layer of graphicsObject.children) {
+      // Determine layer type - check if it's a VideoLayer
+      const layerType = layer.type === 'video' ? 'video' : 'layer'
+
       // Add layer track
       const layerTrack = {
-        type: 'layer',
+        type: layerType,
         object: layer,
         name: layer.name || 'Layer',
         indent: 0,

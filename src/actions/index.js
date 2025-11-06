@@ -12,7 +12,7 @@ import {
   Frame
 } from '../models/animation.js';
 import { GraphicsObject } from '../models/graphics-object.js';
-import { Layer, AudioTrack } from '../models/layer.js';
+import { VectorLayer, AudioTrack, VideoLayer } from '../models/layer.js';
 import {
   arraysAreEqual,
   lerp,
@@ -161,6 +161,7 @@ let redoStack = null;
 let updateMenu = null;
 let updateLayers = null;
 let updateUI = null;
+let updateVideoFrames = null;
 let updateInfopanel = null;
 let invoke = null;
 let config = null;
@@ -186,6 +187,7 @@ export function initializeActions(deps) {
   updateMenu = deps.updateMenu;
   updateLayers = deps.updateLayers;
   updateUI = deps.updateUI;
+  updateVideoFrames = deps.updateVideoFrames;
   updateInfopanel = deps.updateInfopanel;
   invoke = deps.invoke;
   config = deps.config;
@@ -587,6 +589,147 @@ export const actions = {
       }
     },
   },
+  addVideo: {
+    create: (filePath, object, videoname) => {
+      redoStack.length = 0;
+      let action = {
+        filePath: filePath,
+        videoname: videoname,
+        layeruuid: uuidv4(),
+        object: object.idx,
+      };
+      undoStack.push({ name: "addVideo", action: action });
+      actions.addVideo.execute(action);
+      updateMenu();
+    },
+    execute: async (action) => {
+      // Create new VideoLayer
+      let newVideoLayer = new VideoLayer(action.layeruuid, action.videoname);
+      let object = pointerList[action.object];
+
+      // Add layer to object
+      object.layers.push(newVideoLayer);
+
+      // Update UI
+      updateLayers();
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw();
+      }
+
+      // Load video asynchronously
+      try {
+        const metadata = await invoke('video_load_file', {
+          path: action.filePath
+        });
+
+        // Add clip to video layer
+        await newVideoLayer.addClip(
+          metadata.pool_index,
+          0, // startTime
+          metadata.duration,
+          0, // offset
+          action.videoname,
+          metadata.duration // sourceDuration
+        );
+
+        // If video has audio, create linked AudioTrack
+        if (metadata.has_audio && metadata.audio_pool_index !== null) {
+          const audioTrackUuid = uuidv4();
+          const audioTrackName = `${action.videoname} (Audio)`;
+          const newAudioTrack = new AudioTrack(audioTrackUuid, audioTrackName);
+
+          // Initialize track in backend
+          await newAudioTrack.initializeTrack();
+
+          // Add audio clip using the extracted audio
+          const audioClipId = newAudioTrack.clips.length;
+          await invoke('audio_add_clip', {
+            trackId: newAudioTrack.audioTrackId,
+            poolIndex: metadata.audio_pool_index,
+            startTime: 0,
+            duration: metadata.audio_duration,
+            offset: 0
+          });
+
+          const audioClip = {
+            clipId: audioClipId,
+            poolIndex: metadata.audio_pool_index,
+            name: audioTrackName,
+            startTime: 0,
+            duration: metadata.audio_duration,
+            offset: 0,
+            waveform: metadata.audio_waveform,
+            sourceDuration: metadata.audio_duration
+          };
+          newAudioTrack.clips.push(audioClip);
+
+          // Link the clips to each other
+          const videoClip = newVideoLayer.clips[0];  // The video clip we just added
+          if (videoClip) {
+            videoClip.linkedAudioClip = audioClip;
+            audioClip.linkedVideoClip = videoClip;
+          }
+
+          // Also keep track-level references for convenience
+          newVideoLayer.linkedAudioTrack = newAudioTrack;
+          newAudioTrack.linkedVideoLayer = newVideoLayer;
+
+          // Add audio track to object
+          object.audioTracks.push(newAudioTrack);
+
+          // Store reference for rollback
+          action.audioTrackUuid = audioTrackUuid;
+
+          console.log(`Video audio extracted: ${metadata.audio_duration}s, ${metadata.audio_sample_rate}Hz, ${metadata.audio_channels}ch`);
+        }
+
+        // Update UI with real clip data
+        updateLayers();
+        if (context.timelineWidget) {
+          context.timelineWidget.requestRedraw();
+        }
+
+        // Make this the active layer
+        if (context.activeObject) {
+          context.activeObject.activeLayer = newVideoLayer;
+          updateLayers();
+        }
+
+        // Fetch first frame
+        if (updateVideoFrames) {
+          await updateVideoFrames(context.activeObject.currentTime || 0);
+        }
+
+        // Trigger redraw to show the first frame
+        updateUI();
+
+        console.log(`Video loaded: ${action.videoname}, ${metadata.width}x${metadata.height}, ${metadata.duration}s`);
+      } catch (error) {
+        console.error('Failed to load video:', error);
+      }
+    },
+    rollback: (action) => {
+      let object = pointerList[action.object];
+      let layer = pointerList[action.layeruuid];
+      object.layers.splice(object.layers.indexOf(layer), 1);
+
+      // Remove linked audio track if it was created
+      if (action.audioTrackUuid) {
+        let audioTrack = pointerList[action.audioTrackUuid];
+        if (audioTrack) {
+          const index = object.audioTracks.indexOf(audioTrack);
+          if (index !== -1) {
+            object.audioTracks.splice(index, 1);
+          }
+        }
+      }
+
+      updateLayers();
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw();
+      }
+    },
+  },
   addMIDI: {
     create: (filePath, object, midiname) => {
       redoStack.length = 0;
@@ -832,8 +975,8 @@ export const actions = {
     },
     execute: (action) => {
       let object = pointerList[action.object];
-      let layer = new Layer(action.uuid);
-      layer.name = `Layer ${object.layers.length + 1}`;
+      let layer = new VectorLayer(action.uuid);
+      layer.name = `VectorLayer ${object.layers.length + 1}`;
       object.layers.push(layer);
       object.currentLayer = object.layers.indexOf(layer);
       updateLayers();
@@ -854,7 +997,7 @@ export const actions = {
       redoStack.length = 0;
       // Don't allow deleting the only layer
       if (context.activeObject.layers.length == 1) return;
-      if (!(layer instanceof Layer)) {
+      if (!(layer instanceof VectorLayer)) {
         layer = context.activeObject.activeLayer;
       }
       let action = {
@@ -929,8 +1072,8 @@ export const actions = {
           let object = GraphicsObject.fromJSON(action.object);
           activeObject.addObject(object);
           break;
-        case "Layer":
-          let layer = Layer.fromJSON(action.object);
+        case "VectorLayer":
+          let layer = VectorLayer.fromJSON(action.object);
           activeObject.addLayer(layer);
       }
       updateUI();
@@ -943,7 +1086,7 @@ export const actions = {
           let object = pointerList[action.object.idx];
           activeObject.removeChild(object);
           break;
-        case "Layer":
+        case "VectorLayer":
           let layer = pointerList[action.object.idx];
           activeObject.removeLayer(layer);
       }

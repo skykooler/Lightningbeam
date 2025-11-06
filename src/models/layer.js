@@ -1245,4 +1245,269 @@ class AudioTrack {
   }
 }
 
-export { VectorLayer, AudioTrack };
+class VideoLayer extends Widget {
+  constructor(uuid, name) {
+    super(0, 0);
+    if (!uuid) {
+      this.idx = uuidv4();
+    } else {
+      this.idx = uuid;
+    }
+    this.name = name || "Video";
+    this.type = 'video';
+    this.visible = true;
+    this.audible = true;
+    this.animationData = new AnimationData(this);
+
+    // Empty arrays for layer compatibility
+    Object.defineProperty(this, 'shapes', {
+      value: Object.freeze([]),
+      writable: false,
+      enumerable: true,
+      configurable: false
+    });
+    Object.defineProperty(this, 'children', {
+      value: Object.freeze([]),
+      writable: false,
+      enumerable: true,
+      configurable: false
+    });
+
+    // Video clips on this layer
+    // { clipId, poolIndex, name, startTime, duration, offset, width, height }
+    this.clips = [];
+
+    // Associated audio track (if video has audio)
+    this.linkedAudioTrack = null;  // Reference to AudioTrack
+
+    // Timeline display
+    this.collapsed = false;
+    this.curvesMode = 'segment';
+    this.curvesHeight = 150;
+
+    pointerList[this.idx] = this;
+  }
+
+  async addClip(poolIndex, startTime, duration, offset = 0.0, name = '', sourceDuration = null) {
+    const poolInfo = await invoke('video_get_pool_info', { poolIndex });
+    // poolInfo is [width, height, fps] tuple from Rust
+    const [width, height, fps] = poolInfo;
+
+    this.clips.push({
+      clipId: this.clips.length,
+      poolIndex,
+      name: name || `Video ${this.clips.length + 1}`,
+      startTime,
+      duration,
+      offset,
+      width,
+      height,
+      sourceDuration: sourceDuration || duration  // Store original file duration
+    });
+
+    console.log(`Video clip added: ${name}, ${width}x${height}, duration: ${duration}s`);
+  }
+
+  // Pre-fetch frames for current time (call before draw)
+  async updateFrame(currentTime) {
+    // Prevent concurrent calls - if already updating, skip
+    if (this.updateInProgress) {
+      return;
+    }
+    this.updateInProgress = true;
+
+    try {
+      for (let clip of this.clips) {
+        // Check if clip is active at current time
+        if (currentTime < clip.startTime ||
+            currentTime >= clip.startTime + clip.duration) {
+          clip.currentFrame = null;
+          continue;
+        }
+
+        // Calculate video timestamp from clip time
+        const clipTime = currentTime - clip.startTime;
+        const videoTimestamp = clip.offset + clipTime;
+
+        // Only fetch if timestamp changed
+        if (clip.lastFetchedTimestamp === videoTimestamp && clip.currentFrame) {
+          continue;
+        }
+
+        // Skip if already fetching this frame
+        if (clip.fetchInProgress === videoTimestamp) {
+          continue;
+        }
+
+        clip.fetchInProgress = videoTimestamp;
+        clip.lastFetchedTimestamp = videoTimestamp;
+
+        try {
+          // Request frame from Rust backend
+          const t_start = performance.now();
+          let frameData = await invoke('video_get_frame', {
+            poolIndex: clip.poolIndex,
+            timestamp: videoTimestamp
+          });
+          const t_after_ipc = performance.now();
+
+          // Handle different formats that Tauri might return
+          // ByteBuf from Rust can come as Uint8Array or Array depending on serialization
+          if (!(frameData instanceof Uint8Array)) {
+            frameData = new Uint8Array(frameData);
+          }
+
+          // Validate frame data size
+          const expectedSize = clip.width * clip.height * 4; // RGBA = 4 bytes per pixel
+
+          if (frameData.length !== expectedSize) {
+            throw new Error(`Invalid frame data size: got ${frameData.length}, expected ${expectedSize}`);
+          }
+
+          // Convert to ImageData
+          const t_before_conversion = performance.now();
+          const imageData = new ImageData(
+            new Uint8ClampedArray(frameData),
+            clip.width,
+            clip.height
+          );
+          const t_after_conversion = performance.now();
+
+          // Create or reuse temp canvas
+          if (!clip.frameCanvas) {
+            clip.frameCanvas = document.createElement('canvas');
+            clip.frameCanvas.width = clip.width;
+            clip.frameCanvas.height = clip.height;
+          }
+
+          const tempCtx = clip.frameCanvas.getContext('2d');
+          const t_before_putimage = performance.now();
+          tempCtx.putImageData(imageData, 0, 0);
+          const t_after_putimage = performance.now();
+
+          clip.currentFrame = clip.frameCanvas;
+
+          // Log detailed timing breakdown
+          const total_time = t_after_putimage - t_start;
+          const ipc_time = t_after_ipc - t_start;
+          const conversion_time = t_after_conversion - t_before_conversion;
+          const putimage_time = t_after_putimage - t_before_putimage;
+
+          console.log(`[JS Video Timing] ts=${videoTimestamp.toFixed(3)}s | Total: ${total_time.toFixed(1)}ms | IPC: ${ipc_time.toFixed(1)}ms (${(ipc_time/total_time*100).toFixed(0)}%) | Convert: ${conversion_time.toFixed(1)}ms | PutImage: ${putimage_time.toFixed(1)}ms | Size: ${(frameData.length/1024/1024).toFixed(2)}MB`);
+        } catch (error) {
+          console.error('Failed to get video frame:', error);
+          clip.currentFrame = null;
+        } finally {
+          clip.fetchInProgress = null;
+        }
+      }
+    } finally {
+      this.updateInProgress = false;
+    }
+  }
+
+  // Draw cached frames (synchronous)
+  draw(cxt, currentTime) {
+    if (!this.visible) {
+      return;
+    }
+
+    const ctx = cxt.ctx || cxt;
+
+    // Use currentTime from context if not provided
+    if (currentTime === undefined) {
+      currentTime = cxt.activeObject?.currentTime || 0;
+    }
+
+    for (let clip of this.clips) {
+      // Check if clip is active at current time
+      if (currentTime < clip.startTime ||
+          currentTime >= clip.startTime + clip.duration) {
+        continue;
+      }
+
+      // Draw cached frame if available
+      if (clip.currentFrame) {
+        try {
+          // Scale to fit canvas while maintaining aspect ratio
+          const canvasWidth = config.fileWidth;
+          const canvasHeight = config.fileHeight;
+          const scale = Math.min(
+            canvasWidth / clip.width,
+            canvasHeight / clip.height
+          );
+          const scaledWidth = clip.width * scale;
+          const scaledHeight = clip.height * scale;
+          const x = (canvasWidth - scaledWidth) / 2;
+          const y = (canvasHeight - scaledHeight) / 2;
+
+          ctx.drawImage(clip.currentFrame, x, y, scaledWidth, scaledHeight);
+        } catch (error) {
+          console.error('Failed to draw video frame:', error);
+        }
+      } else {
+        // Draw placeholder if frame not loaded yet
+        ctx.save();
+        ctx.fillStyle = '#333333';
+        ctx.fillRect(0, 0, config.fileWidth, config.fileHeight);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Loading...', config.fileWidth / 2, config.fileHeight / 2);
+        ctx.restore();
+      }
+    }
+  }
+
+  static fromJSON(json) {
+    const videoLayer = new VideoLayer(json.idx, json.name);
+
+    if (json.animationData) {
+      videoLayer.animationData = AnimationData.fromJSON(json.animationData, videoLayer);
+    }
+
+    if (json.clips) {
+      videoLayer.clips = json.clips;
+    }
+
+    if (json.linkedAudioTrack) {
+      // Will be resolved after all objects are loaded
+      videoLayer.linkedAudioTrack = json.linkedAudioTrack;
+    }
+
+    videoLayer.visible = json.visible;
+    videoLayer.audible = json.audible;
+
+    return videoLayer;
+  }
+
+  toJSON(randomizeUuid = false) {
+    return {
+      type: "VideoLayer",
+      idx: randomizeUuid ? uuidv4() : this.idx,
+      name: randomizeUuid ? this.name + " copy" : this.name,
+      visible: this.visible,
+      audible: this.audible,
+      animationData: this.animationData.toJSON(),
+      clips: this.clips,
+      linkedAudioTrack: this.linkedAudioTrack?.idx
+    };
+  }
+
+  copy(idx) {
+    const json = this.toJSON(true);
+    json.idx = idx.slice(0, 8) + this.idx.slice(8);
+    return VideoLayer.fromJSON(json);
+  }
+
+  // Compatibility methods for layer interface
+  bbox() {
+    return {
+      x: { min: 0, max: config.fileWidth },
+      y: { min: 0, max: config.fileHeight }
+    };
+  }
+}
+
+export { VectorLayer, AudioTrack, VideoLayer };
