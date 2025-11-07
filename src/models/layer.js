@@ -1334,15 +1334,15 @@ class VideoLayer extends Widget {
   async _createVideoElement(clip) {
     // Create hidden video element for hardware-accelerated decoding
     const video = document.createElement('video');
-    // DEBUG: Make video visible on top of everything
+    // Hide video element using opacity (browsers may skip decoding if off-screen)
     video.style.position = 'fixed';
-    video.style.top = '10px';
-    video.style.right = '10px';
-    video.style.width = '400px';
-    video.style.height = '225px';
-    video.style.zIndex = '99999';
-    video.style.border = '3px solid red';
-    video.controls = true;  // DEBUG: Add controls
+    video.style.bottom = '0';
+    video.style.right = '0';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.opacity = '0.01';  // Nearly invisible but not 0 (some browsers optimize opacity:0)
+    video.style.pointerEvents = 'none';
+    video.style.zIndex = '-1';
     video.preload = 'auto';
     video.muted = true;  // Mute video element (audio plays separately)
     video.playsInline = true;
@@ -1469,7 +1469,8 @@ class VideoLayer extends Widget {
             if (!clip.isPlaying) {
               // Start playing one frame ahead to compensate for canvas drawing lag
               const frameDuration = 1 / (clip.fps || 30); // Use clip's actual framerate
-              const startTime = videoTime + frameDuration;
+              const maxVideoTime = clip.sourceDuration - frameDuration; // Don't seek past end
+              const startTime = Math.min(videoTime + frameDuration, maxVideoTime);
               console.log(`[Video updateFrame] Starting playback at ${startTime.toFixed(3)}s (compensated by ${frameDuration.toFixed(3)}s for ${clip.fps}fps)`);
               clip.videoElement.currentTime = startTime;
               clip.videoElement.play().catch(e => console.error('Failed to play video:', e));
