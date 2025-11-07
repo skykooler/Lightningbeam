@@ -72,7 +72,6 @@
         }
       ]
     },
-    "dialog:default",
-    "log:default"
+    "dialog:default"
   ]
 }

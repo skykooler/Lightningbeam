@@ -876,3 +876,46 @@ pub async fn video_get_frames_batch(
 
     Ok(())
 }
+
+/// Stream a decoded video frame over WebSocket (zero-copy performance testing)
+#[tauri::command]
+pub async fn video_stream_frame(
+    video_state: tauri::State<'_, Arc<Mutex<VideoState>>>,
+    frame_streamer: tauri::State<'_, Arc<Mutex<crate::frame_streamer::FrameStreamer>>>,
+    pool_index: usize,
+    timestamp: f64,
+) -> Result<(), String> {
+    use std::time::Instant;
+    let t_start = Instant::now();
+
+    // Get decoder
+    let state = video_state.lock().unwrap();
+    let decoder = state.pool.get(pool_index)
+        .ok_or("Invalid pool index")?
+        .clone();
+    drop(state);
+
+    // Decode frame
+    let mut decoder = decoder.lock().unwrap();
+    let width = decoder.output_width;
+    let height = decoder.output_height;
+
+    let t_decode_start = Instant::now();
+    let rgba_data = decoder.get_frame(timestamp)?;  // Note: get_frame returns RGBA, not RGB
+    let t_decode = t_decode_start.elapsed().as_micros();
+    drop(decoder);
+
+    // Stream over WebSocket
+    let t_stream_start = Instant::now();
+    let streamer = frame_streamer.lock().unwrap();
+    streamer.send_frame(pool_index, timestamp, width, height, &rgba_data);
+    let t_stream = t_stream_start.elapsed().as_micros();
+    drop(streamer);
+
+    // Commented out per-frame logging
+    // let t_total = t_start.elapsed().as_micros();
+    // eprintln!("[Video Stream] Frame {}x{} @ {:.2}s | Decode: {}μs | Stream: {}μs | Total: {}μs",
+    //     width, height, timestamp, t_decode, t_stream, t_total);
+
+    Ok(())
+}

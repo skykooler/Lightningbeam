@@ -1,14 +1,12 @@
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 
-use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
-use tracing_subscriber::EnvFilter;
-use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 mod audio;
 mod video;
 mod video_server;
+mod frame_streamer;
 
 
 #[derive(Default)]
@@ -41,6 +39,14 @@ fn warn(msg: String) {
 #[tauri::command]
 fn error(msg: String) {
   error!("{}",msg);
+}
+
+#[tauri::command]
+fn get_frame_streamer_port(
+    frame_streamer: tauri::State<'_, Arc<Mutex<frame_streamer::FrameStreamer>>>,
+) -> u16 {
+    let streamer = frame_streamer.lock().unwrap();
+    streamer.port()
 }
 
 use tauri::PhysicalSize;
@@ -128,17 +134,27 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let pkg_name = env!("CARGO_PKG_NAME").to_string();
+    // Initialize env_logger with Error level only
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Error)
+        .init();
+
     // Initialize video HTTP server
     let video_server = video_server::VideoServer::new()
         .expect("Failed to start video server");
     eprintln!("[App] Video server started on port {}", video_server.port());
+
+    // Initialize WebSocket frame streamer
+    let frame_streamer = frame_streamer::FrameStreamer::new()
+        .expect("Failed to start frame streamer");
+    eprintln!("[App] Frame streamer started on port {}", frame_streamer.port());
 
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
       .manage(Arc::new(Mutex::new(audio::AudioState::default())))
       .manage(Arc::new(Mutex::new(video::VideoState::default())))
       .manage(Arc::new(Mutex::new(video_server)))
+      .manage(Arc::new(Mutex::new(frame_streamer)))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -174,34 +190,38 @@ pub fn run() {
         }
         Ok(())
       })
-      .plugin(
-          tauri_plugin_log::Builder::new()
-              .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-              .format(|out, message, record| {
-                  let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                  out.finish(format_args!(
-                      "{}[{}] {}",
-                      date,
-                      record.level(),
-                      message
-                    ))
-                })
-              .targets([
-                  Target::new(TargetKind::Stdout),
-                  // LogDir locations:
-                  // Linux: /home/user/.local/share/org.lightningbeam.core/logs
-                  // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
-                  // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
-                  Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
-                  Target::new(TargetKind::Webview),
-              ])
-              .build()
-      )
+      // .plugin(
+      //     tauri_plugin_log::Builder::new()
+      //         .filter(|metadata| {
+      //             // ONLY allow Error-level logs, block everything else
+      //             metadata.level() == log::Level::Error
+      //         })
+      //         .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+      //         .format(|out, message, record| {
+      //             let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+      //             out.finish(format_args!(
+      //                 "{}[{}] {}",
+      //                 date,
+      //                 record.level(),
+      //                 message
+      //               ))
+      //           })
+      //         .targets([
+      //             Target::new(TargetKind::Stdout),
+      //             // LogDir locations:
+      //             // Linux: /home/user/.local/share/org.lightningbeam.core/logs
+      //             // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
+      //             // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
+      //             Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
+      //             Target::new(TargetKind::Webview),
+      //         ])
+      //         .build()
+      // )
       .plugin(tauri_plugin_dialog::init())
       .plugin(tauri_plugin_fs::init())
       .plugin(tauri_plugin_shell::init())
       .invoke_handler(tauri::generate_handler![
-        greet, trace, debug, info, warn, error, create_window,
+        greet, trace, debug, info, warn, error, create_window, get_frame_streamer_port,
         audio::audio_init,
         audio::audio_reset,
         audio::audio_play,
@@ -263,6 +283,7 @@ pub fn run() {
         video::video_load_file,
         video::video_get_frame,
         video::video_get_frames_batch,
+        video::video_stream_frame,
         video::video_set_cache_size,
         video::video_get_pool_info,
         video::video_ipc_benchmark,
@@ -295,5 +316,4 @@ pub fn run() {
           }
         },
       );
-    tracing_subscriber::fmt().with_env_filter(EnvFilter::new(format!("{}=trace", pkg_name))).init();
 }
