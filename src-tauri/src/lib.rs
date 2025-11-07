@@ -7,6 +7,8 @@ use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 mod audio;
+mod video;
+mod video_server;
 
 
 #[derive(Default)]
@@ -127,9 +129,16 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pkg_name = env!("CARGO_PKG_NAME").to_string();
+    // Initialize video HTTP server
+    let video_server = video_server::VideoServer::new()
+        .expect("Failed to start video server");
+    eprintln!("[App] Video server started on port {}", video_server.port());
+
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
       .manage(Arc::new(Mutex::new(audio::AudioState::default())))
+      .manage(Arc::new(Mutex::new(video::VideoState::default())))
+      .manage(Arc::new(Mutex::new(video_server)))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -205,6 +214,7 @@ pub fn run() {
         audio::audio_load_file,
         audio::audio_add_clip,
         audio::audio_move_clip,
+        audio::audio_trim_clip,
         audio::audio_start_recording,
         audio::audio_stop_recording,
         audio::audio_pause_recording,
@@ -251,6 +261,14 @@ pub fn run() {
         audio::audio_resolve_missing_file,
         audio::audio_serialize_track_graph,
         audio::audio_load_track_graph,
+        video::video_load_file,
+        video::video_get_frame,
+        video::video_get_frames_batch,
+        video::video_set_cache_size,
+        video::video_get_pool_info,
+        video::video_ipc_benchmark,
+        video::video_get_transcode_status,
+        video::video_allow_asset,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())

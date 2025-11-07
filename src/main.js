@@ -93,8 +93,9 @@ import {
   AnimationData
 } from "./models/animation.js";
 import {
-  Layer,
+  VectorLayer,
   AudioTrack,
+  VideoLayer,
   initializeLayerDependencies
 } from "./models/layer.js";
 import {
@@ -135,6 +136,7 @@ const { getVersion } = window.__TAURI__.app;
 // Supported file extensions
 const imageExtensions = ["png", "gif", "avif", "jpg", "jpeg"];
 const audioExtensions = ["mp3", "wav", "aiff", "ogg", "flac"];
+const videoExtensions = ["mp4", "mov", "avi", "mkv", "webm", "m4v"];
 const midiExtensions = ["mid", "midi"];
 const beamExtensions = ["beam"];
 
@@ -218,7 +220,6 @@ let fileExportPath = undefined;
 
 let state = "normal";
 
-let playing = false;
 let lastFrameTime;
 
 let uiDirty = false;
@@ -343,6 +344,66 @@ let mouseEvent;
 window.context = context;
 window.actions = actions;
 window.addKeyframeAtPlayhead = addKeyframeAtPlayhead;
+window.updateVideoFrames = null; // Will be set after function is defined
+
+// IPC Benchmark function - run from console: testIPCBenchmark()
+window.testIPCBenchmark = async function() {
+  const { invoke, Channel } = window.__TAURI__.core;
+
+  // Test sizes: 1KB, 10KB, 50KB, 100KB, 500KB, 1MB, 2MB, 5MB
+  const testSizes = [
+    1024,           // 1 KB
+    10 * 1024,      // 10 KB
+    50 * 1024,      // 50 KB
+    100 * 1024,     // 100 KB
+    500 * 1024,     // 500 KB
+    1024 * 1024,    // 1 MB
+    2 * 1024 * 1024,  // 2 MB
+    5 * 1024 * 1024   // 5 MB
+  ];
+
+  console.log('\n=== IPC Benchmark Starting ===\n');
+  console.log('Size (KB)\tJS Total (ms)\tJS IPC (ms)\tJS Recv (ms)\tThroughput (MB/s)');
+  console.log('─'.repeat(80));
+
+  for (const sizeBytes of testSizes) {
+    const t_start = performance.now();
+
+    let receivedData = null;
+    const dataPromise = new Promise((resolve, reject) => {
+      const channel = new Channel();
+
+      channel.onmessage = (data) => {
+        const t_recv_start = performance.now();
+        receivedData = data;
+        const t_recv_end = performance.now();
+        resolve(t_recv_end - t_recv_start);
+      };
+
+      invoke('video_ipc_benchmark', {
+        sizeBytes: sizeBytes,
+        channel: channel
+      }).catch(reject);
+    });
+
+    const recv_time = await dataPromise;
+    const t_after_ipc = performance.now();
+
+    const total_time = t_after_ipc - t_start;
+    const ipc_time = total_time - recv_time;
+    const size_kb = sizeBytes / 1024;
+    const size_mb = sizeBytes / (1024 * 1024);
+    const throughput = size_mb / (total_time / 1000);
+
+    console.log(`${size_kb.toFixed(0)}\t\t${total_time.toFixed(2)}\t\t${ipc_time.toFixed(2)}\t\t${recv_time.toFixed(2)}\t\t${throughput.toFixed(2)}`);
+
+    // Small delay between tests
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  console.log('\n=== IPC Benchmark Complete ===\n');
+  console.log('Run again with: testIPCBenchmark()');
+};
 
 function uuidv4() {
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
@@ -638,7 +699,7 @@ function redo() {
 // ============================================================================
 
 // ============================================================================
-// Layer system classes (Layer, AudioTrack)
+// Layer system classes (VectorLayer, AudioTrack, VideoLayer)
 // have been moved to src/models/layer.js and are imported at the top of this file
 // ============================================================================
 
@@ -904,8 +965,8 @@ window.addEventListener("keydown", (e) => {
 });
 
 async function playPause() {
-  playing = !playing;
-  if (playing) {
+  context.playing = !context.playing;
+  if (context.playing) {
     // Reset to start if we're at the end
     const duration = context.activeObject.duration;
     if (duration > 0 && context.activeObject.currentTime >= duration) {
@@ -963,8 +1024,8 @@ async function playPause() {
 
   // Update play/pause button appearance if it exists
   if (context.playPauseButton) {
-    context.playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
-    context.playPauseButton.title = playing ? "Pause" : "Play";
+    context.playPauseButton.className = context.playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    context.playPauseButton.title = context.playing ? "Pause" : "Play";
   }
 }
 
@@ -977,7 +1038,7 @@ function playbackLoop() {
     context.timelineWidget.requestRedraw();
   }
 
-  if (playing) {
+  if (context.playing) {
     const duration = context.activeObject.duration;
 
     // Check if we've reached the end (but allow infinite playback when recording)
@@ -986,7 +1047,7 @@ function playbackLoop() {
       requestAnimationFrame(playbackLoop);
     } else {
       // Animation finished
-      playing = false;
+      context.playing = false;
 
       // Stop DAW backend audio playback
       invoke('audio_stop').catch(error => {
@@ -1009,6 +1070,38 @@ function playbackLoop() {
   }
 }
 
+// Update video frames for all VideoLayers in the scene
+async function updateVideoFrames(currentTime) {
+  // Recursively find all VideoLayers in the scene
+  function findVideoLayers(obj) {
+    const videoLayers = [];
+    if (obj.layers) {
+      for (let layer of obj.layers) {
+        if (layer.type === 'video') {
+          videoLayers.push(layer);
+        }
+      }
+    }
+    // Recursively check children (GraphicsObjects can contain other GraphicsObjects)
+    if (obj.children) {
+      for (let child of obj.children) {
+        videoLayers.push(...findVideoLayers(child));
+      }
+    }
+    return videoLayers;
+  }
+
+  const videoLayers = findVideoLayers(context.activeObject);
+
+  // Update all video layers in parallel
+  await Promise.all(videoLayers.map(layer => layer.updateFrame(currentTime)));
+
+  // Note: No updateUI() call here - renderUI() will draw after awaiting this function
+}
+
+// Expose updateVideoFrames globally
+window.updateVideoFrames = updateVideoFrames;
+
 // Single-step forward by one frame/second
 function advance() {
   if (context.timelineWidget?.timelineState?.timeFormat === "frames") {
@@ -1024,6 +1117,9 @@ function advance() {
 
   // Sync DAW backend
   invoke('audio_seek', { seconds: context.activeObject.currentTime });
+
+  // Update video frames
+  updateVideoFrames(context.activeObject.currentTime);
 
   updateLayers();
   updateMenu();
@@ -1098,7 +1194,7 @@ async function handleAudioEvent(event) {
   switch (event.type) {
     case 'PlaybackPosition':
       // Sync frontend time with DAW time
-      if (playing) {
+      if (context.playing) {
         // Quantize time to framerate for animation playback
         const framerate = context.activeObject.frameRate;
         const frameDuration = 1 / framerate;
@@ -1108,6 +1204,10 @@ async function handleAudioEvent(event) {
         if (context.timelineWidget?.timelineState) {
           context.timelineWidget.timelineState.currentTime = quantizedTime;
         }
+
+        // Update video frames
+        updateVideoFrames(quantizedTime);
+
         // Update time display
         if (context.updateTimeDisplay) {
           context.updateTimeDisplay();
@@ -1545,7 +1645,7 @@ async function toggleRecording() {
         console.log('[FRONTEND] MIDI recording started successfully');
 
         // Start playback so the timeline moves (if not already playing)
-        if (!playing) {
+        if (!context.playing) {
           await playPause();
         }
       } catch (error) {
@@ -1565,7 +1665,7 @@ async function toggleRecording() {
         console.log('[FRONTEND] Audio recording started successfully, waiting for RecordingStarted event');
 
         // Start playback so the timeline moves (if not already playing)
-        if (!playing) {
+        if (!context.playing) {
           await playPause();
         }
       } catch (error) {
@@ -2356,6 +2456,10 @@ async function importFile() {
       extensions: audioExtensions,
     },
     {
+      name: "Video files",
+      extensions: videoExtensions,
+    },
+    {
       name: "MIDI files",
       extensions: midiExtensions,
     },
@@ -2410,10 +2514,12 @@ async function importFile() {
     let usedFilterIndex = 0;
     if (audioExtensions.includes(ext)) {
       usedFilterIndex = 1; // Audio
+    } else if (videoExtensions.includes(ext)) {
+      usedFilterIndex = 2; // Video
     } else if (midiExtensions.includes(ext)) {
-      usedFilterIndex = 2; // MIDI
+      usedFilterIndex = 3; // MIDI
     } else if (beamExtensions.includes(ext)) {
-      usedFilterIndex = 3; // Lightningbeam
+      usedFilterIndex = 4; // Lightningbeam
     } else {
       usedFilterIndex = 0; // Image (default)
     }
@@ -2480,6 +2586,9 @@ async function importFile() {
     } else if (audioExtensions.includes(ext)) {
       // Handle audio files - pass file path directly to backend
       actions.addAudio.create(path, context.activeObject, filename);
+    } else if (videoExtensions.includes(ext)) {
+      // Handle video files
+      actions.addVideo.create(path, context.activeObject, filename);
     } else if (midiExtensions.includes(ext)) {
       // Handle MIDI files
       actions.addMIDI.create(path, context.activeObject, filename);
@@ -4503,8 +4612,8 @@ function timeline() {
 
     // Play/Pause button
     const playPauseButton = document.createElement("button");
-    playPauseButton.className = playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
-    playPauseButton.title = playing ? "Pause" : "Play";
+    playPauseButton.className = context.playing ? "playback-btn playback-btn-pause" : "playback-btn playback-btn-play";
+    playPauseButton.title = context.playing ? "Pause" : "Play";
     playPauseButton.addEventListener("click", playPause);
 
     // Store reference so playPause() can update it
@@ -4886,6 +4995,12 @@ function timeline() {
     timelineWidget.lastDragEvent = e;
 
     timelineWidget.handleMouseEvent("mousemove", x, y);
+
+    // Update cursor based on widget's cursor property
+    if (timelineWidget.cursor) {
+      canvas.style.cursor = timelineWidget.cursor;
+    }
+
     updateCanvasSize(); // Redraw after interaction
   });
 
@@ -5607,7 +5722,12 @@ function updateUI() {
 context.updateUI = updateUI;
 context.updateMenu = updateMenu;
 
-function renderUI() {
+async function renderUI() {
+  // Update video frames BEFORE drawing
+  if (context.activeObject) {
+    await updateVideoFrames(context.activeObject.currentTime);
+  }
+
   for (let canvas of canvases) {
     let ctx = canvas.getContext("2d");
     ctx.resetTransform();
@@ -6636,6 +6756,11 @@ async function renderMenu() {
         accelerator: getShortcut("addLayer"),
       },
       {
+        text: "Add Video Layer",
+        enabled: true,
+        action: addVideoLayer,
+      },
+      {
         text: "Add Audio Track",
         enabled: true,
         action: addEmptyAudioTrack,
@@ -6729,7 +6854,7 @@ async function renderMenu() {
       },
       {
         text: "Play",
-        enabled: !playing,
+        enabled: !context.playing,
         action: playPause,
         accelerator: getShortcut("playAnimation"),
       },
@@ -10881,10 +11006,33 @@ function getMimeType(filePath) {
 }
 
 
-function renderAll() {
+let renderInProgress = false;
+let rafScheduled = false;
+
+// FPS tracking
+let lastFpsLogTime = 0;
+let frameCount = 0;
+let fpsHistory = [];
+
+async function renderAll() {
+  rafScheduled = false;
+
+  // Skip if a render is already in progress (prevent stacking async calls)
+  if (renderInProgress) {
+    // Schedule another attempt if not already scheduled
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderAll);
+    }
+    return;
+  }
+
+  renderInProgress = true;
+  const renderStartTime = performance.now();
+
   try {
     if (uiDirty) {
-      renderUI();
+      await renderUI();
       uiDirty = false;
     }
     if (layersDirty) {
@@ -10917,7 +11065,33 @@ function renderAll() {
       repeatCount = 2;
     }
   } finally {
-    requestAnimationFrame(renderAll);
+    renderInProgress = false;
+
+    // FPS logging (only when playing)
+    if (context.playing) {
+      frameCount++;
+      const now = performance.now();
+      const renderTime = now - renderStartTime;
+
+      if (now - lastFpsLogTime >= 1000) {
+        const fps = frameCount / ((now - lastFpsLogTime) / 1000);
+        fpsHistory.push({ fps, renderTime });
+        console.log(`[FPS] ${fps.toFixed(1)} fps | Render time: ${renderTime.toFixed(1)}ms`);
+        frameCount = 0;
+        lastFpsLogTime = now;
+
+        // Keep only last 10 samples
+        if (fpsHistory.length > 10) {
+          fpsHistory.shift();
+        }
+      }
+    }
+
+    // Schedule next frame if not already scheduled
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(renderAll);
+    }
   }
 }
 
@@ -10928,6 +11102,7 @@ initializeActions({
   updateMenu,
   updateLayers,
   updateUI,
+  updateVideoFrames,
   updateInfopanel,
   invoke,
   config
@@ -11014,6 +11189,33 @@ async function addEmptyMIDITrack() {
     console.log('Empty MIDI track created:', trackName, 'with ID:', newMIDITrack.audioTrackId);
   } catch (error) {
     console.error('Failed to create empty MIDI track:', error);
+  }
+}
+
+async function addVideoLayer() {
+  console.log('[addVideoLayer] Creating new video layer');
+  const layerName = `Video ${context.activeObject.layers.filter(l => l.type === 'video').length + 1}`;
+  const layerUuid = uuidv4();
+
+  try {
+    // Create new VideoLayer
+    const newVideoLayer = new VideoLayer(layerUuid, layerName);
+
+    // Add layer to active object
+    context.activeObject.layers.push(newVideoLayer);
+
+    // Select the newly created layer
+    context.activeObject.activeLayer = newVideoLayer;
+
+    // Update UI
+    updateLayers();
+    if (context.timelineWidget) {
+      context.timelineWidget.requestRedraw();
+    }
+
+    console.log('Empty video layer created:', layerName);
+  } catch (error) {
+    console.error('Failed to create video layer:', error);
   }
 }
 

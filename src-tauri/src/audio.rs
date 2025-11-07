@@ -30,15 +30,15 @@ pub struct MidiFileMetadata {
 }
 
 pub struct AudioState {
-    controller: Option<EngineController>,
-    sample_rate: u32,
-    channels: u32,
-    buffer_size: u32,
-    next_track_id: u32,
-    next_pool_index: usize,
-    next_graph_node_id: u32,
+    pub(crate) controller: Option<EngineController>,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u32,
+    pub(crate) buffer_size: u32,
+    pub(crate) next_track_id: u32,
+    pub(crate) next_pool_index: usize,
+    pub(crate) next_graph_node_id: u32,
     // Track next node ID for each VoiceAllocator template (VoiceAllocator backend ID -> next template node ID)
-    template_node_counters: HashMap<u32, u32>,
+    pub(crate) template_node_counters: HashMap<u32, u32>,
 }
 
 impl Default for AudioState {
@@ -375,6 +375,24 @@ pub async fn audio_move_clip(
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {
         controller.move_clip(track_id, clip_id, new_start_time);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_trim_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    new_start_time: f64,
+    new_duration: f64,
+    new_offset: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.trim_clip(track_id, clip_id, new_start_time, new_duration, new_offset);
         Ok(())
     } else {
         Err("Audio not initialized".to_string())

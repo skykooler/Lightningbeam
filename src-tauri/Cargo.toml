@@ -36,6 +36,14 @@ daw-backend = { path = "../daw-backend" }
 cpal = "0.15"
 rtrb = "0.3"
 
+# Video decoding
+ffmpeg-next = "7.0"
+lru = "0.12"
+image = { version = "0.24", default-features = false, features = ["jpeg"] }
+
+# HTTP server for video streaming
+tiny_http = "0.12"
+
 [profile.dev]
 opt-level = 1  # Enable basic optimizations in debug mode for audio decoding performance
 

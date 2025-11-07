@@ -1,7 +1,7 @@
 // GraphicsObject model: Main container for layers and animation
 
 import { context, config, pointerList, startProps } from '../state.js';
-import { Layer, AudioTrack } from './layer.js';
+import { VectorLayer, AudioTrack, VideoLayer } from './layer.js';
 import { TempShape } from './shapes.js';
 import { AnimationCurve, Keyframe } from './animation.js';
 import { Widget } from '../widgets.js';
@@ -45,8 +45,20 @@ class GraphicsObject extends Widget {
     this.name = this.idx;
 
     this.currentFrameNum = 0; // LEGACY: kept for backwards compatibility
-    this.currentTime = 0; // New: continuous time for AnimationData curves
+    this._currentTime = 0; // Internal storage for currentTime
     this.currentLayer = 0;
+
+    // Make currentTime a getter/setter property
+    Object.defineProperty(this, 'currentTime', {
+      get: function() {
+        return this._currentTime;
+      },
+      set: function(value) {
+        this._currentTime = value;
+      },
+      enumerable: true,
+      configurable: true
+    });
     this._activeAudioTrack = null; // Reference to active audio track (if any)
 
     // Initialize children and audioTracks based on initialChildType
@@ -54,8 +66,11 @@ class GraphicsObject extends Widget {
     this.audioTracks = [];
 
     if (initialChildType === 'layer') {
-      this.children = [new Layer(uuid + "-L1", this)];
+      this.children = [new VectorLayer(uuid + "-L1", this)];
       this.currentLayer = 0;  // Set first layer as active
+    } else if (initialChildType === 'video') {
+      this.children = [new VideoLayer(uuid + "-V1", "Video 1")];
+      this.currentLayer = 0;  // Set first video layer as active
     } else if (initialChildType === 'midi') {
       const midiTrack = new AudioTrack(uuid + "-M1", "MIDI 1", 'midi');
       this.audioTracks.push(midiTrack);
@@ -103,7 +118,12 @@ class GraphicsObject extends Widget {
       graphicsObject.parent = pointerList[json.parent]
     }
     for (let layer of json.layers) {
-      graphicsObject.layers.push(Layer.fromJSON(layer, graphicsObject));
+      if (layer.type === 'VideoLayer') {
+        graphicsObject.layers.push(VideoLayer.fromJSON(layer));
+      } else {
+        // Default to VectorLayer
+        graphicsObject.layers.push(VectorLayer.fromJSON(layer, graphicsObject));
+      }
     }
     // Handle audioTracks (may not exist in older files)
     if (json.audioTracks) {
@@ -177,8 +197,19 @@ class GraphicsObject extends Widget {
 
     // Check visual layers
     for (let layer of this.layers) {
+      // Check animation data duration
       if (layer.animationData && layer.animationData.duration > maxDuration) {
         maxDuration = layer.animationData.duration;
+      }
+
+      // Check video layer clips (VideoLayer has clips like AudioTrack)
+      if (layer.type === 'video' && layer.clips) {
+        for (let clip of layer.clips) {
+          const clipEnd = clip.startTime + clip.duration;
+          if (clipEnd > maxDuration) {
+            maxDuration = clipEnd;
+          }
+        }
       }
     }
 
@@ -299,6 +330,12 @@ class GraphicsObject extends Widget {
 
     for (let layer of this.layers) {
       if (context.activeObject == this && !layer.visible) continue;
+
+      // Handle VideoLayer differently - call its draw method
+      if (layer.type === 'video') {
+        layer.draw(context);
+        continue;
+      }
 
       // Draw activeShape (shape being drawn in progress) for active layer only
       if (layer === context.activeLayer && layer.activeShape) {

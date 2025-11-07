@@ -29,6 +29,8 @@ pub enum Command {
     // Clip management commands
     /// Move a clip to a new timeline position
     MoveClip(TrackId, ClipId, f64),
+    /// Trim a clip (track_id, clip_id, new_start_time, new_duration, new_offset)
+    TrimClip(TrackId, ClipId, f64, f64, f64),
 
     // Metatrack management commands
     /// Create a new metatrack with a name

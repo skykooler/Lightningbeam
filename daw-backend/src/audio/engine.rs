@@ -398,6 +398,24 @@ impl Engine {
                     _ => {}
                 }
             }
+            Command::TrimClip(track_id, clip_id, new_start_time, new_duration, new_offset) => {
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.start_time = new_start_time;
+                            clip.duration = new_duration;
+                            clip.offset = new_offset;
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                            clip.start_time = new_start_time;
+                            clip.duration = new_duration;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Command::CreateMetatrack(name) => {
                 let track_id = self.project.add_group_track(name.clone(), None);
                 // Notify UI about the new metatrack
@@ -1909,6 +1927,10 @@ impl EngineController {
     /// Move a clip to a new timeline position
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
         let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
+    }
+
+    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64, new_duration: f64, new_offset: f64) {
+        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_start_time, new_duration, new_offset));
     }
 
     /// Send a generic command to the audio thread

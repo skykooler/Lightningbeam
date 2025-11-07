@@ -36,7 +36,8 @@ export let context = {
   timelineWidget: null, // Reference to TimelineWindowV2 widget for zoom controls
   config: null, // Reference to config object (set after config is initialized)
   mode: "select", // Current tool mode
-  // Recording state
+  // Playback and recording state
+  playing: false,
   isRecording: false,
   recordingTrackId: null,
   recordingClipId: null,
@@ -91,6 +92,7 @@ export let config = {
   reopenLastSession: false,
   lastImportFilterIndex: 0,  // Index of last used filter in import dialog (0=Image, 1=Audio, 2=Lightningbeam)
   audioBufferSize: 256,  // Audio buffer size in frames (128, 256, 512, 1024, etc. - requires restart)
+  minClipDuration: 0.1,  // Minimum clip duration in seconds when trimming
   // Layout settings
   currentLayout: "animation",  // Current active layout key
   defaultLayout: "animation",  // Default layout for new files
