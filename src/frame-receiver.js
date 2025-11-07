@@ -66,14 +66,10 @@ export class FrameReceiver {
     const dataLength = width * height * 4;
     const rgbaData = new Uint8ClampedArray(arrayBuffer, 16, dataLength);
 
-    // Debug: Log received data
-    console.log(`[FrameReceiver RECV] pool=${poolIndex}, ${width}x${height}, total buffer len=${arrayBuffer.byteLength}, data len=${dataLength}, first 20 RGBA bytes:`, Array.from(rgbaData.slice(0, 20)));
 
     // Create ImageData directly from the view (zero-copy!)
     const imageData = new ImageData(rgbaData, width, height);
 
-    // Debug: Log ImageData properties
-    console.log(`[FrameReceiver RECV] ImageData: ${imageData.width}x${imageData.height}, data len=${imageData.data.length}, first 20 bytes:`, Array.from(imageData.data.slice(0, 20)));
 
     // Call subscriber with frame data
     const timestamp = timestampMs / 1000.0;

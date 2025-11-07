@@ -62,10 +62,6 @@ impl FrameStreamer {
     pub fn send_frame(&self, pool_index: usize, timestamp: f64, width: u32, height: u32, rgba_data: &[u8]) {
         let mut clients = self.clients.lock().unwrap();
 
-        // Debug: Log input dimensions and first few RGBA bytes
-        eprintln!("[Frame Streamer SEND] pool={}, {}x{} pixels, RGBA input len={}, first 20 RGBA bytes: {:?}",
-            pool_index, width, height, rgba_data.len(), &rgba_data[..20.min(rgba_data.len())]);
-
         // Build frame message (rgba_data is already in RGBA format from decoder)
         let mut frame_msg = Vec::with_capacity(16 + rgba_data.len());
         frame_msg.extend_from_slice(&(pool_index as u32).to_le_bytes());

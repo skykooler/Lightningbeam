@@ -35,10 +35,6 @@ rtrb = "0.3"
 # Video decoding
 ffmpeg-next = "7.0"
 lru = "0.12"
-image = { version = "0.24", default-features = false, features = ["jpeg"] }
-
-# HTTP server for video streaming
-tiny_http = "0.12"
 
 # WebSocket for frame streaming (disable default features to remove tracing, but keep handshake)
 tungstenite = { version = "0.20", default-features = false, features = ["handshake"] }

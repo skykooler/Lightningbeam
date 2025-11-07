@@ -19,10 +19,6 @@ pub struct VideoFileMetadata {
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u32>,
     pub audio_waveform: Option<Vec<WaveformPeak>>,
-    pub codec_name: String,
-    pub is_browser_compatible: bool,
-    pub http_url: Option<String>,  // HTTP URL to stream video (if compatible or transcode complete)
-    pub transcoding: bool,  // True if currently transcoding
 }
 
 struct VideoDecoder {
@@ -244,24 +240,10 @@ impl VideoDecoder {
     }
 }
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-
-#[derive(Clone)]
-pub struct TranscodeJob {
-    pub pool_index: usize,
-    pub input_path: String,
-    pub output_path: String,
-    pub http_url: Option<String>,  // HTTP URL when transcode completes
-    pub progress: f32,  // 0.0 to 1.0
-    pub completed: bool,
-}
-
 pub struct VideoState {
     pool: Vec<Arc<Mutex<VideoDecoder>>>,
     next_pool_index: usize,
     cache_size: usize,
-    transcode_jobs: Arc<Mutex<HashMap<usize, TranscodeJob>>>,  // pool_index -> job
 }
 
 impl Default for VideoState {
@@ -270,7 +252,6 @@ impl Default for VideoState {
             pool: Vec::new(),
             next_pool_index: 0,
             cache_size: 20, // Default cache size
-            transcode_jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -279,7 +260,6 @@ impl Default for VideoState {
 pub async fn video_load_file(
     video_state: tauri::State<'_, Arc<Mutex<VideoState>>>,
     audio_state: tauri::State<'_, Arc<Mutex<crate::audio::AudioState>>>,
-    video_server: tauri::State<'_, Arc<Mutex<crate::video_server::VideoServer>>>,
     path: String,
 ) -> Result<VideoFileMetadata, String> {
     eprintln!("[Video] Loading file: {}", path);
@@ -408,45 +388,13 @@ pub async fn video_load_file(
         (None, None, None, None, None)
     };
 
-    // Detect video codec
-    let video_stream = input.streams()
-        .best(ffmpeg::media::Type::Video)
-        .ok_or("No video stream found")?;
-
-    let codec_id = video_stream.parameters().id();
-    let codec_name = ffmpeg::codec::Id::name(&codec_id).to_string();
-
-    // Check if codec is browser-compatible (can play directly)
-    // Browsers support: H.264/AVC, VP8, VP9, AV1 (limited)
-    let is_browser_compatible = matches!(
-        codec_id,
-        ffmpeg::codec::Id::H264 |
-        ffmpeg::codec::Id::VP8 |
-        ffmpeg::codec::Id::VP9 |
-        ffmpeg::codec::Id::AV1
-    );
-
-    eprintln!("[Video Codec] {} - Browser compatible: {}", codec_name, is_browser_compatible);
-
-    // Create video decoder with max dimensions for playback (800x600)
-    // This scales down high-res videos to reduce data transfer
+    // Create video decoder with max dimensions for playback (1920x1080)
+    // This scales videos to reduce data transfer over WebSocket
     let mut video_state_guard = video_state.lock().unwrap();
     let pool_index = video_state_guard.next_pool_index;
     video_state_guard.next_pool_index += 1;
 
-    let decoder = VideoDecoder::new(path.clone(), video_state_guard.cache_size, Some(800), Some(600))?;
-
-    // Add file to HTTP server if browser-compatible
-    let http_url = if is_browser_compatible {
-        let server = video_server.lock().unwrap();
-        let url_path = format!("/video/{}", pool_index);
-        server.add_file(url_path.clone(), PathBuf::from(&path));
-        let http_url = server.get_url(&url_path);
-        eprintln!("[Video] Browser-compatible, serving at: {}", http_url);
-        Some(http_url)
-    } else {
-        None
-    };
+    let decoder = VideoDecoder::new(path.clone(), video_state_guard.cache_size, Some(1920), Some(1080))?;
 
     let metadata = VideoFileMetadata {
         pool_index,
@@ -460,150 +408,11 @@ pub async fn video_load_file(
         audio_sample_rate,
         audio_channels,
         audio_waveform,
-        codec_name,
-        is_browser_compatible,
-        http_url,
-        transcoding: !is_browser_compatible,
     };
 
     video_state_guard.pool.push(Arc::new(Mutex::new(decoder)));
 
-    // Start background transcoding if not browser-compatible
-    if !is_browser_compatible {
-        eprintln!("[Video Transcode] Starting background transcode for pool_index {}", pool_index);
-        let jobs = video_state_guard.transcode_jobs.clone();
-        let input_path = path.clone();
-        let pool_idx = pool_index;
-        let server = video_server.inner().clone();
-
-        tauri::async_runtime::spawn(async move {
-            if let Err(e) = start_transcode(jobs, pool_idx, input_path, server).await {
-                eprintln!("[Video Transcode] Failed: {}", e);
-            }
-        });
-    }
-
     Ok(metadata)
-}
-
-// Background transcode to WebM/VP9 for browser compatibility
-async fn start_transcode(
-    jobs: Arc<Mutex<HashMap<usize, TranscodeJob>>>,
-    pool_index: usize,
-    input_path: String,
-    video_server: Arc<Mutex<crate::video_server::VideoServer>>,
-) -> Result<(), String> {
-    use std::process::Command;
-
-    // Generate output path in system cache directory
-    let cache_dir = std::env::temp_dir().join("lightningbeam_transcoded");
-    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
-
-    let input_file = PathBuf::from(&input_path);
-    let file_stem = input_file.file_stem()
-        .ok_or("Invalid input path")?
-        .to_string_lossy();
-    let output_path = cache_dir.join(format!("{}_{}.webm", file_stem, pool_index));
-
-    // Create job entry
-    {
-        let mut jobs_guard = jobs.lock().unwrap();
-        jobs_guard.insert(pool_index, TranscodeJob {
-            pool_index,
-            input_path: input_path.clone(),
-            output_path: output_path.to_string_lossy().to_string(),
-            http_url: None,
-            progress: 0.0,
-            completed: false,
-        });
-    }
-
-    eprintln!("[Video Transcode] Output: {}", output_path.display());
-
-    // Run FFmpeg transcode command
-    // Using VP9 codec with CRF 30 (good quality/size balance) and fast encoding
-    let output = Command::new("ffmpeg")
-        .args(&[
-            "-i", &input_path,
-            "-c:v", "libvpx-vp9",  // VP9 video codec
-            "-crf", "30",           // Quality (lower = better, 23-32 recommended)
-            "-b:v", "0",            // Use CRF mode
-            "-threads", "4",        // Use 4 threads
-            "-row-mt", "1",         // Enable row-based multithreading
-            "-speed", "4",          // Encoding speed (0=slowest/best, 4=good balance)
-            "-c:a", "libopus",      // Opus audio codec (best for WebM)
-            "-b:a", "128k",         // Audio bitrate
-            "-y",                   // Overwrite output
-            output_path.to_str().ok_or("Invalid output path")?,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
-
-    if output.status.success() {
-        eprintln!("[Video Transcode] Completed: {}", output_path.display());
-
-        // Add transcoded file to HTTP server
-        let server = video_server.lock().unwrap();
-        let url_path = format!("/video/{}", pool_index);
-        server.add_file(url_path.clone(), output_path.clone());
-        let http_url = server.get_url(&url_path);
-        eprintln!("[Video Transcode] Serving at: {}", http_url);
-        drop(server);
-
-        // Mark as completed and store HTTP URL
-        let mut jobs_guard = jobs.lock().unwrap();
-        if let Some(job) = jobs_guard.get_mut(&pool_index) {
-            job.progress = 1.0;
-            job.completed = true;
-            job.http_url = Some(http_url);
-        }
-        eprintln!("[Video Transcode] Job completed for pool_index {}", pool_index);
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("[Video Transcode] FFmpeg error: {}", stderr);
-        Err(format!("FFmpeg failed: {}", stderr))
-    }
-}
-
-// Get transcode status for a pool index
-#[tauri::command]
-pub async fn video_get_transcode_status(
-    video_state: tauri::State<'_, Arc<Mutex<VideoState>>>,
-    pool_index: usize,
-) -> Result<Option<(String, f32, bool, Option<String>)>, String> {
-    let state = video_state.lock().unwrap();
-    let jobs = state.transcode_jobs.lock().unwrap();
-
-    if let Some(job) = jobs.get(&pool_index) {
-        Ok(Some((job.output_path.clone(), job.progress, job.completed, job.http_url.clone())))
-    } else {
-        Ok(None)
-    }
-}
-
-// Add a video file to asset protocol scope so browser can access it
-#[tauri::command]
-pub async fn video_allow_asset(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<(), String> {
-    use tauri_plugin_fs::FsExt;
-
-    let file_path = PathBuf::from(&path);
-
-    // Add to FS scope
-    let fs_scope = app.fs_scope();
-    fs_scope.allow_file(&file_path)
-        .map_err(|e| format!("Failed to allow file in fs scope: {}", e))?;
-
-    // Add to asset protocol scope
-    let asset_scope = app.asset_protocol_scope();
-    asset_scope.allow_file(&file_path)
-        .map_err(|e| format!("Failed to allow file in asset scope: {}", e))?;
-
-    eprintln!("[Video] Added to asset scope: {}", path);
-    Ok(())
 }
 
 fn generate_waveform(audio_data: &[f32], channels: u32, target_peaks: usize) -> Vec<WaveformPeak> {
@@ -649,91 +458,6 @@ fn generate_waveform(audio_data: &[f32], channels: u32, target_peaks: usize) -> 
 }
 
 #[tauri::command]
-pub async fn video_get_frame(
-    state: tauri::State<'_, Arc<Mutex<VideoState>>>,
-    pool_index: usize,
-    timestamp: f64,
-    use_jpeg: bool,
-    channel: tauri::ipc::Channel,
-) -> Result<(), String> {
-    use std::time::Instant;
-
-    let t_total_start = Instant::now();
-
-    let t_lock_start = Instant::now();
-    let video_state = state.lock().unwrap();
-
-    let decoder = video_state.pool.get(pool_index)
-        .ok_or("Invalid pool index")?
-        .clone();
-
-    drop(video_state);
-
-    let mut decoder = decoder.lock().unwrap();
-    let t_lock_end = Instant::now();
-
-    let t_decode_start = Instant::now();
-    let frame_data = decoder.get_frame(timestamp)?;
-    let t_decode_end = Instant::now();
-
-    let t_compress_start = Instant::now();
-    let data_to_send = if use_jpeg {
-        // Get frame dimensions from decoder
-        let width = decoder.output_width;
-        let height = decoder.output_height;
-
-        // Create image from raw RGBA data
-        let img = RgbaImage::from_raw(width, height, frame_data)
-            .ok_or("Failed to create image from frame data")?;
-
-        // Convert RGBA to RGB (JPEG doesn't support alpha)
-        let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
-
-        // Encode to JPEG with quality 85 (good balance of size/quality)
-        let mut jpeg_data = Vec::new();
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, 85);
-        encoder.encode(
-            rgb_img.as_raw(),
-            rgb_img.width(),
-            rgb_img.height(),
-            image::ColorType::Rgb8
-        ).map_err(|e| format!("JPEG encoding failed: {}", e))?;
-
-        jpeg_data
-    } else {
-        frame_data
-    };
-    let t_compress_end = Instant::now();
-
-    // Drop decoder lock before sending to avoid blocking
-    drop(decoder);
-
-    let t_send_start = Instant::now();
-    // Send binary data through channel (bypasses JSON serialization)
-    // InvokeResponseBody::Raw sends raw binary data without JSON encoding
-    channel.send(tauri::ipc::InvokeResponseBody::Raw(data_to_send.clone()))
-        .map_err(|e| format!("Channel send error: {}", e))?;
-    let t_send_end = Instant::now();
-
-    let t_total_end = Instant::now();
-
-    // Detailed profiling
-    let lock_time = t_lock_end.duration_since(t_lock_start).as_micros();
-    let decode_time = t_decode_end.duration_since(t_decode_start).as_micros();
-    let compress_time = t_compress_end.duration_since(t_compress_start).as_micros();
-    let send_time = t_send_end.duration_since(t_send_start).as_micros();
-    let total_time = t_total_end.duration_since(t_total_start).as_micros();
-
-    let size_kb = data_to_send.len() / 1024;
-    let mode = if use_jpeg { "JPEG" } else { "RAW" };
-
-    eprintln!("[Video Profile {}] Size: {}KB | Lock: {}μs | Decode: {}μs | Compress: {}μs | Send: {}μs | Total: {}μs",
-        mode, size_kb, lock_time, decode_time, compress_time, send_time, total_time);
-
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn video_set_cache_size(
     state: tauri::State<'_, Arc<Mutex<VideoState>>>,
     cache_size: usize,
@@ -758,123 +482,6 @@ pub async fn video_get_pool_info(
         decoder.output_height,
         decoder.fps
     ))
-}
-
-// Benchmark command to test IPC performance with various payload sizes
-#[tauri::command]
-pub async fn video_ipc_benchmark(
-    size_bytes: usize,
-    channel: tauri::ipc::Channel,
-) -> Result<(), String> {
-    use std::time::Instant;
-
-    let t_start = Instant::now();
-
-    // Create dummy data of requested size
-    let data = vec![0u8; size_bytes];
-
-    let t_after_alloc = Instant::now();
-
-    // Send through channel
-    channel.send(tauri::ipc::InvokeResponseBody::Raw(data))
-        .map_err(|e| format!("Channel send error: {}", e))?;
-
-    let t_after_send = Instant::now();
-
-    let alloc_time = t_after_alloc.duration_since(t_start).as_micros();
-    let send_time = t_after_send.duration_since(t_after_alloc).as_micros();
-    let total_time = t_after_send.duration_since(t_start).as_micros();
-
-    eprintln!("[IPC Benchmark Rust] Size: {}KB | Alloc: {}μs | Send: {}μs | Total: {}μs",
-        size_bytes / 1024, alloc_time, send_time, total_time);
-
-    Ok(())
-}
-
-// Batch frame request - get multiple frames in one IPC call
-#[tauri::command]
-pub async fn video_get_frames_batch(
-    state: tauri::State<'_, Arc<Mutex<VideoState>>>,
-    pool_index: usize,
-    timestamps: Vec<f64>,
-    use_jpeg: bool,
-    channel: tauri::ipc::Channel,
-) -> Result<(), String> {
-    use std::time::Instant;
-
-    let t_total_start = Instant::now();
-
-    let video_state = state.lock().unwrap();
-    let decoder = video_state.pool.get(pool_index)
-        .ok_or("Invalid pool index")?
-        .clone();
-    drop(video_state);
-
-    let mut decoder = decoder.lock().unwrap();
-
-    // Decode all frames
-    let mut all_frames = Vec::new();
-    let mut total_decode_time = 0u128;
-    let mut total_compress_time = 0u128;
-
-    for timestamp in &timestamps {
-        let t_decode_start = Instant::now();
-        let frame_data = decoder.get_frame(*timestamp)?;
-        let t_decode_end = Instant::now();
-        total_decode_time += t_decode_end.duration_since(t_decode_start).as_micros();
-
-        let t_compress_start = Instant::now();
-        let data = if use_jpeg {
-            let width = decoder.output_width;
-            let height = decoder.output_height;
-            let img = RgbaImage::from_raw(width, height, frame_data)
-                .ok_or("Failed to create image from frame data")?;
-            let rgb_img = image::DynamicImage::ImageRgba8(img).to_rgb8();
-            let mut jpeg_data = Vec::new();
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_data, 85);
-            encoder.encode(
-                rgb_img.as_raw(),
-                rgb_img.width(),
-                rgb_img.height(),
-                image::ColorType::Rgb8
-            ).map_err(|e| format!("JPEG encoding failed: {}", e))?;
-            jpeg_data
-        } else {
-            frame_data
-        };
-        let t_compress_end = Instant::now();
-        total_compress_time += t_compress_end.duration_since(t_compress_start).as_micros();
-
-        all_frames.push(data);
-    }
-
-    drop(decoder);
-
-    // Pack all frames into one buffer with metadata
-    // Format: [frame_count: u32][frame1_size: u32][frame1_data...][frame2_size: u32][frame2_data...]
-    let mut packed_data = Vec::new();
-    packed_data.extend_from_slice(&(all_frames.len() as u32).to_le_bytes());
-
-    for frame in &all_frames {
-        packed_data.extend_from_slice(&(frame.len() as u32).to_le_bytes());
-        packed_data.extend_from_slice(frame);
-    }
-
-    let total_size_kb = packed_data.len() / 1024;
-
-    let t_send_start = Instant::now();
-    channel.send(tauri::ipc::InvokeResponseBody::Raw(packed_data))
-        .map_err(|e| format!("Channel send error: {}", e))?;
-    let t_send_end = Instant::now();
-
-    let send_time = t_send_end.duration_since(t_send_start).as_micros();
-    let total_time = t_send_end.duration_since(t_total_start).as_micros();
-
-    let mode = if use_jpeg { "JPEG" } else { "RAW" };
-    eprintln!("[Video Batch {}] Frames: {} | Size: {}KB | Decode: {}μs | Compress: {}μs | Send: {}μs | Total: {}μs",
-        mode, timestamps.len(), total_size_kb, total_decode_time, total_compress_time, send_time, total_time);
-
-    Ok(())
 }
 
 /// Stream a decoded video frame over WebSocket (zero-copy performance testing)
