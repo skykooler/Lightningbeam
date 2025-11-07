@@ -172,7 +172,7 @@ function serializeLayoutNode(element, depth = 0) {
     // that matches the panes object keys, not the name property
     const dataName = element.getAttribute("data-pane-name");
 
-    // Convert kebab-case to camelCase (e.g., "timeline-v2" -> "timelineV2")
+    // Convert kebab-case to camelCase (e.g., "preset-browser" -> "presetBrowser")
     const camelCaseName = dataName.replace(/-([a-z0-9])/g, (g) => g[1].toUpperCase());
 
     console.log(`${indent}  -> Found pane: ${camelCaseName}`);

@@ -675,7 +675,7 @@ button {
   margin: 0px;
 }
 #popupMenu li {
-  color: var(--keyframe);
+  color: var(--text-primary);
   list-style-type: none;
   display: flex;
   align-items: center;  /* Vertically center the image and text */
@@ -773,7 +773,7 @@ button {
     background-color: var(--shade);
   }
   #popupMenu li {
-    color: var(--background-color);
+    color: var(--text-primary);
   }
   #popupMenu li:hover {
     background-color: var(--surface-light);

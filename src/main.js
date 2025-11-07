@@ -732,7 +732,7 @@ window.addEventListener("DOMContentLoaded", () => {
     rootPane,
     10,
     true,
-    createPane(panes.timelineV2),
+    createPane(panes.timeline),
   );
   let [stageAndTimeline, _infopanel] = splitPane(
     panel,
@@ -4179,9 +4179,9 @@ function toolbar() {
   return tools_scroller;
 }
 
-function timeline() {
+function timelineDeprecated() {
   let timeline_cvs = document.createElement("canvas");
-  timeline_cvs.className = "timeline";
+  timeline_cvs.className = "timeline-deprecated";
 
   // Start building widget hierarchy
   timeline_cvs.timelinewindow = new TimelineWindow(0, 0, context)
@@ -4449,9 +4449,9 @@ function timeline() {
   return timeline_cvs;
 }
 
-function timelineV2() {
+function timeline() {
   let canvas = document.createElement("canvas");
-  canvas.className = "timeline-v2";
+  canvas.className = "timeline";
 
   // Create TimelineWindowV2 widget
   const timelineWidget = new TimelineWindowV2(0, 0, context);
@@ -5167,6 +5167,11 @@ function createPaneMenu(div) {
 
   // Loop through the menuItems array and create a <li> for each item
   for (let pane in panes) {
+    // Skip deprecated panes
+    if (pane === 'timelineDeprecated') {
+      continue;
+    }
+
     const li = document.createElement("li");
     // Create the <img> element for the icon
     const img = document.createElement("img");
@@ -5728,7 +5733,7 @@ function renderLayers() {
     context.timelineWidget.requestRedraw();
   }
 
-  for (let canvas of document.querySelectorAll(".timeline")) {
+  for (let canvas of document.querySelectorAll(".timeline-deprecated")) {
     const width = canvas.width;
     const height = canvas.height;
     const ctx = canvas.getContext("2d");
@@ -10709,13 +10714,13 @@ const panes = {
     name: "toolbar",
     func: toolbar,
   },
+  timelineDeprecated: {
+    name: "timeline-deprecated",
+    func: timelineDeprecated,
+  },
   timeline: {
     name: "timeline",
     func: timeline,
-  },
-  timelineV2: {
-    name: "timeline-v2",
-    func: timelineV2,
   },
   infopanel: {
     name: "infopanel",
