@@ -3,11 +3,29 @@
  */
 
 /**
+ * Reset canvas scroll/pan to origin
+ */
+export async function resetCanvasView() {
+  await browser.execute(function() {
+    if (window.context && window.context.stageWidget) {
+      window.context.stageWidget.offsetX = 0;
+      window.context.stageWidget.offsetY = 0;
+      // Trigger redraw to apply the reset
+      if (window.context.updateUI) {
+        window.context.updateUI();
+      }
+    }
+  });
+  await browser.pause(100); // Wait for canvas to reset
+}
+
+/**
  * Click at specific coordinates on the canvas
  * @param {number} x - X coordinate relative to canvas
  * @param {number} y - Y coordinate relative to canvas
  */
 export async function clickCanvas(x, y) {
+  await resetCanvasView();
   await browser.clickCanvas(x, y);
   await browser.pause(100); // Wait for render
 }
@@ -20,6 +38,7 @@ export async function clickCanvas(x, y) {
  * @param {number} toY - Ending Y coordinate
  */
 export async function dragCanvas(fromX, fromY, toX, toY) {
+  await resetCanvasView();
   await browser.dragCanvas(fromX, fromY, toX, toY);
   await browser.pause(200); // Wait for render
 }
@@ -205,6 +224,11 @@ export async function setPlayheadTime(time) {
       // Trigger timeline redraw to show updated playhead position
       if (window.context.timelineWidget && window.context.timelineWidget.requestRedraw) {
         window.context.timelineWidget.requestRedraw();
+      }
+
+      // Trigger stage redraw to show shapes at new time
+      if (window.context.updateUI) {
+        window.context.updateUI();
       }
     }
   }, time);

@@ -10,7 +10,9 @@ import { waitForAppReady } from '../../helpers/app.js';
 import {
   drawRectangle,
   selectMultipleShapes,
+  selectTool,
   dragCanvas,
+  clickCanvas,
   setPlayheadTime,
   getPlayheadTime,
   addKeyframe,
@@ -42,7 +44,7 @@ describe('MANUAL: Timeline Animation', () => {
   it('TEST 1: Group animation - draw, group, keyframe, move group', async () => {
     await logStep('Drawing a RED rectangle at (100, 100) with size 100x100');
     await drawRectangle(100, 100, 100, 100, true, '#ff0000');
-    await pauseAndDescribe('RED rectangle drawn', 2000);
+    await pauseAndDescribe('RED rectangle drawn', 200);
 
     await verifyManually(
       'VERIFY: Do you see a RED filled rectangle at the top-left area?\n' +
@@ -52,7 +54,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Selecting the RED rectangle by dragging a selection box over it');
     await selectMultipleShapes([{ x: 150, y: 150 }]);
-    await pauseAndDescribe('RED rectangle selected', 2000);
+    await pauseAndDescribe('RED rectangle selected', 200);
 
     await verifyManually(
       'VERIFY: Is the RED rectangle now selected? (Should have selection indicators)\n\n' +
@@ -61,7 +63,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Grouping the selected rectangle (Ctrl+G)');
     await useKeyboardShortcut('g', true);
-    await pauseAndDescribe('RED rectangle grouped', 2000);
+    await pauseAndDescribe('RED rectangle grouped', 200);
 
     await verifyManually(
       'VERIFY: Was the rectangle grouped? (May look similar but is now a group)\n\n' +
@@ -70,11 +72,11 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Selecting the group by dragging a selection box over it');
     await selectMultipleShapes([{ x: 150, y: 150 }]);
-    await pauseAndDescribe('Group selected', 2000);
+    await pauseAndDescribe('Group selected', 200);
 
     await logStep('Moving playhead to time 0.333 (frame 10 at 30fps)');
     await setPlayheadTime(0.333);
-    await pauseAndDescribe('Playhead moved to 0.333s - WAIT for UI to update', 3000);
+    await pauseAndDescribe('Playhead moved to 0.333s - WAIT for UI to update', 300);
 
     await verifyManually(
       'VERIFY: Did the playhead indicator move on the timeline?\n' +
@@ -84,7 +86,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Adding a keyframe at current position');
     await addKeyframe();
-    await pauseAndDescribe('Keyframe added', 2000);
+    await pauseAndDescribe('Keyframe added', 200);
 
     await verifyManually(
       'VERIFY: Was a keyframe added? (Should see a keyframe marker on timeline)\n\n' +
@@ -93,7 +95,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Dragging the selected group to move it right (from x=150 to x=250)');
     await dragCanvas(150, 150, 250, 150);
-    await pauseAndDescribe('Group moved to the right', 3000);
+    await pauseAndDescribe('Group moved to the right', 300);
 
     await verifyManually(
       'VERIFY: Did the RED rectangle move to the right?\n' +
@@ -103,7 +105,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Moving playhead back to time 0 (frame 1)');
     await setPlayheadTime(0);
-    await pauseAndDescribe('Playhead back at start', 3000);
+    await pauseAndDescribe('Playhead back at start', 300);
 
     await verifyManually(
       'VERIFY: Did the RED rectangle jump back to its original position (x=150)?\n' +
@@ -113,7 +115,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Moving playhead to middle (time 0.166, frame 5)');
     await setPlayheadTime(0.166);
-    await pauseAndDescribe('Playhead at middle frame', 3000);
+    await pauseAndDescribe('Playhead at middle frame', 300);
 
     await verifyManually(
       'VERIFY: Is the RED rectangle now between the two positions?\n' +
@@ -123,13 +125,13 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Moving playhead back and forth to show animation');
     await setPlayheadTime(0);
-    await browser.pause(1000);
+    await browser.pause(300);
     await setPlayheadTime(0.333);
-    await browser.pause(1000);
+    await browser.pause(300);
     await setPlayheadTime(0);
-    await browser.pause(1000);
+    await browser.pause(300);
     await setPlayheadTime(0.333);
-    await browser.pause(1000);
+    await browser.pause(300);
 
     await verifyManually(
       'VERIFY: Did you see the RED rectangle animate back and forth?\n' +
@@ -146,9 +148,13 @@ describe('MANUAL: Timeline Animation', () => {
   });
 
   it('TEST 2: Shape tween - draw shape, add keyframes, modify edges', async () => {
+    await logStep('Resetting playhead to time 0 at start of test');
+    await setPlayheadTime(0);
+    await pauseAndDescribe('Playhead reset to time 0', 200);
+
     await logStep('Drawing a BLUE rectangle at (400, 100)');
     await drawRectangle(400, 100, 80, 80, true, '#0000ff');
-    await pauseAndDescribe('BLUE rectangle drawn', 2000);
+    await pauseAndDescribe('BLUE rectangle drawn', 200);
 
     await verifyManually(
       'VERIFY: Do you see a BLUE filled rectangle?\n' +
@@ -158,7 +164,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Selecting the BLUE rectangle');
     await selectMultipleShapes([{ x: 440, y: 140 }]);
-    await pauseAndDescribe('BLUE rectangle selected', 2000);
+    await pauseAndDescribe('BLUE rectangle selected', 200);
 
     await verifyManually(
       'VERIFY: Is the BLUE rectangle selected?\n' +
@@ -166,9 +172,9 @@ describe('MANUAL: Timeline Animation', () => {
       'Click OK if yes, Cancel if no'
     );
 
-    await logStep('Moving playhead to time 0.5');
+    await logStep('Moving playhead to time 0.5 (frame 12 at 24fps)');
     await setPlayheadTime(0.5);
-    await pauseAndDescribe('Playhead moved to 0.5s - WAIT for UI to update', 3000);
+    await pauseAndDescribe('Playhead moved to 0.5s - WAIT for UI to update', 300);
 
     await verifyManually(
       'VERIFY: Did the playhead move to 0.5s on the timeline?\n\n' +
@@ -177,16 +183,26 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Adding a keyframe at time 0.5');
     await addKeyframe();
-    await pauseAndDescribe('Keyframe added at 0.5s', 2000);
+    await pauseAndDescribe('Keyframe added at 0.5s', 200);
 
     await verifyManually(
       'VERIFY: Was a keyframe added at 0.5s?\n\n' +
       'Click OK if yes, Cancel if no'
     );
 
+    await logStep('Clicking away from the shape to deselect it');
+    await clickCanvas(600, 300);
+    await pauseAndDescribe('Shape deselected', 100);
+
+    await verifyManually(
+      'VERIFY: Is the BLUE rectangle now deselected?\n' +
+      '(No selection indicators around it)\n\n' +
+      'Click OK if yes, Cancel if no'
+    );
+
     await logStep('Dragging the right edge of the BLUE rectangle to curve/extend it');
     await dragCanvas(480, 140, 530, 140);
-    await pauseAndDescribe('Dragged right edge of BLUE rectangle', 3000);
+    await pauseAndDescribe('Dragged right edge of BLUE rectangle', 300);
 
     await verifyManually(
       'VERIFY: Did the right edge of the BLUE rectangle get curved/pulled out?\n' +
@@ -196,7 +212,7 @@ describe('MANUAL: Timeline Animation', () => {
 
     await logStep('Moving playhead back to time 0');
     await setPlayheadTime(0);
-    await pauseAndDescribe('Playhead back at start', 3000);
+    await pauseAndDescribe('Playhead back at start', 300);
 
     await verifyManually(
       'VERIFY: Did the BLUE rectangle return to its original rectangular shape?\n' +
@@ -204,13 +220,14 @@ describe('MANUAL: Timeline Animation', () => {
       'Click OK if yes, Cancel if no'
     );
 
-    await logStep('Moving playhead to middle (time 0.25)');
+    await logStep('Moving playhead to middle between keyframes (time 0.25, frame 6)');
     await setPlayheadTime(0.25);
-    await pauseAndDescribe('Playhead at middle (0.25s)', 3000);
+    await pauseAndDescribe('Playhead at middle (0.25s) - halfway between frame 0 and frame 12', 300);
 
     await verifyManually(
       'VERIFY: Is the BLUE rectangle shape somewhere between the two versions?\n' +
-      'It should be partially morphed (shape tween interpolation)\n\n' +
+      'It should be partially morphed (shape tween interpolation)\n' +
+      'Halfway between the original rectangle and the curved version\n\n' +
       'Click OK if yes, Cancel if no'
     );
 
@@ -223,9 +240,13 @@ describe('MANUAL: Timeline Animation', () => {
   });
 
   it('TEST 3: Test dragging unselected shape edge', async () => {
+    await logStep('Resetting playhead to time 0');
+    await setPlayheadTime(0);
+    await pauseAndDescribe('Playhead reset to time 0', 100);
+
     await logStep('Drawing a GREEN rectangle at (200, 250) WITHOUT selecting it');
     await drawRectangle(200, 250, 100, 100, true, '#00ff00');
-    await pauseAndDescribe('GREEN rectangle drawn (not selected)', 2000);
+    await pauseAndDescribe('GREEN rectangle drawn (not selected)', 100);
 
     await verifyManually(
       'VERIFY: GREEN rectangle should be visible but NOT selected\n' +
@@ -233,9 +254,13 @@ describe('MANUAL: Timeline Animation', () => {
       'Click OK if yes, Cancel if no'
     );
 
+    await logStep('Switching to select tool');
+    await selectTool('select');
+    await pauseAndDescribe('Select tool activated', 100);
+
     await logStep('Dragging from the right edge (x=300) of GREEN rectangle to extend it');
     await dragCanvas(300, 300, 350, 300);
-    await pauseAndDescribe('Dragged the right edge of GREEN rectangle', 3000);
+    await pauseAndDescribe('Dragged the right edge of GREEN rectangle', 200);
 
     await verifyManually(
       'VERIFY: What happened to the GREEN rectangle?\n\n' +

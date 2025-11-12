@@ -19,6 +19,7 @@ import {
   getPixelColor
 } from '../helpers/canvas.js';
 import { assertShapeExists } from '../helpers/assertions.js';
+import { verifyManually, logStep } from '../helpers/manual.js';
 
 describe('Timeline Animation', () => {
   before(async () => {
@@ -44,9 +45,18 @@ describe('Timeline Animation', () => {
       await addKeyframe();
       await browser.pause(200);
 
+      await logStep('About to drag selected shape - dragging selected shapes does not move them yet');
+
       // Shape is selected, so dragging from its center will move it
       await dragCanvas(150, 150, 250, 150);
       await browser.pause(300);
+
+      await verifyManually(
+        'VERIFY: Did the shape move to x=250?\n' +
+        'Expected: Shape at x=250\n' +
+        'Note: Dragging selected shapes is not implemented yet\n\n' +
+        'Click OK if at x=250, Cancel if not'
+      );
 
       // At frame 10, shape should be at the new position (moved 100px to the right)
       await assertShapeExists(250, 150, 'Shape should be at new position at frame 10');
@@ -55,12 +65,22 @@ describe('Timeline Animation', () => {
       await setPlayheadTime(0);
       await browser.pause(200);
 
+      await verifyManually(
+        'VERIFY: Did the shape return to original position (x=150)?\n\n' +
+        'Click OK if yes, Cancel if no'
+      );
+
       // Shape should be at original position
       await assertShapeExists(150, 150, 'Shape should be at original position at frame 1');
 
       // Go to middle frame (frame 5, time ≈ 0.166s)
       await setPlayheadTime(0.166);
       await browser.pause(200);
+
+      await verifyManually(
+        'VERIFY: Is the shape interpolated at x=200 (halfway)?\n\n' +
+        'Click OK if yes, Cancel if no'
+      );
 
       // Shape should be interpolated between the two positions
       // At frame 5 (halfway), shape should be around x=200 (halfway between 150 and 250)
@@ -91,74 +111,85 @@ describe('Timeline Animation', () => {
 
     it('should handle multiple keyframes on the same shape', async () => {
       // Draw a shape
-      await drawRectangle(100, 300, 80, 80);
+      await drawRectangle(100, 100, 80, 80);
 
       // Select it
-      await selectMultipleShapes([{ x: 140, y: 340 }]);
+      await selectMultipleShapes([{ x: 140, y: 140 }]);
       await browser.pause(200);
 
-      // Keyframe 1: time 0 (original position at x=140, y=340)
+      // Keyframe 1: time 0 (original position at x=140, y=140)
 
       // Keyframe 2: time 0.333 (move right)
       await setPlayheadTime(0.333);
       await addKeyframe();
       await browser.pause(200);
+
+      await logStep('Dragging selected shape (not implemented yet)');
       // Shape should still be selected, drag to move
-      await dragCanvas(140, 340, 200, 340);
+      await dragCanvas(140, 140, 200, 140);
       await browser.pause(300);
 
-      // Keyframe 3: time 0.666 (move down but stay within canvas)
+      await verifyManually('VERIFY: Did shape move to x=200? (probably not)\nClick OK if at x=200, Cancel if not');
+
+      // Keyframe 3: time 0.666 (move down)
       await setPlayheadTime(0.666);
       await addKeyframe();
       await browser.pause(200);
-      // Drag to move down (y=380 instead of 400 to stay in canvas)
-      await dragCanvas(200, 340, 200, 380);
+      // Drag to move down
+      await dragCanvas(200, 140, 200, 180);
       await browser.pause(300);
+
+      await verifyManually('VERIFY: Did shape move to y=180?\nClick OK if yes, Cancel if no');
 
       // Verify positions at each keyframe
       await setPlayheadTime(0);
       await browser.pause(200);
-      await assertShapeExists(140, 340, 'Shape at keyframe 1 (x=140, y=340)');
+      await verifyManually('VERIFY: Shape at original position (x=140, y=140)?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(140, 140, 'Shape at keyframe 1 (x=140, y=140)');
 
       await setPlayheadTime(0.333);
       await browser.pause(200);
-      await assertShapeExists(200, 340, 'Shape at keyframe 2 (x=200, y=340)');
+      await verifyManually('VERIFY: Shape at x=200, y=140?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(200, 140, 'Shape at keyframe 2 (x=200, y=140)');
 
       await setPlayheadTime(0.666);
       await browser.pause(200);
-      await assertShapeExists(200, 380, 'Shape at keyframe 3 (x=200, y=380)');
+      await verifyManually('VERIFY: Shape at x=200, y=180?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(200, 180, 'Shape at keyframe 3 (x=200, y=180)');
 
       // Check interpolation between keyframe 1 and 2 (at t=0.166, halfway)
       await setPlayheadTime(0.166);
       await browser.pause(200);
-      await assertShapeExists(170, 340, 'Shape interpolated between kf1 and kf2');
+      await verifyManually('VERIFY: Shape interpolated at x=170, y=140?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(170, 140, 'Shape interpolated between kf1 and kf2');
 
       // Check interpolation between keyframe 2 and 3 (at t=0.5, halfway)
       await setPlayheadTime(0.5);
       await browser.pause(200);
-      await assertShapeExists(200, 360, 'Shape interpolated between kf2 and kf3');
+      await verifyManually('VERIFY: Shape interpolated at x=200, y=160?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(200, 160, 'Shape interpolated between kf2 and kf3');
     });
   });
 
   describe('Group/Object Animation', () => {
     it('should animate group position across keyframes', async () => {
       // Create a group with two shapes
-      await drawRectangle(300, 300, 60, 60);
-      await drawRectangle(380, 300, 60, 60);
+      await drawRectangle(300, 100, 60, 60);
+      await drawRectangle(380, 100, 60, 60);
 
       await selectMultipleShapes([
-        { x: 330, y: 330 },
-        { x: 410, y: 330 }
+        { x: 330, y: 130 },
+        { x: 410, y: 130 }
       ]);
       await useKeyboardShortcut('g', true);
       await browser.pause(300);
 
       // Verify both shapes exist at frame 1
-      await assertShapeExists(330, 330, 'First shape at frame 1');
-      await assertShapeExists(410, 330, 'Second shape at frame 1');
+      await assertShapeExists(330, 130, 'First shape at frame 1');
+      await assertShapeExists(410, 130, 'Second shape at frame 1');
 
       // Select the group by dragging a selection box over it
-      await selectMultipleShapes([{ x: 370, y: 330 }]);
+      await selectMultipleShapes([{ x: 370, y: 130 }]);
       await browser.pause(200);
 
       // Move to frame 10 and add keyframe
@@ -166,30 +197,37 @@ describe('Timeline Animation', () => {
       await addKeyframe();
       await browser.pause(200);
 
+      await logStep('Dragging group down');
       // Group is selected, so dragging will move it
-      // Drag from center of group down (but keep it within canvas bounds)
-      await dragCanvas(370, 330, 370, 380);
+      // Drag from center of group down
+      await dragCanvas(370, 130, 370, 200);
       await browser.pause(300);
 
-      // At frame 10, group should be at new position (moved 50px down)
-      await assertShapeExists(330, 380, 'First shape at new position at frame 10');
-      await assertShapeExists(410, 380, 'Second shape at new position at frame 10');
+      await verifyManually('VERIFY: Did the group move down to y=200?\nClick OK if yes, Cancel if no');
+
+      // At frame 10, group should be at new position (moved down)
+      await assertShapeExists(330, 200, 'First shape at new position at frame 10');
+      await assertShapeExists(410, 200, 'Second shape at new position at frame 10');
 
       // Go to frame 1
       await setPlayheadTime(0);
       await browser.pause(200);
 
+      await verifyManually('VERIFY: Did group return to original position (y=130)?\nClick OK if yes, Cancel if no');
+
       // Group should be at original position
-      await assertShapeExists(330, 330, 'First shape at original position at frame 1');
-      await assertShapeExists(410, 330, 'Second shape at original position at frame 1');
+      await assertShapeExists(330, 130, 'First shape at original position at frame 1');
+      await assertShapeExists(410, 130, 'Second shape at original position at frame 1');
 
       // Go to frame 5 (middle, t=0.166)
       await setPlayheadTime(0.166);
       await browser.pause(200);
 
-      // Group should be interpolated (halfway between y=330 and y=380, so y=355)
-      await assertShapeExists(330, 355, 'First shape interpolated at frame 5');
-      await assertShapeExists(410, 355, 'Second shape interpolated at frame 5');
+      await verifyManually('VERIFY: Is group interpolated at y=165 (halfway)?\nClick OK if yes, Cancel if no');
+
+      // Group should be interpolated (halfway between y=130 and y=200, so y=165)
+      await assertShapeExists(330, 165, 'First shape interpolated at frame 5');
+      await assertShapeExists(410, 165, 'Second shape interpolated at frame 5');
     });
 
     it('should maintain relative positions of shapes within animated group', async () => {
@@ -233,41 +271,47 @@ describe('Timeline Animation', () => {
   describe('Interpolation', () => {
     it('should smoothly interpolate between keyframes', async () => {
       // Draw a simple shape
-      await drawRectangle(500, 100, 50, 50);
+      await drawRectangle(100, 100, 50, 50);
 
       // Select it
-      await selectMultipleShapes([{ x: 525, y: 125 }]);
+      await selectMultipleShapes([{ x: 125, y: 125 }]);
       await browser.pause(200);
 
-      // Keyframe at start (x=525)
+      // Keyframe at start (x=125)
       await setPlayheadTime(0);
       await browser.pause(100);
 
-      // Keyframe at end (1 second = frame 30, move to x=725)
+      // Keyframe at end (1 second = frame 30, move to x=325)
       await setPlayheadTime(1.0);
       await addKeyframe();
       await browser.pause(200);
 
-      await dragCanvas(525, 125, 725, 125);
+      await logStep('Dragging shape (selected shapes cannot be dragged yet)');
+      await dragCanvas(125, 125, 325, 125);
       await browser.pause(300);
+
+      await verifyManually('VERIFY: Did shape move to x=325? (probably not)\nClick OK if at x=325, Cancel if not');
 
       // Check multiple intermediate frames for smooth interpolation
       // Total movement: 200px over 1 second
 
-      // At 25% (0.25s), x should be 525 + 50 = 575
+      // At 25% (0.25s), x should be 125 + 50 = 175
       await setPlayheadTime(0.25);
       await browser.pause(200);
-      await assertShapeExists(575, 125, 'Shape at 25% interpolation');
+      await verifyManually('VERIFY: Shape at x=175 (25% interpolation)?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(175, 125, 'Shape at 25% interpolation');
 
-      // At 50% (0.5s), x should be 525 + 100 = 625
+      // At 50% (0.5s), x should be 125 + 100 = 225
       await setPlayheadTime(0.5);
       await browser.pause(200);
-      await assertShapeExists(625, 125, 'Shape at 50% interpolation');
+      await verifyManually('VERIFY: Shape at x=225 (50% interpolation)?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(225, 125, 'Shape at 50% interpolation');
 
-      // At 75% (0.75s), x should be 525 + 150 = 675
+      // At 75% (0.75s), x should be 125 + 150 = 275
       await setPlayheadTime(0.75);
       await browser.pause(200);
-      await assertShapeExists(675, 125, 'Shape at 75% interpolation');
+      await verifyManually('VERIFY: Shape at x=275 (75% interpolation)?\nClick OK if yes, Cancel if no');
+      await assertShapeExists(275, 125, 'Shape at 75% interpolation');
     });
   });
 });
