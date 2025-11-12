@@ -5270,6 +5270,83 @@ async function startup() {
 
 startup();
 
+// Track maximized pane state
+let maximizedPane = null;
+let savedPaneParent = null;
+let savedRootPaneChildren = [];
+let savedRootPaneClasses = null;
+
+function toggleMaximizePane(paneDiv) {
+  if (maximizedPane === paneDiv) {
+    // Restore layout
+    if (savedPaneParent && savedRootPaneChildren.length > 0) {
+      // Remove pane from root
+      rootPane.removeChild(paneDiv);
+
+      // Restore all root pane children
+      while (rootPane.firstChild) {
+        rootPane.removeChild(rootPane.firstChild);
+      }
+      for (const child of savedRootPaneChildren) {
+        rootPane.appendChild(child);
+      }
+
+      // Put pane back in its original parent
+      savedPaneParent.appendChild(paneDiv);
+
+      // Restore root pane classes
+      if (savedRootPaneClasses) {
+        rootPane.className = savedRootPaneClasses;
+      }
+
+      savedPaneParent = null;
+      savedRootPaneChildren = [];
+      savedRootPaneClasses = null;
+    }
+    maximizedPane = null;
+
+    // Update button
+    const btn = paneDiv.querySelector('.maximize-btn');
+    if (btn) {
+      btn.innerHTML = "⛶";
+      btn.title = "Maximize Pane";
+    }
+
+    // Trigger updates
+    updateAll();
+  } else {
+    // Maximize pane
+    // Save pane's current parent
+    savedPaneParent = paneDiv.parentElement;
+
+    // Save all root pane children
+    savedRootPaneChildren = Array.from(rootPane.children);
+    savedRootPaneClasses = rootPane.className;
+
+    // Remove pane from its parent
+    savedPaneParent.removeChild(paneDiv);
+
+    // Clear root pane
+    while (rootPane.firstChild) {
+      rootPane.removeChild(rootPane.firstChild);
+    }
+
+    // Add only the maximized pane to root
+    rootPane.appendChild(paneDiv);
+    maximizedPane = paneDiv;
+
+    // Update button
+    const btn = paneDiv.querySelector('.maximize-btn');
+    if (btn) {
+      btn.innerHTML = "⛶"; // Could use different icon for restore
+      btn.title = "Restore Layout";
+    }
+
+    // Trigger updates
+    updateAll();
+  }
+}
+
 function createPaneMenu(div) {
   const menuItems = ["Item 1", "Item 2", "Item 3"]; // The items for the menu
 
@@ -5385,6 +5462,16 @@ function createPane(paneType = undefined, div = undefined) {
       header.appendChild(control);
     }
   }
+
+  // Add maximize/restore button in top right
+  const maximizeBtn = document.createElement("button");
+  maximizeBtn.className = "maximize-btn";
+  maximizeBtn.title = "Maximize Pane";
+  maximizeBtn.innerHTML = "⛶"; // Maximize icon
+  maximizeBtn.addEventListener("click", () => {
+    toggleMaximizePane(div);
+  });
+  header.appendChild(maximizeBtn);
 
   div.className = "vertical-grid pane";
   div.setAttribute("data-pane-name", paneType.name);
@@ -8708,7 +8795,10 @@ function nodeEditor() {
                   keyMax: layerConfig.keyMax,
                   rootKey: layerConfig.rootKey,
                   velocityMin: layerConfig.velocityMin,
-                  velocityMax: layerConfig.velocityMax
+                  velocityMax: layerConfig.velocityMax,
+                  loopStart: layerConfig.loopStart,
+                  loopEnd: layerConfig.loopEnd,
+                  loopMode: layerConfig.loopMode
                 });
 
                 // Wait a bit for the audio thread to process the add command
@@ -8822,7 +8912,10 @@ function nodeEditor() {
               keyMax: layer.key_max,
               rootKey: layer.root_key,
               velocityMin: layer.velocity_min,
-              velocityMax: layer.velocity_max
+              velocityMax: layer.velocity_max,
+              loopStart: layer.loop_start,
+              loopEnd: layer.loop_end,
+              loopMode: layer.loop_mode
             });
 
             if (layerConfig) {
@@ -8835,7 +8928,10 @@ function nodeEditor() {
                   keyMax: layerConfig.keyMax,
                   rootKey: layerConfig.rootKey,
                   velocityMin: layerConfig.velocityMin,
-                  velocityMax: layerConfig.velocityMax
+                  velocityMax: layerConfig.velocityMax,
+                  loopStart: layerConfig.loopStart,
+                  loopEnd: layerConfig.loopEnd,
+                  loopMode: layerConfig.loopMode
                 });
 
                 // Refresh the list
@@ -9872,7 +9968,10 @@ function nodeEditor() {
                       keyMax: layerConfig.keyMax,
                       rootKey: layerConfig.rootKey,
                       velocityMin: layerConfig.velocityMin,
-                      velocityMax: layerConfig.velocityMax
+                      velocityMax: layerConfig.velocityMax,
+                      loopStart: layerConfig.loopStart,
+                      loopEnd: layerConfig.loopEnd,
+                      loopMode: layerConfig.loopMode
                     });
 
                     // Wait a bit for the audio thread to process the add command
@@ -10677,6 +10776,9 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     const rootKey = existingConfig?.rootKey ?? 60;
     const velocityMin = existingConfig?.velocityMin ?? 0;
     const velocityMax = existingConfig?.velocityMax ?? 127;
+    const loopMode = existingConfig?.loopMode ?? 'oneshot';
+    const loopStart = existingConfig?.loopStart ?? null;
+    const loopEnd = existingConfig?.loopEnd ?? null;
 
     // Create modal dialog
     const dialog = document.createElement('div');
@@ -10723,6 +10825,33 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
               </div>
             </div>
           </div>
+          <div class="form-group">
+            <label>Loop Mode</label>
+            <select id="loop-mode">
+              <option value="oneshot" ${loopMode === 'oneshot' ? 'selected' : ''}>One-Shot (play once)</option>
+              <option value="continuous" ${loopMode === 'continuous' ? 'selected' : ''}>Continuous (loop)</option>
+            </select>
+            <div class="form-note" style="font-size: 11px; color: #888; margin-top: 4px;">
+              Continuous mode will auto-detect loop points if not specified
+            </div>
+          </div>
+          <div id="loop-points-group" class="form-group" style="display: ${loopMode === 'continuous' ? 'block' : 'none'};">
+            <label>Loop Points (optional, samples)</label>
+            <div class="form-group-inline">
+              <div>
+                <label style="font-size: 11px; color: #888;">Start</label>
+                <input type="number" id="loop-start" min="0" value="${loopStart ?? ''}" placeholder="Auto" />
+              </div>
+              <span>-</span>
+              <div>
+                <label style="font-size: 11px; color: #888;">End</label>
+                <input type="number" id="loop-end" min="0" value="${loopEnd ?? ''}" placeholder="Auto" />
+              </div>
+            </div>
+            <div class="form-note" style="font-size: 11px; color: #888; margin-top: 4px;">
+              Leave empty to auto-detect optimal loop points
+            </div>
+          </div>
           <div class="form-actions">
             <button type="button" class="btn-cancel">Cancel</button>
             <button type="submit" class="btn-primary">${isEdit ? 'Update' : 'Add'} Layer</button>
@@ -10737,6 +10866,8 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     const keyMinInput = dialog.querySelector('#key-min');
     const keyMaxInput = dialog.querySelector('#key-max');
     const rootKeyInput = dialog.querySelector('#root-key');
+    const loopModeSelect = dialog.querySelector('#loop-mode');
+    const loopPointsGroup = dialog.querySelector('#loop-points-group');
 
     const updateKeyMinName = () => {
       const note = parseInt(keyMinInput.value) || 0;
@@ -10757,6 +10888,12 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     keyMaxInput.addEventListener('input', updateKeyMaxName);
     rootKeyInput.addEventListener('input', updateRootKeyName);
 
+    // Toggle loop points visibility based on loop mode
+    loopModeSelect.addEventListener('change', () => {
+      const isContinuous = loopModeSelect.value === 'continuous';
+      loopPointsGroup.style.display = isContinuous ? 'block' : 'none';
+    });
+
     // Focus first input
     setTimeout(() => dialog.querySelector('#key-min')?.focus(), 100);
 
@@ -10775,6 +10912,13 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
       const rootKey = parseInt(rootKeyInput.value);
       const velocityMin = parseInt(dialog.querySelector('#velocity-min').value);
       const velocityMax = parseInt(dialog.querySelector('#velocity-max').value);
+      const loopMode = loopModeSelect.value;
+
+      // Get loop points (null if empty)
+      const loopStartInput = dialog.querySelector('#loop-start');
+      const loopEndInput = dialog.querySelector('#loop-end');
+      const loopStart = loopStartInput.value ? parseInt(loopStartInput.value) : null;
+      const loopEnd = loopEndInput.value ? parseInt(loopEndInput.value) : null;
 
       // Validate ranges
       if (keyMin > keyMax) {
@@ -10792,13 +10936,22 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
         return;
       }
 
+      // Validate loop points if both are specified
+      if (loopStart !== null && loopEnd !== null && loopStart >= loopEnd) {
+        alert('Loop Start must be less than Loop End');
+        return;
+      }
+
       dialog.remove();
       resolve({
         keyMin,
         keyMax,
         rootKey,
         velocityMin,
-        velocityMax
+        velocityMax,
+        loopMode,
+        loopStart,
+        loopEnd
       });
     });
 

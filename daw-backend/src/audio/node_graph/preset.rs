@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use super::nodes::LoopMode;
 
 /// Sample data for preset serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,16 @@ pub struct LayerData {
     pub root_key: u8,
     pub velocity_min: u8,
     pub velocity_max: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loop_end: Option<usize>,
+    #[serde(default = "default_loop_mode")]
+    pub loop_mode: LoopMode,
+}
+
+fn default_loop_mode() -> LoopMode {
+    LoopMode::OneShot
 }
 
 /// Serializable representation of a node graph preset

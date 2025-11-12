@@ -3,6 +3,7 @@ use crate::audio::{
     TrackId,
 };
 use crate::audio::buffer_pool::BufferPoolStats;
+use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
 
 /// Commands sent from UI/control thread to audio thread
@@ -151,10 +152,10 @@ pub enum Command {
 
     /// Load a sample into a SimpleSampler node (track_id, node_id, file_path)
     SamplerLoadSample(TrackId, u32, String),
-    /// Add a sample layer to a MultiSampler node (track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max)
-    MultiSamplerAddLayer(TrackId, u32, String, u8, u8, u8, u8, u8),
-    /// Update a MultiSampler layer's configuration (track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max)
-    MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8),
+    /// Add a sample layer to a MultiSampler node (track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode)
+    MultiSamplerAddLayer(TrackId, u32, String, u8, u8, u8, u8, u8, Option<usize>, Option<usize>, LoopMode),
+    /// Update a MultiSampler layer's configuration (track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode)
+    MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8, Option<usize>, Option<usize>, LoopMode),
     /// Remove a layer from a MultiSampler node (track_id, node_id, layer_index)
     MultiSamplerRemoveLayer(TrackId, u32, usize),
 
@@ -215,6 +216,8 @@ pub enum AudioEvent {
     GraphStateChanged(TrackId),
     /// Preset fully loaded (track_id) - emitted after all nodes and samples are loaded
     GraphPresetLoaded(TrackId),
+    /// Preset has been saved to file (track_id, preset_path)
+    GraphPresetSaved(TrackId, String),
 }
 
 /// Synchronous queries sent from UI thread to audio thread

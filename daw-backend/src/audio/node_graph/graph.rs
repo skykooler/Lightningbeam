@@ -472,7 +472,7 @@ impl AudioGraph {
                     // This is safe because each output buffer is independent
                     let buffer = &mut node.output_buffers[i] as *mut Vec<f32>;
                     unsafe {
-                        let slice = &mut (*buffer)[..process_size.min((*buffer).len())];
+                        let slice = &mut (&mut *buffer)[..process_size.min((*buffer).len())];
                         output_slices.push(slice);
                     }
                 }
@@ -733,6 +733,9 @@ impl AudioGraph {
                                         root_key: info.root_key,
                                         velocity_min: info.velocity_min,
                                         velocity_max: info.velocity_max,
+                                        loop_start: info.loop_start,
+                                        loop_end: info.loop_end,
+                                        loop_mode: info.loop_mode,
                                     }
                                 })
                                 .collect();
@@ -938,6 +941,9 @@ impl AudioGraph {
                                                 layer.root_key,
                                                 layer.velocity_min,
                                                 layer.velocity_max,
+                                                layer.loop_start,
+                                                layer.loop_end,
+                                                layer.loop_mode,
                                             );
                                         }
                                     } else if let Some(ref path) = layer.file_path {
@@ -950,6 +956,9 @@ impl AudioGraph {
                                             layer.root_key,
                                             layer.velocity_min,
                                             layer.velocity_max,
+                                            layer.loop_start,
+                                            layer.loop_end,
+                                            layer.loop_mode,
                                         ) {
                                             eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
                                         }

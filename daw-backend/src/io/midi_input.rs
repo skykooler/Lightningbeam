@@ -9,6 +9,7 @@ use std::time::Duration;
 pub struct MidiInputManager {
     connections: Arc<Mutex<Vec<ActiveMidiConnection>>>,
     active_track_id: Arc<Mutex<Option<TrackId>>>,
+    #[allow(dead_code)]
     command_tx: Arc<Mutex<rtrb::Producer<Command>>>,
 }
 
@@ -147,14 +148,16 @@ impl MidiInputManager {
                     println!("MIDI: Connected to: {}", port_name);
 
                     // Need to recreate MidiInput for next iteration
-                    midi_in = MidiInput::new("Lightningbeam")
+                    let _midi_in = MidiInput::new("Lightningbeam")
                         .map_err(|e| format!("Failed to recreate MIDI input: {}", e))?;
+                    midi_in = _midi_in;
                 }
                 Err(e) => {
                     eprintln!("MIDI: Failed to connect to {}: {}", port_name, e);
                     // Recreate MidiInput to continue with other ports
-                    midi_in = MidiInput::new("Lightningbeam")
+                    let _midi_in = MidiInput::new("Lightningbeam")
                         .map_err(|e| format!("Failed to recreate MIDI input: {}", e))?;
+                    midi_in = _midi_in;
                 }
             }
         }

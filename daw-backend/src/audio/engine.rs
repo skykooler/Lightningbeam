@@ -1114,11 +1114,20 @@ impl Engine {
 
                     // Write to file
                     if let Ok(json) = preset.to_json() {
-                        if let Err(e) = std::fs::write(&preset_path, json) {
-                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
-                                track_id,
-                                format!("Failed to save preset: {}", e)
-                            ));
+                        match std::fs::write(&preset_path, json) {
+                            Ok(_) => {
+                                // Emit success event with path
+                                let _ = self.event_tx.push(AudioEvent::GraphPresetSaved(
+                                    track_id,
+                                    preset_path.clone()
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to save preset: {}", e)
+                                ));
+                            }
                         }
                     } else {
                         let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
@@ -1230,7 +1239,7 @@ impl Engine {
                 }
             }
 
-            Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max) => {
+            Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) => {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
@@ -1244,7 +1253,7 @@ impl Engine {
 
                         unsafe {
                             let multi_sampler_node = &mut *node_ptr;
-                            if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max) {
+                            if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to add sample layer: {}", e);
                             }
                         }
@@ -1252,7 +1261,7 @@ impl Engine {
                 }
             }
 
-            Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max) => {
+            Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) => {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
@@ -1266,7 +1275,7 @@ impl Engine {
 
                         unsafe {
                             let multi_sampler_node = &mut *node_ptr;
-                            if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max) {
+                            if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to update sample layer: {}", e);
                             }
                         }
@@ -2254,13 +2263,13 @@ impl EngineController {
     }
 
     /// Add a sample layer to a MultiSampler node
-    pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
-        let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max));
+    pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8, loop_start: Option<usize>, loop_end: Option<usize>, loop_mode: crate::audio::node_graph::nodes::LoopMode) {
+        let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode));
     }
 
     /// Update a MultiSampler layer's configuration
-    pub fn multi_sampler_update_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
-        let _ = self.command_tx.push(Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max));
+    pub fn multi_sampler_update_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8, loop_start: Option<usize>, loop_end: Option<usize>, loop_mode: crate::audio::node_graph::nodes::LoopMode) {
+        let _ = self.command_tx.push(Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode));
     }
 
     /// Remove a layer from a MultiSampler node

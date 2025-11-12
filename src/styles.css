@@ -213,6 +213,23 @@ button {
   user-select: none;
 }
 
+/* Maximize button in pane headers */
+.maximize-btn {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 4px 8px;
+  background: none;
+  border: 1px solid var(--foreground-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 14px;
+}
+
+.maximize-btn:hover {
+  background-color: var(--surface-light);
+}
+
 .pane {
   user-select: none;
 }

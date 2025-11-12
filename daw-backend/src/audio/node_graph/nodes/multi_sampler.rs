@@ -7,6 +7,16 @@ const PARAM_ATTACK: u32 = 1;
 const PARAM_RELEASE: u32 = 2;
 const PARAM_TRANSPOSE: u32 = 3;
 
+/// Loop playback mode
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LoopMode {
+    /// Play sample once, no looping
+    OneShot,
+    /// Loop continuously between loop_start and loop_end
+    Continuous,
+}
+
 /// Metadata about a loaded sample layer (for preset serialization)
 #[derive(Clone, Debug)]
 pub struct LayerInfo {
@@ -16,6 +26,9 @@ pub struct LayerInfo {
     pub root_key: u8,
     pub velocity_min: u8,
     pub velocity_max: u8,
+    pub loop_start: Option<usize>,  // Loop start point in samples
+    pub loop_end: Option<usize>,    // Loop end point in samples
+    pub loop_mode: LoopMode,
 }
 
 /// Single sample with velocity range and key range
@@ -32,6 +45,11 @@ struct SampleLayer {
     // Velocity range: 0-127
     velocity_min: u8,
     velocity_max: u8,
+
+    // Loop points (in samples)
+    loop_start: Option<usize>,
+    loop_end: Option<usize>,
+    loop_mode: LoopMode,
 }
 
 impl SampleLayer {
@@ -43,6 +61,9 @@ impl SampleLayer {
         root_key: u8,
         velocity_min: u8,
         velocity_max: u8,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+        loop_mode: LoopMode,
     ) -> Self {
         Self {
             sample_data,
@@ -52,6 +73,9 @@ impl SampleLayer {
             root_key,
             velocity_min,
             velocity_max,
+            loop_start,
+            loop_end,
+            loop_mode,
         }
     }
 
@@ -61,6 +85,114 @@ impl SampleLayer {
             && key <= self.key_max
             && velocity >= self.velocity_min
             && velocity <= self.velocity_max
+    }
+
+    /// Auto-detect loop points using autocorrelation to find a good loop region
+    /// Returns (loop_start, loop_end) in samples
+    fn detect_loop_points(sample_data: &[f32], sample_rate: f32) -> Option<(usize, usize)> {
+        if sample_data.len() < (sample_rate * 0.5) as usize {
+            return None; // Need at least 0.5 seconds of audio
+        }
+
+        // Look for loop in the sustain region (skip attack/decay, avoid release)
+        // For sustained instruments, look in the middle 50% of the sample
+        let search_start = (sample_data.len() as f32 * 0.25) as usize;
+        let search_end = (sample_data.len() as f32 * 0.75) as usize;
+
+        if search_end <= search_start {
+            return None;
+        }
+
+        // Find the best loop point using autocorrelation
+        // For sustained instruments like brass/woodwind, we want longer loops
+        let min_loop_length = (sample_rate * 0.1) as usize; // Min 0.1s loop (more stable)
+        let max_loop_length = (sample_rate * 10.0) as usize; // Max 10 second loop
+
+        let mut best_correlation = -1.0;
+        let mut best_loop_start = search_start;
+        let mut best_loop_end = search_end;
+
+        // Try different loop lengths from LONGEST to SHORTEST
+        // This way we prefer longer loops and stop early if we find a good one
+        let length_step = ((sample_rate * 0.05) as usize).max(512); // 50ms steps
+        let actual_max_length = max_loop_length.min(search_end - search_start);
+
+        // Manually iterate backwards since step_by().rev() doesn't work on RangeInclusive<usize>
+        let mut loop_length = actual_max_length;
+        while loop_length >= min_loop_length {
+            // Try different starting points in the sustain region (finer steps)
+            let start_step = ((sample_rate * 0.02) as usize).max(256); // 20ms steps
+            for start in (search_start..search_end - loop_length).step_by(start_step) {
+                let end = start + loop_length;
+                if end > search_end {
+                    break;
+                }
+
+                // Calculate correlation between loop end and loop start
+                let correlation = Self::calculate_loop_correlation(sample_data, start, end);
+
+                if correlation > best_correlation {
+                    best_correlation = correlation;
+                    best_loop_start = start;
+                    best_loop_end = end;
+                }
+            }
+
+            // If we found a good enough loop, stop searching shorter ones
+            if best_correlation > 0.8 {
+                break;
+            }
+
+            // Decrement loop_length, with underflow protection
+            if loop_length < length_step {
+                break;
+            }
+            loop_length -= length_step;
+        }
+
+        // Lower threshold since longer loops are harder to match perfectly
+        if best_correlation > 0.6 {
+            Some((best_loop_start, best_loop_end))
+        } else {
+            // Fallback: use a reasonable chunk of the sustain region
+            let fallback_length = ((search_end - search_start) / 2).max(min_loop_length);
+            Some((search_start, search_start + fallback_length))
+        }
+    }
+
+    /// Calculate how well the audio loops at the given points
+    /// Returns correlation value between -1.0 and 1.0 (higher is better)
+    fn calculate_loop_correlation(sample_data: &[f32], loop_start: usize, loop_end: usize) -> f32 {
+        let loop_length = loop_end - loop_start;
+        let window_size = (loop_length / 10).max(128).min(2048); // Compare last 10% of loop
+
+        if loop_end + window_size >= sample_data.len() {
+            return -1.0;
+        }
+
+        // Compare the end of the loop region with the beginning
+        let region1_start = loop_end - window_size;
+        let region2_start = loop_start;
+
+        let mut sum_xy = 0.0;
+        let mut sum_x2 = 0.0;
+        let mut sum_y2 = 0.0;
+
+        for i in 0..window_size {
+            let x = sample_data[region1_start + i];
+            let y = sample_data[region2_start + i];
+            sum_xy += x * y;
+            sum_x2 += x * x;
+            sum_y2 += y * y;
+        }
+
+        // Pearson correlation coefficient
+        let denominator = (sum_x2 * sum_y2).sqrt();
+        if denominator > 0.0 {
+            sum_xy / denominator
+        } else {
+            -1.0
+        }
     }
 }
 
@@ -75,6 +207,10 @@ struct Voice {
     // Envelope
     envelope_phase: EnvelopePhase,
     envelope_value: f32,
+
+    // Loop crossfade state
+    crossfade_buffer: Vec<f32>,  // Stores samples from before loop_start for crossfading
+    crossfade_length: usize,     // Length of crossfade in samples (e.g., 100 samples = ~2ms @ 48kHz)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,6 +230,8 @@ impl Voice {
             is_active: true,
             envelope_phase: EnvelopePhase::Attack,
             envelope_value: 0.0,
+            crossfade_buffer: Vec::new(),
+            crossfade_length: 1000,  // ~20ms at 48kHz (longer for smoother loops)
         }
     }
 }
@@ -166,6 +304,9 @@ impl MultiSamplerNode {
         root_key: u8,
         velocity_min: u8,
         velocity_max: u8,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+        loop_mode: LoopMode,
     ) {
         let layer = SampleLayer::new(
             sample_data,
@@ -175,6 +316,9 @@ impl MultiSamplerNode {
             root_key,
             velocity_min,
             velocity_max,
+            loop_start,
+            loop_end,
+            loop_mode,
         );
         self.layers.push(layer);
     }
@@ -188,10 +332,25 @@ impl MultiSamplerNode {
         root_key: u8,
         velocity_min: u8,
         velocity_max: u8,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+        loop_mode: LoopMode,
     ) -> Result<(), String> {
         use crate::audio::sample_loader::load_audio_file;
 
         let sample_data = load_audio_file(path)?;
+
+        // Auto-detect loop points if not provided and mode is Continuous
+        let (final_loop_start, final_loop_end) = if loop_mode == LoopMode::Continuous && loop_start.is_none() && loop_end.is_none() {
+            if let Some((start, end)) = SampleLayer::detect_loop_points(&sample_data.samples, sample_data.sample_rate as f32) {
+                (Some(start), Some(end))
+            } else {
+                (None, None)
+            }
+        } else {
+            (loop_start, loop_end)
+        };
+
         self.add_layer(
             sample_data.samples,
             sample_data.sample_rate as f32,
@@ -200,6 +359,9 @@ impl MultiSamplerNode {
             root_key,
             velocity_min,
             velocity_max,
+            final_loop_start,
+            final_loop_end,
+            loop_mode,
         );
 
         // Store layer metadata for preset serialization
@@ -210,6 +372,9 @@ impl MultiSamplerNode {
             root_key,
             velocity_min,
             velocity_max,
+            loop_start: final_loop_start,
+            loop_end: final_loop_end,
+            loop_mode,
         });
 
         Ok(())
@@ -236,6 +401,9 @@ impl MultiSamplerNode {
         root_key: u8,
         velocity_min: u8,
         velocity_max: u8,
+        loop_start: Option<usize>,
+        loop_end: Option<usize>,
+        loop_mode: LoopMode,
     ) -> Result<(), String> {
         if layer_index >= self.layers.len() {
             return Err("Layer index out of bounds".to_string());
@@ -247,6 +415,9 @@ impl MultiSamplerNode {
         self.layers[layer_index].root_key = root_key;
         self.layers[layer_index].velocity_min = velocity_min;
         self.layers[layer_index].velocity_max = velocity_max;
+        self.layers[layer_index].loop_start = loop_start;
+        self.layers[layer_index].loop_end = loop_end;
+        self.layers[layer_index].loop_mode = loop_mode;
 
         // Update the layer info
         if layer_index < self.layer_infos.len() {
@@ -255,6 +426,9 @@ impl MultiSamplerNode {
             self.layer_infos[layer_index].root_key = root_key;
             self.layer_infos[layer_index].velocity_min = velocity_min;
             self.layer_infos[layer_index].velocity_max = velocity_max;
+            self.layer_infos[layer_index].loop_start = loop_start;
+            self.layer_infos[layer_index].loop_end = loop_end;
+            self.layer_infos[layer_index].loop_mode = loop_mode;
         }
 
         Ok(())
@@ -429,25 +603,109 @@ impl AudioNode for MultiSamplerNode {
             let speed_adjusted = speed * (layer.sample_rate / sample_rate as f32);
 
             for frame in 0..frames {
-                // Read sample with linear interpolation
+                // Read sample with linear interpolation and loop handling
                 let playhead = voice.playhead;
-                let sample = if !layer.sample_data.is_empty() && playhead >= 0.0 {
+                let mut sample = 0.0;
+
+                if !layer.sample_data.is_empty() && playhead >= 0.0 {
                     let index = playhead.floor() as usize;
-                    if index < layer.sample_data.len() {
-                        let frac = playhead - playhead.floor();
-                        let sample1 = layer.sample_data[index];
-                        let sample2 = if index + 1 < layer.sample_data.len() {
-                            layer.sample_data[index + 1]
+
+                    // Check if we need to handle looping
+                    if layer.loop_mode == LoopMode::Continuous {
+                        if let (Some(loop_start), Some(loop_end)) = (layer.loop_start, layer.loop_end) {
+                            // Validate loop points
+                            if loop_start < loop_end && loop_end <= layer.sample_data.len() {
+                                // Fill crossfade buffer on first loop with samples just before loop_start
+                                // These will be crossfaded with the beginning of the loop for seamless looping
+                                if voice.crossfade_buffer.is_empty() && loop_start >= voice.crossfade_length {
+                                    let crossfade_start = loop_start.saturating_sub(voice.crossfade_length);
+                                    voice.crossfade_buffer = layer.sample_data[crossfade_start..loop_start].to_vec();
+                                }
+
+                                // Check if we've reached the loop end
+                                if index >= loop_end {
+                                    // Wrap around to loop start
+                                    let loop_length = loop_end - loop_start;
+                                    let offset_from_end = index - loop_end;
+                                    let wrapped_index = loop_start + (offset_from_end % loop_length);
+                                    voice.playhead = wrapped_index as f32 + (playhead - playhead.floor());
+                                }
+
+                                // Read sample at current position
+                                let current_index = voice.playhead.floor() as usize;
+                                if current_index < layer.sample_data.len() {
+                                    let frac = voice.playhead - voice.playhead.floor();
+                                    let sample1 = layer.sample_data[current_index];
+                                    let sample2 = if current_index + 1 < layer.sample_data.len() {
+                                        layer.sample_data[current_index + 1]
+                                    } else {
+                                        layer.sample_data[loop_start]  // Wrap to loop start for interpolation
+                                    };
+                                    sample = sample1 + (sample2 - sample1) * frac;
+
+                                    // Apply crossfade only at the END of loop
+                                    // Crossfade the end of loop with samples BEFORE loop_start
+                                    if current_index >= loop_start && current_index < loop_end {
+                                        if !voice.crossfade_buffer.is_empty() {
+                                            let crossfade_len = voice.crossfade_length.min(voice.crossfade_buffer.len());
+
+                                            // Only crossfade at loop end (last crossfade_length samples)
+                                            // This blends end samples (i,j,k) with pre-loop samples (a,b,c)
+                                            if current_index >= loop_end - crossfade_len && current_index < loop_end {
+                                                let crossfade_pos = current_index - (loop_end - crossfade_len);
+                                                if crossfade_pos < voice.crossfade_buffer.len() {
+                                                    let end_sample = sample; // Current sample at end of loop (i, j, or k)
+                                                    let pre_loop_sample = voice.crossfade_buffer[crossfade_pos]; // Corresponding pre-loop sample (a, b, or c)
+                                                    // Equal-power crossfade: fade out end, fade in pre-loop
+                                                    let fade_ratio = crossfade_pos as f32 / crossfade_len as f32;
+                                                    let fade_out = (1.0 - fade_ratio).sqrt();
+                                                    let fade_in = fade_ratio.sqrt();
+                                                    sample = end_sample * fade_out + pre_loop_sample * fade_in;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Invalid loop points, play normally
+                                if index < layer.sample_data.len() {
+                                    let frac = playhead - playhead.floor();
+                                    let sample1 = layer.sample_data[index];
+                                    let sample2 = if index + 1 < layer.sample_data.len() {
+                                        layer.sample_data[index + 1]
+                                    } else {
+                                        0.0
+                                    };
+                                    sample = sample1 + (sample2 - sample1) * frac;
+                                }
+                            }
                         } else {
-                            0.0
-                        };
-                        sample1 + (sample2 - sample1) * frac
+                            // No loop points defined, play normally
+                            if index < layer.sample_data.len() {
+                                let frac = playhead - playhead.floor();
+                                let sample1 = layer.sample_data[index];
+                                let sample2 = if index + 1 < layer.sample_data.len() {
+                                    layer.sample_data[index + 1]
+                                } else {
+                                    0.0
+                                };
+                                sample = sample1 + (sample2 - sample1) * frac;
+                            }
+                        }
                     } else {
-                        0.0
+                        // OneShot mode - play normally without looping
+                        if index < layer.sample_data.len() {
+                            let frac = playhead - playhead.floor();
+                            let sample1 = layer.sample_data[index];
+                            let sample2 = if index + 1 < layer.sample_data.len() {
+                                layer.sample_data[index + 1]
+                            } else {
+                                0.0
+                            };
+                            sample = sample1 + (sample2 - sample1) * frac;
+                        }
                     }
-                } else {
-                    0.0
-                };
+                }
 
                 // Process envelope
                 match voice.envelope_phase {
@@ -484,10 +742,12 @@ impl AudioNode for MultiSamplerNode {
                 // Advance playhead
                 voice.playhead += speed_adjusted;
 
-                // Stop if we've reached the end
-                if voice.playhead >= layer.sample_data.len() as f32 {
-                    voice.is_active = false;
-                    break;
+                // Stop if we've reached the end (only for OneShot mode)
+                if layer.loop_mode == LoopMode::OneShot {
+                    if voice.playhead >= layer.sample_data.len() as f32 {
+                        voice.is_active = false;
+                        break;
+                    }
                 }
             }
         }

@@ -14,6 +14,7 @@ pub struct Metronome {
     click_position: usize,  // Current position in the click sample (0 = not playing)
     playing_high_click: bool,  // Which click we're currently playing
 
+    #[allow(dead_code)]
     sample_rate: u32,
 }
 
