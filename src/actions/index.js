@@ -2612,4 +2612,56 @@ export const actions = {
       }
     },
   },
+
+  clearNodeGraph: {
+    execute: async (action) => {
+      // Get the current graph state to find all node IDs
+      const graphStateJson = await invoke('graph_get_state', { trackId: action.trackId });
+      const graphState = JSON.parse(graphStateJson);
+
+      // Remove all nodes from backend
+      for (const node of graphState.nodes) {
+        try {
+          await invoke("graph_remove_node", {
+            trackId: action.trackId,
+            nodeId: node.id,
+          });
+        } catch (e) {
+          console.error(`Failed to remove node ${node.id}:`, e);
+        }
+      }
+
+      // Reload the graph from backend
+      if (context.reloadNodeEditor) {
+        await context.reloadNodeEditor();
+      }
+
+      // Update minimap
+      if (context.updateMinimap) {
+        setTimeout(() => context.updateMinimap(), 100);
+      }
+    },
+    rollback: async (action) => {
+      // Restore the entire graph from the saved preset JSON
+      try {
+        await invoke("graph_load_preset_from_json", {
+          trackId: action.trackId,
+          presetJson: action.savedGraphJson,
+        });
+
+        // Reload the graph editor to show the restored nodes
+        if (context.reloadNodeEditor) {
+          await context.reloadNodeEditor();
+        }
+
+        // Update minimap
+        if (context.updateMinimap) {
+          setTimeout(() => context.updateMinimap(), 100);
+        }
+      } catch (e) {
+        console.error('Failed to restore graph:', e);
+        alert('Failed to restore graph: ' + e);
+      }
+    },
+  },
 };

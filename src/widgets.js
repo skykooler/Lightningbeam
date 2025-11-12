@@ -4909,6 +4909,12 @@ class VirtualPiano extends Widget {
       // Handle piano keys
       const baseNote = this.keyboardMap[key];
       if (baseNote !== undefined) {
+        // Check if this key is already pressed (prevents duplicate note-ons from OS key repeat quirks)
+        if (this.activeKeyPresses.has(key)) {
+          e.preventDefault();
+          return;
+        }
+
         // Note: octave offset is applied by shifting the visible piano range
         // so we play the base note directly
         const note = baseNote + (this.octaveOffset * 12);

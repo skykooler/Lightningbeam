@@ -43,6 +43,47 @@ fn error(msg: String) {
   error!("{}",msg);
 }
 
+#[tauri::command]
+async fn open_folder_dialog(app: AppHandle, title: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app.dialog()
+        .file()
+        .set_title(&title)
+        .blocking_pick_folder();
+
+    Ok(folder.map(|path| path.to_string()))
+}
+
+#[tauri::command]
+async fn read_folder_files(path: String) -> Result<Vec<String>, String> {
+    use std::fs;
+
+    let entries = fs::read_dir(&path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    let audio_extensions = vec!["wav", "aif", "aiff", "flac", "mp3", "ogg"];
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if audio_extensions.contains(&ext_str.as_str()) {
+                    if let Some(filename) = path.file_name() {
+                        files.push(filename.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 use tauri::PhysicalSize;
 
 #[tauri::command]
@@ -241,6 +282,7 @@ pub fn run() {
         audio::graph_set_output_node,
         audio::graph_save_preset,
         audio::graph_load_preset,
+        audio::graph_load_preset_from_json,
         audio::graph_list_presets,
         audio::graph_delete_preset,
         audio::graph_get_state,
@@ -265,6 +307,8 @@ pub fn run() {
         video::video_get_frame,
         video::video_get_frames_batch,
         video::video_set_cache_size,
+        open_folder_dialog,
+        read_folder_files,
         video::video_get_pool_info,
         video::video_ipc_benchmark,
         video::video_get_transcode_status,

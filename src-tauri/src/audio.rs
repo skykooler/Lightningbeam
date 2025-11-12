@@ -959,6 +959,49 @@ pub async fn graph_load_preset(
     }
 }
 
+#[tauri::command]
+pub async fn graph_load_preset_from_json(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_json: String,
+) -> Result<(), String> {
+    use daw_backend::GraphPreset;
+    use std::io::Write;
+
+    let mut audio_state = state.lock().unwrap();
+
+    // Parse the preset JSON to count nodes
+    let preset = GraphPreset::from_json(&preset_json)
+        .map_err(|e| format!("Failed to parse preset: {}", e))?;
+
+    // Update the node ID counter to account for nodes in the preset
+    let node_count = preset.nodes.len() as u32;
+    audio_state.next_graph_node_id = node_count;
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Write JSON to a temporary file
+        let temp_path = std::env::temp_dir().join(format!("lb_temp_preset_{}.json", track_id));
+        let mut file = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        file.write_all(preset_json.as_bytes())
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        drop(file);
+
+        // Load from the temp file
+        controller.graph_load_preset(track_id, temp_path.to_string_lossy().to_string());
+
+        // Clean up temp file (after a delay to allow loading)
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = std::fs::remove_file(temp_path);
+        });
+
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct PresetInfo {
     pub name: String,

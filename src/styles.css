@@ -1244,6 +1244,7 @@ button {
   border-bottom: 1px solid #3d3d3d;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 16px;
   z-index: 200;
   user-select: none;
@@ -1282,6 +1283,22 @@ button {
 .exit-template-btn:hover {
   background: #4d4d4d;
   border-color: #5d5d5d;
+}
+
+.node-graph-clear-btn {
+  padding: 4px 12px;
+  background: #d32f2f;
+  border: 1px solid #b71c1c;
+  border-radius: 3px;
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.node-graph-clear-btn:hover {
+  background: #e53935;
+  border-color: #c62828;
 }
 
 .exit-template-btn:active {

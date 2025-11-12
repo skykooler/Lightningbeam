@@ -7104,8 +7104,49 @@ function nodeEditor() {
   const header = document.createElement("div");
   header.className = "node-editor-header";
   // Initial header will be updated by updateBreadcrumb() after track info is available
-  header.innerHTML = '<div class="context-breadcrumb">Node Graph</div>';
+  header.innerHTML = `
+    <div class="context-breadcrumb">Node Graph</div>
+    <button class="node-graph-clear-btn" title="Clear all nodes">Clear</button>
+  `;
   container.appendChild(header);
+
+  // Add clear button handler
+  const clearBtn = header.querySelector('.node-graph-clear-btn');
+  clearBtn.addEventListener('click', async () => {
+    try {
+      // Get current track
+      const trackInfo = getCurrentTrack();
+      if (trackInfo === null) {
+        console.error('No track selected');
+        alert('Please select a track first');
+        return;
+      }
+      const trackId = trackInfo.trackId;
+
+      // Get the full backend graph state as JSON
+      const graphStateJson = await invoke('graph_get_state', { trackId });
+      const graphState = JSON.parse(graphStateJson);
+
+      if (!graphState.nodes || graphState.nodes.length === 0) {
+        return; // Nothing to clear
+      }
+
+      // Create and execute the action
+      redoStack.length = 0; // Clear redo stack
+      const action = {
+        trackId,
+        savedGraphJson: graphStateJson  // Save the entire graph state as JSON
+      };
+      undoStack.push({ name: 'clearNodeGraph', action });
+      await actions.clearNodeGraph.execute(action);
+      updateMenu();
+
+      console.log('Cleared node graph (undoable)');
+    } catch (e) {
+      console.error('Failed to clear node graph:', e);
+      alert('Failed to clear node graph: ' + e);
+    }
+  });
 
   // Create the Drawflow canvas
   const editorDiv = document.createElement("div");
@@ -7528,6 +7569,9 @@ function nodeEditor() {
 
     // Update minimap on pan/zoom
     drawflowDiv.addEventListener('wheel', () => setTimeout(updateMinimap, 10));
+
+    // Store updateMinimap in context so it can be called from actions
+    context.updateMinimap = updateMinimap;
 
     // Initial minimap render
     setTimeout(updateMinimap, 200);
@@ -8814,6 +8858,35 @@ function nodeEditor() {
           }
         });
       }
+
+      // Handle Import Folder button for MultiSampler
+      const importFolderBtn = nodeElement.querySelector(".import-folder-btn");
+      if (importFolderBtn) {
+        importFolderBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+        importFolderBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+        importFolderBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (!nodeData || nodeData.data.backendId === null) {
+            showError("Node not yet created on backend");
+            return;
+          }
+
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId === null) {
+            showError("No MIDI track selected");
+            return;
+          }
+
+          try {
+            await showFolderImportDialog(currentTrackId, nodeData.data.backendId, nodeId);
+          } catch (err) {
+            console.error("Failed to import folder:", err);
+            showError(`Failed to import folder: ${err}`);
+          }
+        });
+      }
     }, 100);
   }
 
@@ -8860,8 +8933,12 @@ function nodeEditor() {
         nodeId: nodeData.data.backendId
       });
 
-      const layersList = document.querySelector(`#sample-layers-list-${nodeId}`);
-      const layersContainer = document.querySelector(`#sample-layers-container-${nodeId}`);
+      // Find the node element and query within it for the layers list
+      const nodeElement = document.querySelector(`#node-${nodeId}`);
+      if (!nodeElement) return;
+
+      const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+      const layersContainer = nodeElement.querySelector('[id^="sample-layers-container-"]');
 
       if (!layersList) return;
 
@@ -9998,10 +10075,10 @@ function nodeEditor() {
           }
 
           if (nodeType === 'MultiSampler' && serializedNode.sample_data && serializedNode.sample_data.type === 'multi_sampler') {
-            console.log(`[reloadGraph] Condition met for node ${drawflowId}, looking for layers list element with backend ID ${serializedNode.id}`);
-            // Use backend ID (serializedNode.id) since that's what was used in getHTML
-            const layersList = nodeElement.querySelector(`#sample-layers-list-${serializedNode.id}`);
-            const layersContainer = nodeElement.querySelector(`#sample-layers-container-${serializedNode.id}`);
+            console.log(`[reloadGraph] Condition met for node ${drawflowId}, looking for layers list element`);
+            // Query for elements by prefix to avoid ID mismatch issues
+            const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+            const layersContainer = nodeElement.querySelector('[id^="sample-layers-container-"]');
             console.log(`[reloadGraph] layersList:`, layersList);
             console.log(`[reloadGraph] layersContainer:`, layersContainer);
 
@@ -10049,7 +10126,43 @@ function nodeEditor() {
                     const drawflowNodeId = parseInt(btn.dataset.drawflowNode);
                     const layerIndex = parseInt(btn.dataset.index);
                     const layer = layers[layerIndex];
-                    await showLayerEditDialog(drawflowNodeId, layerIndex, layer);
+
+                    // Show dialog with current layer settings
+                    const layerConfig = await showLayerConfigDialog(layer.file_path, {
+                      keyMin: layer.key_min,
+                      keyMax: layer.key_max,
+                      rootKey: layer.root_key,
+                      velocityMin: layer.velocity_min,
+                      velocityMax: layer.velocity_max,
+                      loopStart: layer.loop_start,
+                      loopEnd: layer.loop_end,
+                      loopMode: layer.loop_mode
+                    });
+
+                    if (layerConfig) {
+                      const nodeData = editor.getNodeFromId(drawflowNodeId);
+                      const currentTrackId = getCurrentMidiTrack();
+                      if (nodeData && currentTrackId !== null) {
+                        try {
+                          await invoke("multi_sampler_update_layer", {
+                            trackId: currentTrackId,
+                            nodeId: nodeData.data.backendId,
+                            layerIndex: layerIndex,
+                            keyMin: layerConfig.keyMin,
+                            keyMax: layerConfig.keyMax,
+                            rootKey: layerConfig.rootKey,
+                            velocityMin: layerConfig.velocityMin,
+                            velocityMax: layerConfig.velocityMax,
+                            loopStart: layerConfig.loopStart,
+                            loopEnd: layerConfig.loopEnd,
+                            loopMode: layerConfig.loopMode
+                          });
+                          await refreshSampleLayersList(drawflowNodeId);
+                        } catch (err) {
+                          showError(`Failed to update layer: ${err}`);
+                        }
+                      }
+                    }
                   });
                 });
 
@@ -10762,6 +10875,368 @@ function midiToNoteName(midiNote) {
   const octave = Math.floor(midiNote / 12) - 1;
   const noteName = noteNames[midiNote % 12];
   return `${noteName}${octave}`;
+}
+
+// Parse note name from string (e.g., "A#3" -> 58)
+function noteNameToMidi(noteName) {
+  const noteMap = {
+    'C': 0, 'C#': 1, 'Db': 1,
+    'D': 2, 'D#': 3, 'Eb': 3,
+    'E': 4,
+    'F': 5, 'F#': 6, 'Gb': 6,
+    'G': 7, 'G#': 8, 'Ab': 8,
+    'A': 9, 'A#': 10, 'Bb': 10,
+    'B': 11
+  };
+
+  // Match note + optional accidental + octave
+  const match = noteName.match(/^([A-G][#b]?)(-?\d+)$/i);
+  if (!match) return null;
+
+  const note = match[1].toUpperCase();
+  const octave = parseInt(match[2]);
+
+  if (!(note in noteMap)) return null;
+
+  return (octave + 1) * 12 + noteMap[note];
+}
+
+// Parse filename to extract note and velocity layer
+function parseSampleFilename(filename) {
+  // Remove extension
+  const nameWithoutExt = filename.replace(/\.(wav|aif|aiff|flac|mp3|ogg)$/i, '');
+
+  // Try to find note patterns (e.g., A#3, Bb2, C4)
+  const notePattern = /([A-G][#b]?)(-?\d+)/gi;
+  const noteMatches = [...nameWithoutExt.matchAll(notePattern)];
+
+  if (noteMatches.length === 0) return null;
+
+  // Use the last note match (usually most reliable)
+  const noteMatch = noteMatches[noteMatches.length - 1];
+  const noteStr = noteMatch[1] + noteMatch[2];
+  const midiNote = noteNameToMidi(noteStr);
+
+  if (midiNote === null) return null;
+
+  // Try to find velocity indicators
+  // Common patterns: v1, v2, v3, pp, p, mp, mf, f, ff, fff
+  const velPatterns = [
+    { regex: /v(\d+)/i, type: 'numeric' },
+    { regex: /\b(ppp|pp|p|mp|mf|f|ff|fff)\b/i, type: 'dynamic' }
+  ];
+
+  let velocityMarker = null;
+  let velocityType = null;
+
+  for (const pattern of velPatterns) {
+    const match = nameWithoutExt.match(pattern.regex);
+    if (match) {
+      velocityMarker = match[1];
+      velocityType = pattern.type;
+      break;
+    }
+  }
+
+  return {
+    note: noteStr,
+    midiNote,
+    velocityMarker,
+    velocityType,
+    filename
+  };
+}
+
+// Group samples by note and velocity
+function groupSamples(samples) {
+  const groups = {};
+  const velocityLayers = new Set();
+
+  for (const sample of samples) {
+    const parsed = parseSampleFilename(sample);
+    if (!parsed) continue;
+
+    const key = parsed.midiNote;
+    if (!groups[key]) {
+      groups[key] = {
+        note: parsed.note,
+        midiNote: parsed.midiNote,
+        layers: []
+      };
+    }
+
+    groups[key].layers.push({
+      filename: parsed.filename,
+      velocityMarker: parsed.velocityMarker,
+      velocityType: parsed.velocityType
+    });
+
+    if (parsed.velocityMarker) {
+      velocityLayers.add(parsed.velocityMarker);
+    }
+  }
+
+  return { groups, velocityLayers: Array.from(velocityLayers).sort() };
+}
+
+// Show folder import dialog
+async function showFolderImportDialog(trackId, nodeId, drawflowNodeId) {
+  // Select folder
+  const folderPath = await invoke("open_folder_dialog", {
+    title: "Select Sample Folder"
+  });
+
+  if (!folderPath) return;
+
+  // Read files from folder
+  const files = await invoke("read_folder_files", {
+    path: folderPath
+  });
+
+  if (!files || files.length === 0) {
+    alert("No audio files found in folder");
+    return;
+  }
+
+  // Parse and group samples
+  const { groups, velocityLayers } = groupSamples(files);
+  const noteGroups = Object.values(groups).sort((a, b) => a.midiNote - b.midiNote);
+
+  if (noteGroups.length === 0) {
+    alert("Could not detect note names in filenames");
+    return;
+  }
+
+  // Show configuration dialog
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+    dialog.style.width = '600px';
+    dialog.style.maxWidth = '90vw';
+    dialog.style.maxHeight = '80vh';
+    dialog.style.padding = '20px';
+    dialog.style.backgroundColor = '#2a2a2a';
+    dialog.style.border = '1px solid #444';
+    dialog.style.borderRadius = '8px';
+    dialog.style.color = '#e0e0e0';
+
+    let velocityMapping = {};
+
+    // Initialize default velocity mappings
+    if (velocityLayers.length > 0) {
+      const step = Math.floor(127 / velocityLayers.length);
+      velocityLayers.forEach((marker, idx) => {
+        velocityMapping[marker] = {
+          min: idx * step,
+          max: (idx + 1) * step - 1
+        };
+      });
+      // Ensure last layer goes to 127
+      if (velocityLayers.length > 0) {
+        velocityMapping[velocityLayers[velocityLayers.length - 1]].max = 127;
+      }
+    }
+
+    dialog.innerHTML = `
+      <h3 style="margin-top: 0; margin-bottom: 15px; color: #e0e0e0;">Import Sample Folder</h3>
+      <div style="margin-bottom: 15px; font-size: 12px; line-height: 1.6;">
+        <strong>Folder:</strong> <span style="color: #888; word-break: break-all;">${folderPath}</span><br>
+        <strong>Found:</strong> ${noteGroups.length} notes, ${velocityLayers.length} velocity layer(s)
+      </div>
+
+      ${velocityLayers.length > 0 ? `
+        <div style="margin-bottom: 15px;">
+          <strong style="display: block; margin-bottom: 8px;">Velocity Mapping:</strong>
+          <table style="width: 100%; font-size: 11px; border-collapse: collapse;">
+            <thead>
+              <tr style="background: #333;">
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Marker</th>
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Min Velocity</th>
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Max Velocity</th>
+              </tr>
+            </thead>
+            <tbody id="velocity-mapping-table">
+              ${velocityLayers.map(marker => `
+                <tr>
+                  <td style="padding: 6px; border: 1px solid #444;"><strong>${marker}</strong></td>
+                  <td style="padding: 6px; border: 1px solid #444;"><input type="number" class="vel-min" data-marker="${marker}" value="${velocityMapping[marker].min}" min="0" max="127" style="width: 60px; padding: 4px; background: #1a1a1a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px;"></td>
+                  <td style="padding: 6px; border: 1px solid #444;"><input type="number" class="vel-max" data-marker="${marker}" value="${velocityMapping[marker].max}" min="0" max="127" style="width: 60px; padding: 4px; background: #1a1a1a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px;"></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : ''}
+
+      <div style="max-height: 300px; overflow-y: auto; margin-bottom: 15px; border: 1px solid #444; padding: 10px; font-size: 11px; background: #1a1a1a; border-radius: 4px;">
+        <strong style="display: block; margin-bottom: 8px;">Preview:</strong>
+        <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+          ${noteGroups.slice(0, 20).map(group => `
+            <li>${group.note} (MIDI ${group.midiNote}): ${group.layers.length} sample(s)
+              ${group.layers.length <= 3 ? `<br><span style="color: #888; font-size: 10px;">&nbsp;&nbsp;${group.layers.map(l => l.filename).join('<br>&nbsp;&nbsp;')}</span>` : ''}
+            </li>
+          `).join('')}
+          ${noteGroups.length > 20 ? `<li style="color: #888;"><em>... and ${noteGroups.length - 20} more notes</em></li>` : ''}
+        </ul>
+      </div>
+
+      <div style="margin-bottom: 15px;">
+        <label style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="auto-key-ranges" checked style="margin-right: 8px;">
+          <span style="font-size: 12px;">Automatically set key ranges (split between adjacent notes)</span>
+        </label>
+      </div>
+
+      <div style="display: flex; gap: 10px; justify-content: flex-end;">
+        <button id="btn-cancel" style="padding: 8px 16px; background: #444; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 12px;">Cancel</button>
+        <button id="btn-import" style="padding: 8px 16px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">Import ${noteGroups.reduce((sum, g) => sum + g.layers.length, 0)} Samples</button>
+      </div>
+    `;
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    // Update velocity mapping when inputs change
+    const velInputs = dialog.querySelectorAll('.vel-min, .vel-max');
+    velInputs.forEach(input => {
+      input.addEventListener('input', () => {
+        const marker = input.dataset.marker;
+        const isMin = input.classList.contains('vel-min');
+        const value = parseInt(input.value);
+
+        if (isMin) {
+          velocityMapping[marker].min = value;
+        } else {
+          velocityMapping[marker].max = value;
+        }
+      });
+    });
+
+    dialog.querySelector('#btn-cancel').addEventListener('click', () => {
+      document.body.removeChild(overlay);
+      resolve();
+    });
+
+    dialog.querySelector('#btn-import').addEventListener('click', async () => {
+      const autoKeyRanges = dialog.querySelector('#auto-key-ranges').checked;
+
+      try {
+        // Build layer list
+        const layersToImport = [];
+
+        for (let i = 0; i < noteGroups.length; i++) {
+          const group = noteGroups[i];
+
+          // Calculate key range
+          let keyMin, keyMax;
+          if (autoKeyRanges) {
+            // Split range between adjacent notes
+            const prevNote = i > 0 ? noteGroups[i - 1].midiNote : 0;
+            const nextNote = i < noteGroups.length - 1 ? noteGroups[i + 1].midiNote : 127;
+
+            keyMin = i === 0 ? 0 : Math.ceil((prevNote + group.midiNote) / 2);
+            keyMax = i === noteGroups.length - 1 ? 127 : Math.floor((group.midiNote + nextNote) / 2);
+          } else {
+            keyMin = group.midiNote;
+            keyMax = group.midiNote;
+          }
+
+          // Add each velocity layer for this note
+          for (const layer of group.layers) {
+            let velMin = 0, velMax = 127;
+
+            if (layer.velocityMarker && velocityMapping[layer.velocityMarker]) {
+              velMin = velocityMapping[layer.velocityMarker].min;
+              velMax = velocityMapping[layer.velocityMarker].max;
+            }
+
+            layersToImport.push({
+              filePath: `${folderPath}/${layer.filename}`,
+              keyMin,
+              keyMax,
+              rootKey: group.midiNote,
+              velocityMin: velMin,
+              velocityMax: velMax
+            });
+          }
+        }
+
+        // Import all layers
+        dialog.querySelector('#btn-import').disabled = true;
+        dialog.querySelector('#btn-import').textContent = 'Importing...';
+
+        for (const layer of layersToImport) {
+          await invoke("multi_sampler_add_layer", {
+            trackId,
+            nodeId,
+            filePath: layer.filePath,
+            keyMin: layer.keyMin,
+            keyMax: layer.keyMax,
+            rootKey: layer.rootKey,
+            velocityMin: layer.velocityMin,
+            velocityMax: layer.velocityMax,
+            loopStart: null,
+            loopEnd: null,
+            loopMode: "Continuous"
+          });
+        }
+
+        // Refresh the layers list by re-fetching from backend
+        try {
+          const layers = await invoke("multi_sampler_get_layers", {
+            trackId,
+            nodeId
+          });
+
+          // Find the node element and update the layers list
+          const nodeElement = document.querySelector(`#node-${drawflowNodeId}`);
+          if (nodeElement) {
+            const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+
+            if (layersList) {
+              if (layers.length === 0) {
+                layersList.innerHTML = '<tr><td colspan="5" class="sample-layers-empty">No layers loaded</td></tr>';
+              } else {
+                layersList.innerHTML = layers.map((layer, index) => {
+                  const filename = layer.file_path.split('/').pop().split('\\').pop();
+                  const keyRange = `${midiToNoteName(layer.key_min)}-${midiToNoteName(layer.key_max)}`;
+                  const rootNote = midiToNoteName(layer.root_key);
+                  const velRange = `${layer.velocity_min}-${layer.velocity_max}`;
+
+                  return `
+                    <tr data-index="${index}">
+                      <td class="sample-layer-filename" title="${filename}">${filename}</td>
+                      <td>${keyRange}</td>
+                      <td>${rootNote}</td>
+                      <td>${velRange}</td>
+                      <td>
+                        <div class="sample-layer-actions">
+                          <button class="btn-edit-layer" data-node="${drawflowNodeId}" data-index="${index}">Edit</button>
+                          <button class="btn-delete-layer" data-node="${drawflowNodeId}" data-index="${index}">Del</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('');
+              }
+            }
+          }
+        } catch (refreshErr) {
+          console.error("Failed to refresh layers list:", refreshErr);
+        }
+
+        document.body.removeChild(overlay);
+        resolve();
+      } catch (err) {
+        alert(`Failed to import: ${err}`);
+        dialog.querySelector('#btn-import').disabled = false;
+        dialog.querySelector('#btn-import').textContent = 'Import';
+      }
+    });
+  });
 }
 
 // Show dialog to configure MultiSampler layer zones
