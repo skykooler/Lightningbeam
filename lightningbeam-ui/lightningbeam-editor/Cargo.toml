@@ -8,6 +8,7 @@ lightningbeam-core = { path = "../lightningbeam-core" }
 
 # UI Framework
 eframe = { workspace = true }
+egui_extras = { workspace = true }
 
 # GPU
 wgpu = { workspace = true }
@@ -18,9 +19,16 @@ peniko = { workspace = true }
 # Windowing
 winit = { workspace = true }
 
+# Native menus
+muda = { workspace = true }
+
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Image loading
+image = { workspace = true }
+resvg = { workspace = true }
 
 # Utilities
 pollster = { workspace = true }

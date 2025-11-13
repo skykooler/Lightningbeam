@@ -6,11 +6,19 @@ use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 mod audio;
 mod video;
 mod frame_streamer;
+mod renderer;
+mod render_window;
 
 
 #[derive(Default)]
 struct AppState {
   counter: u32,
+}
+
+struct RenderWindowState {
+  handle: Option<render_window::RenderWindowHandle>,
+  canvas_offset: (i32, i32), // Canvas position relative to window
+  canvas_size: (u32, u32),
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -46,6 +54,165 @@ fn get_frame_streamer_port(
 ) -> u16 {
     let streamer = frame_streamer.lock().unwrap();
     streamer.port()
+}
+
+// Render window commands
+#[tauri::command]
+fn render_window_create(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    canvas_offset_x: i32,
+    canvas_offset_y: i32,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let mut render_state = state.lock().unwrap();
+
+    if render_state.handle.is_some() {
+        return Err("Render window already exists".to_string());
+    }
+
+    let handle = render_window::spawn_render_window(x, y, width, height)?;
+    render_state.handle = Some(handle);
+    render_state.canvas_offset = (canvas_offset_x, canvas_offset_y);
+    render_state.canvas_size = (width, height);
+
+    // Start a background thread to poll main window position
+    let state_clone = state.inner().clone();
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        let mut last_pos: Option<(i32, i32)> = None;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            if let Some(main_window) = app_clone.get_webview_window("main") {
+                if let Ok(pos) = main_window.outer_position() {
+                    let current_pos = (pos.x, pos.y);
+
+                    // Only update if position actually changed
+                    if last_pos != Some(current_pos) {
+                        eprintln!("[WindowSync] Main window position: {:?}", current_pos);
+
+                        let render_state = state_clone.lock().unwrap();
+                        if let Some(handle) = &render_state.handle {
+                            let new_x = pos.x + render_state.canvas_offset.0;
+                            let new_y = pos.y + render_state.canvas_offset.1;
+                            handle.set_position(new_x, new_y);
+                            last_pos = Some(current_pos);
+                        } else {
+                            break; // No handle, exit thread
+                        }
+                    }
+                } else {
+                    break; // Window closed, exit thread
+                }
+            } else {
+                break; // Main window gone, exit thread
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn render_window_update_gradient(
+    top_r: f32,
+    top_g: f32,
+    top_b: f32,
+    top_a: f32,
+    bottom_r: f32,
+    bottom_g: f32,
+    bottom_b: f32,
+    bottom_a: f32,
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let render_state = state.lock().unwrap();
+
+    if let Some(handle) = &render_state.handle {
+        handle.update_gradient(
+            [top_r, top_g, top_b, top_a],
+            [bottom_r, bottom_g, bottom_b, bottom_a],
+        );
+        Ok(())
+    } else {
+        Err("Render window not created".to_string())
+    }
+}
+
+#[tauri::command]
+fn render_window_set_position(
+    x: i32,
+    y: i32,
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let render_state = state.lock().unwrap();
+
+    if let Some(handle) = &render_state.handle {
+        handle.set_position(x, y);
+        Ok(())
+    } else {
+        Err("Render window not created".to_string())
+    }
+}
+
+#[tauri::command]
+fn render_window_sync_position(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let render_state = state.lock().unwrap();
+
+    if let Some(main_window) = app.get_webview_window("main") {
+        if let Ok(pos) = main_window.outer_position() {
+            if let Some(handle) = &render_state.handle {
+                let new_x = pos.x + render_state.canvas_offset.0;
+                let new_y = pos.y + render_state.canvas_offset.1;
+                eprintln!("[Manual Sync] Updating to ({}, {})", new_x, new_y);
+                handle.set_position(new_x, new_y);
+                Ok(())
+            } else {
+                Err("Render window not created".to_string())
+            }
+        } else {
+            Err("Could not get window position".to_string())
+        }
+    } else {
+        Err("Main window not found".to_string())
+    }
+}
+
+#[tauri::command]
+fn render_window_set_size(
+    width: u32,
+    height: u32,
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let render_state = state.lock().unwrap();
+
+    if let Some(handle) = &render_state.handle {
+        handle.set_size(width, height);
+        Ok(())
+    } else {
+        Err("Render window not created".to_string())
+    }
+}
+
+#[tauri::command]
+fn render_window_close(
+    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
+) -> Result<(), String> {
+    let mut render_state = state.lock().unwrap();
+
+    if let Some(handle) = render_state.handle.take() {
+        handle.close();
+        Ok(())
+    } else {
+        Err("Render window not created".to_string())
+    }
 }
 
 use tauri::PhysicalSize;
@@ -148,6 +315,11 @@ pub fn run() {
       .manage(Arc::new(Mutex::new(audio::AudioState::default())))
       .manage(Arc::new(Mutex::new(video::VideoState::default())))
       .manage(Arc::new(Mutex::new(frame_streamer)))
+      .manage(Arc::new(Mutex::new(RenderWindowState {
+        handle: None,
+        canvas_offset: (0, 0),
+        canvas_size: (0, 0),
+      })))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -215,6 +387,12 @@ pub fn run() {
       .plugin(tauri_plugin_shell::init())
       .invoke_handler(tauri::generate_handler![
         greet, trace, debug, info, warn, error, create_window, get_frame_streamer_port,
+        render_window_create,
+        render_window_update_gradient,
+        render_window_set_position,
+        render_window_set_size,
+        render_window_sync_position,
+        render_window_close,
         audio::audio_init,
         audio::audio_reset,
         audio::audio_play,

@@ -39,6 +39,14 @@ lru = "0.12"
 # WebSocket for frame streaming (disable default features to remove tracing, but keep handshake)
 tungstenite = { version = "0.20", default-features = false, features = ["handshake"] }
 
+# Native rendering with wgpu
+wgpu = "0.19"
+winit = "0.29"
+pollster = "0.3"
+bytemuck = { version = "1.14", features = ["derive"] }
+raw-window-handle = "0.6"
+image = "0.24"
+
 [profile.dev]
 opt-level = 1  # Enable basic optimizations in debug mode for audio decoding performance
 

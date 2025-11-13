@@ -1,0 +1,145 @@
+/// Pane implementations for the editor
+///
+/// Each pane type has its own module with implementation details.
+/// Panes can hold local state and access shared state through SharedPaneState.
+
+use eframe::egui;
+use lightningbeam_core::{pane::PaneType, tool::Tool};
+
+// Type alias for node paths (matches main.rs)
+pub type NodePath = Vec<usize>;
+
+pub mod toolbar;
+pub mod stage;
+pub mod timeline;
+pub mod infopanel;
+pub mod outliner;
+pub mod piano_roll;
+pub mod node_editor;
+pub mod preset_browser;
+
+/// Shared state that all panes can access
+pub struct SharedPaneState<'a> {
+    pub tool_icon_cache: &'a mut crate::ToolIconCache,
+    pub icon_cache: &'a mut crate::IconCache,
+    pub selected_tool: &'a mut Tool,
+    pub fill_color: &'a mut egui::Color32,
+    pub stroke_color: &'a mut egui::Color32,
+}
+
+/// Trait for pane rendering
+///
+/// Panes implement this trait to provide custom rendering logic.
+/// The header is optional and typically used for controls (e.g., Timeline playback).
+/// The content area is the main body of the pane.
+pub trait PaneRenderer {
+    /// Render the optional header section with controls
+    ///
+    /// Returns true if a header was rendered, false if no header
+    fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+        false // Default: no header
+    }
+
+    /// Render the main content area
+    fn render_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+    );
+
+    /// Get the display name of this pane
+    fn name(&self) -> &str;
+}
+
+/// Enum wrapper for all pane implementations (enum dispatch pattern)
+pub enum PaneInstance {
+    Stage(stage::StagePane),
+    Timeline(timeline::TimelinePane),
+    Toolbar(toolbar::ToolbarPane),
+    Infopanel(infopanel::InfopanelPane),
+    Outliner(outliner::OutlinerPane),
+    PianoRoll(piano_roll::PianoRollPane),
+    NodeEditor(node_editor::NodeEditorPane),
+    PresetBrowser(preset_browser::PresetBrowserPane),
+}
+
+impl PaneInstance {
+    /// Create a new pane instance for the given type
+    pub fn new(pane_type: PaneType) -> Self {
+        match pane_type {
+            PaneType::Stage => PaneInstance::Stage(stage::StagePane::new()),
+            PaneType::Timeline => PaneInstance::Timeline(timeline::TimelinePane::new()),
+            PaneType::Toolbar => PaneInstance::Toolbar(toolbar::ToolbarPane::new()),
+            PaneType::Infopanel => PaneInstance::Infopanel(infopanel::InfopanelPane::new()),
+            PaneType::Outliner => PaneInstance::Outliner(outliner::OutlinerPane::new()),
+            PaneType::PianoRoll => PaneInstance::PianoRoll(piano_roll::PianoRollPane::new()),
+            PaneType::NodeEditor => PaneInstance::NodeEditor(node_editor::NodeEditorPane::new()),
+            PaneType::PresetBrowser => {
+                PaneInstance::PresetBrowser(preset_browser::PresetBrowserPane::new())
+            }
+        }
+    }
+
+    /// Get the pane type of this instance
+    pub fn pane_type(&self) -> PaneType {
+        match self {
+            PaneInstance::Stage(_) => PaneType::Stage,
+            PaneInstance::Timeline(_) => PaneType::Timeline,
+            PaneInstance::Toolbar(_) => PaneType::Toolbar,
+            PaneInstance::Infopanel(_) => PaneType::Infopanel,
+            PaneInstance::Outliner(_) => PaneType::Outliner,
+            PaneInstance::PianoRoll(_) => PaneType::PianoRoll,
+            PaneInstance::NodeEditor(_) => PaneType::NodeEditor,
+            PaneInstance::PresetBrowser(_) => PaneType::PresetBrowser,
+        }
+    }
+}
+
+impl PaneRenderer for PaneInstance {
+    fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+        match self {
+            PaneInstance::Stage(p) => p.render_header(ui, shared),
+            PaneInstance::Timeline(p) => p.render_header(ui, shared),
+            PaneInstance::Toolbar(p) => p.render_header(ui, shared),
+            PaneInstance::Infopanel(p) => p.render_header(ui, shared),
+            PaneInstance::Outliner(p) => p.render_header(ui, shared),
+            PaneInstance::PianoRoll(p) => p.render_header(ui, shared),
+            PaneInstance::NodeEditor(p) => p.render_header(ui, shared),
+            PaneInstance::PresetBrowser(p) => p.render_header(ui, shared),
+        }
+    }
+
+    fn render_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+    ) {
+        match self {
+            PaneInstance::Stage(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::Timeline(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::Toolbar(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::Infopanel(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::Outliner(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::PianoRoll(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::NodeEditor(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::PresetBrowser(p) => p.render_content(ui, rect, path, shared),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            PaneInstance::Stage(p) => p.name(),
+            PaneInstance::Timeline(p) => p.name(),
+            PaneInstance::Toolbar(p) => p.name(),
+            PaneInstance::Infopanel(p) => p.name(),
+            PaneInstance::Outliner(p) => p.name(),
+            PaneInstance::PianoRoll(p) => p.name(),
+            PaneInstance::NodeEditor(p) => p.name(),
+            PaneInstance::PresetBrowser(p) => p.name(),
+        }
+    }
+}
