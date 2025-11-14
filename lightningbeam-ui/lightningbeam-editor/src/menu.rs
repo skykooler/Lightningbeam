@@ -2,11 +2,132 @@
 ///
 /// This module creates the native menu bar with all menu items matching
 /// the JavaScript version's menu structure.
+///
+/// Menu definitions are centralized to allow generating both native menus
+/// and keyboard shortcut handlers from a single source.
 
+use eframe::egui;
 use muda::{
     accelerator::{Accelerator, Code, Modifiers},
     Menu, MenuItem, PredefinedMenuItem, Submenu,
 };
+
+/// Keyboard shortcut definition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortcut {
+    pub key: ShortcutKey,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+/// Keys that can be used in shortcuts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutKey {
+    // Letters
+    A, C, E, G, I, K, L, N, O, Q, S, V, W, X, Z,
+    // Numbers
+    Num0,
+    // Symbols
+    Comma, Minus, Equals, Plus,
+    BracketLeft, BracketRight,
+    // Special
+    Delete,
+}
+
+impl Shortcut {
+    pub const fn new(key: ShortcutKey, ctrl: bool, shift: bool, alt: bool) -> Self {
+        Self { key, ctrl, shift, alt }
+    }
+
+    /// Convert to muda Accelerator
+    pub fn to_muda_accelerator(&self) -> Accelerator {
+        let mut modifiers = Modifiers::empty();
+        if self.ctrl {
+            #[cfg(target_os = "macos")]
+            { modifiers |= Modifiers::META; }
+            #[cfg(not(target_os = "macos"))]
+            { modifiers |= Modifiers::CONTROL; }
+        }
+        if self.shift {
+            modifiers |= Modifiers::SHIFT;
+        }
+        if self.alt {
+            modifiers |= Modifiers::ALT;
+        }
+
+        let code = match self.key {
+            ShortcutKey::A => Code::KeyA,
+            ShortcutKey::C => Code::KeyC,
+            ShortcutKey::E => Code::KeyE,
+            ShortcutKey::G => Code::KeyG,
+            ShortcutKey::I => Code::KeyI,
+            ShortcutKey::K => Code::KeyK,
+            ShortcutKey::L => Code::KeyL,
+            ShortcutKey::N => Code::KeyN,
+            ShortcutKey::O => Code::KeyO,
+            ShortcutKey::Q => Code::KeyQ,
+            ShortcutKey::S => Code::KeyS,
+            ShortcutKey::V => Code::KeyV,
+            ShortcutKey::W => Code::KeyW,
+            ShortcutKey::X => Code::KeyX,
+            ShortcutKey::Z => Code::KeyZ,
+            ShortcutKey::Num0 => Code::Digit0,
+            ShortcutKey::Comma => Code::Comma,
+            ShortcutKey::Minus => Code::Minus,
+            ShortcutKey::Equals => Code::Equal,
+            ShortcutKey::Plus => Code::Equal, // Same key as equals
+            ShortcutKey::BracketLeft => Code::BracketLeft,
+            ShortcutKey::BracketRight => Code::BracketRight,
+            ShortcutKey::Delete => Code::Delete,
+        };
+
+        Accelerator::new(if modifiers.is_empty() { None } else { Some(modifiers) }, code)
+    }
+
+    /// Check if this shortcut matches the current egui input state
+    pub fn matches_egui_input(&self, input: &egui::InputState) -> bool {
+        // Check modifiers first
+        if self.ctrl != input.modifiers.ctrl {
+            return false;
+        }
+        if self.shift != input.modifiers.shift {
+            return false;
+        }
+        if self.alt != input.modifiers.alt {
+            return false;
+        }
+
+        // Check key
+        let key = match self.key {
+            ShortcutKey::A => egui::Key::A,
+            ShortcutKey::C => egui::Key::C,
+            ShortcutKey::E => egui::Key::E,
+            ShortcutKey::G => egui::Key::G,
+            ShortcutKey::I => egui::Key::I,
+            ShortcutKey::K => egui::Key::K,
+            ShortcutKey::L => egui::Key::L,
+            ShortcutKey::N => egui::Key::N,
+            ShortcutKey::O => egui::Key::O,
+            ShortcutKey::Q => egui::Key::Q,
+            ShortcutKey::S => egui::Key::S,
+            ShortcutKey::V => egui::Key::V,
+            ShortcutKey::W => egui::Key::W,
+            ShortcutKey::X => egui::Key::X,
+            ShortcutKey::Z => egui::Key::Z,
+            ShortcutKey::Num0 => egui::Key::Num0,
+            ShortcutKey::Comma => egui::Key::Comma,
+            ShortcutKey::Minus => egui::Key::Minus,
+            ShortcutKey::Equals => egui::Key::Equals,
+            ShortcutKey::Plus => egui::Key::Plus,
+            ShortcutKey::BracketLeft => egui::Key::OpenBracket,
+            ShortcutKey::BracketRight => egui::Key::CloseBracket,
+            ShortcutKey::Delete => egui::Key::Delete,
+        };
+
+        input.key_pressed(key)
+    }
+}
 
 /// All possible menu actions that can be triggered
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +195,242 @@ pub enum MenuAction {
     CloseWindow,
 }
 
+/// Menu item definition
+pub struct MenuItemDef {
+    pub label: &'static str,
+    pub action: MenuAction,
+    pub shortcut: Option<Shortcut>,
+}
+
+/// Menu structure definition - can be an item, separator, or submenu
+pub enum MenuDef {
+    Item(&'static MenuItemDef),
+    Separator,
+    Submenu {
+        label: &'static str,
+        children: &'static [MenuDef],
+    },
+}
+
+// Shortcut constants for clarity
+const CTRL: bool = true;
+const SHIFT: bool = true;
+const ALT: bool = true;
+const NO_CTRL: bool = false;
+const NO_SHIFT: bool = false;
+const NO_ALT: bool = false;
+
+// Central menu definitions - single source of truth
+impl MenuItemDef {
+    // File menu items
+    const NEW_FILE: Self = Self { label: "New file...", action: MenuAction::NewFile, shortcut: Some(Shortcut::new(ShortcutKey::N, CTRL, NO_SHIFT, NO_ALT)) };
+    const NEW_WINDOW: Self = Self { label: "New Window", action: MenuAction::NewWindow, shortcut: Some(Shortcut::new(ShortcutKey::N, CTRL, SHIFT, NO_ALT)) };
+    const SAVE: Self = Self { label: "Save", action: MenuAction::Save, shortcut: Some(Shortcut::new(ShortcutKey::S, CTRL, NO_SHIFT, NO_ALT)) };
+    const SAVE_AS: Self = Self { label: "Save As...", action: MenuAction::SaveAs, shortcut: Some(Shortcut::new(ShortcutKey::S, CTRL, SHIFT, NO_ALT)) };
+    const OPEN_FILE: Self = Self { label: "Open File...", action: MenuAction::OpenFile, shortcut: Some(Shortcut::new(ShortcutKey::O, CTRL, NO_SHIFT, NO_ALT)) };
+    const REVERT: Self = Self { label: "Revert", action: MenuAction::Revert, shortcut: None };
+    const IMPORT: Self = Self { label: "Import...", action: MenuAction::Import, shortcut: Some(Shortcut::new(ShortcutKey::I, CTRL, SHIFT, NO_ALT)) };
+    const EXPORT: Self = Self { label: "Export...", action: MenuAction::Export, shortcut: Some(Shortcut::new(ShortcutKey::E, CTRL, SHIFT, NO_ALT)) };
+    const QUIT: Self = Self { label: "Quit", action: MenuAction::Quit, shortcut: Some(Shortcut::new(ShortcutKey::Q, CTRL, NO_SHIFT, NO_ALT)) };
+
+    // Edit menu items
+    const UNDO: Self = Self { label: "Undo", action: MenuAction::Undo, shortcut: Some(Shortcut::new(ShortcutKey::Z, CTRL, NO_SHIFT, NO_ALT)) };
+    const REDO: Self = Self { label: "Redo", action: MenuAction::Redo, shortcut: Some(Shortcut::new(ShortcutKey::Z, CTRL, SHIFT, NO_ALT)) };
+    const CUT: Self = Self { label: "Cut", action: MenuAction::Cut, shortcut: Some(Shortcut::new(ShortcutKey::X, CTRL, NO_SHIFT, NO_ALT)) };
+    const COPY: Self = Self { label: "Copy", action: MenuAction::Copy, shortcut: Some(Shortcut::new(ShortcutKey::C, CTRL, NO_SHIFT, NO_ALT)) };
+    const PASTE: Self = Self { label: "Paste", action: MenuAction::Paste, shortcut: Some(Shortcut::new(ShortcutKey::V, CTRL, NO_SHIFT, NO_ALT)) };
+    const DELETE: Self = Self { label: "Delete", action: MenuAction::Delete, shortcut: Some(Shortcut::new(ShortcutKey::Delete, NO_CTRL, NO_SHIFT, NO_ALT)) };
+    const SELECT_ALL: Self = Self { label: "Select All", action: MenuAction::SelectAll, shortcut: Some(Shortcut::new(ShortcutKey::A, CTRL, NO_SHIFT, NO_ALT)) };
+    const SELECT_NONE: Self = Self { label: "Select None", action: MenuAction::SelectNone, shortcut: Some(Shortcut::new(ShortcutKey::A, CTRL, SHIFT, NO_ALT)) };
+    const PREFERENCES: Self = Self { label: "Preferences", action: MenuAction::Preferences, shortcut: None };
+
+    // Modify menu items
+    const GROUP: Self = Self { label: "Group", action: MenuAction::Group, shortcut: Some(Shortcut::new(ShortcutKey::G, CTRL, NO_SHIFT, NO_ALT)) };
+    const SEND_TO_BACK: Self = Self { label: "Send to back", action: MenuAction::SendToBack, shortcut: None };
+    const BRING_TO_FRONT: Self = Self { label: "Bring to front", action: MenuAction::BringToFront, shortcut: None };
+
+    // Layer menu items
+    const ADD_LAYER: Self = Self { label: "Add Layer", action: MenuAction::AddLayer, shortcut: Some(Shortcut::new(ShortcutKey::L, CTRL, SHIFT, NO_ALT)) };
+    const ADD_VIDEO_LAYER: Self = Self { label: "Add Video Layer", action: MenuAction::AddVideoLayer, shortcut: None };
+    const ADD_AUDIO_TRACK: Self = Self { label: "Add Audio Track", action: MenuAction::AddAudioTrack, shortcut: None };
+    const ADD_MIDI_TRACK: Self = Self { label: "Add MIDI Track", action: MenuAction::AddMidiTrack, shortcut: None };
+    const DELETE_LAYER: Self = Self { label: "Delete Layer", action: MenuAction::DeleteLayer, shortcut: None };
+    const TOGGLE_LAYER_VISIBILITY: Self = Self { label: "Hide/Show Layer", action: MenuAction::ToggleLayerVisibility, shortcut: None };
+
+    // Timeline menu items
+    const NEW_KEYFRAME: Self = Self { label: "New Keyframe", action: MenuAction::NewKeyframe, shortcut: Some(Shortcut::new(ShortcutKey::K, NO_CTRL, NO_SHIFT, NO_ALT)) };
+    const NEW_BLANK_KEYFRAME: Self = Self { label: "New Blank Keyframe", action: MenuAction::NewBlankKeyframe, shortcut: None };
+    const DELETE_FRAME: Self = Self { label: "Delete Frame", action: MenuAction::DeleteFrame, shortcut: None };
+    const DUPLICATE_KEYFRAME: Self = Self { label: "Duplicate Keyframe", action: MenuAction::DuplicateKeyframe, shortcut: None };
+    const ADD_KEYFRAME_AT_PLAYHEAD: Self = Self { label: "Add Keyframe at Playhead", action: MenuAction::AddKeyframeAtPlayhead, shortcut: None };
+    const ADD_MOTION_TWEEN: Self = Self { label: "Add Motion Tween", action: MenuAction::AddMotionTween, shortcut: None };
+    const ADD_SHAPE_TWEEN: Self = Self { label: "Add Shape Tween", action: MenuAction::AddShapeTween, shortcut: None };
+    const RETURN_TO_START: Self = Self { label: "Return to start", action: MenuAction::ReturnToStart, shortcut: None };
+    const PLAY: Self = Self { label: "Play", action: MenuAction::Play, shortcut: None };
+
+    // View menu items
+    const ZOOM_IN: Self = Self { label: "Zoom In", action: MenuAction::ZoomIn, shortcut: Some(Shortcut::new(ShortcutKey::Equals, CTRL, NO_SHIFT, NO_ALT)) };
+    const ZOOM_OUT: Self = Self { label: "Zoom Out", action: MenuAction::ZoomOut, shortcut: Some(Shortcut::new(ShortcutKey::Minus, CTRL, NO_SHIFT, NO_ALT)) };
+    const ACTUAL_SIZE: Self = Self { label: "Actual Size", action: MenuAction::ActualSize, shortcut: Some(Shortcut::new(ShortcutKey::Num0, CTRL, NO_SHIFT, NO_ALT)) };
+    const RECENTER_VIEW: Self = Self { label: "Recenter View", action: MenuAction::RecenterView, shortcut: None };
+    const NEXT_LAYOUT: Self = Self { label: "Next Layout", action: MenuAction::NextLayout, shortcut: Some(Shortcut::new(ShortcutKey::BracketRight, CTRL, NO_SHIFT, NO_ALT)) };
+    const PREVIOUS_LAYOUT: Self = Self { label: "Previous Layout", action: MenuAction::PreviousLayout, shortcut: Some(Shortcut::new(ShortcutKey::BracketLeft, CTRL, NO_SHIFT, NO_ALT)) };
+
+    // Help menu items
+    const ABOUT: Self = Self { label: "About...", action: MenuAction::About, shortcut: None };
+
+    // macOS app menu items
+    const SETTINGS: Self = Self { label: "Settings", action: MenuAction::Settings, shortcut: Some(Shortcut::new(ShortcutKey::Comma, CTRL, NO_SHIFT, NO_ALT)) };
+    const CLOSE_WINDOW: Self = Self { label: "Close Window", action: MenuAction::CloseWindow, shortcut: Some(Shortcut::new(ShortcutKey::W, CTRL, NO_SHIFT, NO_ALT)) };
+    const QUIT_MACOS: Self = Self { label: "Quit Lightningbeam", action: MenuAction::Quit, shortcut: Some(Shortcut::new(ShortcutKey::Q, CTRL, NO_SHIFT, NO_ALT)) };
+    const ABOUT_MACOS: Self = Self { label: "About Lightningbeam", action: MenuAction::About, shortcut: None };
+
+    /// Get all menu items with shortcuts (for keyboard handling)
+    pub fn all_with_shortcuts() -> &'static [&'static MenuItemDef] {
+        &[
+            &Self::NEW_FILE, &Self::NEW_WINDOW, &Self::SAVE, &Self::SAVE_AS,
+            &Self::OPEN_FILE, &Self::IMPORT, &Self::EXPORT, &Self::QUIT,
+            &Self::UNDO, &Self::REDO, &Self::CUT, &Self::COPY, &Self::PASTE,
+            &Self::DELETE, &Self::SELECT_ALL, &Self::SELECT_NONE,
+            &Self::GROUP, &Self::ADD_LAYER, &Self::NEW_KEYFRAME,
+            &Self::ZOOM_IN, &Self::ZOOM_OUT, &Self::ACTUAL_SIZE,
+            &Self::NEXT_LAYOUT, &Self::PREVIOUS_LAYOUT,
+            &Self::SETTINGS, &Self::CLOSE_WINDOW,
+        ]
+    }
+
+    /// Get the complete menu structure definition
+    pub const fn menu_structure() -> &'static [MenuDef] {
+        &[
+            // File menu
+            MenuDef::Submenu {
+                label: "File",
+                children: &[
+                    MenuDef::Item(&Self::NEW_FILE),
+                    MenuDef::Item(&Self::NEW_WINDOW),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::SAVE),
+                    MenuDef::Item(&Self::SAVE_AS),
+                    MenuDef::Separator,
+                    MenuDef::Submenu {
+                        label: "Open Recent",
+                        children: &[], // TODO: Dynamic recent files
+                    },
+                    MenuDef::Item(&Self::OPEN_FILE),
+                    MenuDef::Item(&Self::REVERT),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::IMPORT),
+                    MenuDef::Item(&Self::EXPORT),
+                    #[cfg(not(target_os = "macos"))]
+                    MenuDef::Separator,
+                    #[cfg(not(target_os = "macos"))]
+                    MenuDef::Item(&Self::QUIT),
+                ],
+            },
+            // Edit menu
+            MenuDef::Submenu {
+                label: "Edit",
+                children: &[
+                    MenuDef::Item(&Self::UNDO),
+                    MenuDef::Item(&Self::REDO),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::CUT),
+                    MenuDef::Item(&Self::COPY),
+                    MenuDef::Item(&Self::PASTE),
+                    MenuDef::Item(&Self::DELETE),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::SELECT_ALL),
+                    MenuDef::Item(&Self::SELECT_NONE),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::PREFERENCES),
+                ],
+            },
+            // Modify menu
+            MenuDef::Submenu {
+                label: "Modify",
+                children: &[
+                    MenuDef::Item(&Self::GROUP),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::SEND_TO_BACK),
+                    MenuDef::Item(&Self::BRING_TO_FRONT),
+                ],
+            },
+            // Layer menu
+            MenuDef::Submenu {
+                label: "Layer",
+                children: &[
+                    MenuDef::Item(&Self::ADD_LAYER),
+                    MenuDef::Item(&Self::ADD_VIDEO_LAYER),
+                    MenuDef::Item(&Self::ADD_AUDIO_TRACK),
+                    MenuDef::Item(&Self::ADD_MIDI_TRACK),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::DELETE_LAYER),
+                    MenuDef::Item(&Self::TOGGLE_LAYER_VISIBILITY),
+                ],
+            },
+            // Timeline menu
+            MenuDef::Submenu {
+                label: "Timeline",
+                children: &[
+                    MenuDef::Item(&Self::NEW_KEYFRAME),
+                    MenuDef::Item(&Self::NEW_BLANK_KEYFRAME),
+                    MenuDef::Item(&Self::DELETE_FRAME),
+                    MenuDef::Item(&Self::DUPLICATE_KEYFRAME),
+                    MenuDef::Item(&Self::ADD_KEYFRAME_AT_PLAYHEAD),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::ADD_MOTION_TWEEN),
+                    MenuDef::Item(&Self::ADD_SHAPE_TWEEN),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::RETURN_TO_START),
+                    MenuDef::Item(&Self::PLAY),
+                ],
+            },
+            // View menu
+            MenuDef::Submenu {
+                label: "View",
+                children: &[
+                    MenuDef::Item(&Self::ZOOM_IN),
+                    MenuDef::Item(&Self::ZOOM_OUT),
+                    MenuDef::Item(&Self::ACTUAL_SIZE),
+                    MenuDef::Item(&Self::RECENTER_VIEW),
+                    MenuDef::Separator,
+                    MenuDef::Submenu {
+                        label: "Layout",
+                        children: &[
+                            MenuDef::Item(&Self::NEXT_LAYOUT),
+                            MenuDef::Item(&Self::PREVIOUS_LAYOUT),
+                            // TODO: Dynamic layout list
+                        ],
+                    },
+                ],
+            },
+            // Help menu
+            MenuDef::Submenu {
+                label: "Help",
+                children: &[
+                    MenuDef::Item(&Self::ABOUT),
+                ],
+            },
+        ]
+    }
+
+    /// Get macOS app menu structure
+    #[cfg(target_os = "macos")]
+    pub const fn macos_app_menu() -> MenuDef {
+        MenuDef::Submenu {
+            label: "Lightningbeam",
+            children: &[
+                MenuDef::Item(&Self::ABOUT_MACOS),
+                MenuDef::Separator,
+                MenuDef::Item(&Self::SETTINGS),
+                MenuDef::Separator,
+                MenuDef::Item(&Self::CLOSE_WINDOW),
+                MenuDef::Item(&Self::QUIT_MACOS),
+            ],
+        }
+    }
+}
+
 /// Menu system that holds all menu items and can dispatch actions
 pub struct MenuSystem {
     #[allow(dead_code)]
@@ -90,416 +447,61 @@ impl MenuSystem {
         // Platform-specific: Add "Lightningbeam" menu on macOS
         #[cfg(target_os = "macos")]
         {
-            let app_menu = Submenu::new("Lightningbeam", true);
-
-            let about_item = MenuItem::new("About Lightningbeam", true, None);
-            items.push((about_item.clone(), MenuAction::About));
-            app_menu.append(&about_item)?;
-
-            app_menu.append(&PredefinedMenuItem::separator())?;
-
-            let settings_item = MenuItem::new(
-                "Settings",
-                true,
-                Some(Accelerator::new(Some(Modifiers::META), Code::Comma)),
-            );
-            items.push((settings_item.clone(), MenuAction::Settings));
-            app_menu.append(&settings_item)?;
-
-            app_menu.append(&PredefinedMenuItem::separator())?;
-
-            let close_item = MenuItem::new(
-                "Close Window",
-                true,
-                Some(Accelerator::new(Some(Modifiers::META), Code::KeyW)),
-            );
-            items.push((close_item.clone(), MenuAction::CloseWindow));
-            app_menu.append(&close_item)?;
-
-            let quit_item = MenuItem::new(
-                "Quit Lightningbeam",
-                true,
-                Some(Accelerator::new(Some(Modifiers::META), Code::KeyQ)),
-            );
-            items.push((quit_item.clone(), MenuAction::Quit));
-            app_menu.append(&quit_item)?;
-
-            menu.append(&app_menu)?;
+            Self::build_submenu(&menu, &MenuItemDef::macos_app_menu(), &mut items)?;
         }
 
-        // File menu
-        let file_menu = Submenu::new("File", true);
-
-        let new_file = MenuItem::new(
-            "New file...",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyN)),
-        );
-        items.push((new_file.clone(), MenuAction::NewFile));
-        file_menu.append(&new_file)?;
-
-        let new_window = MenuItem::new(
-            "New Window",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyN,
-            )),
-        );
-        items.push((new_window.clone(), MenuAction::NewWindow));
-        file_menu.append(&new_window)?;
-
-        file_menu.append(&PredefinedMenuItem::separator())?;
-
-        let save = MenuItem::new(
-            "Save",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyS)),
-        );
-        items.push((save.clone(), MenuAction::Save));
-        file_menu.append(&save)?;
-
-        let save_as = MenuItem::new(
-            "Save As...",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyS,
-            )),
-        );
-        items.push((save_as.clone(), MenuAction::SaveAs));
-        file_menu.append(&save_as)?;
-
-        file_menu.append(&PredefinedMenuItem::separator())?;
-
-        // Open Recent submenu (placeholder for now)
-        let open_recent = Submenu::new("Open Recent", true);
-        file_menu.append(&open_recent)?;
-
-        let open_file = MenuItem::new(
-            "Open File...",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyO)),
-        );
-        items.push((open_file.clone(), MenuAction::OpenFile));
-        file_menu.append(&open_file)?;
-
-        let revert = MenuItem::new("Revert", true, None);
-        items.push((revert.clone(), MenuAction::Revert));
-        file_menu.append(&revert)?;
-
-        file_menu.append(&PredefinedMenuItem::separator())?;
-
-        let import = MenuItem::new(
-            "Import...",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyI,
-            )),
-        );
-        items.push((import.clone(), MenuAction::Import));
-        file_menu.append(&import)?;
-
-        let export = MenuItem::new(
-            "Export...",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyE,
-            )),
-        );
-        items.push((export.clone(), MenuAction::Export));
-        file_menu.append(&export)?;
-
-        // On non-macOS, add Quit to File menu
-        #[cfg(not(target_os = "macos"))]
-        {
-            file_menu.append(&PredefinedMenuItem::separator())?;
-            let quit = MenuItem::new(
-                "Quit",
-                true,
-                Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyQ)),
-            );
-            items.push((quit.clone(), MenuAction::Quit));
-            file_menu.append(&quit)?;
+        // Build all menus from the centralized structure
+        for menu_def in MenuItemDef::menu_structure() {
+            Self::build_submenu(&menu, menu_def, &mut items)?;
         }
-
-        menu.append(&file_menu)?;
-
-        // Edit menu
-        let edit_menu = Submenu::new("Edit", true);
-
-        let undo = MenuItem::new(
-            "Undo",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyZ)),
-        );
-        items.push((undo.clone(), MenuAction::Undo));
-        edit_menu.append(&undo)?;
-
-        let redo = MenuItem::new(
-            "Redo",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyZ,
-            )),
-        );
-        items.push((redo.clone(), MenuAction::Redo));
-        edit_menu.append(&redo)?;
-
-        edit_menu.append(&PredefinedMenuItem::separator())?;
-
-        let cut = MenuItem::new(
-            "Cut",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyX)),
-        );
-        items.push((cut.clone(), MenuAction::Cut));
-        edit_menu.append(&cut)?;
-
-        let copy = MenuItem::new(
-            "Copy",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyC)),
-        );
-        items.push((copy.clone(), MenuAction::Copy));
-        edit_menu.append(&copy)?;
-
-        let paste = MenuItem::new(
-            "Paste",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyV)),
-        );
-        items.push((paste.clone(), MenuAction::Paste));
-        edit_menu.append(&paste)?;
-
-        let delete = MenuItem::new(
-            "Delete",
-            true,
-            Some(Accelerator::new(None, Code::Delete)),
-        );
-        items.push((delete.clone(), MenuAction::Delete));
-        edit_menu.append(&delete)?;
-
-        edit_menu.append(&PredefinedMenuItem::separator())?;
-
-        let select_all = MenuItem::new(
-            "Select All",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyA)),
-        );
-        items.push((select_all.clone(), MenuAction::SelectAll));
-        edit_menu.append(&select_all)?;
-
-        let select_none = MenuItem::new(
-            "Select None",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyA,
-            )),
-        );
-        items.push((select_none.clone(), MenuAction::SelectNone));
-        edit_menu.append(&select_none)?;
-
-        edit_menu.append(&PredefinedMenuItem::separator())?;
-
-        let preferences = MenuItem::new("Preferences", true, None);
-        items.push((preferences.clone(), MenuAction::Preferences));
-        edit_menu.append(&preferences)?;
-
-        menu.append(&edit_menu)?;
-
-        // Modify menu
-        let modify_menu = Submenu::new("Modify", true);
-
-        let group = MenuItem::new(
-            "Group",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::KeyG)),
-        );
-        items.push((group.clone(), MenuAction::Group));
-        modify_menu.append(&group)?;
-
-        modify_menu.append(&PredefinedMenuItem::separator())?;
-
-        let send_to_back = MenuItem::new("Send to back", true, None);
-        items.push((send_to_back.clone(), MenuAction::SendToBack));
-        modify_menu.append(&send_to_back)?;
-
-        let bring_to_front = MenuItem::new("Bring to front", true, None);
-        items.push((bring_to_front.clone(), MenuAction::BringToFront));
-        modify_menu.append(&bring_to_front)?;
-
-        menu.append(&modify_menu)?;
-
-        // Layer menu
-        let layer_menu = Submenu::new("Layer", true);
-
-        let add_layer = MenuItem::new(
-            "Add Layer",
-            true,
-            Some(Accelerator::new(
-                Some(Modifiers::CONTROL | Modifiers::SHIFT),
-                Code::KeyL,
-            )),
-        );
-        items.push((add_layer.clone(), MenuAction::AddLayer));
-        layer_menu.append(&add_layer)?;
-
-        let add_video_layer = MenuItem::new("Add Video Layer", true, None);
-        items.push((add_video_layer.clone(), MenuAction::AddVideoLayer));
-        layer_menu.append(&add_video_layer)?;
-
-        let add_audio_track = MenuItem::new("Add Audio Track", true, None);
-        items.push((add_audio_track.clone(), MenuAction::AddAudioTrack));
-        layer_menu.append(&add_audio_track)?;
-
-        let add_midi_track = MenuItem::new("Add MIDI Track", true, None);
-        items.push((add_midi_track.clone(), MenuAction::AddMidiTrack));
-        layer_menu.append(&add_midi_track)?;
-
-        layer_menu.append(&PredefinedMenuItem::separator())?;
-
-        let delete_layer = MenuItem::new("Delete Layer", true, None);
-        items.push((delete_layer.clone(), MenuAction::DeleteLayer));
-        layer_menu.append(&delete_layer)?;
-
-        let toggle_layer = MenuItem::new("Hide/Show Layer", true, None);
-        items.push((toggle_layer.clone(), MenuAction::ToggleLayerVisibility));
-        layer_menu.append(&toggle_layer)?;
-
-        menu.append(&layer_menu)?;
-
-        // Timeline menu
-        let timeline_menu = Submenu::new("Timeline", true);
-
-        let new_keyframe = MenuItem::new(
-            "New Keyframe",
-            true,
-            Some(Accelerator::new(None, Code::KeyK)),
-        );
-        items.push((new_keyframe.clone(), MenuAction::NewKeyframe));
-        timeline_menu.append(&new_keyframe)?;
-
-        let new_blank_keyframe = MenuItem::new("New Blank Keyframe", true, None);
-        items.push((new_blank_keyframe.clone(), MenuAction::NewBlankKeyframe));
-        timeline_menu.append(&new_blank_keyframe)?;
-
-        let delete_frame = MenuItem::new("Delete Frame", true, None);
-        items.push((delete_frame.clone(), MenuAction::DeleteFrame));
-        timeline_menu.append(&delete_frame)?;
-
-        let duplicate_keyframe = MenuItem::new("Duplicate Keyframe", true, None);
-        items.push((duplicate_keyframe.clone(), MenuAction::DuplicateKeyframe));
-        timeline_menu.append(&duplicate_keyframe)?;
-
-        let add_keyframe_playhead = MenuItem::new("Add Keyframe at Playhead", true, None);
-        items.push((add_keyframe_playhead.clone(), MenuAction::AddKeyframeAtPlayhead));
-        timeline_menu.append(&add_keyframe_playhead)?;
-
-        timeline_menu.append(&PredefinedMenuItem::separator())?;
-
-        let motion_tween = MenuItem::new("Add Motion Tween", true, None);
-        items.push((motion_tween.clone(), MenuAction::AddMotionTween));
-        timeline_menu.append(&motion_tween)?;
-
-        let shape_tween = MenuItem::new("Add Shape Tween", true, None);
-        items.push((shape_tween.clone(), MenuAction::AddShapeTween));
-        timeline_menu.append(&shape_tween)?;
-
-        timeline_menu.append(&PredefinedMenuItem::separator())?;
-
-        let return_to_start = MenuItem::new("Return to start", true, None);
-        items.push((return_to_start.clone(), MenuAction::ReturnToStart));
-        timeline_menu.append(&return_to_start)?;
-
-        let play = MenuItem::new("Play", true, None);
-        items.push((play.clone(), MenuAction::Play));
-        timeline_menu.append(&play)?;
-
-        menu.append(&timeline_menu)?;
-
-        // View menu
-        let view_menu = Submenu::new("View", true);
-
-        let zoom_in = MenuItem::new(
-            "Zoom In",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::Equal)),
-        );
-        items.push((zoom_in.clone(), MenuAction::ZoomIn));
-        view_menu.append(&zoom_in)?;
-
-        let zoom_out = MenuItem::new(
-            "Zoom Out",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::Minus)),
-        );
-        items.push((zoom_out.clone(), MenuAction::ZoomOut));
-        view_menu.append(&zoom_out)?;
-
-        let actual_size = MenuItem::new(
-            "Actual Size",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::Digit0)),
-        );
-        items.push((actual_size.clone(), MenuAction::ActualSize));
-        view_menu.append(&actual_size)?;
-
-        let recenter = MenuItem::new("Recenter View", true, None);
-        items.push((recenter.clone(), MenuAction::RecenterView));
-        view_menu.append(&recenter)?;
-
-        view_menu.append(&PredefinedMenuItem::separator())?;
-
-        // Layout submenu
-        let layout_submenu = Submenu::new("Layout", true);
-
-        let next_layout = MenuItem::new(
-            "Next Layout",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::BracketRight)),
-        );
-        items.push((next_layout.clone(), MenuAction::NextLayout));
-        layout_submenu.append(&next_layout)?;
-
-        let prev_layout = MenuItem::new(
-            "Previous Layout",
-            true,
-            Some(Accelerator::new(Some(Modifiers::CONTROL), Code::BracketLeft)),
-        );
-        items.push((prev_layout.clone(), MenuAction::PreviousLayout));
-        layout_submenu.append(&prev_layout)?;
-
-        // TODO: Add dynamic layout list with checkmarks for current layout
-        // This will need to be updated when layouts change
-
-        view_menu.append(&layout_submenu)?;
-        menu.append(&view_menu)?;
-
-        // Help menu
-        let help_menu = Submenu::new("Help", true);
-
-        let about = MenuItem::new("About...", true, None);
-        items.push((about.clone(), MenuAction::About));
-        help_menu.append(&about)?;
-
-        menu.append(&help_menu)?;
 
         Ok(Self { menu, items })
     }
 
-    /// Initialize the menu for the application window
-    #[cfg(target_os = "linux")]
-    pub fn init_for_gtk(&self, window: &gtk::ApplicationWindow, container: Option<&gtk::Box>) -> Result<(), Box<dyn std::error::Error>> {
-        self.menu.init_for_gtk_window(window, container)?;
+    /// Build a top-level submenu and append to menu
+    fn build_submenu(
+        menu: &Menu,
+        def: &MenuDef,
+        items: &mut Vec<(MenuItem, MenuAction)>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let MenuDef::Submenu { label, children } = def {
+            let submenu = Submenu::new(*label, true);
+            for child in *children {
+                Self::build_menu_item(&submenu, child, items)?;
+            }
+            menu.append(&submenu)?;
+        }
         Ok(())
     }
 
-    /// Initialize the menu for macOS (app-wide)
+    /// Recursively build menu items within a submenu
+    fn build_menu_item(
+        parent: &Submenu,
+        def: &MenuDef,
+        items: &mut Vec<(MenuItem, MenuAction)>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match def {
+            MenuDef::Item(item_def) => {
+                let accelerator = item_def.shortcut.as_ref().map(|s| s.to_muda_accelerator());
+                let item = MenuItem::new(item_def.label, true, accelerator);
+                items.push((item.clone(), item_def.action));
+                parent.append(&item)?;
+            }
+            MenuDef::Separator => {
+                parent.append(&PredefinedMenuItem::separator())?;
+            }
+            MenuDef::Submenu { label, children } => {
+                let submenu = Submenu::new(*label, true);
+                for child in *children {
+                    Self::build_menu_item(&submenu, child, items)?;
+                }
+                parent.append(&submenu)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Initialize native menus for macOS (app-wide, doesn't require window handle)
     #[cfg(target_os = "macos")]
     pub fn init_for_macos(&self) {
         self.menu.init_for_nsapp();
@@ -515,6 +517,135 @@ impl MenuSystem {
             }
         }
         None
+    }
+
+    /// Check keyboard shortcuts from egui input and return the action
+    /// This works cross-platform and complements native menus
+    pub fn check_shortcuts(input: &egui::InputState) -> Option<MenuAction> {
+        for def in MenuItemDef::all_with_shortcuts() {
+            if let Some(shortcut) = &def.shortcut {
+                if shortcut.matches_egui_input(input) {
+                    return Some(def.action);
+                }
+            }
+        }
+        None
+    }
+
+    /// Render egui menu bar from the same menu structure (for Linux/Windows)
+    pub fn render_egui_menu_bar(ui: &mut egui::Ui) -> Option<MenuAction> {
+        let mut action = None;
+
+        egui::menu::bar(ui, |ui| {
+            for menu_def in MenuItemDef::menu_structure() {
+                if let Some(a) = Self::render_menu_def(ui, menu_def) {
+                    action = Some(a);
+                }
+            }
+        });
+
+        action
+    }
+
+    /// Recursively render a MenuDef as egui UI
+    fn render_menu_def(ui: &mut egui::Ui, def: &MenuDef) -> Option<MenuAction> {
+        match def {
+            MenuDef::Item(item_def) => {
+                if Self::render_menu_item(ui, item_def) {
+                    Some(item_def.action)
+                } else {
+                    None
+                }
+            }
+            MenuDef::Separator => {
+                ui.separator();
+                None
+            }
+            MenuDef::Submenu { label, children } => {
+                let mut action = None;
+                ui.menu_button(*label, |ui| {
+                    for child in *children {
+                        if let Some(a) = Self::render_menu_def(ui, child) {
+                            action = Some(a);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                action
+            }
+        }
+    }
+
+    /// Render a single menu item with label and shortcut
+    fn render_menu_item(ui: &mut egui::Ui, def: &MenuItemDef) -> bool {
+        let shortcut_text = if let Some(shortcut) = &def.shortcut {
+            Self::format_shortcut(shortcut)
+        } else {
+            String::new()
+        };
+
+        // Set minimum width for menu items to prevent cramping
+        ui.set_min_width(180.0);
+
+        if shortcut_text.is_empty() {
+            ui.add(egui::Button::new(def.label).min_size(egui::vec2(0.0, 0.0))).clicked()
+        } else {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0; // More space between label and shortcut
+
+                let button = ui.add(egui::Button::new(def.label).min_size(egui::vec2(0.0, 0.0)));
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(&shortcut_text).weak().size(12.0));
+                });
+
+                button.clicked()
+            }).inner
+        }
+    }
+
+    /// Format shortcut for display (e.g., "Ctrl+S")
+    fn format_shortcut(shortcut: &Shortcut) -> String {
+        let mut parts = Vec::new();
+
+        if shortcut.ctrl {
+            parts.push("Ctrl");
+        }
+        if shortcut.shift {
+            parts.push("Shift");
+        }
+        if shortcut.alt {
+            parts.push("Alt");
+        }
+
+        let key_name = match shortcut.key {
+            ShortcutKey::A => "A",
+            ShortcutKey::C => "C",
+            ShortcutKey::E => "E",
+            ShortcutKey::G => "G",
+            ShortcutKey::I => "I",
+            ShortcutKey::K => "K",
+            ShortcutKey::L => "L",
+            ShortcutKey::N => "N",
+            ShortcutKey::O => "O",
+            ShortcutKey::Q => "Q",
+            ShortcutKey::S => "S",
+            ShortcutKey::V => "V",
+            ShortcutKey::W => "W",
+            ShortcutKey::X => "X",
+            ShortcutKey::Z => "Z",
+            ShortcutKey::Num0 => "0",
+            ShortcutKey::Comma => ",",
+            ShortcutKey::Minus => "-",
+            ShortcutKey::Equals => "=",
+            ShortcutKey::Plus => "+",
+            ShortcutKey::BracketLeft => "[",
+            ShortcutKey::BracketRight => "]",
+            ShortcutKey::Delete => "Del",
+        };
+        parts.push(key_name);
+
+        parts.join("+")
     }
 
     /// Update menu item text dynamically (e.g., for Undo/Redo with action names)

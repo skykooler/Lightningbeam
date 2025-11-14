@@ -20,6 +20,15 @@ fn main() -> eframe::Result {
         println!("   - {}: {}", layout.name, layout.description);
     }
 
+    // Initialize native menus for macOS (app-wide, doesn't need window)
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(menu_system) = MenuSystem::new() {
+            menu_system.init_for_macos();
+            println!("✅ Native macOS menus initialized");
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1920.0, 1080.0])
@@ -180,8 +189,7 @@ struct EditorApp {
     fill_color: egui::Color32, // Fill color for drawing
     stroke_color: egui::Color32, // Stroke color for drawing
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
-    menu_system: Option<MenuSystem>, // Native menu system
-    menu_initialized: bool, // Track if menu has been initialized with window
+    menu_system: Option<MenuSystem>, // Native menu system for event checking
 }
 
 impl EditorApp {
@@ -206,7 +214,6 @@ impl EditorApp {
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
-            menu_initialized: false,
         }
     }
 
@@ -462,40 +469,26 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for native menu events
+        // Check for native menu events (macOS)
         if let Some(menu_system) = &self.menu_system {
             if let Some(action) = menu_system.check_events() {
                 self.handle_menu_action(action);
             }
         }
 
-        // Top menu bar
-        let mut layout_to_switch: Option<usize> = None;
-        let current_name = self.current_layout_def().name.clone();
-
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("Layout", |ui| {
-                    for (i, layout) in self.layouts.iter().enumerate() {
-                        if ui
-                            .selectable_label(i == self.current_layout_index, &layout.name)
-                            .clicked()
-                        {
-                            layout_to_switch = Some(i);
-                            ui.close_menu();
-                        }
-                    }
-                });
-
-                ui.separator();
-                ui.label(format!("Current: {}", current_name));
-            });
+        // Check keyboard shortcuts (works on all platforms)
+        ctx.input(|i| {
+            if let Some(action) = MenuSystem::check_shortcuts(i) {
+                self.handle_menu_action(action);
+            }
         });
 
-        // Switch layout after menu closes to avoid borrow issues
-        if let Some(index) = layout_to_switch {
-            self.switch_layout(index);
-        }
+        // Top menu bar (egui-rendered on all platforms)
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            if let Some(action) = MenuSystem::render_egui_menu_bar(ui) {
+                self.handle_menu_action(action);
+            }
+        });
 
         // Main pane area
         let mut layout_action: Option<LayoutAction> = None;
