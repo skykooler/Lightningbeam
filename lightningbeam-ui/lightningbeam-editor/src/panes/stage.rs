@@ -226,30 +226,41 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
         vello_resources.ensure_texture(device, width, height);
 
-        // Build Vello scene with a test rectangle
+        // Build Vello scene using the document renderer
         let mut scene = vello::Scene::new();
 
-        // Draw a colored rectangle as proof of concept
-        use vello::kurbo::{RoundedRect, Affine};
-        use vello::peniko::Color;
+        // Create a test document with a simple shape
+        use lightningbeam_core::document::Document;
+        use lightningbeam_core::layer::{AnyLayer, VectorLayer};
+        use lightningbeam_core::object::Object;
+        use lightningbeam_core::shape::{Shape, ShapeColor};
+        use vello::kurbo::{Circle, Shape as KurboShape};
 
-        let rect = RoundedRect::new(
-            100.0, 100.0,
-            400.0, 300.0,
-            10.0, // corner radius
-        );
+        let mut doc = Document::new("Test Animation");
 
-        // Apply camera transform: translate for pan, scale for zoom
-        let transform = Affine::translate((self.pan_offset.x as f64, self.pan_offset.y as f64))
+        // Create a simple circle shape
+        let circle = Circle::new((200.0, 150.0), 50.0);
+        let path = circle.to_path(0.1);
+        let shape = Shape::new(path).with_fill(ShapeColor::rgb(100, 150, 250));
+
+        // Create an object for the shape
+        let object = Object::new(shape.id);
+
+        // Create a vector layer
+        let mut vector_layer = VectorLayer::new("Layer 1");
+        vector_layer.add_shape(shape);
+        vector_layer.add_object(object);
+
+        // Add to document
+        doc.root.add_child(AnyLayer::Vector(vector_layer));
+
+        // Build camera transform: translate for pan, scale for zoom
+        use vello::kurbo::Affine;
+        let camera_transform = Affine::translate((self.pan_offset.x as f64, self.pan_offset.y as f64))
             * Affine::scale(self.zoom as f64);
 
-        scene.fill(
-            vello::peniko::Fill::NonZero,
-            transform,
-            Color::rgb8(100, 150, 250),
-            None,
-            &rect,
-        );
+        // Render the document to the scene with camera transform
+        lightningbeam_core::renderer::render_document_with_transform(&doc, &mut scene, camera_transform);
 
         // Render scene to texture
         if let Some(texture_view) = &vello_resources.texture_view {

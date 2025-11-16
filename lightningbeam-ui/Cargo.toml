@@ -14,7 +14,7 @@ egui-wgpu = "0.29"
 # GPU Rendering
 vello = "0.3"
 wgpu = "22"
-kurbo = "0.11"
+kurbo = { version = "0.11", features = ["serde"] }
 peniko = "0.5"
 
 # Windowing
