@@ -2447,6 +2447,7 @@ name = "lightningbeam-editor"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "egui-wgpu",
  "egui_extras",
  "image",
  "kurbo 0.11.3",

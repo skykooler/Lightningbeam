@@ -9,6 +9,7 @@ lightningbeam-core = { path = "../lightningbeam-core" }
 # UI Framework
 eframe = { workspace = true }
 egui_extras = { workspace = true }
+egui-wgpu = { workspace = true }
 
 # GPU
 wgpu = { workspace = true }

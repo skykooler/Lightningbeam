@@ -9,6 +9,7 @@ members = [
 # UI Framework (using eframe for simplified integration)
 eframe = { version = "0.29", default-features = true, features = ["wgpu"] }
 egui_extras = { version = "0.29", features = ["image", "svg"] }
+egui-wgpu = "0.29"
 
 # GPU Rendering
 vello = "0.3"

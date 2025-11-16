@@ -9,6 +9,15 @@ use lightningbeam_core::{pane::PaneType, tool::Tool};
 // Type alias for node paths (matches main.rs)
 pub type NodePath = Vec<usize>;
 
+/// Handler information for view actions (zoom, pan, etc.)
+/// Used for two-phase dispatch: register during render, execute after
+#[derive(Clone)]
+pub struct ViewActionHandler {
+    pub priority: u32,
+    pub pane_path: NodePath,
+    pub zoom_center: egui::Vec2,
+}
+
 pub mod toolbar;
 pub mod stage;
 pub mod timeline;
@@ -25,6 +34,14 @@ pub struct SharedPaneState<'a> {
     pub selected_tool: &'a mut Tool,
     pub fill_color: &'a mut egui::Color32,
     pub stroke_color: &'a mut egui::Color32,
+    pub pending_view_action: &'a mut Option<crate::menu::MenuAction>,
+    /// Tracks the priority of the best fallback pane for view actions
+    /// Lower number = higher priority. None = no fallback pane seen yet
+    /// Priority order: Stage(0) > Timeline(1) > PianoRoll(2) > NodeEditor(3)
+    pub fallback_pane_priority: &'a mut Option<u32>,
+    /// Registry of handlers for the current pending action
+    /// Panes register themselves here during render, execution happens after
+    pub pending_handlers: &'a mut Vec<ViewActionHandler>,
 }
 
 /// Trait for pane rendering

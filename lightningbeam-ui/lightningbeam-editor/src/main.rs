@@ -190,6 +190,7 @@ struct EditorApp {
     stroke_color: egui::Color32, // Stroke color for drawing
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
     menu_system: Option<MenuSystem>, // Native menu system for event checking
+    pending_view_action: Option<MenuAction>, // Pending view action (zoom, recenter) to be handled by hovered pane
 }
 
 impl EditorApp {
@@ -214,6 +215,7 @@ impl EditorApp {
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
+            pending_view_action: None,
         }
     }
 
@@ -412,20 +414,16 @@ impl EditorApp {
 
             // View menu
             MenuAction::ZoomIn => {
-                println!("Menu: Zoom In");
-                // TODO: Implement zoom in
+                self.pending_view_action = Some(MenuAction::ZoomIn);
             }
             MenuAction::ZoomOut => {
-                println!("Menu: Zoom Out");
-                // TODO: Implement zoom out
+                self.pending_view_action = Some(MenuAction::ZoomOut);
             }
             MenuAction::ActualSize => {
-                println!("Menu: Actual Size");
-                // TODO: Implement actual size (100% zoom)
+                self.pending_view_action = Some(MenuAction::ActualSize);
             }
             MenuAction::RecenterView => {
-                println!("Menu: Recenter View");
-                // TODO: Implement recenter view
+                self.pending_view_action = Some(MenuAction::RecenterView);
             }
             MenuAction::NextLayout => {
                 println!("Menu: Next Layout");
@@ -469,6 +467,12 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Disable egui's built-in Ctrl+Plus/Minus zoom behavior
+        // We handle zoom ourselves for the Stage pane
+        ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+        });
+
         // Check for native menu events (macOS)
         if let Some(menu_system) = &self.menu_system {
             if let Some(action) = menu_system.check_events() {
@@ -498,6 +502,12 @@ impl eframe::App for EditorApp {
             // Reset hovered divider each frame
             self.hovered_divider = None;
 
+            // Track fallback pane priority for view actions (reset each frame)
+            let mut fallback_pane_priority: Option<u32> = None;
+
+            // Registry for view action handlers (two-phase dispatch)
+            let mut pending_handlers: Vec<panes::ViewActionHandler> = Vec::new();
+
             render_layout_node(
                 ui,
                 &mut self.current_layout,
@@ -514,7 +524,27 @@ impl eframe::App for EditorApp {
                 &mut self.stroke_color,
                 &mut self.pane_instances,
                 &Vec::new(), // Root path
+                &mut self.pending_view_action,
+                &mut fallback_pane_priority,
+                &mut pending_handlers,
             );
+
+            // Execute action on the best handler (two-phase dispatch)
+            if let Some(action) = &self.pending_view_action {
+                if let Some(best_handler) = pending_handlers.iter().min_by_key(|h| h.priority) {
+                    // Look up the pane instance and execute the action
+                    if let Some(pane_instance) = self.pane_instances.get_mut(&best_handler.pane_path) {
+                        match pane_instance {
+                            panes::PaneInstance::Stage(stage_pane) => {
+                                stage_pane.execute_view_action(action, best_handler.zoom_center);
+                            }
+                            _ => {} // Other pane types don't handle view actions yet
+                        }
+                    }
+                }
+                // Clear the pending action after execution
+                self.pending_view_action = None;
+            }
 
             // Set cursor based on hover state
             if let Some((_, is_horizontal)) = self.hovered_divider {
@@ -550,6 +580,7 @@ impl eframe::App for EditorApp {
             self.apply_layout_action(action);
         }
     }
+
 }
 
 /// Recursively render a layout node with drag support
@@ -569,10 +600,13 @@ fn render_layout_node(
     stroke_color: &mut egui::Color32,
     pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
+    pending_view_action: &mut Option<MenuAction>,
+    fallback_pane_priority: &mut Option<u32>,
+    pending_handlers: &mut Vec<panes::ViewActionHandler>,
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -612,6 +646,9 @@ fn render_layout_node(
                 stroke_color,
                 pane_instances,
                 &left_path,
+                pending_view_action,
+                fallback_pane_priority,
+                pending_handlers,
             );
 
             let mut right_path = path.clone();
@@ -632,6 +669,9 @@ fn render_layout_node(
                 stroke_color,
                 pane_instances,
                 &right_path,
+                pending_view_action,
+                fallback_pane_priority,
+                pending_handlers,
             );
 
             // Draw divider with interaction
@@ -744,6 +784,9 @@ fn render_layout_node(
                 stroke_color,
                 pane_instances,
                 &top_path,
+                pending_view_action,
+                fallback_pane_priority,
+                pending_handlers,
             );
 
             let mut bottom_path = path.clone();
@@ -764,6 +807,9 @@ fn render_layout_node(
                 stroke_color,
                 pane_instances,
                 &bottom_path,
+                pending_view_action,
+                fallback_pane_priority,
+                pending_handlers,
             );
 
             // Draw divider with interaction
@@ -856,6 +902,9 @@ fn render_pane(
     stroke_color: &mut egui::Color32,
     pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
+    pending_view_action: &mut Option<MenuAction>,
+    fallback_pane_priority: &mut Option<u32>,
+    pending_handlers: &mut Vec<panes::ViewActionHandler>,
 ) {
     let pane_type = PaneType::from_name(pane_name);
 
@@ -1115,6 +1164,9 @@ fn render_pane(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                pending_view_action,
+                fallback_pane_priority,
+                pending_handlers,
             };
 
             // Render pane header (if it has one)
