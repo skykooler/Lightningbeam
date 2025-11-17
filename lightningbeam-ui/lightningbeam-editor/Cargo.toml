@@ -33,3 +33,5 @@ resvg = { workspace = true }
 
 # Utilities
 pollster = { workspace = true }
+lightningcss = "1.0.0-alpha.68"
+clap = { version = "4.5", features = ["derive"] }

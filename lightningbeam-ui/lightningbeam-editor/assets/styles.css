@@ -1,0 +1,178 @@
+/* Lightningbeam Editor Styles
+ * CSS with variables and selector-based theming
+ */
+
+/* ============================================
+   LIGHT MODE VARIABLES
+   ============================================ */
+:root {
+  /* Base colors */
+  --bg-primary: #f6f6f6;
+  --bg-secondary: #ccc;
+  --bg-panel: #aaa;
+  --bg-header: #ddd;
+  --background-color: #ccc;
+  --foreground-color: #ddd;
+  --highlight: #ddd;
+  --shadow: #999;
+  --shade: #aaa;
+
+  /* Text colors */
+  --text-primary: #0f0f0f;
+  --text-secondary: #666;
+  --text-tertiary: #999;
+
+  /* Border colors */
+  --border-light: #bbb;
+  --border-medium: #999;
+  --border-dark: #555;
+
+  /* UI backgrounds */
+  --grid-bg: #555;
+  --grid-hover: #666;
+
+  /* Dimensions */
+  --header-height: 40px;
+  --pane-border-width: 1px;
+}
+
+/* ============================================
+   DARK MODE VARIABLES
+   ============================================ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Base colors */
+    --bg-primary: #2f2f2f;
+    --bg-secondary: #3f3f3f;
+    --bg-panel: #222222;
+    --bg-header: #444;
+    --background-color: #333;
+    --foreground-color: #888;
+    --highlight: #4f4f4f;
+    --shadow: #111;
+    --shade: #222;
+
+    /* Text colors */
+    --text-primary: #f6f6f6;
+    --text-secondary: #aaa;
+    --text-tertiary: #777;
+
+    /* Border colors */
+    --border-light: #555;
+    --border-medium: #444;
+    --border-dark: #333;
+
+    /* UI backgrounds */
+    --grid-bg: #0f0f0f;
+    --grid-hover: #1a1a1a;
+  }
+}
+
+/* ============================================
+   COMPONENT STYLES (applies to both modes)
+   ============================================ */
+
+/* Pane headers */
+.pane-header {
+  background-color: var(--bg-header);
+  color: var(--text-primary);
+  height: var(--header-height);
+  border-color: var(--border-medium);
+}
+
+/* Pane content areas */
+.pane-content {
+  background-color: var(--bg-primary);
+  border-color: var(--border-light);
+}
+
+/* General panel */
+.panel {
+  background-color: var(--bg-panel);
+  border-color: var(--border-medium);
+}
+
+/* Grid backgrounds */
+.grid {
+  background-color: var(--grid-bg);
+}
+
+.grid-hover {
+  background-color: var(--grid-hover);
+}
+
+/* Specific pane IDs */
+#stage {
+  background-color: var(--bg-primary);
+}
+
+#timeline {
+  background-color: var(--shade);
+}
+
+#toolbar {
+  background-color: var(--bg-secondary);
+}
+
+#infopanel {
+  background-color: var(--bg-panel);
+}
+
+#node-editor {
+  background-color: #2d2d2d;
+  border-color: #4d4d4d;
+}
+
+/* Timeline specific elements */
+.timeline-background {
+  background-color: var(--shade);
+}
+
+.timeline-header {
+  background-color: var(--shadow);
+}
+
+.timeline-spacer {
+  background-color: var(--shadow);
+}
+
+.timeline-scrubber {
+  background-color: #cc2222;
+  border-color: #cc2222;
+}
+
+.timeline-layer-active {
+  background-color: var(--highlight);
+}
+
+.timeline-layer-inactive {
+  background-color: var(--background-color);
+}
+
+.timeline-row-active {
+  background-color: var(--grid-bg);
+}
+
+.timeline-row-inactive {
+  background-color: var(--foreground-color);
+}
+
+/* Buttons */
+.button {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border-color: var(--border-medium);
+}
+
+.button-hover {
+  border-color: #396cd8;
+}
+
+/* Text */
+.text-primary {
+  color: var(--text-primary);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}

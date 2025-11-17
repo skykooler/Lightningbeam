@@ -39,9 +39,12 @@ pub struct SharedPaneState<'a> {
     /// Lower number = higher priority. None = no fallback pane seen yet
     /// Priority order: Stage(0) > Timeline(1) > PianoRoll(2) > NodeEditor(3)
     pub fallback_pane_priority: &'a mut Option<u32>,
+    pub theme: &'a crate::theme::Theme,
     /// Registry of handlers for the current pending action
     /// Panes register themselves here during render, execution happens after
     pub pending_handlers: &'a mut Vec<ViewActionHandler>,
+    /// Active document being edited
+    pub document: &'a mut lightningbeam_core::document::Document,
 }
 
 /// Trait for pane rendering

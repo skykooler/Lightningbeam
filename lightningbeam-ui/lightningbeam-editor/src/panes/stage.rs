@@ -6,24 +6,28 @@ use eframe::egui;
 use super::{NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex};
 
-/// Resources for a single Vello instance
-struct VelloResources {
+/// Shared Vello resources (created once, reused by all Stage panes)
+struct SharedVelloResources {
     renderer: Arc<Mutex<vello::Renderer>>,
-    texture: Option<wgpu::Texture>,
-    texture_view: Option<wgpu::TextureView>,
-    // Blit pipeline for rendering texture to screen
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+}
+
+/// Per-instance Vello resources (created for each Stage pane)
+struct InstanceVelloResources {
+    texture: Option<wgpu::Texture>,
+    texture_view: Option<wgpu::TextureView>,
     blit_bind_group: Option<wgpu::BindGroup>,
 }
 
 /// Container for all Vello instances, stored in egui's CallbackResources
 pub struct VelloResourcesMap {
-    instances: std::collections::HashMap<u64, VelloResources>,
+    shared: Option<Arc<SharedVelloResources>>,
+    instances: std::collections::HashMap<u64, InstanceVelloResources>,
 }
 
-impl VelloResources {
+impl SharedVelloResources {
     pub fn new(device: &wgpu::Device) -> Result<Self, String> {
         let renderer = vello::Renderer::new(
             device,
@@ -118,20 +122,27 @@ impl VelloResources {
             ..Default::default()
         });
 
-        println!("✅ Vello renderer and blit pipeline initialized");
+        println!("✅ Vello shared resources initialized (renderer and shaders)");
 
         Ok(Self {
             renderer: Arc::new(Mutex::new(renderer)),
-            texture: None,
-            texture_view: None,
             blit_pipeline,
             blit_bind_group_layout,
             sampler,
-            blit_bind_group: None,
         })
     }
+}
 
-    fn ensure_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+impl InstanceVelloResources {
+    pub fn new() -> Self {
+        Self {
+            texture: None,
+            texture_view: None,
+            blit_bind_group: None,
+        }
+    }
+
+    fn ensure_texture(&mut self, device: &wgpu::Device, shared: &SharedVelloResources, width: u32, height: u32) {
         // Clamp to GPU limits (most GPUs support up to 8192)
         let max_texture_size = 8192;
         let width = width.min(max_texture_size);
@@ -157,10 +168,10 @@ impl VelloResources {
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create bind group for blit pipeline
+        // Create bind group for blit pipeline (using shared layout and sampler)
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vello_blit_bind_group"),
-            layout: &self.blit_bind_group_layout,
+            layout: &shared.blit_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -168,7 +179,7 @@ impl VelloResources {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&shared.sampler),
                 },
             ],
         });
@@ -185,11 +196,12 @@ struct VelloCallback {
     pan_offset: egui::Vec2,
     zoom: f32,
     instance_id: u64,
+    document: lightningbeam_core::document::Document,
 }
 
 impl VelloCallback {
-    fn new(rect: egui::Rect, pan_offset: egui::Vec2, zoom: f32, instance_id: u64) -> Self {
-        Self { rect, pan_offset, zoom, instance_id }
+    fn new(rect: egui::Rect, pan_offset: egui::Vec2, zoom: f32, instance_id: u64, document: lightningbeam_core::document::Document) -> Self {
+        Self { rect, pan_offset, zoom, instance_id, document }
     }
 }
 
@@ -205,15 +217,26 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Get or create the resources map
         if !resources.contains::<VelloResourcesMap>() {
             resources.insert(VelloResourcesMap {
+                shared: None,
                 instances: std::collections::HashMap::new(),
             });
         }
 
         let map: &mut VelloResourcesMap = resources.get_mut().unwrap();
 
-        // Get or create resources for this specific instance
-        let vello_resources = map.instances.entry(self.instance_id).or_insert_with(|| {
-            VelloResources::new(device).expect("Failed to initialize Vello renderer")
+        // Initialize shared resources if not yet created (only happens once for first Stage pane)
+        if map.shared.is_none() {
+            map.shared = Some(Arc::new(
+                SharedVelloResources::new(device).expect("Failed to initialize shared Vello resources")
+            ));
+        }
+
+        let shared = map.shared.as_ref().unwrap().clone();
+
+        // Get or create per-instance resources
+        let instance_resources = map.instances.entry(self.instance_id).or_insert_with(|| {
+            println!("✅ Creating instance resources for Stage pane #{}", self.instance_id);
+            InstanceVelloResources::new()
         });
 
         // Ensure texture is the right size
@@ -224,35 +247,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             return Vec::new();
         }
 
-        vello_resources.ensure_texture(device, width, height);
+        instance_resources.ensure_texture(device, &shared, width, height);
 
         // Build Vello scene using the document renderer
         let mut scene = vello::Scene::new();
-
-        // Create a test document with a simple shape
-        use lightningbeam_core::document::Document;
-        use lightningbeam_core::layer::{AnyLayer, VectorLayer};
-        use lightningbeam_core::object::Object;
-        use lightningbeam_core::shape::{Shape, ShapeColor};
-        use vello::kurbo::{Circle, Shape as KurboShape};
-
-        let mut doc = Document::new("Test Animation");
-
-        // Create a simple circle shape
-        let circle = Circle::new((200.0, 150.0), 50.0);
-        let path = circle.to_path(0.1);
-        let shape = Shape::new(path).with_fill(ShapeColor::rgb(100, 150, 250));
-
-        // Create an object for the shape
-        let object = Object::new(shape.id);
-
-        // Create a vector layer
-        let mut vector_layer = VectorLayer::new("Layer 1");
-        vector_layer.add_shape(shape);
-        vector_layer.add_object(object);
-
-        // Add to document
-        doc.root.add_child(AnyLayer::Vector(vector_layer));
 
         // Build camera transform: translate for pan, scale for zoom
         use vello::kurbo::Affine;
@@ -260,10 +258,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             * Affine::scale(self.zoom as f64);
 
         // Render the document to the scene with camera transform
-        lightningbeam_core::renderer::render_document_with_transform(&doc, &mut scene, camera_transform);
+        lightningbeam_core::renderer::render_document_with_transform(&self.document, &mut scene, camera_transform);
 
-        // Render scene to texture
-        if let Some(texture_view) = &vello_resources.texture_view {
+        // Render scene to texture using shared renderer
+        if let Some(texture_view) = &instance_resources.texture_view {
             let render_params = vello::RenderParams {
                 base_color: vello::peniko::Color::rgb8(45, 45, 48), // Dark background
                 width,
@@ -271,7 +269,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 antialiasing_method: vello::AaConfig::Msaa16,
             };
 
-            if let Ok(mut renderer) = vello_resources.renderer.lock() {
+            if let Ok(mut renderer) = shared.renderer.lock() {
                 renderer
                     .render_to_texture(device, queue, &scene, texture_view, &render_params)
                     .ok();
@@ -293,20 +291,26 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             None => return, // Resources not initialized yet
         };
 
-        // Get resources for this specific instance
-        let vello_resources = match map.instances.get(&self.instance_id) {
+        // Get shared resources
+        let shared = match &map.shared {
+            Some(s) => s,
+            None => return, // Shared resources not initialized yet
+        };
+
+        // Get instance resources
+        let instance_resources = match map.instances.get(&self.instance_id) {
             Some(r) => r,
             None => return, // Instance not initialized yet
         };
 
         // Check if we have a bind group (texture ready)
-        let bind_group = match &vello_resources.blit_bind_group {
+        let bind_group = match &instance_resources.blit_bind_group {
             Some(bg) => bg,
             None => return, // Texture not ready yet
         };
 
-        // Render fullscreen quad with our texture
-        render_pass.set_pipeline(&vello_resources.blit_pipeline);
+        // Render fullscreen quad with our texture (using shared pipeline)
+        render_pass.set_pipeline(&shared.blit_pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..4, 0..1); // Triangle strip: 4 vertices
     }
@@ -527,7 +531,7 @@ impl PaneRenderer for StagePane {
         }
 
         // Use egui's custom painting callback for Vello
-        let callback = VelloCallback::new(rect, self.pan_offset, self.zoom, self.instance_id);
+        let callback = VelloCallback::new(rect, self.pan_offset, self.zoom, self.instance_id, shared.document.clone());
 
         let cb = egui_wgpu::Callback::new_paint_callback(
             rect,

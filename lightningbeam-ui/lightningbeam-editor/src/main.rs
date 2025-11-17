@@ -3,6 +3,7 @@ use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
 use lightningbeam_core::tool::Tool;
 use std::collections::HashMap;
+use clap::Parser;
 
 mod panes;
 use panes::{PaneInstance, PaneRenderer, SharedPaneState};
@@ -10,8 +11,45 @@ use panes::{PaneInstance, PaneRenderer, SharedPaneState};
 mod menu;
 use menu::{MenuAction, MenuSystem};
 
+mod theme;
+use theme::{Theme, ThemeMode};
+
+/// Lightningbeam Editor - Animation and video editing software
+#[derive(Parser, Debug)]
+#[command(name = "Lightningbeam Editor")]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Use light theme
+    #[arg(long, conflicts_with = "dark")]
+    light: bool,
+
+    /// Use dark theme
+    #[arg(long, conflicts_with = "light")]
+    dark: bool,
+}
+
 fn main() -> eframe::Result {
     println!("🚀 Starting Lightningbeam Editor...");
+
+    // Parse command line arguments
+    let args = Args::parse();
+
+    // Determine theme mode from arguments
+    let theme_mode = if args.light {
+        ThemeMode::Light
+    } else if args.dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::System
+    };
+
+    // Load theme
+    let mut theme = Theme::load_default().expect("Failed to load theme");
+    theme.set_mode(theme_mode);
+    println!("✅ Loaded theme with {} selectors (mode: {:?})", theme.len(), theme_mode);
+
+    // Debug: print theme info
+    theme.debug_print();
 
     // Load layouts from JSON
     let layouts = load_layouts();
@@ -39,7 +77,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Lightningbeam Editor",
         options,
-        Box::new(move |cc| Ok(Box::new(EditorApp::new(cc, layouts)))),
+        Box::new(move |cc| Ok(Box::new(EditorApp::new(cc, layouts, theme)))),
     )
 }
 
@@ -191,14 +229,37 @@ struct EditorApp {
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
     menu_system: Option<MenuSystem>, // Native menu system for event checking
     pending_view_action: Option<MenuAction>, // Pending view action (zoom, recenter) to be handled by hovered pane
+    theme: Theme, // Theme system for colors and dimensions
+    document: lightningbeam_core::document::Document, // Active document being edited
 }
 
 impl EditorApp {
-    fn new(cc: &eframe::CreationContext, layouts: Vec<LayoutDefinition>) -> Self {
+    fn new(cc: &eframe::CreationContext, layouts: Vec<LayoutDefinition>, theme: Theme) -> Self {
         let current_layout = layouts[0].layout.clone();
 
         // Initialize native menu system
         let menu_system = MenuSystem::new().ok();
+
+        // Create default document with a simple test scene
+        let mut document = lightningbeam_core::document::Document::with_size("Untitled Animation", 1920.0, 1080.0)
+            .with_duration(10.0)
+            .with_framerate(60.0);
+
+        // Add a test layer with a simple shape to visualize
+        use lightningbeam_core::layer::{AnyLayer, VectorLayer};
+        use lightningbeam_core::object::Object;
+        use lightningbeam_core::shape::{Shape, ShapeColor};
+        use vello::kurbo::{Circle, Shape as KurboShape};
+
+        let circle = Circle::new((200.0, 150.0), 50.0);
+        let path = circle.to_path(0.1);
+        let shape = Shape::new(path).with_fill(ShapeColor::rgb(100, 150, 250));
+        let object = Object::new(shape.id);
+
+        let mut vector_layer = VectorLayer::new("Layer 1");
+        vector_layer.add_shape(shape);
+        vector_layer.add_object(object);
+        document.root.add_child(AnyLayer::Vector(vector_layer));
 
         Self {
             layouts,
@@ -216,6 +277,8 @@ impl EditorApp {
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
             pending_view_action: None,
+            theme,
+            document,
         }
     }
 
@@ -527,6 +590,8 @@ impl eframe::App for EditorApp {
                 &mut self.pending_view_action,
                 &mut fallback_pane_priority,
                 &mut pending_handlers,
+                &self.theme,
+                &mut self.document,
             );
 
             // Execute action on the best handler (two-phase dispatch)
@@ -603,10 +668,12 @@ fn render_layout_node(
     pending_view_action: &mut Option<MenuAction>,
     fallback_pane_priority: &mut Option<u32>,
     pending_handlers: &mut Vec<panes::ViewActionHandler>,
+    theme: &Theme,
+    document: &mut lightningbeam_core::document::Document,
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, document);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -649,6 +716,8 @@ fn render_layout_node(
                 pending_view_action,
                 fallback_pane_priority,
                 pending_handlers,
+                theme,
+                document,
             );
 
             let mut right_path = path.clone();
@@ -672,6 +741,8 @@ fn render_layout_node(
                 pending_view_action,
                 fallback_pane_priority,
                 pending_handlers,
+                theme,
+                document,
             );
 
             // Draw divider with interaction
@@ -787,6 +858,8 @@ fn render_layout_node(
                 pending_view_action,
                 fallback_pane_priority,
                 pending_handlers,
+                theme,
+                document,
             );
 
             let mut bottom_path = path.clone();
@@ -810,6 +883,8 @@ fn render_layout_node(
                 pending_view_action,
                 fallback_pane_priority,
                 pending_handlers,
+                theme,
+                document,
             );
 
             // Draw divider with interaction
@@ -905,6 +980,8 @@ fn render_pane(
     pending_view_action: &mut Option<MenuAction>,
     fallback_pane_priority: &mut Option<u32>,
     pending_handlers: &mut Vec<panes::ViewActionHandler>,
+    theme: &Theme,
+    document: &mut lightningbeam_core::document::Document,
 ) {
     let pane_type = PaneType::from_name(pane_name);
 
@@ -1048,14 +1125,93 @@ fn render_pane(
         egui::Color32::from_gray(220),
     );
 
-    // TODO: Add pane-specific header controls here
-    // For example, Timeline pane would add playback controls
+    // Create header controls area (positioned after title)
+    let title_width = 150.0; // Approximate width for title
+    let header_controls_rect = egui::Rect::from_min_size(
+        header_rect.min + egui::vec2(icon_padding * 2.0 + icon_size + 8.0 + title_width, 0.0),
+        egui::vec2(header_rect.width() - (icon_padding * 2.0 + icon_size + 8.0 + title_width), header_height),
+    );
 
-    // Make pane content clickable
+    // Render pane-specific header controls (if pane has them)
+    if let Some(pane_type) = pane_type {
+        // Get or create pane instance for header rendering
+        let needs_new_instance = pane_instances
+            .get(path)
+            .map(|instance| instance.pane_type() != pane_type)
+            .unwrap_or(true);
+
+        if needs_new_instance {
+            pane_instances.insert(path.clone(), panes::PaneInstance::new(pane_type));
+        }
+
+        if let Some(pane_instance) = pane_instances.get_mut(path) {
+            let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_controls_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+            let mut shared = panes::SharedPaneState {
+                tool_icon_cache,
+                icon_cache,
+                selected_tool,
+                fill_color,
+                stroke_color,
+                pending_view_action,
+                fallback_pane_priority,
+                theme,
+                pending_handlers,
+                document,
+            };
+            pane_instance.render_header(&mut header_ui, &mut shared);
+        }
+    }
+
+    // Make pane content clickable (use full rect for split preview interaction)
     let pane_id = ui.id().with(("pane", path));
-    let response = ui.interact(content_rect, pane_id, egui::Sense::click());
+    let response = ui.interact(rect, pane_id, egui::Sense::click());
 
-    // Handle split preview mode
+    // Render pane-specific content using trait-based system
+    if let Some(pane_type) = pane_type {
+        // Get or create pane instance for this path
+        // Check if we need a new instance (either doesn't exist or type changed)
+        let needs_new_instance = pane_instances
+            .get(path)
+            .map(|instance| instance.pane_type() != pane_type)
+            .unwrap_or(true);
+
+        if needs_new_instance {
+            pane_instances.insert(path.clone(), PaneInstance::new(pane_type));
+        }
+
+        // Get the pane instance and render its content
+        if let Some(pane_instance) = pane_instances.get_mut(path) {
+            // Create shared state
+            let mut shared = SharedPaneState {
+                tool_icon_cache,
+                icon_cache,
+                selected_tool,
+                fill_color,
+                stroke_color,
+                pending_view_action,
+                fallback_pane_priority,
+                theme,
+                pending_handlers,
+                document,
+            };
+
+            // Render pane content (header was already rendered above)
+            pane_instance.render_content(ui, content_rect, path, &mut shared);
+        }
+    } else {
+        // Unknown pane type - draw placeholder
+        let content_text = "Unknown pane type";
+        let text_pos = content_rect.center();
+        ui.painter().text(
+            text_pos,
+            egui::Align2::CENTER_CENTER,
+            content_text,
+            egui::FontId::proportional(16.0),
+            egui::Color32::from_gray(150),
+        );
+    }
+
+    // Handle split preview mode (rendered AFTER pane content for proper z-ordering)
     if let SplitPreviewMode::Active {
         is_horizontal,
         hovered_pane,
@@ -1126,8 +1282,12 @@ fn render_pane(
                     );
                 }
 
+                // Create a high-priority interaction for split preview (rendered last = highest priority)
+                let split_preview_id = ui.id().with(("split_preview", path));
+                let split_response = ui.interact(rect, split_preview_id, egui::Sense::click());
+
                 // If clicked, perform the split
-                if response.clicked() {
+                if split_response.clicked() {
                     if *is_horizontal {
                         *layout_action = Some(LayoutAction::SplitHorizontal(path.clone(), *split_percent));
                     } else {
@@ -1140,60 +1300,6 @@ fn render_pane(
         }
     } else if response.clicked() {
         *selected_pane = Some(path.clone());
-    }
-
-    // Render pane-specific content using trait-based system
-    if let Some(pane_type) = pane_type {
-        // Get or create pane instance for this path
-        // Check if we need a new instance (either doesn't exist or type changed)
-        let needs_new_instance = pane_instances
-            .get(path)
-            .map(|instance| instance.pane_type() != pane_type)
-            .unwrap_or(true);
-
-        if needs_new_instance {
-            pane_instances.insert(path.clone(), PaneInstance::new(pane_type));
-        }
-
-        // Get the pane instance and render it
-        if let Some(pane_instance) = pane_instances.get_mut(path) {
-            // Create shared state
-            let mut shared = SharedPaneState {
-                tool_icon_cache,
-                icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                pending_view_action,
-                fallback_pane_priority,
-                pending_handlers,
-            };
-
-            // Render pane header (if it has one)
-            let has_header = pane_instance.render_header(ui, &mut shared);
-
-            // Adjust content rect if header was rendered
-            let final_content_rect = if has_header {
-                // Header was drawn by the pane, adjust content area
-                content_rect
-            } else {
-                content_rect
-            };
-
-            // Render pane content
-            pane_instance.render_content(ui, final_content_rect, path, &mut shared);
-        }
-    } else {
-        // Unknown pane type - draw placeholder
-        let content_text = "Unknown pane type";
-        let text_pos = content_rect.center();
-        ui.painter().text(
-            text_pos,
-            egui::Align2::CENTER_CENTER,
-            content_text,
-            egui::FontId::proportional(16.0),
-            egui::Color32::from_gray(150),
-        );
     }
 }
 
