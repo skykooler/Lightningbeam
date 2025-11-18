@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vello::kurbo::Shape as KurboShape;
 
 /// 2D transform for an object
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,6 +170,20 @@ impl Object {
     pub fn with_position(mut self, x: f64, y: f64) -> Self {
         self.transform.set_position(x, y);
         self
+    }
+
+    /// Convert object transform to affine matrix
+    pub fn to_affine(&self) -> kurbo::Affine {
+        self.transform.to_affine()
+    }
+
+    /// Get the bounding box of this object given its shape
+    ///
+    /// Returns the bounding box in the object's parent coordinate space
+    /// (i.e., with the object's transform applied).
+    pub fn bounding_box(&self, shape: &crate::shape::Shape) -> kurbo::Rect {
+        let path_bbox = shape.path().bounding_box();
+        self.to_affine().transform_rect_bbox(path_bbox)
     }
 }
 

@@ -3,6 +3,9 @@
 /// Defines the available drawing/editing tools
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use vello::kurbo::Point;
 
 /// Drawing and editing tools
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -22,6 +25,86 @@ pub enum Tool {
     PaintBucket,
     /// Eyedropper - pick colors from the canvas
     Eyedropper,
+}
+
+/// Tool state tracking for interactive operations
+#[derive(Debug, Clone)]
+pub enum ToolState {
+    /// Tool is idle (no operation in progress)
+    Idle,
+
+    /// Drawing a freehand path
+    DrawingPath {
+        points: Vec<Point>,
+        simplify_mode: SimplifyMode,
+    },
+
+    /// Dragging selected objects
+    DraggingSelection {
+        start_pos: Point,
+        start_mouse: Point,
+        original_positions: HashMap<Uuid, Point>,
+    },
+
+    /// Creating a marquee selection rectangle
+    MarqueeSelecting {
+        start: Point,
+        current: Point,
+    },
+
+    /// Creating a rectangle shape
+    CreatingRectangle {
+        start_corner: Point,
+        current_corner: Point,
+    },
+
+    /// Creating an ellipse shape
+    CreatingEllipse {
+        center: Point,
+        current_point: Point,
+    },
+
+    /// Transforming selected objects (scale, rotate)
+    Transforming {
+        mode: TransformMode,
+        original_transforms: HashMap<Uuid, crate::object::Transform>,
+        pivot: Point,
+    },
+}
+
+/// Path simplification mode for the draw tool
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimplifyMode {
+    /// Ramer-Douglas-Peucker corner detection
+    Corners,
+    /// Schneider curve fitting for smooth curves
+    Smooth,
+    /// No simplification (use raw points)
+    Verbatim,
+}
+
+/// Transform mode for the transform tool
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformMode {
+    /// Scale from a corner
+    ScaleCorner { origin: Point },
+    /// Scale along an edge
+    ScaleEdge { axis: Axis, origin: Point },
+    /// Rotate around a pivot
+    Rotate { center: Point },
+}
+
+/// Axis for edge scaling
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+impl Default for ToolState {
+    fn default() -> Self {
+        Self::Idle
+    }
 }
 
 impl Tool {

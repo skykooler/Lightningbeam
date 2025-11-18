@@ -2762,6 +2762,7 @@ dependencies = [
  "resvg 0.42.0",
  "serde",
  "serde_json",
+ "uuid",
  "vello",
  "wgpu",
  "winit",

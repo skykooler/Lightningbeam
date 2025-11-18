@@ -169,6 +169,29 @@ impl Document {
                 layer.visible && layer.contains_time(self.current_time)
             })
     }
+
+    /// Get a layer by ID
+    pub fn get_layer(&self, id: &Uuid) -> Option<&AnyLayer> {
+        self.root.get_child(id)
+    }
+
+    // === MUTATION METHODS (pub(crate) - only accessible to action module) ===
+
+    /// Get mutable access to the root graphics object
+    ///
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn root_mut(&mut self) -> &mut GraphicsObject {
+        &mut self.root
+    }
+
+    /// Get mutable access to a layer by ID
+    ///
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn get_layer_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
+        self.root.get_child_mut(id)
+    }
 }
 
 #[cfg(test)]

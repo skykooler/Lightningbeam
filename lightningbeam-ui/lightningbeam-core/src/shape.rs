@@ -299,6 +299,14 @@ impl Shape {
         self.fill_rule = rule;
         self
     }
+
+    /// Get the base path (first version) for this shape
+    ///
+    /// This is useful for hit testing and bounding box calculations
+    /// when shape morphing is not being considered.
+    pub fn path(&self) -> &BezPath {
+        &self.versions[0].path
+    }
 }
 
 #[cfg(test)]

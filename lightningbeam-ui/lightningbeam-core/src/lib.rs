@@ -11,3 +11,7 @@ pub mod object;
 pub mod layer;
 pub mod document;
 pub mod renderer;
+pub mod action;
+pub mod actions;
+pub mod selection;
+pub mod hit_test;

@@ -197,11 +197,25 @@ struct VelloCallback {
     zoom: f32,
     instance_id: u64,
     document: lightningbeam_core::document::Document,
+    tool_state: lightningbeam_core::tool::ToolState,
+    active_layer_id: Option<uuid::Uuid>,
+    drag_delta: Option<vello::kurbo::Vec2>, // Delta for drag preview (world space)
+    selection: lightningbeam_core::selection::Selection,
 }
 
 impl VelloCallback {
-    fn new(rect: egui::Rect, pan_offset: egui::Vec2, zoom: f32, instance_id: u64, document: lightningbeam_core::document::Document) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document }
+    fn new(
+        rect: egui::Rect,
+        pan_offset: egui::Vec2,
+        zoom: f32,
+        instance_id: u64,
+        document: lightningbeam_core::document::Document,
+        tool_state: lightningbeam_core::tool::ToolState,
+        active_layer_id: Option<uuid::Uuid>,
+        drag_delta: Option<vello::kurbo::Vec2>,
+        selection: lightningbeam_core::selection::Selection,
+    ) -> Self {
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection }
     }
 }
 
@@ -259,6 +273,141 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
         // Render the document to the scene with camera transform
         lightningbeam_core::renderer::render_document_with_transform(&self.document, &mut scene, camera_transform);
+
+        // Render drag preview objects with transparency
+        if let (Some(delta), Some(active_layer_id)) = (self.drag_delta, self.active_layer_id) {
+            if let Some(layer) = self.document.get_layer(&active_layer_id) {
+                if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
+                    if let lightningbeam_core::tool::ToolState::DraggingSelection { ref original_positions, .. } = self.tool_state {
+                        use vello::peniko::{Color, Fill, Brush};
+
+                        // Render each object at its preview position (original + delta)
+                        for (object_id, original_pos) in original_positions {
+                            if let Some(_object) = vector_layer.get_object(object_id) {
+                                if let Some(shape) = vector_layer.get_shape(&_object.shape_id) {
+                                    // New position = original + delta
+                                    let new_x = original_pos.x + delta.x;
+                                    let new_y = original_pos.y + delta.y;
+
+                                    // Build transform for preview position
+                                    let object_transform = Affine::translate((new_x, new_y));
+                                    let combined_transform = camera_transform * object_transform;
+
+                                    // Render shape with semi-transparent fill (light blue, 40% opacity)
+                                    let alpha_color = Color::rgba8(100, 150, 255, 100);
+                                    scene.fill(
+                                        Fill::NonZero,
+                                        combined_transform,
+                                        &Brush::Solid(alpha_color),
+                                        None,
+                                        shape.path(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Render selection overlays (outlines, handles, marquee)
+        if let Some(active_layer_id) = self.active_layer_id {
+            if let Some(layer) = self.document.get_layer(&active_layer_id) {
+                if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
+                    use vello::peniko::{Color, Fill};
+                    use vello::kurbo::{Circle, Rect as KurboRect, Shape as KurboShape, Stroke};
+
+                    let selection_color = Color::rgb8(0, 120, 255); // Blue
+                    let stroke_width = 2.0 / self.zoom.max(0.5) as f64;
+
+                    // 1. Draw selection outlines around selected objects
+                    if !self.selection.is_empty() {
+                        for &object_id in self.selection.objects() {
+                            if let Some(object) = vector_layer.get_object(&object_id) {
+                                if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
+                                    // Get shape bounding box
+                                    let bbox = shape.path().bounding_box();
+
+                                    // Apply object transform and camera transform
+                                    let object_transform = Affine::translate((object.transform.x, object.transform.y));
+                                    let combined_transform = camera_transform * object_transform;
+
+                                    // Create selection rectangle
+                                    let selection_rect = KurboRect::new(bbox.x0, bbox.y0, bbox.x1, bbox.y1);
+
+                                    // Draw selection outline
+                                    scene.stroke(
+                                        &Stroke::new(stroke_width),
+                                        combined_transform,
+                                        selection_color,
+                                        None,
+                                        &selection_rect,
+                                    );
+
+                                    // Draw corner handles (4 circles at corners)
+                                    let handle_radius = (6.0 / self.zoom.max(0.5) as f64).max(4.0);
+                                    let corners = [
+                                        (bbox.x0, bbox.y0),
+                                        (bbox.x1, bbox.y0),
+                                        (bbox.x1, bbox.y1),
+                                        (bbox.x0, bbox.y1),
+                                    ];
+
+                                    for (x, y) in corners {
+                                        let corner_circle = Circle::new((x, y), handle_radius);
+                                        // Fill with blue
+                                        scene.fill(
+                                            Fill::NonZero,
+                                            combined_transform,
+                                            selection_color,
+                                            None,
+                                            &corner_circle,
+                                        );
+                                        // White outline
+                                        scene.stroke(
+                                            &Stroke::new(1.0),
+                                            combined_transform,
+                                            Color::rgb8(255, 255, 255),
+                                            None,
+                                            &corner_circle,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Draw marquee selection rectangle
+                    if let lightningbeam_core::tool::ToolState::MarqueeSelecting { ref start, ref current } = self.tool_state {
+                        let marquee_rect = KurboRect::new(
+                            start.x.min(current.x),
+                            start.y.min(current.y),
+                            start.x.max(current.x),
+                            start.y.max(current.y),
+                        );
+
+                        // Semi-transparent fill
+                        let marquee_fill = Color::rgba8(0, 120, 255, 100);
+                        scene.fill(
+                            Fill::NonZero,
+                            camera_transform,
+                            marquee_fill,
+                            None,
+                            &marquee_rect,
+                        );
+
+                        // Border stroke
+                        scene.stroke(
+                            &Stroke::new(1.0),
+                            camera_transform,
+                            selection_color,
+                            None,
+                            &marquee_rect,
+                        );
+                    }
+                }
+            }
+        }
 
         // Render scene to texture using shared renderer
         if let Some(texture_view) = &instance_resources.texture_view {
@@ -391,7 +540,174 @@ impl StagePane {
         self.pan_offset = mouse_canvas_pos - (world_pos * new_zoom);
     }
 
-    fn handle_input(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+    fn handle_select_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shift_held: bool,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::hit_test;
+        use vello::kurbo::{Point, Rect as KurboRect, Affine};
+
+        // Check if we have an active vector layer
+        let active_layer_id = match shared.active_layer_id {
+            Some(id) => id,
+            None => return, // No active layer
+        };
+
+        let active_layer = match shared.document.get_layer(active_layer_id) {
+            Some(layer) => layer,
+            None => return,
+        };
+
+        // Only work on VectorLayer
+        let vector_layer = match active_layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return, // Not a vector layer
+        };
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // Mouse down: start interaction (use drag_started for immediate feedback)
+        if response.drag_started() || response.clicked() {
+            // Hit test at click position
+            let hit = hit_test::hit_test_layer(vector_layer, point, 5.0, Affine::IDENTITY);
+
+            if let Some(object_id) = hit {
+                // Object was hit
+                if shift_held {
+                    // Shift: toggle selection
+                    shared.selection.toggle_object(object_id);
+                } else {
+                    // No shift: replace selection
+                    if !shared.selection.contains_object(&object_id) {
+                        shared.selection.select_only_object(object_id);
+                    }
+                }
+
+                // If object is now selected, prepare for dragging
+                if shared.selection.contains_object(&object_id) {
+                    // Store original positions of all selected objects
+                    let mut original_positions = std::collections::HashMap::new();
+                    for &obj_id in shared.selection.objects() {
+                        if let Some(obj) = vector_layer.get_object(&obj_id) {
+                            original_positions.insert(
+                                obj_id,
+                                Point::new(obj.transform.x, obj.transform.y),
+                            );
+                        }
+                    }
+
+                    *shared.tool_state = ToolState::DraggingSelection {
+                        start_pos: point,
+                        start_mouse: point,
+                        original_positions,
+                    };
+                }
+            } else {
+                // Nothing hit - start marquee selection
+                if !shift_held {
+                    shared.selection.clear();
+                }
+
+                *shared.tool_state = ToolState::MarqueeSelecting {
+                    start: point,
+                    current: point,
+                };
+            }
+        }
+
+        // Mouse drag: update tool state
+        if response.dragged() {
+            match shared.tool_state {
+                ToolState::DraggingSelection { .. } => {
+                    // Update current position (visual feedback only)
+                    // Actual move happens on mouse up
+                }
+                ToolState::MarqueeSelecting { start, .. } => {
+                    // Update marquee rectangle
+                    *shared.tool_state = ToolState::MarqueeSelecting {
+                        start: *start,
+                        current: point,
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        // Mouse up: finish interaction
+        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::DraggingSelection { .. } | ToolState::MarqueeSelecting { .. })) {
+            match shared.tool_state.clone() {
+                ToolState::DraggingSelection { start_mouse, original_positions, .. } => {
+                    // Calculate total delta
+                    let delta = point - start_mouse;
+
+                    if delta.x.abs() > 0.01 || delta.y.abs() > 0.01 {
+                        // Create move action with new positions
+                        use std::collections::HashMap;
+                        let mut object_positions = HashMap::new();
+
+                        for (object_id, original_pos) in original_positions {
+                            let new_pos = Point::new(
+                                original_pos.x + delta.x,
+                                original_pos.y + delta.y,
+                            );
+                            object_positions.insert(object_id, (original_pos, new_pos));
+                        }
+
+                        // Create and submit the action
+                        use lightningbeam_core::actions::MoveObjectsAction;
+                        let action = MoveObjectsAction::new(*active_layer_id, object_positions);
+                        shared.pending_actions.push(Box::new(action));
+                    }
+
+                    // Reset tool state
+                    *shared.tool_state = ToolState::Idle;
+                }
+                ToolState::MarqueeSelecting { start, current } => {
+                    // Create selection rectangle
+                    let min_x = start.x.min(current.x);
+                    let min_y = start.y.min(current.y);
+                    let max_x = start.x.max(current.x);
+                    let max_y = start.y.max(current.y);
+
+                    let selection_rect = KurboRect::new(min_x, min_y, max_x, max_y);
+
+                    // Hit test all objects in rectangle
+                    let hits = hit_test::hit_test_objects_in_rect(
+                        vector_layer,
+                        selection_rect,
+                        Affine::IDENTITY,
+                    );
+
+                    // Add to selection
+                    for obj_id in hits {
+                        if shift_held {
+                            shared.selection.add_object(obj_id);
+                        } else {
+                            // First hit replaces selection
+                            if shared.selection.is_empty() {
+                                shared.selection.add_object(obj_id);
+                            } else {
+                                // Subsequent hits add to selection
+                                shared.selection.add_object(obj_id);
+                            }
+                        }
+                    }
+
+                    // Reset tool state
+                    *shared.tool_state = ToolState::Idle;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_input(&mut self, ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState) {
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
         // Only process input if mouse is over the stage pane
@@ -404,10 +720,28 @@ impl StagePane {
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
         let alt_held = ui.input(|i| i.modifiers.alt);
         let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let shift_held = ui.input(|i| i.modifiers.shift);
 
         // Get mouse position for zoom-to-cursor
         let mouse_pos = response.hover_pos().unwrap_or(rect.center());
         let mouse_canvas_pos = mouse_pos - rect.min;
+
+        // Convert screen position to world position (accounting for pan and zoom)
+        let world_pos = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+
+        // Handle tool input (only if not using Alt modifier for panning)
+        if !alt_held {
+            use lightningbeam_core::tool::Tool;
+
+            match *shared.selected_tool {
+                Tool::Select => {
+                    self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
+                }
+                _ => {
+                    // Other tools not implemented yet
+                }
+            }
+        }
 
         // Distinguish between mouse wheel (discrete) and trackpad (smooth)
         let mut handled = false;
@@ -463,6 +797,7 @@ impl StagePane {
             }
         }
     }
+
 }
 
 impl PaneRenderer for StagePane {
@@ -473,8 +808,8 @@ impl PaneRenderer for StagePane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
-        // Handle input for pan/zoom controls
-        self.handle_input(ui, rect);
+        // Handle input for pan/zoom and tool controls
+        self.handle_input(ui, rect, shared);
 
         // Register handler for pending view actions (two-phase dispatch)
         // Priority: Mouse-over (0-99) > Fallback Stage(1000) > Fallback Timeline(1001) etc.
@@ -530,8 +865,36 @@ impl PaneRenderer for StagePane {
             }
         }
 
+        // Calculate drag delta for preview rendering (world space)
+        let drag_delta = if let lightningbeam_core::tool::ToolState::DraggingSelection { ref start_mouse, .. } = shared.tool_state {
+            // Get current mouse position in world coordinates
+            if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                let mouse_canvas_pos = mouse_pos - rect.min;
+                let world_mouse = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+
+                let delta_x = world_mouse.x as f64 - start_mouse.x;
+                let delta_y = world_mouse.y as f64 - start_mouse.y;
+
+                Some(vello::kurbo::Vec2::new(delta_x, delta_y))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Use egui's custom painting callback for Vello
-        let callback = VelloCallback::new(rect, self.pan_offset, self.zoom, self.instance_id, shared.document.clone());
+        let callback = VelloCallback::new(
+            rect,
+            self.pan_offset,
+            self.zoom,
+            self.instance_id,
+            shared.document.clone(),
+            shared.tool_state.clone(),
+            *shared.active_layer_id,
+            drag_delta,
+            shared.selection.clone(),
+        );
 
         let cb = egui_wgpu::Callback::new_paint_callback(
             rect,

@@ -158,6 +158,68 @@ impl VectorLayer {
     pub fn get_object_mut(&mut self, id: &Uuid) -> Option<&mut Object> {
         self.objects.iter_mut().find(|o| &o.id == id)
     }
+
+    // === MUTATION METHODS (pub(crate) - only accessible to action module) ===
+
+    /// Add a shape to this layer (internal, for actions only)
+    ///
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn add_shape_internal(&mut self, shape: Shape) -> Uuid {
+        let id = shape.id;
+        self.shapes.push(shape);
+        id
+    }
+
+    /// Add an object to this layer (internal, for actions only)
+    ///
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn add_object_internal(&mut self, object: Object) -> Uuid {
+        let id = object.id;
+        self.objects.push(object);
+        id
+    }
+
+    /// Remove a shape from this layer (internal, for actions only)
+    ///
+    /// Returns the removed shape if found.
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn remove_shape_internal(&mut self, id: &Uuid) -> Option<Shape> {
+        if let Some(index) = self.shapes.iter().position(|s| &s.id == id) {
+            Some(self.shapes.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Remove an object from this layer (internal, for actions only)
+    ///
+    /// Returns the removed object if found.
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn remove_object_internal(&mut self, id: &Uuid) -> Option<Object> {
+        if let Some(index) = self.objects.iter().position(|o| &o.id == id) {
+            Some(self.objects.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Modify an object in place (internal, for actions only)
+    ///
+    /// Applies the given function to the object if found.
+    /// This method is intentionally `pub(crate)` to ensure mutations
+    /// only happen through the action system.
+    pub(crate) fn modify_object_internal<F>(&mut self, id: &Uuid, f: F)
+    where
+        F: FnOnce(&mut Object),
+    {
+        if let Some(object) = self.get_object_mut(id) {
+            f(object);
+        }
+    }
 }
 
 /// Audio layer (placeholder for future implementation)

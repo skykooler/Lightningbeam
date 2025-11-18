@@ -587,9 +587,6 @@ impl eframe::App for EditorApp {
             // Registry for view action handlers (two-phase dispatch)
             let mut pending_handlers: Vec<panes::ViewActionHandler> = Vec::new();
 
-            // Registry for actions to execute after rendering (two-phase dispatch)
-            let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
-
             render_layout_node(
                 ui,
                 &mut self.current_layout,
@@ -614,7 +611,6 @@ impl eframe::App for EditorApp {
                 &mut self.selection,
                 &self.active_layer_id,
                 &mut self.tool_state,
-                &mut pending_actions,
             );
 
             // Execute action on the best handler (two-phase dispatch)
@@ -632,11 +628,6 @@ impl eframe::App for EditorApp {
                 }
                 // Clear the pending action after execution
                 self.pending_view_action = None;
-            }
-
-            // Execute all pending actions (two-phase dispatch)
-            for action in pending_actions {
-                self.action_executor.execute(action);
             }
 
             // Set cursor based on hover state
@@ -701,11 +692,10 @@ fn render_layout_node(
     selection: &mut lightningbeam_core::selection::Selection,
     active_layer_id: &Option<Uuid>,
     tool_state: &mut lightningbeam_core::tool::ToolState,
-    pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, document, selection, active_layer_id, tool_state, pending_actions);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, document, selection, active_layer_id);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -752,8 +742,6 @@ fn render_layout_node(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             );
 
             let mut right_path = path.clone();
@@ -781,8 +769,6 @@ fn render_layout_node(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             );
 
             // Draw divider with interaction
@@ -902,8 +888,6 @@ fn render_layout_node(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             );
 
             let mut bottom_path = path.clone();
@@ -931,8 +915,6 @@ fn render_layout_node(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             );
 
             // Draw divider with interaction
@@ -1032,8 +1014,6 @@ fn render_pane(
     document: &lightningbeam_core::document::Document,
     selection: &mut lightningbeam_core::selection::Selection,
     active_layer_id: &Option<Uuid>,
-    tool_state: &mut lightningbeam_core::tool::ToolState,
-    pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
 ) {
     let pane_type = PaneType::from_name(pane_name);
 
@@ -1211,8 +1191,6 @@ fn render_pane(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -1251,8 +1229,6 @@ fn render_pane(
                 document,
                 selection,
                 active_layer_id,
-                tool_state,
-                pending_actions,
             };
 
             // Render pane content (header was already rendered above)
