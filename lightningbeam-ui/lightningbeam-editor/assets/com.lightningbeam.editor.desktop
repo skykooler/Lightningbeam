@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Lightningbeam Editor
+Comment=Animation and video editing software
+Exec=lightningbeam-editor
+Icon=lightningbeam-editor
+Terminal=false
+Categories=Graphics;AudioVideo;Video;
+StartupWMClass=lightningbeam-editor

@@ -6,6 +6,7 @@ pub mod pane;
 pub mod tool;
 pub mod animation;
 pub mod path_interpolation;
+pub mod path_fitting;
 pub mod shape;
 pub mod object;
 pub mod layer;

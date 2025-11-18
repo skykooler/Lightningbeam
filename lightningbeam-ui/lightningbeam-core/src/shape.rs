@@ -177,6 +177,16 @@ impl ShapeColor {
     pub fn to_brush(&self) -> Brush {
         Brush::Solid(self.to_peniko())
     }
+
+    /// Create from egui Color32
+    pub fn from_egui(color: egui::Color32) -> Self {
+        Self {
+            r: color.r(),
+            g: color.g(),
+            b: color.b(),
+            a: color.a(),
+        }
+    }
 }
 
 impl Default for ShapeColor {

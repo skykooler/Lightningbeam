@@ -212,7 +212,7 @@ impl VectorLayer {
     /// Applies the given function to the object if found.
     /// This method is intentionally `pub(crate)` to ensure mutations
     /// only happen through the action system.
-    pub(crate) fn modify_object_internal<F>(&mut self, id: &Uuid, f: F)
+    pub fn modify_object_internal<F>(&mut self, id: &Uuid, f: F)
     where
         F: FnOnce(&mut Object),
     {

@@ -64,6 +64,13 @@ impl ActionExecutor {
         &self.document
     }
 
+    /// Get mutable access to the document
+    /// Note: This should only be used for live previews. Permanent changes
+    /// should go through the execute() method to support undo/redo.
+    pub fn document_mut(&mut self) -> &mut Document {
+        &mut self.document
+    }
+
     /// Execute an action and add it to the undo stack
     ///
     /// This clears the redo stack since we're creating a new timeline branch.

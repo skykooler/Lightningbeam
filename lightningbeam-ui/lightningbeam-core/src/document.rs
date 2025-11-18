@@ -189,7 +189,7 @@ impl Document {
     ///
     /// This method is intentionally `pub(crate)` to ensure mutations
     /// only happen through the action system.
-    pub(crate) fn get_layer_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
+    pub fn get_layer_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
         self.root.get_child_mut(id)
     }
 }

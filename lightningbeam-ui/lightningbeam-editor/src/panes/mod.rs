@@ -43,8 +43,9 @@ pub struct SharedPaneState<'a> {
     /// Registry of handlers for the current pending action
     /// Panes register themselves here during render, execution happens after
     pub pending_handlers: &'a mut Vec<ViewActionHandler>,
-    /// Active document being edited (read-only, mutations go through actions)
-    pub document: &'a lightningbeam_core::document::Document,
+    /// Action executor for immediate action execution (for shape tools to avoid flicker)
+    /// Also provides read-only access to the document via action_executor.document()
+    pub action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
     /// Current selection state (mutable for tools to modify)
     pub selection: &'a mut lightningbeam_core::selection::Selection,
     /// Currently active layer ID
@@ -53,6 +54,10 @@ pub struct SharedPaneState<'a> {
     pub tool_state: &'a mut lightningbeam_core::tool::ToolState,
     /// Actions to execute after rendering completes (two-phase dispatch)
     pub pending_actions: &'a mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    /// Draw tool configuration
+    pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
+    pub rdp_tolerance: &'a mut f64,
+    pub schneider_max_error: &'a mut f64,
 }
 
 /// Trait for pane rendering

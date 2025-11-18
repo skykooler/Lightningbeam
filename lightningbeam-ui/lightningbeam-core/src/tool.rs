@@ -54,14 +54,18 @@ pub enum ToolState {
 
     /// Creating a rectangle shape
     CreatingRectangle {
-        start_corner: Point,
-        current_corner: Point,
+        start_point: Point,      // Starting point (corner or center depending on modifiers)
+        current_point: Point,    // Current mouse position
+        centered: bool,          // If true, start_point is center; if false, it's a corner
+        constrain_square: bool,  // If true, constrain to square (equal width/height)
     },
 
     /// Creating an ellipse shape
     CreatingEllipse {
-        center: Point,
-        current_point: Point,
+        start_point: Point,      // Starting point (center or corner depending on modifiers)
+        current_point: Point,    // Current mouse position
+        corner_mode: bool,       // If true, start is corner; if false, start is center
+        constrain_circle: bool,  // If true, constrain to circle (equal radii)
     },
 
     /// Transforming selected objects (scale, rotate)
@@ -69,6 +73,9 @@ pub enum ToolState {
         mode: TransformMode,
         original_transforms: HashMap<Uuid, crate::object::Transform>,
         pivot: Point,
+        start_mouse: Point,    // Mouse position when transform started
+        current_mouse: Point,  // Current mouse position during drag
+        original_bbox: vello::kurbo::Rect,  // Bounding box at start of transform (fixed)
     },
 }
 

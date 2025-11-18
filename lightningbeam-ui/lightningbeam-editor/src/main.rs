@@ -68,10 +68,36 @@ fn main() -> eframe::Result {
         }
     }
 
+    // Load window icon
+    let icon_data = include_bytes!("../../../src-tauri/icons/icon.png");
+    let icon_image = match image::load_from_memory(icon_data) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (width, height) = (rgba.width(), rgba.height());
+            println!("✅ Loaded window icon: {}x{}", width, height);
+            Some(egui::IconData {
+                rgba: rgba.into_raw(),
+                width,
+                height,
+            })
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to load window icon: {}", e);
+            None
+        }
+    };
+
+    let mut viewport_builder = egui::ViewportBuilder::default()
+        .with_inner_size([1920.0, 1080.0])
+        .with_title("Lightningbeam Editor")
+        .with_app_id("lightningbeam-editor"); // Set app_id for Wayland
+
+    if let Some(icon) = icon_image {
+        viewport_builder = viewport_builder.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1920.0, 1080.0])
-            .with_title("Lightningbeam Editor"),
+        viewport: viewport_builder,
         ..Default::default()
     };
 
@@ -235,6 +261,10 @@ struct EditorApp {
     active_layer_id: Option<Uuid>, // Currently active layer for editing
     selection: lightningbeam_core::selection::Selection, // Current selection state
     tool_state: lightningbeam_core::tool::ToolState, // Current tool interaction state
+    // Draw tool configuration
+    draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
+    rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
+    schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
 }
 
 impl EditorApp {
@@ -289,6 +319,9 @@ impl EditorApp {
             active_layer_id: Some(layer_id),
             selection: lightningbeam_core::selection::Selection::new(),
             tool_state: lightningbeam_core::tool::ToolState::default(),
+            draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
+            rdp_tolerance: 10.0, // Default RDP tolerance
+            schneider_max_error: 30.0, // Default Schneider max error
         }
     }
 
@@ -610,11 +643,14 @@ impl eframe::App for EditorApp {
                 &mut fallback_pane_priority,
                 &mut pending_handlers,
                 &self.theme,
-                self.action_executor.document(),
+                &mut self.action_executor,
                 &mut self.selection,
                 &self.active_layer_id,
                 &mut self.tool_state,
                 &mut pending_actions,
+                &mut self.draw_simplify_mode,
+                &mut self.rdp_tolerance,
+                &mut self.schneider_max_error,
             );
 
             // Execute action on the best handler (two-phase dispatch)
@@ -697,15 +733,18 @@ fn render_layout_node(
     fallback_pane_priority: &mut Option<u32>,
     pending_handlers: &mut Vec<panes::ViewActionHandler>,
     theme: &Theme,
-    document: &lightningbeam_core::document::Document,
+    action_executor: &mut lightningbeam_core::action::ActionExecutor,
     selection: &mut lightningbeam_core::selection::Selection,
     active_layer_id: &Option<Uuid>,
     tool_state: &mut lightningbeam_core::tool::ToolState,
     pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,
+    rdp_tolerance: &mut f64,
+    schneider_max_error: &mut f64,
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, document, selection, active_layer_id, tool_state, pending_actions);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, action_executor, selection, active_layer_id, tool_state, pending_actions, draw_simplify_mode, rdp_tolerance, schneider_max_error);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -749,11 +788,14 @@ fn render_layout_node(
                 fallback_pane_priority,
                 pending_handlers,
                 theme,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             );
 
             let mut right_path = path.clone();
@@ -778,11 +820,14 @@ fn render_layout_node(
                 fallback_pane_priority,
                 pending_handlers,
                 theme,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             );
 
             // Draw divider with interaction
@@ -899,11 +944,14 @@ fn render_layout_node(
                 fallback_pane_priority,
                 pending_handlers,
                 theme,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             );
 
             let mut bottom_path = path.clone();
@@ -928,11 +976,14 @@ fn render_layout_node(
                 fallback_pane_priority,
                 pending_handlers,
                 theme,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             );
 
             // Draw divider with interaction
@@ -1029,11 +1080,14 @@ fn render_pane(
     fallback_pane_priority: &mut Option<u32>,
     pending_handlers: &mut Vec<panes::ViewActionHandler>,
     theme: &Theme,
-    document: &lightningbeam_core::document::Document,
+    action_executor: &mut lightningbeam_core::action::ActionExecutor,
     selection: &mut lightningbeam_core::selection::Selection,
     active_layer_id: &Option<Uuid>,
     tool_state: &mut lightningbeam_core::tool::ToolState,
     pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,
+    rdp_tolerance: &mut f64,
+    schneider_max_error: &mut f64,
 ) {
     let pane_type = PaneType::from_name(pane_name);
 
@@ -1208,11 +1262,14 @@ fn render_pane(
                 fallback_pane_priority,
                 theme,
                 pending_handlers,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -1248,11 +1305,14 @@ fn render_pane(
                 fallback_pane_priority,
                 theme,
                 pending_handlers,
-                document,
+                action_executor,
                 selection,
                 active_layer_id,
                 tool_state,
                 pending_actions,
+                draw_simplify_mode,
+                rdp_tolerance,
+                schneider_max_error,
             };
 
             // Render pane content (header was already rendered above)
