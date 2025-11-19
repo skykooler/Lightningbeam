@@ -2259,7 +2259,8 @@ impl StagePane {
             }
 
             TransformMode::Skew { axis, origin } => {
-                // Calculate skew angle such that the edge follows the mouse cursor
+                // Calculate skew angle for center-relative skewing (center stays fixed)
+                let center = original_bbox.center();
                 let skew_radians = match axis {
                     Axis::Horizontal => {
                         // Determine which horizontal edge we're dragging
@@ -2268,10 +2269,10 @@ impl StagePane {
                         } else {
                             original_bbox.y0 // Origin is bottom edge, so dragging top
                         };
-                        let distance = edge_y - origin.y;
+                        let distance = edge_y - center.y;  // Distance from center to edge
                         if distance.abs() > 0.1 {
-                            // tan(skew) = horizontal_offset / vertical_distance
-                            let tan_skew = (current_mouse.x - origin.x) / distance;
+                            // tan(skew) = mouse_movement / distance_from_center
+                            let tan_skew = (current_mouse.x - start_mouse.x) / distance;
                             tan_skew.atan()
                         } else {
                             0.0
@@ -2284,10 +2285,10 @@ impl StagePane {
                         } else {
                             original_bbox.x0 // Origin is right edge, so dragging left
                         };
-                        let distance = edge_x - origin.x;
+                        let distance = edge_x - center.x;  // Distance from center to edge
                         if distance.abs() > 0.1 {
-                            // tan(skew) = vertical_offset / horizontal_distance
-                            let tan_skew = (current_mouse.y - origin.y) / distance;
+                            // tan(skew) = mouse_movement / distance_from_center
+                            let tan_skew = (current_mouse.y - start_mouse.y) / distance;
                             tan_skew.atan()
                         } else {
                             0.0
@@ -2296,42 +2297,58 @@ impl StagePane {
                 };
                 let skew_degrees = skew_radians.to_degrees();
 
-                // Calculate selection center for group skew
+                // Calculate selection center for group skew - this stays fixed
                 let selection_center = match axis {
-                    Axis::Horizontal => {
-                        // For horizontal skew, use center Y
-                        original_bbox.center().y
-                    }
-                    Axis::Vertical => {
-                        // For vertical skew, use center X
-                        original_bbox.center().x
-                    }
+                    Axis::Horizontal => original_bbox.center().y,
+                    Axis::Vertical => original_bbox.center().x,
                 };
 
                 // Apply skew to all selected objects
-                let tan_skew = skew_degrees.to_radians().tan();
+                // Note: skew_radians = atan(tan_skew), so tan(skew_radians) = tan_skew
+                let tan_skew = skew_radians.tan();
                 for (object_id, original_transform) in original_transforms {
+                    // Get the object to find its shape
+                    let object = vector_layer.get_object(object_id);
+
+                    // Calculate the world-space center where the renderer applies skew
+                    // This is the shape's bounding box center transformed to world space
+                    let shape_center_world = if let Some(obj) = object {
+                        if let Some(shape) = vector_layer.get_shape(&obj.shape_id) {
+                            use kurbo::Shape as KurboShape;
+                            let shape_bbox = shape.path().bounding_box();
+                            let local_center_x = (shape_bbox.x0 + shape_bbox.x1) / 2.0;
+                            let local_center_y = (shape_bbox.y0 + shape_bbox.y1) / 2.0;
+
+                            // Transform to world space (same as renderer)
+                            let world_center = kurbo::Affine::translate((original_transform.x, original_transform.y))
+                                * kurbo::Affine::rotate(original_transform.rotation.to_radians())
+                                * kurbo::Affine::scale_non_uniform(original_transform.scale_x, original_transform.scale_y)
+                                * kurbo::Point::new(local_center_x, local_center_y);
+                            (world_center.x, world_center.y)
+                        } else {
+                            // Fallback to object position if shape not found
+                            (original_transform.x, original_transform.y)
+                        }
+                    } else {
+                        // Fallback to object position if object not found
+                        (original_transform.x, original_transform.y)
+                    };
+
                     vector_layer.modify_object_internal(object_id, |obj| {
-                        // Calculate distance from selection center
+                        // Distance from selection center using the object's actual skew center
                         let distance_from_center = match axis {
-                            Axis::Horizontal => {
-                                // For horizontal skew, measure Y distance
-                                original_transform.y - selection_center
-                            }
-                            Axis::Vertical => {
-                                // For vertical skew, measure X distance
-                                original_transform.x - selection_center
-                            }
+                            Axis::Horizontal => shape_center_world.1 - selection_center,
+                            Axis::Vertical => shape_center_world.0 - selection_center,
                         };
 
-                        // Calculate translation to make group skew cohesive
+                        // Calculate translation to make group skew around center
                         let (offset_x, offset_y) = match axis {
                             Axis::Horizontal => {
-                                // Horizontal skew: translate X based on Y distance
+                                // Horizontal skew: objects above/below center move horizontally
                                 (distance_from_center * tan_skew, 0.0)
                             }
                             Axis::Vertical => {
-                                // Vertical skew: translate Y based on X distance
+                                // Vertical skew: objects left/right of center move vertically
                                 (0.0, distance_from_center * tan_skew)
                             }
                         };
