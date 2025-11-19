@@ -12,7 +12,11 @@ use crate::curve_intersections::{find_curve_intersections, find_self_intersectio
 use crate::curve_segment::CurveSegment;
 use crate::shape::{Shape, ShapeColor, StrokeStyle};
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use vello::kurbo::{BezPath, Circle, CubicBez, Point, Shape as KurboShape};
+
+/// Global debug storage for the last planar graph (for visualization)
+pub static DEBUG_GRAPH: Mutex<Option<PlanarGraph>> = Mutex::new(None);
 
 /// A node in the planar graph (intersection point or endpoint)
 #[derive(Debug, Clone)]
@@ -66,6 +70,7 @@ impl GraphEdge {
 }
 
 /// Planar graph structure
+#[derive(Clone)]
 pub struct PlanarGraph {
     /// All nodes in the graph
     pub nodes: Vec<GraphNode>,
@@ -373,8 +378,19 @@ impl PlanarGraph {
             // Try forward direction
             if !used_half_edges.contains(&(edge_idx, true)) {
                 if let Some(face) = self.trace_face(edge_idx, true, &mut used_half_edges) {
-                    println!("Successfully traced face {} starting from edge {} fwd with {} edges",
-                        faces.len(), edge_idx, face.edges.len());
+                    let start_edge = &self.edges[edge_idx];
+                    print!("Successfully traced face {} starting from {} -> {} (edge {} fwd) with {} edges: ",
+                        faces.len(), start_edge.start_node, start_edge.end_node, edge_idx, face.edges.len());
+                    for (idx, (e, fwd)) in face.edges.iter().enumerate() {
+                        let e_obj: &GraphEdge = &self.edges[*e];
+                        let (n1, n2) = if *fwd {
+                            (e_obj.start_node, e_obj.end_node)
+                        } else {
+                            (e_obj.end_node, e_obj.start_node)
+                        };
+                        print!("{} -> {}{}", n1, n2, if idx < face.edges.len() - 1 { " -> " } else { "" });
+                    }
+                    println!();
                     faces.push(face);
                 }
             }
@@ -382,8 +398,19 @@ impl PlanarGraph {
             // Try backward direction
             if !used_half_edges.contains(&(edge_idx, false)) {
                 if let Some(face) = self.trace_face(edge_idx, false, &mut used_half_edges) {
-                    println!("Successfully traced face {} starting from edge {} bwd with {} edges",
-                        faces.len(), edge_idx, face.edges.len());
+                    let start_edge = &self.edges[edge_idx];
+                    print!("Successfully traced face {} starting from {} -> {} (edge {} bwd) with {} edges: ",
+                        faces.len(), start_edge.end_node, start_edge.start_node, edge_idx, face.edges.len());
+                    for (idx, (e, fwd)) in face.edges.iter().enumerate() {
+                        let e_obj: &GraphEdge = &self.edges[*e];
+                        let (n1, n2) = if *fwd {
+                            (e_obj.start_node, e_obj.end_node)
+                        } else {
+                            (e_obj.end_node, e_obj.start_node)
+                        };
+                        print!("{} -> {}{}", n1, n2, if idx < face.edges.len() - 1 { " -> " } else { "" });
+                    }
+                    println!();
                     faces.push(face);
                 }
             }
@@ -401,43 +428,124 @@ impl PlanarGraph {
         forward: bool,
         used_half_edges: &mut HashSet<(usize, bool)>,
     ) -> Option<Face> {
+        // Use a local set for this trace attempt
+        // Only add to global set if we successfully complete a face
+        let mut temp_used = HashSet::new();
         let mut edge_sequence = Vec::new();
+        let mut visited_nodes = HashSet::new();
         let mut current_edge = start_edge;
         let mut current_forward = forward;
 
+        // Get start node info for logging
+        let start_edge_obj = &self.edges[start_edge];
+        let (start_node, start_end_node) = if forward {
+            (start_edge_obj.start_node, start_edge_obj.end_node)
+        } else {
+            (start_edge_obj.end_node, start_edge_obj.start_node)
+        };
+
+        println!("trace_face: Starting from node {} -> {} (edge {} {})",
+            start_node, start_end_node, start_edge, if forward { "fwd" } else { "bwd" });
+
+        // Mark the starting node as visited
+        visited_nodes.insert(start_node);
+
         loop {
-            // Mark this half-edge as used
-            if used_half_edges.contains(&(current_edge, current_forward)) {
+            // Check if this half-edge is already used (globally or in this trace)
+            if used_half_edges.contains(&(current_edge, current_forward))
+                || temp_used.contains(&(current_edge, current_forward)) {
                 // Already traced this half-edge
+                let current_edge_obj = &self.edges[current_edge];
+                let (curr_start, curr_end) = if current_forward {
+                    (current_edge_obj.start_node, current_edge_obj.end_node)
+                } else {
+                    (current_edge_obj.end_node, current_edge_obj.start_node)
+                };
+
+                println!("trace_face: Found already-used edge: {} -> {} (edge {} {}) after {} steps",
+                    curr_start, curr_end, current_edge, if current_forward { "fwd" } else { "bwd" },
+                    edge_sequence.len());
+
+                // Print the full edge sequence to understand the sub-cycle
+                print!("  Full sequence: ");
+                for (idx, (e, fwd)) in edge_sequence.iter().enumerate() {
+                    let e_obj: &GraphEdge = &self.edges[*e];
+                    let (n1, n2) = if *fwd {
+                        (e_obj.start_node, e_obj.end_node)
+                    } else {
+                        (e_obj.end_node, e_obj.start_node)
+                    };
+                    print!("{} -> {}{}", n1, n2, if idx < edge_sequence.len() - 1 { " -> " } else { "" });
+                }
+                println!(" -> {} -> {} (already used)", curr_start, curr_end);
+
                 return None;
             }
 
             edge_sequence.push((current_edge, current_forward));
-            used_half_edges.insert((current_edge, current_forward));
+            temp_used.insert((current_edge, current_forward));
 
             // Get the end node of this half-edge
             let edge = &self.edges[current_edge];
+            let start_node_this_edge = if current_forward {
+                edge.start_node
+            } else {
+                edge.end_node
+            };
             let end_node = if current_forward {
                 edge.end_node
             } else {
                 edge.start_node
             };
 
+            // Check if we've returned to the starting node - if so, we've completed the face!
+            if end_node == start_node && edge_sequence.len() >= 2 {
+                println!("trace_face: Completed cycle back to starting node {} after {} edges", start_node, edge_sequence.len());
+                // Success! Add all edges from this trace to the global used set
+                for &half_edge in &temp_used {
+                    used_half_edges.insert(half_edge);
+                }
+                return Some(Face { edges: edge_sequence });
+            }
+
+            // Check if we've visited this end node before (it's not the start, so it's a self-intersection)
+            if visited_nodes.contains(&end_node) {
+                println!("trace_face: Detected node revisit at node {} - rejecting self-intersecting path", end_node);
+                return None;
+            }
+
+            // Mark this node as visited
+            visited_nodes.insert(end_node);
+
             // Find the next edge in counterclockwise order around end_node
             let next = self.find_next_ccw_edge(current_edge, current_forward, end_node);
+
+            if edge_sequence.len() <= 5 {
+                if let Some((next_edge, next_forward)) = next {
+                    let next_edge_obj = &self.edges[next_edge];
+                    let next_end_node = if next_forward {
+                        next_edge_obj.end_node
+                    } else {
+                        next_edge_obj.start_node
+                    };
+                    println!("  Step {}: {} -> {} (edge {} {}) -> next: {} -> {} (edge {} {})",
+                        edge_sequence.len(), start_node_this_edge, end_node,
+                        current_edge, if current_forward { "fwd" } else { "bwd" },
+                        end_node, next_end_node, next_edge, if next_forward { "fwd" } else { "bwd" });
+                } else {
+                    println!("  Step {}: {} -> {} (edge {} {}) -> next: None",
+                        edge_sequence.len(), start_node_this_edge, end_node,
+                        current_edge, if current_forward { "fwd" } else { "bwd" });
+                }
+            }
 
             if let Some((next_edge, next_forward)) = next {
                 current_edge = next_edge;
                 current_forward = next_forward;
-
-                // Check if we've completed the loop
-                if current_edge == start_edge && current_forward == forward {
-                    return Some(Face { edges: edge_sequence });
-                }
+                // Continue to next iteration
             } else {
                 // Dead end - not a valid face
-                println!("trace_face: Dead end at node {} (from edge {} {})",
-                    end_node, current_edge, if current_forward { "fwd" } else { "bwd" });
+                println!("trace_face: Dead end at node {}", end_node);
                 return None;
             }
 
@@ -513,8 +621,14 @@ impl PlanarGraph {
         }
 
         if best_edge.is_none() {
-            println!("find_next_ccw_edge FAILED at node {}: {} candidates total, incoming edge {} {}, found no valid next edge",
-                node_idx, candidates.len(), incoming_edge, if incoming_forward { "fwd" } else { "bwd" });
+            let incoming_edge_obj = &self.edges[incoming_edge];
+            let (inc_start, inc_end) = if incoming_forward {
+                (incoming_edge_obj.start_node, incoming_edge_obj.end_node)
+            } else {
+                (incoming_edge_obj.end_node, incoming_edge_obj.start_node)
+            };
+            println!("find_next_ccw_edge FAILED at node {}: {} candidates total, incoming {} -> {} (edge {} {}), found no valid next edge",
+                node_idx, candidates.len(), inc_start, inc_end, incoming_edge, if incoming_forward { "fwd" } else { "bwd" });
         }
 
         best_edge
@@ -523,6 +637,29 @@ impl PlanarGraph {
     /// Find which face contains a given point
     pub fn find_face_containing_point(&self, point: Point, faces: &[Face]) -> Option<usize> {
         for (i, face) in faces.iter().enumerate() {
+            // Build polygon for debugging
+            let mut polygon_points = Vec::new();
+            for &(edge_idx, forward) in &face.edges {
+                let edge = &self.edges[edge_idx];
+                let node_idx = if forward { edge.start_node } else { edge.end_node };
+                polygon_points.push(self.nodes[node_idx].position);
+            }
+
+            // Calculate bounding box
+            let mut min_x = f64::MAX;
+            let mut max_x = f64::MIN;
+            let mut min_y = f64::MAX;
+            let mut max_y = f64::MIN;
+            for p in &polygon_points {
+                min_x = min_x.min(p.x);
+                max_x = max_x.max(p.x);
+                min_y = min_y.min(p.y);
+                max_y = max_y.max(p.y);
+            }
+
+            println!("Face {}: {} edges, {} points, bbox: ({:.1},{:.1}) to ({:.1},{:.1})",
+                i, face.edges.len(), polygon_points.len(), min_x, min_y, max_x, max_y);
+
             if self.point_in_face(point, face) {
                 return Some(i);
             }

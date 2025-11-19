@@ -85,6 +85,11 @@ impl Action for PaintBucketAction {
         println!("Building planar graph...");
         let graph = PlanarGraph::build(&all_curves);
 
+        // Store graph for debug visualization
+        if let Ok(mut debug_graph) = crate::planar_graph::DEBUG_GRAPH.lock() {
+            *debug_graph = Some(graph.clone());
+        }
+
         // Step 3: Render debug visualization of planar graph
         println!("Rendering planar graph debug visualization...");
         let (nodes_shape, edges_shape) = graph.render_debug();

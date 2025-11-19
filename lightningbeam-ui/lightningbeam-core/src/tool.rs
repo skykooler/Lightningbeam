@@ -25,6 +25,14 @@ pub enum Tool {
     PaintBucket,
     /// Eyedropper - pick colors from the canvas
     Eyedropper,
+    /// Line tool - draw straight lines
+    Line,
+    /// Polygon tool - draw polygons
+    Polygon,
+    /// Bezier edit tool - edit bezier curve control points
+    BezierEdit,
+    /// Text tool - add and edit text
+    Text,
 }
 
 /// Tool state tracking for interactive operations
@@ -125,6 +133,10 @@ impl Tool {
             Tool::Ellipse => "Ellipse",
             Tool::PaintBucket => "Paint Bucket",
             Tool::Eyedropper => "Eyedropper",
+            Tool::Line => "Line",
+            Tool::Polygon => "Polygon",
+            Tool::BezierEdit => "Bezier Edit",
+            Tool::Text => "Text",
         }
     }
 
@@ -138,6 +150,10 @@ impl Tool {
             Tool::Ellipse => "ellipse.svg",
             Tool::PaintBucket => "paint_bucket.svg",
             Tool::Eyedropper => "eyedropper.svg",
+            Tool::Line => "line.svg",
+            Tool::Polygon => "polygon.svg",
+            Tool::BezierEdit => "bezier_edit.svg",
+            Tool::Text => "text.svg",
         }
     }
 
@@ -151,6 +167,10 @@ impl Tool {
             Tool::Ellipse,
             Tool::PaintBucket,
             Tool::Eyedropper,
+            Tool::Line,
+            Tool::Polygon,
+            Tool::BezierEdit,
+            Tool::Text,
         ]
     }
 
@@ -164,6 +184,10 @@ impl Tool {
             Tool::Ellipse => "E",
             Tool::PaintBucket => "B",
             Tool::Eyedropper => "I",
+            Tool::Line => "L",
+            Tool::Polygon => "G",
+            Tool::BezierEdit => "A",
+            Tool::Text => "T",
         }
     }
 }
