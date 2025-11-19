@@ -596,8 +596,38 @@ impl eframe::App for EditorApp {
 
         // Check keyboard shortcuts (works on all platforms)
         ctx.input(|i| {
+            // Check menu shortcuts
             if let Some(action) = MenuSystem::check_shortcuts(i) {
                 self.handle_menu_action(action);
+            }
+
+            // Check tool shortcuts (only if no modifiers are held)
+            if !i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && !i.modifiers.command {
+                use lightningbeam_core::tool::Tool;
+
+                if i.key_pressed(egui::Key::V) {
+                    self.selected_tool = Tool::Select;
+                } else if i.key_pressed(egui::Key::P) {
+                    self.selected_tool = Tool::Draw;
+                } else if i.key_pressed(egui::Key::Q) {
+                    self.selected_tool = Tool::Transform;
+                } else if i.key_pressed(egui::Key::R) {
+                    self.selected_tool = Tool::Rectangle;
+                } else if i.key_pressed(egui::Key::E) {
+                    self.selected_tool = Tool::Ellipse;
+                } else if i.key_pressed(egui::Key::B) {
+                    self.selected_tool = Tool::PaintBucket;
+                } else if i.key_pressed(egui::Key::I) {
+                    self.selected_tool = Tool::Eyedropper;
+                } else if i.key_pressed(egui::Key::L) {
+                    self.selected_tool = Tool::Line;
+                } else if i.key_pressed(egui::Key::G) {
+                    self.selected_tool = Tool::Polygon;
+                } else if i.key_pressed(egui::Key::A) {
+                    self.selected_tool = Tool::BezierEdit;
+                } else if i.key_pressed(egui::Key::T) {
+                    self.selected_tool = Tool::Text;
+                }
             }
         });
 
