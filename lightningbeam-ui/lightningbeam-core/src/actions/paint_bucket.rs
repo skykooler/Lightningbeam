@@ -78,6 +78,11 @@ impl Action for PaintBucketAction {
             for object in vector_layer.objects.iter().rev() {
                 // Find the corresponding shape
                 if let Some(shape) = vector_layer.shapes.iter().find(|s| s.id == object.shape_id) {
+                    // Skip shapes without fill color (e.g., lines with only stroke)
+                    if shape.fill_color.is_none() {
+                        continue;
+                    }
+
                     // Apply the object's transform to get the transformed path
                     let transform_affine = object.transform.to_affine();
 

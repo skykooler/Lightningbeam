@@ -85,6 +85,19 @@ pub enum ToolState {
         current_mouse: Point,  // Current mouse position during drag
         original_bbox: vello::kurbo::Rect,  // Bounding box at start of transform (fixed)
     },
+
+    /// Creating a line
+    CreatingLine {
+        start_point: Point,    // Starting point of the line
+        current_point: Point,  // Current mouse position (end point)
+    },
+
+    /// Creating a polygon
+    CreatingPolygon {
+        center: Point,         // Center point of the polygon
+        current_point: Point,  // Current mouse position (determines radius)
+        num_sides: u32,        // Number of sides (from properties, default 5)
+    },
 }
 
 /// Path simplification mode for the draw tool

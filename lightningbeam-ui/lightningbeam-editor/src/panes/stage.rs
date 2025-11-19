@@ -554,7 +554,88 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
                     }
 
-                    // 5. Draw path drawing preview
+                    // 5. Draw line creation preview
+                    if let lightningbeam_core::tool::ToolState::CreatingLine { ref start_point, ref current_point, .. } = self.tool_state {
+                        use vello::kurbo::Line;
+
+                        // Calculate line length
+                        let dx = current_point.x - start_point.x;
+                        let dy = current_point.y - start_point.y;
+                        let length = (dx * dx + dy * dy).sqrt();
+
+                        if length > 0.0 {
+                            // Use actual stroke color for line preview
+                            let stroke_color = Color::rgba8(
+                                self.stroke_color.r(),
+                                self.stroke_color.g(),
+                                self.stroke_color.b(),
+                                self.stroke_color.a(),
+                            );
+
+                            // Draw the line directly
+                            let line = Line::new(*start_point, *current_point);
+                            scene.stroke(
+                                &Stroke::new(2.0),
+                                camera_transform,
+                                stroke_color,
+                                None,
+                                &line,
+                            );
+                        }
+                    }
+
+                    // 6. Draw polygon creation preview
+                    if let lightningbeam_core::tool::ToolState::CreatingPolygon { ref center, ref current_point, num_sides, .. } = self.tool_state {
+                        use vello::kurbo::{BezPath, Point};
+                        use std::f64::consts::PI;
+
+                        // Calculate radius
+                        let dx = current_point.x - center.x;
+                        let dy = current_point.y - center.y;
+                        let radius = (dx * dx + dy * dy).sqrt();
+
+                        if radius > 5.0 && num_sides >= 3 {
+                            let preview_transform = camera_transform * Affine::translate((center.x, center.y));
+
+                            // Use actual fill color (same as final shape)
+                            let fill_color = Color::rgba8(
+                                self.fill_color.r(),
+                                self.fill_color.g(),
+                                self.fill_color.b(),
+                                self.fill_color.a(),
+                            );
+
+                            // Create the polygon path inline
+                            let mut path = BezPath::new();
+                            let angle_step = 2.0 * PI / num_sides as f64;
+                            let start_angle = -PI / 2.0;
+
+                            // First vertex
+                            let first_x = radius * start_angle.cos();
+                            let first_y = radius * start_angle.sin();
+                            path.move_to(Point::new(first_x, first_y));
+
+                            // Add remaining vertices
+                            for i in 1..num_sides {
+                                let angle = start_angle + angle_step * i as f64;
+                                let x = radius * angle.cos();
+                                let y = radius * angle.sin();
+                                path.line_to(Point::new(x, y));
+                            }
+
+                            path.close_path();
+
+                            scene.fill(
+                                Fill::NonZero,
+                                preview_transform,
+                                fill_color,
+                                None,
+                                &path,
+                            );
+                        }
+                    }
+
+                    // 7. Draw path drawing preview
                     if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.tool_state {
                         use vello::kurbo::{BezPath, Point};
 
@@ -1362,6 +1443,179 @@ impl StagePane {
         }
     }
 
+    fn handle_line_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        _shift_held: bool,
+        _ctrl_held: bool,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Point;
+
+        // Check if we have an active vector layer
+        let active_layer_id = match shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+            Some(layer) => layer,
+            None => return,
+        };
+
+        // Only work on VectorLayer
+        if !matches!(active_layer, AnyLayer::Vector(_)) {
+            return;
+        }
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // Mouse down: start creating line
+        if response.drag_started() || response.clicked() {
+            *shared.tool_state = ToolState::CreatingLine {
+                start_point: point,
+                current_point: point,
+            };
+        }
+
+        // Mouse drag: update line
+        if response.dragged() {
+            if let ToolState::CreatingLine { start_point, .. } = shared.tool_state {
+                *shared.tool_state = ToolState::CreatingLine {
+                    start_point: *start_point,
+                    current_point: point,
+                };
+            }
+        }
+
+        // Mouse up: create the line shape
+        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingLine { .. })) {
+            if let ToolState::CreatingLine { start_point, current_point } = shared.tool_state.clone() {
+                // Calculate line length to ensure it's not too small
+                let dx = current_point.x - start_point.x;
+                let dy = current_point.y - start_point.y;
+                let length = (dx * dx + dy * dy).sqrt();
+
+                // Only create shape if line has reasonable length
+                if length > 1.0 {
+                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
+                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::actions::AddShapeAction;
+
+                    // Create shape with line path
+                    let path = Self::create_line_path(dx, dy);
+
+                    // Lines should have stroke by default, not fill
+                    let shape = Shape::new(path)
+                        .with_stroke(
+                            ShapeColor::from_egui(*shared.stroke_color),
+                            StrokeStyle {
+                                width: 2.0,
+                                ..Default::default()
+                            }
+                        );
+
+                    // Create object at the start point
+                    let object = Object::new(shape.id).with_position(start_point.x, start_point.y);
+
+                    // Create and execute action immediately
+                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    shared.action_executor.execute(Box::new(action));
+
+                    // Clear tool state to stop preview rendering
+                    *shared.tool_state = ToolState::Idle;
+                }
+            }
+        }
+    }
+
+    fn handle_polygon_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        _shift_held: bool,
+        _ctrl_held: bool,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Point;
+
+        // Check if we have an active vector layer
+        let active_layer_id = match shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+            Some(layer) => layer,
+            None => return,
+        };
+
+        // Only work on VectorLayer
+        if !matches!(active_layer, AnyLayer::Vector(_)) {
+            return;
+        }
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // Mouse down: start creating polygon (center point)
+        if response.drag_started() || response.clicked() {
+            *shared.tool_state = ToolState::CreatingPolygon {
+                center: point,
+                current_point: point,
+                num_sides: 5,  // Default to 5 sides (pentagon)
+            };
+        }
+
+        // Mouse drag: update polygon radius
+        if response.dragged() {
+            if let ToolState::CreatingPolygon { center, num_sides, .. } = shared.tool_state {
+                *shared.tool_state = ToolState::CreatingPolygon {
+                    center: *center,
+                    current_point: point,
+                    num_sides: *num_sides,
+                };
+            }
+        }
+
+        // Mouse up: create the polygon shape
+        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingPolygon { .. })) {
+            if let ToolState::CreatingPolygon { center, current_point, num_sides } = shared.tool_state.clone() {
+                // Calculate radius
+                let dx = current_point.x - center.x;
+                let dy = current_point.y - center.y;
+                let radius = (dx * dx + dy * dy).sqrt();
+
+                // Only create shape if polygon has reasonable size
+                if radius > 5.0 {
+                    use lightningbeam_core::shape::{Shape, ShapeColor};
+                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::actions::AddShapeAction;
+
+                    // Create shape with polygon path
+                    let path = Self::create_polygon_path(num_sides, radius);
+                    let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
+
+                    // Create object at the center point
+                    let object = Object::new(shape.id).with_position(center.x, center.y);
+
+                    // Create and execute action immediately
+                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    shared.action_executor.execute(Box::new(action));
+
+                    // Clear tool state to stop preview rendering
+                    *shared.tool_state = ToolState::Idle;
+                }
+            }
+        }
+    }
+
     /// Create a rectangle path from lines (easier for curve editing later)
     fn create_rectangle_path(width: f64, height: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
@@ -1431,6 +1685,61 @@ impl StagePane {
             Point::new(rx, 0.0),      // end point (right)
         );
 
+        path.close_path();
+
+        path
+    }
+
+    /// Create a line path from start to end point
+    fn create_line_path(dx: f64, dy: f64) -> vello::kurbo::BezPath {
+        use vello::kurbo::{BezPath, Point};
+
+        let mut path = BezPath::new();
+
+        // Start at origin (object position will be the start point)
+        path.move_to(Point::new(0.0, 0.0));
+
+        // Line to end point
+        path.line_to(Point::new(dx, dy));
+
+        path
+    }
+
+    /// Create a regular polygon path centered at origin
+    ///
+    /// # Arguments
+    /// * `num_sides` - Number of sides for the polygon (must be >= 3)
+    /// * `radius` - Radius from center to vertices
+    fn create_polygon_path(num_sides: u32, radius: f64) -> vello::kurbo::BezPath {
+        use vello::kurbo::{BezPath, Point};
+        use std::f64::consts::PI;
+
+        let mut path = BezPath::new();
+
+        if num_sides < 3 {
+            return path;
+        }
+
+        // Calculate angle between vertices
+        let angle_step = 2.0 * PI / num_sides as f64;
+
+        // Start at top (angle = -PI/2 so first vertex is at top)
+        let start_angle = -PI / 2.0;
+
+        // First vertex
+        let first_x = radius * (start_angle).cos();
+        let first_y = radius * (start_angle).sin();
+        path.move_to(Point::new(first_x, first_y));
+
+        // Add remaining vertices
+        for i in 1..num_sides {
+            let angle = start_angle + angle_step * i as f64;
+            let x = radius * angle.cos();
+            let y = radius * angle.sin();
+            path.line_to(Point::new(x, y));
+        }
+
+        // Close the path back to first vertex
         path.close_path();
 
         path
@@ -2564,6 +2873,12 @@ impl StagePane {
                 }
                 Tool::PaintBucket => {
                     self.handle_paint_bucket_tool(&response, world_pos, shared);
+                }
+                Tool::Line => {
+                    self.handle_line_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
+                }
+                Tool::Polygon => {
+                    self.handle_polygon_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 _ => {
                     // Other tools not implemented yet
