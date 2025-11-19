@@ -120,6 +120,8 @@ pub enum TransformMode {
     ScaleEdge { axis: Axis, origin: Point },
     /// Rotate around a pivot
     Rotate { center: Point },
+    /// Skew along an edge
+    Skew { axis: Axis, origin: Point },
 }
 
 /// Axis for edge scaling

@@ -694,10 +694,38 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1), // Bottom-left
                                     ];
 
+                                    // Build skew transforms around shape center
+                                    let center_x = (local_bbox.x0 + local_bbox.x1) / 2.0;
+                                    let center_y = (local_bbox.y0 + local_bbox.y1) / 2.0;
+
+                                    let skew_transform = if object.transform.skew_x != 0.0 || object.transform.skew_y != 0.0 {
+                                        let skew_x_affine = if object.transform.skew_x != 0.0 {
+                                            let tan_skew = object.transform.skew_x.to_radians().tan();
+                                            Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+                                        } else {
+                                            Affine::IDENTITY
+                                        };
+
+                                        let skew_y_affine = if object.transform.skew_y != 0.0 {
+                                            let tan_skew = object.transform.skew_y.to_radians().tan();
+                                            Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+                                        } else {
+                                            Affine::IDENTITY
+                                        };
+
+                                        Affine::translate((center_x, center_y))
+                                            * skew_x_affine
+                                            * skew_y_affine
+                                            * Affine::translate((-center_x, -center_y))
+                                    } else {
+                                        Affine::IDENTITY
+                                    };
+
                                     // Transform to world space
                                     let obj_transform = Affine::translate((object.transform.x, object.transform.y))
                                         * Affine::rotate(object.transform.rotation.to_radians())
-                                        * Affine::scale_non_uniform(object.transform.scale_x, object.transform.scale_y);
+                                        * Affine::scale_non_uniform(object.transform.scale_x, object.transform.scale_y)
+                                        * skew_transform;
 
                                     let world_corners: Vec<vello::kurbo::Point> = local_corners
                                         .iter()
@@ -2228,6 +2256,46 @@ impl StagePane {
                     });
                 }
             }
+
+            TransformMode::Skew { axis, origin } => {
+                // Calculate skew amount based on parallel mouse movement (drag along edge)
+                // Convert mouse movement to skew angle in degrees
+                let skew_degrees = match axis {
+                    Axis::Horizontal => {
+                        // Horizontal edge: drag horizontally to skew
+                        let delta_x = current_mouse.x - start_mouse.x;
+                        // Calculate skew angle based on movement
+                        delta_x / 2.0 // Sensitivity: 2 pixels = 1 degree
+                    }
+                    Axis::Vertical => {
+                        // Vertical edge: drag vertically to skew
+                        let delta_y = current_mouse.y - start_mouse.y;
+                        delta_y / 2.0 // Sensitivity: 2 pixels = 1 degree
+                    }
+                };
+
+                // Apply skew to all selected objects
+                for (object_id, original_transform) in original_transforms {
+                    vector_layer.modify_object_internal(object_id, |obj| {
+                        // Set skew based on axis
+                        match axis {
+                            Axis::Horizontal => {
+                                obj.transform.skew_x = original_transform.skew_x + skew_degrees;
+                            }
+                            Axis::Vertical => {
+                                obj.transform.skew_y = original_transform.skew_y + skew_degrees;
+                            }
+                        }
+
+                        // Keep other transform properties unchanged
+                        obj.transform.x = original_transform.x;
+                        obj.transform.y = original_transform.y;
+                        obj.transform.rotation = original_transform.rotation;
+                        obj.transform.scale_x = original_transform.scale_x;
+                        obj.transform.scale_y = original_transform.scale_y;
+                    });
+                }
+            }
         }
     }
 
@@ -2282,6 +2350,52 @@ impl StagePane {
                     axis: *axis,
                     origin,
                 });
+            }
+        }
+
+        // Check for skew (hovering over edge but not near a handle)
+        // Define edge segments
+        let edge_segments = [
+            // Top edge
+            (Point::new(bbox.x0, bbox.y0), Point::new(bbox.x1, bbox.y0), Axis::Horizontal, bbox.y1),
+            // Right edge
+            (Point::new(bbox.x1, bbox.y0), Point::new(bbox.x1, bbox.y1), Axis::Vertical, bbox.x0),
+            // Bottom edge
+            (Point::new(bbox.x1, bbox.y1), Point::new(bbox.x0, bbox.y1), Axis::Horizontal, bbox.y0),
+            // Left edge
+            (Point::new(bbox.x0, bbox.y1), Point::new(bbox.x0, bbox.y0), Axis::Vertical, bbox.x1),
+        ];
+
+        let skew_tolerance = tolerance * 1.5; // Slightly larger tolerance for edge detection
+        for (start, end, axis, origin_coord) in &edge_segments {
+            // Calculate distance from point to line segment
+            let edge_vec = *end - *start;
+            let point_vec = point - *start;
+            let edge_length = edge_vec.hypot();
+
+            if edge_length > 0.0 {
+                // Project point onto line segment
+                let t = (point_vec.x * edge_vec.x + point_vec.y * edge_vec.y) / (edge_length * edge_length);
+
+                // Check if projection is within segment bounds (not at ends where handles are)
+                let handle_exclusion = tolerance / edge_length; // Exclude regions near handles
+
+                if t > handle_exclusion && t < (1.0 - handle_exclusion) {
+                    // Calculate perpendicular distance to edge
+                    let closest_point = *start + edge_vec * t;
+                    let distance = point.distance(closest_point);
+
+                    if distance < skew_tolerance {
+                        let origin = match axis {
+                            Axis::Horizontal => Point::new(point.x, *origin_coord),
+                            Axis::Vertical => Point::new(*origin_coord, point.y),
+                        };
+                        return Some(TransformMode::Skew {
+                            axis: *axis,
+                            origin,
+                        });
+                    }
+                }
             }
         }
 
@@ -2364,6 +2478,43 @@ impl StagePane {
                 Some(b) => b,
                 None => return,
             };
+
+            // Set cursor based on hovering over handles
+            let tolerance = 10.0;
+            if let Some(mode) = Self::hit_test_transform_handle(point, bbox, tolerance) {
+                use lightningbeam_core::tool::TransformMode;
+                let cursor = match mode {
+                    TransformMode::ScaleCorner { origin } => {
+                        // Determine which corner based on origin
+                        if (origin.x - bbox.x0).abs() < 0.1 && (origin.y - bbox.y0).abs() < 0.1 {
+                            egui::CursorIcon::ResizeNwSe // Top-left
+                        } else if (origin.x - bbox.x1).abs() < 0.1 && (origin.y - bbox.y0).abs() < 0.1 {
+                            egui::CursorIcon::ResizeNeSw // Top-right
+                        } else if (origin.x - bbox.x1).abs() < 0.1 && (origin.y - bbox.y1).abs() < 0.1 {
+                            egui::CursorIcon::ResizeNwSe // Bottom-right
+                        } else {
+                            egui::CursorIcon::ResizeNeSw // Bottom-left
+                        }
+                    }
+                    TransformMode::ScaleEdge { axis, .. } => {
+                        use lightningbeam_core::tool::Axis;
+                        match axis {
+                            Axis::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                            Axis::Vertical => egui::CursorIcon::ResizeVertical,
+                        }
+                    }
+                    TransformMode::Rotate { .. } => egui::CursorIcon::AllScroll,
+                    TransformMode::Skew { axis, .. } => {
+                        use lightningbeam_core::tool::Axis;
+                        // Use Move cursor to indicate skew
+                        match axis {
+                            Axis::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                            Axis::Vertical => egui::CursorIcon::ResizeVertical,
+                        }
+                    }
+                };
+                ui.ctx().set_cursor_icon(cursor);
+            }
 
             // Mouse down: check if clicking on a handle
             if response.drag_started() || response.clicked() {
@@ -2485,9 +2636,37 @@ impl StagePane {
                             vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1),
                         ];
 
+                        // Build skew transforms around shape center
+                        let center_x = (local_bbox.x0 + local_bbox.x1) / 2.0;
+                        let center_y = (local_bbox.y0 + local_bbox.y1) / 2.0;
+
+                        let skew_transform = if object.transform.skew_x != 0.0 || object.transform.skew_y != 0.0 {
+                            let skew_x_affine = if object.transform.skew_x != 0.0 {
+                                let tan_skew = object.transform.skew_x.to_radians().tan();
+                                Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+                            } else {
+                                Affine::IDENTITY
+                            };
+
+                            let skew_y_affine = if object.transform.skew_y != 0.0 {
+                                let tan_skew = object.transform.skew_y.to_radians().tan();
+                                Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+                            } else {
+                                Affine::IDENTITY
+                            };
+
+                            Affine::translate((center_x, center_y))
+                                * skew_x_affine
+                                * skew_y_affine
+                                * Affine::translate((-center_x, -center_y))
+                        } else {
+                            Affine::IDENTITY
+                        };
+
                         let obj_transform = Affine::translate((object.transform.x, object.transform.y))
                             * Affine::rotate(object.transform.rotation.to_radians())
-                            * Affine::scale_non_uniform(object.transform.scale_x, object.transform.scale_y);
+                            * Affine::scale_non_uniform(object.transform.scale_x, object.transform.scale_y)
+                            * skew_transform;
 
                         let world_corners: Vec<vello::kurbo::Point> = local_corners
                             .iter()
@@ -2561,6 +2740,52 @@ impl StagePane {
                         ui.ctx().set_cursor_icon(cursor);
                         hovering_handle = true;
                         break;
+                    }
+                }
+            }
+
+            // Check for skew (hovering over edge but not near handles)
+            if !hovering_handle {
+                let skew_tolerance = tolerance * 1.5;
+
+                // Check each edge
+                for i in 0..4 {
+                    let start = world_corners[i];
+                    let end = world_corners[(i + 1) % 4];
+                    let edge_midpoint = edge_midpoints[i];
+
+                    // Calculate distance from point to line segment
+                    let edge_vec = end - start;
+                    let point_vec = point - start;
+                    let edge_length = edge_vec.hypot();
+
+                    if edge_length > 0.0 {
+                        // Project point onto line segment
+                        let t = (point_vec.x * edge_vec.x + point_vec.y * edge_vec.y) / (edge_length * edge_length);
+
+                        // Check if projection is within segment bounds
+                        if t > 0.0 && t < 1.0 {
+                            let closest_point = start + edge_vec * t;
+                            let distance = point.distance(closest_point);
+
+                            // Check if close to edge but not near corner or midpoint handles
+                            if distance < skew_tolerance {
+                                let near_corner = point.distance(start) < tolerance || point.distance(end) < tolerance;
+                                let near_midpoint = point.distance(edge_midpoint) < tolerance;
+
+                                if !near_corner && !near_midpoint {
+                                    // Show skew cursor
+                                    let cursor = match i {
+                                        0 | 2 => egui::CursorIcon::ResizeHorizontal, // Top/Bottom edges
+                                        1 | 3 => egui::CursorIcon::ResizeVertical,   // Right/Left edges
+                                        _ => egui::CursorIcon::Default,
+                                    };
+                                    ui.ctx().set_cursor_icon(cursor);
+                                    hovering_handle = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2649,6 +2874,62 @@ impl StagePane {
                         original_bbox: vello::kurbo::Rect::new(local_bbox.x0, local_bbox.y0, local_bbox.x1, local_bbox.y1),
                     };
                     return;
+                }
+            }
+
+            // Check for skew (same logic as cursor hover)
+            let skew_tolerance = tolerance * 1.5;
+            for i in 0..4 {
+                let start = world_corners[i];
+                let end = world_corners[(i + 1) % 4];
+                let edge_midpoint = edge_midpoints[i];
+
+                let edge_vec = end - start;
+                let point_vec = point - start;
+                let edge_length = edge_vec.hypot();
+
+                if edge_length > 0.0 {
+                    let t = (point_vec.x * edge_vec.x + point_vec.y * edge_vec.y) / (edge_length * edge_length);
+
+                    if t > 0.0 && t < 1.0 {
+                        let closest_point = start + edge_vec * t;
+                        let distance = point.distance(closest_point);
+
+                        if distance < skew_tolerance {
+                            let near_corner = point.distance(start) < tolerance || point.distance(end) < tolerance;
+                            let near_midpoint = point.distance(edge_midpoint) < tolerance;
+
+                            if !near_corner && !near_midpoint {
+                                use std::collections::HashMap;
+                                use lightningbeam_core::tool::Axis;
+
+                                let mut original_transforms = HashMap::new();
+                                original_transforms.insert(object_id, object.transform.clone());
+
+                                // Determine skew axis and origin
+                                let (axis, opposite_edge) = match i {
+                                    0 => (Axis::Horizontal, edge_midpoints[2]), // Top edge
+                                    1 => (Axis::Vertical, edge_midpoints[3]),   // Right edge
+                                    2 => (Axis::Horizontal, edge_midpoints[0]), // Bottom edge
+                                    3 => (Axis::Vertical, edge_midpoints[1]),   // Left edge
+                                    _ => unreachable!(),
+                                };
+
+                                *shared.tool_state = ToolState::Transforming {
+                                    mode: lightningbeam_core::tool::TransformMode::Skew {
+                                        axis,
+                                        origin: opposite_edge,
+                                    },
+                                    original_transforms,
+                                    pivot: opposite_edge,
+                                    start_mouse: point,
+                                    current_mouse: point,
+                                    original_bbox: vello::kurbo::Rect::new(local_bbox.x0, local_bbox.y0, local_bbox.x1, local_bbox.y1),
+                                };
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2857,6 +3138,51 @@ impl StagePane {
                                         obj.transform.x = original.x + pos_offset_x;
                                         obj.transform.y = original.y + pos_offset_y;
                                         obj.transform.rotation = original.rotation;
+                                    });
+                                }
+                                lightningbeam_core::tool::TransformMode::Skew { axis, origin } => {
+                                    // Transform mouse positions to local space to get skew amount
+                                    let original_transform = Affine::translate((original.x, original.y))
+                                        * Affine::rotate(original.rotation.to_radians())
+                                        * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                    let inv_original_transform = original_transform.inverse();
+
+                                    // Get mouse movement in local space
+                                    let local_start = inv_original_transform * start_mouse;
+                                    let local_current = inv_original_transform * point;
+
+                                    use lightningbeam_core::tool::Axis;
+                                    // Calculate skew angle in degrees based on mouse movement
+                                    let skew_degrees = match axis {
+                                        Axis::Horizontal => {
+                                            // Horizontal edge: drag horizontally (in local space) to skew
+                                            let delta_x = local_current.x - local_start.x;
+                                            delta_x / 2.0 // Sensitivity: 2 pixels = 1 degree
+                                        }
+                                        Axis::Vertical => {
+                                            // Vertical edge: drag vertically (in local space) to skew
+                                            let delta_y = local_current.y - local_start.y;
+                                            delta_y / 2.0 // Sensitivity: 2 pixels = 1 degree
+                                        }
+                                    };
+
+                                    vector_layer.modify_object_internal(&object_id, |obj| {
+                                        // Apply skew based on axis
+                                        match axis {
+                                            Axis::Horizontal => {
+                                                obj.transform.skew_x = original.skew_x + skew_degrees;
+                                            }
+                                            Axis::Vertical => {
+                                                obj.transform.skew_y = original.skew_y + skew_degrees;
+                                            }
+                                        }
+
+                                        // Keep other transform properties unchanged
+                                        obj.transform.x = original.x;
+                                        obj.transform.y = original.y;
+                                        obj.transform.rotation = original.rotation;
+                                        obj.transform.scale_x = original.scale_x;
+                                        obj.transform.scale_y = original.scale_y;
                                     });
                                 }
                                 _ => {}

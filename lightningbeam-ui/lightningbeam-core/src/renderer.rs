@@ -5,7 +5,7 @@
 use crate::animation::TransformProperty;
 use crate::document::Document;
 use crate::layer::{AnyLayer, VectorLayer};
-use kurbo::Affine;
+use kurbo::{Affine, Shape};
 use vello::kurbo::Rect;
 use vello::peniko::Fill;
 use vello::Scene;
@@ -133,6 +133,28 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
                 time,
                 transform.scale_y,
             );
+        let skew_x = layer
+            .layer
+            .animation_data
+            .eval(
+                &crate::animation::AnimationTarget::Object {
+                    id: object.id,
+                    property: TransformProperty::SkewX,
+                },
+                time,
+                transform.skew_x,
+            );
+        let skew_y = layer
+            .layer
+            .animation_data
+            .eval(
+                &crate::animation::AnimationTarget::Object {
+                    id: object.id,
+                    property: TransformProperty::SkewY,
+                },
+                time,
+                transform.skew_y,
+            );
         let opacity = layer
             .layer
             .animation_data
@@ -162,9 +184,40 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
         let path = shape.get_morphed_path(shape_index);
 
         // Build transform matrix (compose with base transform for camera)
+        // Get shape center for skewing around center
+        let shape_bbox = shape.path().bounding_box();
+        let center_x = (shape_bbox.x0 + shape_bbox.x1) / 2.0;
+        let center_y = (shape_bbox.y0 + shape_bbox.y1) / 2.0;
+
+        // Build skew transforms (applied around shape center)
+        let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
+            let skew_x_affine = if skew_x != 0.0 {
+                let tan_skew = skew_x.to_radians().tan();
+                Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+            } else {
+                Affine::IDENTITY
+            };
+
+            let skew_y_affine = if skew_y != 0.0 {
+                let tan_skew = skew_y.to_radians().tan();
+                Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+            } else {
+                Affine::IDENTITY
+            };
+
+            // Skew around center: translate to origin, skew, translate back
+            Affine::translate((center_x, center_y))
+                * skew_x_affine
+                * skew_y_affine
+                * Affine::translate((-center_x, -center_y))
+        } else {
+            Affine::IDENTITY
+        };
+
         let object_transform = Affine::translate((x, y))
             * Affine::rotate(rotation.to_radians())
-            * Affine::scale_non_uniform(scale_x, scale_y);
+            * Affine::scale_non_uniform(scale_x, scale_y)
+            * skew_transform;
         let affine = base_transform * object_transform;
 
         // Calculate final opacity (layer * object)

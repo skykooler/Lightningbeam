@@ -90,6 +90,8 @@ impl Transform {
     }
 
     /// Convert to an affine transform matrix
+    /// Note: Skew is applied in local space. For proper centering, the shape's
+    /// bounding box center should be used (see renderer.rs for the full implementation).
     pub fn to_affine(&self) -> kurbo::Affine {
         use kurbo::Affine;
 
@@ -98,7 +100,7 @@ impl Transform {
         let rotate = Affine::rotate(self.rotation.to_radians());
         let scale = Affine::scale_non_uniform(self.scale_x, self.scale_y);
 
-        // Skew transforms
+        // Skew transforms (applied in local space)
         let skew_x = if self.skew_x != 0.0 {
             let tan_skew = self.skew_x.to_radians().tan();
             Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
