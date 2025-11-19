@@ -102,11 +102,16 @@ impl PlanarGraph {
         let (nodes, edges) = Self::build_nodes_and_edges(&curves, intersections);
         println!("Created {} nodes and {} edges", nodes.len(), edges.len());
 
-        Self {
+        let mut graph = Self {
             nodes,
             edges,
             curves,
-        }
+        };
+
+        // Prune dangling nodes
+        graph.prune_dangling_nodes();
+
+        graph
     }
 
     /// Find all intersections between curves
@@ -189,25 +194,22 @@ impl PlanarGraph {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
 
-        // Map from position to node index (to avoid duplicate nodes)
-        let mut position_to_node: HashMap<(i32, i32), usize> = HashMap::new();
-
         // Helper to get or create node at a position
-        let mut get_or_create_node = |position: Point,
-                                       nodes: &mut Vec<GraphNode>,
-                                       position_to_node: &mut HashMap<(i32, i32), usize>|
-         -> usize {
-            // Round to nearest pixel for lookup
-            let key = (position.x.round() as i32, position.y.round() as i32);
-
-            if let Some(&node_idx) = position_to_node.get(&key) {
-                node_idx
-            } else {
-                let node_idx = nodes.len();
-                nodes.push(GraphNode::new(position));
-                position_to_node.insert(key, node_idx);
-                node_idx
+        // Uses distance-based deduplication with 0.5 pixel tolerance
+        const NODE_TOLERANCE: f64 = 0.5;
+        let get_or_create_node = |position: Point, nodes: &mut Vec<GraphNode>| -> usize {
+            // Check if there's already a node within tolerance
+            for (idx, node) in nodes.iter().enumerate() {
+                let dist = (position - node.position).hypot();
+                if dist < NODE_TOLERANCE {
+                    return idx;
+                }
             }
+
+            // No nearby node found, create new one
+            let node_idx = nodes.len();
+            nodes.push(GraphNode::new(position));
+            node_idx
         };
 
         // Create edges for each curve
@@ -218,8 +220,8 @@ impl PlanarGraph {
                 let (t_end, p_end) = curve_intersections[i + 1];
 
                 // Get or create nodes
-                let start_node = get_or_create_node(p_start, &mut nodes, &mut position_to_node);
-                let end_node = get_or_create_node(p_end, &mut nodes, &mut position_to_node);
+                let start_node = get_or_create_node(p_start, &mut nodes);
+                let end_node = get_or_create_node(p_end, &mut nodes);
 
                 // Create edge
                 let edge_idx = edges.len();
@@ -238,6 +240,88 @@ impl PlanarGraph {
         }
 
         (nodes, edges)
+    }
+
+    /// Prune dangling nodes (nodes with only one edge) from the graph
+    ///
+    /// This is useful for cleaning up the graph structure by removing dead ends
+    /// that cannot be part of any face. Nodes are pruned iteratively until only
+    /// nodes that are part of face loops remain (or the graph becomes empty).
+    fn prune_dangling_nodes(&mut self) {
+        println!("Starting graph pruning...");
+
+        let mut iteration = 0;
+        loop {
+            // Find nodes with only 1 edge
+            let mut nodes_to_remove = Vec::new();
+            for (idx, node) in self.nodes.iter().enumerate() {
+                if node.edge_indices.len() == 1 {
+                    nodes_to_remove.push(idx);
+                }
+            }
+
+            if nodes_to_remove.is_empty() {
+                println!("Pruning complete after {} iterations", iteration);
+                break;
+            }
+
+            iteration += 1;
+            println!("Pruning iteration {}: removing {} nodes", iteration, nodes_to_remove.len());
+
+            // Find edges connected to these nodes
+            let mut edges_to_remove = HashSet::new();
+            for &node_idx in &nodes_to_remove {
+                for &edge_idx in &self.nodes[node_idx].edge_indices {
+                    edges_to_remove.insert(edge_idx);
+                }
+            }
+
+            // Remove the edges and nodes
+            // We need to rebuild the structure since indices change
+
+            // Create new nodes list (excluding removed ones)
+            let mut new_nodes = Vec::new();
+            let mut old_to_new_node: HashMap<usize, usize> = HashMap::new();
+
+            for (old_idx, node) in self.nodes.iter().enumerate() {
+                if !nodes_to_remove.contains(&old_idx) {
+                    let new_idx = new_nodes.len();
+                    old_to_new_node.insert(old_idx, new_idx);
+                    new_nodes.push(node.clone());
+                }
+            }
+
+            // Create new edges list (excluding removed ones and updating node indices)
+            let mut new_edges = Vec::new();
+            for (old_idx, edge) in self.edges.iter().enumerate() {
+                if !edges_to_remove.contains(&old_idx) {
+                    // Update node indices
+                    if let (Some(&new_start), Some(&new_end)) =
+                        (old_to_new_node.get(&edge.start_node), old_to_new_node.get(&edge.end_node)) {
+                        let mut new_edge = edge.clone();
+                        new_edge.start_node = new_start;
+                        new_edge.end_node = new_end;
+                        new_edges.push(new_edge);
+                    }
+                }
+            }
+
+            // Rebuild edge_indices in nodes
+            for node in &mut new_nodes {
+                node.edge_indices.clear();
+            }
+
+            for (edge_idx, edge) in new_edges.iter().enumerate() {
+                new_nodes[edge.start_node].edge_indices.push(edge_idx);
+                new_nodes[edge.end_node].edge_indices.push(edge_idx);
+            }
+
+            // Update graph
+            self.nodes = new_nodes;
+            self.edges = new_edges;
+
+            println!("After pruning: {} nodes, {} edges", self.nodes.len(), self.edges.len());
+        }
     }
 
     /// Render debug visualization of the planar graph
@@ -279,25 +363,18 @@ impl PlanarGraph {
 
     /// Find all faces in the planar graph
     pub fn find_faces(&self) -> Vec<Face> {
-        // Debug: Print graph structure
-        println!("\n=== GRAPH STRUCTURE DEBUG ===");
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            println!("Node {}: pos=({:.1}, {:.1}), edges={:?}",
-                node_idx, node.position.x, node.position.y, node.edge_indices);
-        }
-        for (edge_idx, edge) in self.edges.iter().enumerate() {
-            println!("Edge {}: {} -> {}", edge_idx, edge.start_node, edge.end_node);
-        }
-        println!("=== END GRAPH STRUCTURE ===\n");
-
         let mut faces = Vec::new();
         let mut used_half_edges = HashSet::new();
+
+        println!("Finding faces: trying {} edges in both directions", self.edges.len());
 
         // Try starting from each edge in both directions
         for edge_idx in 0..self.edges.len() {
             // Try forward direction
             if !used_half_edges.contains(&(edge_idx, true)) {
                 if let Some(face) = self.trace_face(edge_idx, true, &mut used_half_edges) {
+                    println!("Successfully traced face {} starting from edge {} fwd with {} edges",
+                        faces.len(), edge_idx, face.edges.len());
                     faces.push(face);
                 }
             }
@@ -305,6 +382,8 @@ impl PlanarGraph {
             // Try backward direction
             if !used_half_edges.contains(&(edge_idx, false)) {
                 if let Some(face) = self.trace_face(edge_idx, false, &mut used_half_edges) {
+                    println!("Successfully traced face {} starting from edge {} bwd with {} edges",
+                        faces.len(), edge_idx, face.edges.len());
                     faces.push(face);
                 }
             }
@@ -357,6 +436,8 @@ impl PlanarGraph {
                 }
             } else {
                 // Dead end - not a valid face
+                println!("trace_face: Dead end at node {} (from edge {} {})",
+                    end_node, current_edge, if current_forward { "fwd" } else { "bwd" });
                 return None;
             }
 
@@ -412,22 +493,18 @@ impl PlanarGraph {
             }
         }
 
-        println!("find_next_ccw_edge: node {} has {} candidates", node_idx, candidates.len());
-
         // Find the edge that makes the smallest left turn (most counterclockwise)
         let mut best_edge = None;
         let mut best_angle = std::f64::MAX;
 
-        for (edge_idx, forward, out_dir) in candidates {
+        for &(edge_idx, forward, out_dir) in &candidates {
             // Skip the edge we came from (in opposite direction)
             if edge_idx == incoming_edge && forward == !incoming_forward {
-                println!("  Skipping edge {} (came from there)", edge_idx);
                 continue;
             }
 
             // Compute angle from incoming to outgoing (counterclockwise)
             let angle = angle_between_ccw(incoming_dir, out_dir);
-            println!("  Edge {} dir={} angle={}", edge_idx, if forward { "fwd" } else { "bwd" }, angle);
 
             if angle < best_angle {
                 best_angle = angle;
@@ -435,7 +512,11 @@ impl PlanarGraph {
             }
         }
 
-        println!("  Best: {:?} angle={}", best_edge, best_angle);
+        if best_edge.is_none() {
+            println!("find_next_ccw_edge FAILED at node {}: {} candidates total, incoming edge {} {}, found no valid next edge",
+                node_idx, candidates.len(), incoming_edge, if incoming_forward { "fwd" } else { "bwd" });
+        }
+
         best_edge
     }
 
