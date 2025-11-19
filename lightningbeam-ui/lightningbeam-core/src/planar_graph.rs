@@ -135,9 +135,21 @@ impl PlanarGraph {
         }
 
         // Find curve-curve intersections
+        println!("Checking {} curve pairs for intersections...", (curves.len() * (curves.len() - 1)) / 2);
+        let mut total_intersections = 0;
         for i in 0..curves.len() {
             for j in (i + 1)..curves.len() {
                 let curve_i_intersections = find_curve_intersections(&curves[i], &curves[j]);
+
+                if !curve_i_intersections.is_empty() {
+                    println!("  Curves {} and {} intersect at {} points:", i, j, curve_i_intersections.len());
+                    for (idx, intersection) in curve_i_intersections.iter().enumerate() {
+                        println!("    {} - t1={:.3}, t2={:.3}, point=({:.1}, {:.1})",
+                            idx, intersection.t1, intersection.t2.unwrap_or(0.0),
+                            intersection.point.x, intersection.point.y);
+                    }
+                    total_intersections += curve_i_intersections.len();
+                }
 
                 for intersection in curve_i_intersections {
                     // Add to curve i
@@ -171,6 +183,8 @@ impl PlanarGraph {
                 }
             }
         }
+
+        println!("Total curve-curve intersections found: {}", total_intersections);
 
         // Sort and deduplicate intersections for each curve
         for curve_intersections in intersections.values_mut() {
@@ -520,25 +534,6 @@ impl PlanarGraph {
             // Find the next edge in counterclockwise order around end_node
             let next = self.find_next_ccw_edge(current_edge, current_forward, end_node);
 
-            if edge_sequence.len() <= 5 {
-                if let Some((next_edge, next_forward)) = next {
-                    let next_edge_obj = &self.edges[next_edge];
-                    let next_end_node = if next_forward {
-                        next_edge_obj.end_node
-                    } else {
-                        next_edge_obj.start_node
-                    };
-                    println!("  Step {}: {} -> {} (edge {} {}) -> next: {} -> {} (edge {} {})",
-                        edge_sequence.len(), start_node_this_edge, end_node,
-                        current_edge, if current_forward { "fwd" } else { "bwd" },
-                        end_node, next_end_node, next_edge, if next_forward { "fwd" } else { "bwd" });
-                } else {
-                    println!("  Step {}: {} -> {} (edge {} {}) -> next: None",
-                        edge_sequence.len(), start_node_this_edge, end_node,
-                        current_edge, if current_forward { "fwd" } else { "bwd" });
-                }
-            }
-
             if let Some((next_edge, next_forward)) = next {
                 current_edge = next_edge;
                 current_forward = next_forward;
@@ -566,16 +561,19 @@ impl PlanarGraph {
     ) -> Option<(usize, bool)> {
         let node = &self.nodes[node_idx];
 
-        // Get the incoming direction vector (pointing INTO this node)
+        // Get the reverse of the incoming direction (pointing back to where we came FROM)
+        // This way, angle 0 = going back, and we measure CCW turns from the incoming edge
         let edge = &self.edges[incoming_edge];
         let incoming_dir = if incoming_forward {
             let start_pos = self.nodes[edge.start_node].position;
             let end_pos = self.nodes[edge.end_node].position;
-            (end_pos.x - start_pos.x, end_pos.y - start_pos.y)
+            // Reverse: point from end back to start
+            (start_pos.x - end_pos.x, start_pos.y - end_pos.y)
         } else {
             let start_pos = self.nodes[edge.start_node].position;
             let end_pos = self.nodes[edge.end_node].position;
-            (start_pos.x - end_pos.x, start_pos.y - end_pos.y)
+            // Reverse: point from start back to end
+            (end_pos.x - start_pos.x, end_pos.y - start_pos.y)
         };
 
         // Find all outgoing edges from this node
@@ -601,34 +599,51 @@ impl PlanarGraph {
             }
         }
 
-        // Find the edge that makes the smallest left turn (most counterclockwise)
+        // Debug: show incoming edge info
+        let incoming_edge_obj = &self.edges[incoming_edge];
+        let (inc_start, inc_end) = if incoming_forward {
+            (incoming_edge_obj.start_node, incoming_edge_obj.end_node)
+        } else {
+            (incoming_edge_obj.end_node, incoming_edge_obj.start_node)
+        };
+
+        println!("  find_next_ccw_edge at node {} (incoming: {} -> {}, edge {} {})",
+            node_idx, inc_start, inc_end, incoming_edge, if incoming_forward { "fwd" } else { "bwd" });
+        println!("    Available edges ({} candidates):", candidates.len());
+
+        // Find the edge with the largest CCW angle (rightmost turn for face tracing)
+        // Since incoming_dir points back to where we came from, the largest angle
+        // gives us the rightmost turn, which traces faces correctly.
         let mut best_edge = None;
-        let mut best_angle = std::f64::MAX;
+        let mut best_angle = 0.0;
 
         for &(edge_idx, forward, out_dir) in &candidates {
             // Skip the edge we came from (in opposite direction)
             if edge_idx == incoming_edge && forward == !incoming_forward {
+                println!("      Edge {} {} -> SKIP (reverse of incoming)", edge_idx, if forward { "fwd" } else { "bwd" });
                 continue;
             }
 
             // Compute angle from incoming to outgoing (counterclockwise)
             let angle = angle_between_ccw(incoming_dir, out_dir);
 
-            if angle < best_angle {
+            // Get the destination node for this candidate
+            let cand_edge = &self.edges[edge_idx];
+            let dest_node = if forward { cand_edge.end_node } else { cand_edge.start_node };
+
+            println!("      Edge {} {} -> node {} (angle: {:.3} rad = {:.1}°){}",
+                edge_idx, if forward { "fwd" } else { "bwd" }, dest_node,
+                angle, angle.to_degrees(),
+                if angle > best_angle { " <- BEST" } else { "" });
+
+            if angle > best_angle {
                 best_angle = angle;
                 best_edge = Some((edge_idx, forward));
             }
         }
 
         if best_edge.is_none() {
-            let incoming_edge_obj = &self.edges[incoming_edge];
-            let (inc_start, inc_end) = if incoming_forward {
-                (incoming_edge_obj.start_node, incoming_edge_obj.end_node)
-            } else {
-                (incoming_edge_obj.end_node, incoming_edge_obj.start_node)
-            };
-            println!("find_next_ccw_edge FAILED at node {}: {} candidates total, incoming {} -> {} (edge {} {}), found no valid next edge",
-                node_idx, candidates.len(), inc_start, inc_end, incoming_edge, if incoming_forward { "fwd" } else { "bwd" });
+            println!("    FAILED: No valid next edge found!");
         }
 
         best_edge

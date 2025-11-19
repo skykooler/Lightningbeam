@@ -71,10 +71,10 @@ impl Action for PaintBucketAction {
     fn execute(&mut self, document: &mut Document) {
         println!("=== PaintBucketAction::execute (Planar Graph Approach) ===");
 
-        // Step 1: Extract curves from stroked shapes only (not filled regions)
-        let all_curves = extract_curves_from_stroked_shapes(document, &self.layer_id);
+        // Step 1: Extract curves from all shapes (rectangles, ellipses, paths, etc.)
+        let all_curves = extract_curves_from_all_shapes(document, &self.layer_id);
 
-        println!("Extracted {} curves from stroked shapes", all_curves.len());
+        println!("Extracted {} curves from all shapes", all_curves.len());
 
         if all_curves.is_empty() {
             println!("No curves found, returning");
@@ -161,11 +161,11 @@ impl Action for PaintBucketAction {
     }
 }
 
-/// Extract curves from stroked shapes only (not filled regions)
+/// Extract curves from all shapes in the layer
 ///
-/// This filters out paint bucket filled shapes which have only fills, not strokes.
-/// Stroked shapes define boundaries for the planar graph.
-fn extract_curves_from_stroked_shapes(
+/// Includes rectangles, ellipses, paths, and even previous paint bucket fills.
+/// The planar graph builder will handle deduplication of overlapping edges.
+fn extract_curves_from_all_shapes(
     document: &Document,
     layer_id: &Uuid,
 ) -> Vec<CurveSegment> {
@@ -179,25 +179,26 @@ fn extract_curves_from_stroked_shapes(
 
     // Extract curves only from this vector layer
     if let AnyLayer::Vector(vector_layer) = layer {
+        println!("Extracting curves from {} objects in layer", vector_layer.objects.len());
         // Extract curves from each object (which applies transforms to shapes)
-        for object in &vector_layer.objects {
+        for (obj_idx, object) in vector_layer.objects.iter().enumerate() {
             // Find the shape for this object
             let shape = match vector_layer.shapes.iter().find(|s| s.id == object.shape_id) {
                 Some(s) => s,
                 None => continue,
             };
 
-            // Skip shapes without strokes (these are filled regions, not boundaries)
-            if shape.stroke_color.is_none() {
-                continue;
-            }
+            // Include all shapes - planar graph will handle deduplication
+            // (Rectangles, ellipses, paths, and even previous paint bucket fills)
 
             // Get the transform matrix from the object
             let transform_affine = object.transform.to_affine();
 
             let path = shape.path();
             let mut current_point = Point::ZERO;
+            let mut subpath_start = Point::ZERO;  // Track start of current subpath
             let mut segment_index = 0;
+            let mut curves_in_shape = 0;
 
             for element in path.elements() {
                 // Extract curve segment from path element
@@ -214,17 +215,41 @@ fn extract_curves_from_stroked_shapes(
 
                     all_curves.push(segment);
                     segment_index += 1;
+                    curves_in_shape += 1;
                 }
 
                 // Update current point for next iteration (keep in local space)
                 match element {
-                    vello::kurbo::PathEl::MoveTo(p) => current_point = *p,
+                    vello::kurbo::PathEl::MoveTo(p) => {
+                        current_point = *p;
+                        subpath_start = *p;  // Mark start of new subpath
+                    }
                     vello::kurbo::PathEl::LineTo(p) => current_point = *p,
                     vello::kurbo::PathEl::QuadTo(_, p) => current_point = *p,
                     vello::kurbo::PathEl::CurveTo(_, _, p) => current_point = *p,
-                    vello::kurbo::PathEl::ClosePath => {}
+                    vello::kurbo::PathEl::ClosePath => {
+                        // Create closing segment from current_point back to subpath_start
+                        if let Some(mut segment) = CurveSegment::from_path_element(
+                            shape.id.as_u128() as usize,
+                            segment_index,
+                            &vello::kurbo::PathEl::LineTo(subpath_start),
+                            current_point,
+                        ) {
+                            // Apply transform
+                            for control_point in &mut segment.control_points {
+                                *control_point = transform_affine * (*control_point);
+                            }
+
+                            all_curves.push(segment);
+                            segment_index += 1;
+                            curves_in_shape += 1;
+                        }
+                        current_point = subpath_start;  // ClosePath moves back to start
+                    }
                 }
             }
+
+            println!("  Object {}: Extracted {} curves from shape", obj_idx, curves_in_shape);
         }
     }
 
