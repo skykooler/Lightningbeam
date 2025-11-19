@@ -2932,8 +2932,37 @@ impl StagePane {
                     }
                     *shared.tool_state = ToolState::Idle;
                 }
-                ToolState::MarqueeSelecting { .. } => {
-                    // Just cancel marquee selection if released offscreen
+                ToolState::MarqueeSelecting { start, current } => {
+                    // Complete marquee selection (even if mouse is offscreen)
+                    // Get active layer
+                    if let Some(active_layer_id) = shared.active_layer_id {
+                        use lightningbeam_core::layer::AnyLayer;
+                        use lightningbeam_core::hit_test;
+                        use vello::kurbo::{Rect as KurboRect, Affine};
+
+                        if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
+                            // Create selection rectangle
+                            let min_x = start.x.min(current.x);
+                            let min_y = start.y.min(current.y);
+                            let max_x = start.x.max(current.x);
+                            let max_y = start.y.max(current.y);
+
+                            let selection_rect = KurboRect::new(min_x, min_y, max_x, max_y);
+
+                            // Hit test all objects in rectangle
+                            let hits = hit_test::hit_test_objects_in_rect(
+                                vector_layer,
+                                selection_rect,
+                                Affine::IDENTITY,
+                            );
+
+                            // Add to selection
+                            for obj_id in hits {
+                                shared.selection.add_object(obj_id);
+                            }
+                        }
+                    }
+
                     *shared.tool_state = ToolState::Idle;
                 }
                 _ => {}
