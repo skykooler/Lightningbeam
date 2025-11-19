@@ -2743,35 +2743,6 @@ impl PaneRenderer for StagePane {
             egui::FontId::proportional(14.0),
             egui::Color32::from_gray(200),
         );
-
-        // Render planar graph debug visualization
-        if let Ok(debug_graph_opt) = lightningbeam_core::planar_graph::DEBUG_GRAPH.lock() {
-            if let Some(ref graph) = *debug_graph_opt {
-                // Draw node labels
-                for (idx, node) in graph.nodes.iter().enumerate() {
-                    // Transform world coords to screen coords
-                    let screen_x = (node.position.x + self.pan_offset.x as f64) * self.zoom as f64 + rect.min.x as f64;
-                    let screen_y = (node.position.y + self.pan_offset.y as f64) * self.zoom as f64 + rect.min.y as f64;
-                    let screen_pos = egui::pos2(screen_x as f32, screen_y as f32);
-
-                    // Draw small circle at node
-                    ui.painter().circle_filled(
-                        screen_pos,
-                        4.0,
-                        egui::Color32::from_rgb(255, 100, 100),
-                    );
-
-                    // Draw node number label
-                    ui.painter().text(
-                        screen_pos + egui::vec2(8.0, -8.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!("{}", idx),
-                        egui::FontId::monospace(14.0),
-                        egui::Color32::from_rgb(0, 0, 0),
-                    );
-                }
-            }
-        }
     }
 
     fn name(&self) -> &str {

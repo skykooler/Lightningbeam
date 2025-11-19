@@ -69,7 +69,46 @@ impl PaintBucketAction {
 
 impl Action for PaintBucketAction {
     fn execute(&mut self, document: &mut Document) {
-        println!("=== PaintBucketAction::execute (Planar Graph Approach) ===");
+        println!("=== PaintBucketAction::execute ===");
+
+        // Optimization: Check if we're clicking on an existing shape first
+        // This is much faster than building a planar graph
+        if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer_mut(&self.layer_id) {
+            // Iterate through objects in reverse order (topmost first)
+            for object in vector_layer.objects.iter().rev() {
+                // Find the corresponding shape
+                if let Some(shape) = vector_layer.shapes.iter().find(|s| s.id == object.shape_id) {
+                    // Apply the object's transform to get the transformed path
+                    let transform_affine = object.transform.to_affine();
+
+                    // Transform the click point to shape's local coordinates (inverse transform)
+                    let inverse_transform = transform_affine.inverse();
+                    let local_point = inverse_transform * self.click_point;
+
+                    // Test if the local point is inside the shape using winding number
+                    use vello::kurbo::Shape as KurboShape;
+                    let winding = shape.path().winding(local_point);
+
+                    if winding != 0 {
+                        // Point is inside this shape! Just change its fill color
+                        println!("Clicked on existing shape, changing fill color");
+
+                        // Store the shape ID before the immutable borrow ends
+                        let shape_id = shape.id;
+
+                        // Find mutable reference to the shape and update its fill
+                        if let Some(shape_mut) = vector_layer.shapes.iter_mut().find(|s| s.id == shape_id) {
+                            shape_mut.fill_color = Some(self.fill_color);
+                            println!("Updated shape fill color");
+                        }
+
+                        return; // Done! No need to create a new shape
+                    }
+                }
+            }
+
+            println!("No existing shape at click point, creating new fill region");
+        }
 
         // Step 1: Extract curves from all shapes (rectangles, ellipses, paths, etc.)
         let all_curves = extract_curves_from_all_shapes(document, &self.layer_id);
@@ -85,40 +124,21 @@ impl Action for PaintBucketAction {
         println!("Building planar graph...");
         let graph = PlanarGraph::build(&all_curves);
 
-        // Store graph for debug visualization
-        if let Ok(mut debug_graph) = crate::planar_graph::DEBUG_GRAPH.lock() {
-            *debug_graph = Some(graph.clone());
-        }
-
-        // Step 3: Render debug visualization of planar graph
-        println!("Rendering planar graph debug visualization...");
-        let (nodes_shape, edges_shape) = graph.render_debug();
-        let nodes_object = Object::new(nodes_shape.id);
-        let edges_object = Object::new(edges_shape.id);
-
-        if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer_mut(&self.layer_id) {
-            vector_layer.add_shape_internal(edges_shape);
-            vector_layer.add_object_internal(edges_object);
-            vector_layer.add_shape_internal(nodes_shape);
-            vector_layer.add_object_internal(nodes_object);
-            println!("DEBUG: Added graph visualization (yellow=edges, red=nodes)");
-        }
-
-        // Step 4: Find all faces
-        println!("Finding faces in planar graph...");
-        let faces = graph.find_faces();
-
-        // Step 5: Find which face contains the click point
-        println!("Finding face containing click point {:?}...", self.click_point);
-        if let Some(face_idx) = graph.find_face_containing_point(self.click_point, &faces) {
-            println!("Found face {} containing click point!", face_idx);
+        // Step 3: Trace the face containing the click point (optimized - only traces one face)
+        println!("Tracing face from click point {:?}...", self.click_point);
+        if let Some(face) = graph.trace_face_from_point(self.click_point) {
+            println!("Successfully traced face containing click point!");
 
             // Build the face boundary using actual curve segments
-            let face = &faces[face_idx];
-            let face_path = graph.build_face_path(face);
+            let face_path = graph.build_face_path(&face);
+
+            println!("DEBUG: Creating face shape with fill color: r={}, g={}, b={}, a={}",
+                self.fill_color.r, self.fill_color.g, self.fill_color.b, self.fill_color.a);
 
             let face_shape = crate::shape::Shape::new(face_path)
                 .with_fill(self.fill_color); // Use the requested fill color
+
+            println!("DEBUG: Face shape created with fill_color: {:?}", face_shape.fill_color);
 
             let face_object = Object::new(face_shape.id);
 
@@ -127,9 +147,15 @@ impl Action for PaintBucketAction {
             self.created_object_id = Some(face_object.id);
 
             if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer_mut(&self.layer_id) {
+                let shape_id_for_debug = face_shape.id;
                 vector_layer.add_shape_internal(face_shape);
                 vector_layer.add_object_internal(face_object);
-                println!("DEBUG: Added filled shape for face {}", face_idx);
+                println!("DEBUG: Added filled shape");
+
+                // Verify the shape still has the fill color after being added
+                if let Some(added_shape) = vector_layer.shapes.iter().find(|s| s.id == shape_id_for_debug) {
+                    println!("DEBUG: After adding to layer, shape fill_color = {:?}", added_shape.fill_color);
+                }
             }
         } else {
             println!("Click point is not inside any face!");

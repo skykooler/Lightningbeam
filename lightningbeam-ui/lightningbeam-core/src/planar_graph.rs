@@ -10,13 +10,8 @@
 
 use crate::curve_intersections::{find_curve_intersections, find_self_intersections};
 use crate::curve_segment::CurveSegment;
-use crate::shape::{Shape, ShapeColor, StrokeStyle};
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use vello::kurbo::{BezPath, Circle, CubicBez, Point, Shape as KurboShape};
-
-/// Global debug storage for the last planar graph (for visualization)
-pub static DEBUG_GRAPH: Mutex<Option<PlanarGraph>> = Mutex::new(None);
+use vello::kurbo::{BezPath, CubicBez, Point};
 
 /// A node in the planar graph (intersection point or endpoint)
 #[derive(Debug, Clone)]
@@ -341,43 +336,6 @@ impl PlanarGraph {
 
             println!("After pruning: {} nodes, {} edges", self.nodes.len(), self.edges.len());
         }
-    }
-
-    /// Render debug visualization of the planar graph
-    ///
-    /// Returns two shapes: one for nodes (red circles) and one for edges (yellow lines)
-    pub fn render_debug(&self) -> (Shape, Shape) {
-        // Render nodes as red circles
-        let mut nodes_path = BezPath::new();
-        for node in &self.nodes {
-            let circle = Circle::new(node.position, 3.0);
-            nodes_path.extend(circle.to_path(0.1));
-        }
-        let nodes_shape = Shape::new(nodes_path).with_stroke(
-            ShapeColor::rgb(255, 0, 0),
-            StrokeStyle {
-                width: 1.0,
-                ..Default::default()
-            },
-        );
-
-        // Render edges as yellow straight lines
-        let mut edges_path = BezPath::new();
-        for edge in &self.edges {
-            let start_pos = self.nodes[edge.start_node].position;
-            let end_pos = self.nodes[edge.end_node].position;
-            edges_path.move_to(start_pos);
-            edges_path.line_to(end_pos);
-        }
-        let edges_shape = Shape::new(edges_path).with_stroke(
-            ShapeColor::rgb(255, 255, 0),
-            StrokeStyle {
-                width: 0.5,
-                ..Default::default()
-            },
-        );
-
-        (nodes_shape, edges_shape)
     }
 
     /// Find all faces in the planar graph
@@ -727,6 +685,161 @@ impl PlanarGraph {
 
         path.close_path();
         path
+    }
+
+    /// Find the closest edge to a given point
+    ///
+    /// Returns (edge_index, closest_point_on_edge, distance)
+    fn find_closest_edge_to_point(&self, point: Point) -> Option<(usize, Point, f64)> {
+        let mut best_edge = None;
+        let mut best_distance = f64::MAX;
+        let mut best_point = Point::ZERO;
+
+        for (edge_idx, edge) in self.edges.iter().enumerate() {
+            // Get the edge endpoints
+            let start_pos = self.nodes[edge.start_node].position;
+            let end_pos = self.nodes[edge.end_node].position;
+
+            // Compute closest point on line segment manually
+            // Vector from start to end
+            let dx = end_pos.x - start_pos.x;
+            let dy = end_pos.y - start_pos.y;
+
+            // Squared length of segment
+            let len_sq = dx * dx + dy * dy;
+
+            let closest = if len_sq < 1e-10 {
+                // Degenerate segment (start == end), closest point is start
+                start_pos
+            } else {
+                // Parameter t of closest point on line
+                let t = ((point.x - start_pos.x) * dx + (point.y - start_pos.y) * dy) / len_sq;
+
+                // Clamp t to [0, 1] to keep it on the segment
+                let t_clamped = t.max(0.0).min(1.0);
+
+                // Compute closest point
+                Point::new(
+                    start_pos.x + t_clamped * dx,
+                    start_pos.y + t_clamped * dy
+                )
+            };
+
+            let distance = (point - closest).hypot();
+
+            if distance < best_distance {
+                best_distance = distance;
+                best_point = closest;
+                best_edge = Some(edge_idx);
+            }
+        }
+
+        best_edge.map(|idx| (idx, best_point, best_distance))
+    }
+
+    /// Determine the starting node and direction for face traversal
+    ///
+    /// Uses cross product to determine which side of the edge the click point is on,
+    /// then picks the traversal direction that keeps the point on the "inside" of the face.
+    ///
+    /// Returns (starting_node, starting_edge, forward)
+    fn determine_face_traversal_start(&self, edge_idx: usize, click_point: Point) -> (usize, usize, bool) {
+        let edge = &self.edges[edge_idx];
+        let start_pos = self.nodes[edge.start_node].position;
+        let end_pos = self.nodes[edge.end_node].position;
+
+        // Vector along the edge (forward direction: start -> end)
+        let edge_vec = (end_pos.x - start_pos.x, end_pos.y - start_pos.y);
+
+        // Vector from edge start to click point
+        let to_point = (click_point.x - start_pos.x, click_point.y - start_pos.y);
+
+        // Cross product: positive if point is to the left of edge, negative if to the right
+        let cross = edge_vec.0 * to_point.1 - edge_vec.1 * to_point.0;
+
+        if cross > 0.0 {
+            // Point is to the left of the edge (when going start -> end)
+            // To keep the point on our right (inside the face), we should traverse start -> end
+            // This means starting from start_node and going forward
+            (edge.start_node, edge_idx, true)
+        } else {
+            // Point is to the right of the edge (when going start -> end)
+            // To keep the point on our right (inside the face), we should traverse end -> start
+            // This means starting from end_node and going backward
+            (edge.end_node, edge_idx, false)
+        }
+    }
+
+    /// Trace a single face from a click point
+    ///
+    /// This is an optimized version that only traces the one face containing the click point,
+    /// rather than finding all faces in the graph.
+    ///
+    /// Returns the face if successful, None if no valid face contains the click point
+    pub fn trace_face_from_point(&self, click_point: Point) -> Option<Face> {
+        println!("trace_face_from_point: Finding face containing {:?}", click_point);
+
+        // Step 1: Find closest edge to the click point
+        let (closest_edge_idx, closest_point, distance) = self.find_closest_edge_to_point(click_point)?;
+        println!("  Closest edge: {} at distance {:.2}, point: {:?}", closest_edge_idx, distance, closest_point);
+
+        // Step 2: Determine starting node and direction
+        let (start_node, start_edge, start_forward) = self.determine_face_traversal_start(closest_edge_idx, click_point);
+        println!("  Starting from node {}, edge {} {}", start_node, start_edge, if start_forward { "forward" } else { "backward" });
+
+        // Step 3: Trace the face using CCW traversal
+        let mut edge_sequence = Vec::new();
+        let mut visited_nodes = HashSet::new();
+        let mut current_edge = start_edge;
+        let mut current_forward = start_forward;
+
+        // Mark the starting node as visited
+        visited_nodes.insert(start_node);
+
+        loop {
+            // Add this edge to the sequence
+            edge_sequence.push((current_edge, current_forward));
+
+            // Get the end node of this half-edge
+            let edge = &self.edges[current_edge];
+            let end_node = if current_forward {
+                edge.end_node
+            } else {
+                edge.start_node
+            };
+
+            // Check if we've returned to the starting node - if so, we've completed the face!
+            if end_node == start_node && edge_sequence.len() >= 2 {
+                println!("  Completed face with {} edges", edge_sequence.len());
+                return Some(Face { edges: edge_sequence });
+            }
+
+            // Check if we've visited this end node before (not the start, so it's an error)
+            if visited_nodes.contains(&end_node) {
+                println!("  Error: Visited node {} twice before completing loop", end_node);
+                return None;
+            }
+
+            // Mark this node as visited
+            visited_nodes.insert(end_node);
+
+            // Find the next edge in counterclockwise order
+            let next = self.find_next_ccw_edge(current_edge, current_forward, end_node);
+
+            if let Some((next_edge, next_forward)) = next {
+                current_edge = next_edge;
+                current_forward = next_forward;
+            } else {
+                println!("  Dead end at node {}", end_node);
+                return None;
+            }
+
+            // Safety check to prevent infinite loops
+            if edge_sequence.len() > self.edges.len() {
+                println!("  Error: Potential infinite loop detected");
+                return None;
+            }
+        }
     }
 }
 
