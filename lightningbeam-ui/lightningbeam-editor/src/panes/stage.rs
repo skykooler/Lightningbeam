@@ -2079,6 +2079,7 @@ impl StagePane {
         pivot: vello::kurbo::Point,
         start_mouse: vello::kurbo::Point,
         current_mouse: vello::kurbo::Point,
+        original_bbox: vello::kurbo::Rect,
     ) {
         use lightningbeam_core::tool::{TransformMode, Axis};
 
@@ -2258,26 +2259,84 @@ impl StagePane {
             }
 
             TransformMode::Skew { axis, origin } => {
-                // Calculate skew amount based on parallel mouse movement (drag along edge)
-                // Convert mouse movement to skew angle in degrees
-                let skew_degrees = match axis {
+                // Calculate skew angle such that the edge follows the mouse cursor
+                let skew_radians = match axis {
                     Axis::Horizontal => {
-                        // Horizontal edge: drag horizontally to skew
-                        let delta_x = current_mouse.x - start_mouse.x;
-                        // Calculate skew angle based on movement
-                        delta_x / 2.0 // Sensitivity: 2 pixels = 1 degree
+                        // Determine which horizontal edge we're dragging
+                        let edge_y = if (origin.y - original_bbox.y0).abs() < 0.1 {
+                            original_bbox.y1 // Origin is top edge, so dragging bottom
+                        } else {
+                            original_bbox.y0 // Origin is bottom edge, so dragging top
+                        };
+                        let distance = edge_y - origin.y;
+                        if distance.abs() > 0.1 {
+                            // tan(skew) = horizontal_offset / vertical_distance
+                            let tan_skew = (current_mouse.x - origin.x) / distance;
+                            tan_skew.atan()
+                        } else {
+                            0.0
+                        }
                     }
                     Axis::Vertical => {
-                        // Vertical edge: drag vertically to skew
-                        let delta_y = current_mouse.y - start_mouse.y;
-                        delta_y / 2.0 // Sensitivity: 2 pixels = 1 degree
+                        // Determine which vertical edge we're dragging
+                        let edge_x = if (origin.x - original_bbox.x0).abs() < 0.1 {
+                            original_bbox.x1 // Origin is left edge, so dragging right
+                        } else {
+                            original_bbox.x0 // Origin is right edge, so dragging left
+                        };
+                        let distance = edge_x - origin.x;
+                        if distance.abs() > 0.1 {
+                            // tan(skew) = vertical_offset / horizontal_distance
+                            let tan_skew = (current_mouse.y - origin.y) / distance;
+                            tan_skew.atan()
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                let skew_degrees = skew_radians.to_degrees();
+
+                // Calculate selection center for group skew
+                let selection_center = match axis {
+                    Axis::Horizontal => {
+                        // For horizontal skew, use center Y
+                        original_bbox.center().y
+                    }
+                    Axis::Vertical => {
+                        // For vertical skew, use center X
+                        original_bbox.center().x
                     }
                 };
 
                 // Apply skew to all selected objects
+                let tan_skew = skew_degrees.to_radians().tan();
                 for (object_id, original_transform) in original_transforms {
                     vector_layer.modify_object_internal(object_id, |obj| {
-                        // Set skew based on axis
+                        // Calculate distance from selection center
+                        let distance_from_center = match axis {
+                            Axis::Horizontal => {
+                                // For horizontal skew, measure Y distance
+                                original_transform.y - selection_center
+                            }
+                            Axis::Vertical => {
+                                // For vertical skew, measure X distance
+                                original_transform.x - selection_center
+                            }
+                        };
+
+                        // Calculate translation to make group skew cohesive
+                        let (offset_x, offset_y) = match axis {
+                            Axis::Horizontal => {
+                                // Horizontal skew: translate X based on Y distance
+                                (distance_from_center * tan_skew, 0.0)
+                            }
+                            Axis::Vertical => {
+                                // Vertical skew: translate Y based on X distance
+                                (0.0, distance_from_center * tan_skew)
+                            }
+                        };
+
+                        // Apply skew to individual object
                         match axis {
                             Axis::Horizontal => {
                                 obj.transform.skew_x = original_transform.skew_x + skew_degrees;
@@ -2287,9 +2346,11 @@ impl StagePane {
                             }
                         }
 
+                        // Translate object for group-relative skew
+                        obj.transform.x = original_transform.x + offset_x;
+                        obj.transform.y = original_transform.y + offset_y;
+
                         // Keep other transform properties unchanged
-                        obj.transform.x = original_transform.x;
-                        obj.transform.y = original_transform.y;
                         obj.transform.rotation = original_transform.rotation;
                         obj.transform.scale_x = original_transform.scale_x;
                         obj.transform.scale_y = original_transform.scale_y;
@@ -2572,6 +2633,7 @@ impl StagePane {
                                 pivot,
                                 start_mouse,
                                 point,
+                                original_bbox,
                             );
                         }
                     }
@@ -3141,49 +3203,76 @@ impl StagePane {
                                     });
                                 }
                                 lightningbeam_core::tool::TransformMode::Skew { axis, origin } => {
-                                    // Transform mouse positions to local space to get skew amount
-                                    let original_transform = Affine::translate((original.x, original.y))
-                                        * Affine::rotate(original.rotation.to_radians())
-                                        * Affine::scale_non_uniform(original.scale_x, original.scale_y);
-                                    let inv_original_transform = original_transform.inverse();
+                                    // Get the object and shape's bounding box
+                                    if let Some(obj) = vector_layer.get_object(&object_id) {
+                                        if let Some(shape) = vector_layer.get_shape(&obj.shape_id) {
+                                        use kurbo::Shape as KurboShape;
+                                        let shape_bbox = shape.path().bounding_box();
 
-                                    // Get mouse movement in local space
-                                    let local_start = inv_original_transform * start_mouse;
-                                    let local_current = inv_original_transform * point;
+                                        // Transform origin to local space to determine which edge
+                                        let original_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let inv_original_transform = original_transform.inverse();
+                                        let local_origin = inv_original_transform * origin;
+                                        let local_current = inv_original_transform * point;
 
-                                    use lightningbeam_core::tool::Axis;
-                                    // Calculate skew angle in degrees based on mouse movement
-                                    let skew_degrees = match axis {
-                                        Axis::Horizontal => {
-                                            // Horizontal edge: drag horizontally (in local space) to skew
-                                            let delta_x = local_current.x - local_start.x;
-                                            delta_x / 2.0 // Sensitivity: 2 pixels = 1 degree
-                                        }
-                                        Axis::Vertical => {
-                                            // Vertical edge: drag vertically (in local space) to skew
-                                            let delta_y = local_current.y - local_start.y;
-                                            delta_y / 2.0 // Sensitivity: 2 pixels = 1 degree
-                                        }
-                                    };
-
-                                    vector_layer.modify_object_internal(&object_id, |obj| {
-                                        // Apply skew based on axis
-                                        match axis {
+                                        use lightningbeam_core::tool::Axis;
+                                        // Calculate skew angle such that edge follows mouse
+                                        let skew_radians = match axis {
                                             Axis::Horizontal => {
-                                                obj.transform.skew_x = original.skew_x + skew_degrees;
+                                                // Determine which horizontal edge we're dragging
+                                                let edge_y = if (local_origin.y - shape_bbox.y0).abs() < 0.1 {
+                                                    shape_bbox.y1 // Origin at top, dragging bottom
+                                                } else {
+                                                    shape_bbox.y0 // Origin at bottom, dragging top
+                                                };
+                                                let distance = edge_y - local_origin.y;
+                                                if distance.abs() > 0.1 {
+                                                    let tan_skew = (local_current.x - local_origin.x) / distance;
+                                                    tan_skew.atan()
+                                                } else {
+                                                    0.0
+                                                }
                                             }
                                             Axis::Vertical => {
-                                                obj.transform.skew_y = original.skew_y + skew_degrees;
+                                                // Determine which vertical edge we're dragging
+                                                let edge_x = if (local_origin.x - shape_bbox.x0).abs() < 0.1 {
+                                                    shape_bbox.x1 // Origin at left, dragging right
+                                                } else {
+                                                    shape_bbox.x0 // Origin at right, dragging left
+                                                };
+                                                let distance = edge_x - local_origin.x;
+                                                if distance.abs() > 0.1 {
+                                                    let tan_skew = (local_current.y - local_origin.y) / distance;
+                                                    tan_skew.atan()
+                                                } else {
+                                                    0.0
+                                                }
                                             }
-                                        }
+                                        };
+                                        let skew_degrees = skew_radians.to_degrees();
 
-                                        // Keep other transform properties unchanged
-                                        obj.transform.x = original.x;
-                                        obj.transform.y = original.y;
-                                        obj.transform.rotation = original.rotation;
-                                        obj.transform.scale_x = original.scale_x;
-                                        obj.transform.scale_y = original.scale_y;
-                                    });
+                                        vector_layer.modify_object_internal(&object_id, |obj| {
+                                            // Apply skew based on axis
+                                            match axis {
+                                                Axis::Horizontal => {
+                                                    obj.transform.skew_x = original.skew_x + skew_degrees;
+                                                }
+                                                Axis::Vertical => {
+                                                    obj.transform.skew_y = original.skew_y + skew_degrees;
+                                                }
+                                            }
+
+                                            // Keep other transform properties unchanged
+                                            obj.transform.x = original.x;
+                                            obj.transform.y = original.y;
+                                            obj.transform.rotation = original.rotation;
+                                            obj.transform.scale_x = original.scale_x;
+                                            obj.transform.scale_y = original.scale_y;
+                                        });
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
