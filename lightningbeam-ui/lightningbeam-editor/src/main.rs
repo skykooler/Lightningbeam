@@ -253,6 +253,7 @@ struct EditorApp {
     selected_tool: Tool, // Currently selected drawing tool
     fill_color: egui::Color32, // Fill color for drawing
     stroke_color: egui::Color32, // Stroke color for drawing
+    active_color_mode: panes::ColorMode, // Which color (fill/stroke) was last interacted with
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
     menu_system: Option<MenuSystem>, // Native menu system for event checking
     pending_view_action: Option<MenuAction>, // Pending view action (zoom, recenter) to be handled by hovered pane
@@ -311,6 +312,7 @@ impl EditorApp {
             selected_tool: Tool::Select, // Default tool
             fill_color: egui::Color32::from_rgb(100, 100, 255), // Default blue fill
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
+            active_color_mode: panes::ColorMode::default(), // Default to fill color
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
             pending_view_action: None,
@@ -637,6 +639,7 @@ impl eframe::App for EditorApp {
                 &mut self.selected_tool,
                 &mut self.fill_color,
                 &mut self.stroke_color,
+                &mut self.active_color_mode,
                 &mut self.pane_instances,
                 &Vec::new(), // Root path
                 &mut self.pending_view_action,
@@ -727,6 +730,7 @@ fn render_layout_node(
     selected_tool: &mut Tool,
     fill_color: &mut egui::Color32,
     stroke_color: &mut egui::Color32,
+    active_color_mode: &mut panes::ColorMode,
     pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
     pending_view_action: &mut Option<MenuAction>,
@@ -744,7 +748,7 @@ fn render_layout_node(
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, action_executor, selection, active_layer_id, tool_state, pending_actions, draw_simplify_mode, rdp_tolerance, schneider_max_error);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, active_color_mode, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, action_executor, selection, active_layer_id, tool_state, pending_actions, draw_simplify_mode, rdp_tolerance, schneider_max_error);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -782,6 +786,7 @@ fn render_layout_node(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pane_instances,
                 &left_path,
                 pending_view_action,
@@ -814,6 +819,7 @@ fn render_layout_node(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pane_instances,
                 &right_path,
                 pending_view_action,
@@ -938,6 +944,7 @@ fn render_layout_node(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pane_instances,
                 &top_path,
                 pending_view_action,
@@ -970,6 +977,7 @@ fn render_layout_node(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pane_instances,
                 &bottom_path,
                 pending_view_action,
@@ -1074,6 +1082,7 @@ fn render_pane(
     selected_tool: &mut Tool,
     fill_color: &mut egui::Color32,
     stroke_color: &mut egui::Color32,
+    active_color_mode: &mut panes::ColorMode,
     pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
     pending_view_action: &mut Option<MenuAction>,
@@ -1258,6 +1267,7 @@ fn render_pane(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pending_view_action,
                 fallback_pane_priority,
                 theme,
@@ -1301,6 +1311,7 @@ fn render_pane(
                 selected_tool,
                 fill_color,
                 stroke_color,
+                active_color_mode,
                 pending_view_action,
                 fallback_pane_priority,
                 theme,

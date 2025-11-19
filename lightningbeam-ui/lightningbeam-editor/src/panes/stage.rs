@@ -4,7 +4,7 @@
 
 use eframe::egui;
 use super::{NodePath, PaneRenderer, SharedPaneState};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use vello::kurbo::Shape;
 
 /// Shared Vello resources (created once, reused by all Stage panes)
@@ -163,7 +163,7 @@ impl InstanceVelloResources {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
@@ -205,6 +205,7 @@ struct VelloCallback {
     fill_color: egui::Color32, // Current fill color for previews
     stroke_color: egui::Color32, // Current stroke color for previews
     selected_tool: lightningbeam_core::tool::Tool, // Current tool for rendering mode-specific UI
+    eyedropper_request: Option<(egui::Pos2, super::ColorMode)>, // Pending eyedropper sample
 }
 
 impl VelloCallback {
@@ -221,8 +222,9 @@ impl VelloCallback {
         fill_color: egui::Color32,
         stroke_color: egui::Color32,
         selected_tool: lightningbeam_core::tool::Tool,
+        eyedropper_request: Option<(egui::Pos2, super::ColorMode)>,
     ) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, selected_tool }
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, selected_tool, eyedropper_request }
     }
 }
 
@@ -921,6 +923,93 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             }
         }
 
+        // Handle eyedropper pixel sampling if requested
+        if let Some((screen_pos, color_mode)) = self.eyedropper_request {
+            if let Some(texture) = &instance_resources.texture {
+                // Convert screen position to texture coordinates
+                let tex_x = ((screen_pos.x - self.rect.min.x).max(0.0).min(self.rect.width())) as u32;
+                let tex_y = ((screen_pos.y - self.rect.min.y).max(0.0).min(self.rect.height())) as u32;
+
+                // Clamp to texture bounds
+                if tex_x < width && tex_y < height {
+                    // Create a staging buffer to read back the pixel
+                    let bytes_per_pixel = 4; // RGBA8
+                    // Align bytes_per_row to 256 (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                    let bytes_per_row_alignment = 256u32;
+                    let bytes_per_row = bytes_per_row_alignment; // Single pixel, use minimum alignment
+                    let buffer_size = bytes_per_row as u64;
+
+                    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("eyedropper_staging_buffer"),
+                        size: buffer_size,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+
+                    // Create a command encoder for the copy operation
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("eyedropper_copy_encoder"),
+                    });
+
+                    // Copy the pixel from texture to staging buffer
+                    encoder.copy_texture_to_buffer(
+                        wgpu::ImageCopyTexture {
+                            texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d { x: tex_x, y: tex_y, z: 0 },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyBuffer {
+                            buffer: &staging_buffer,
+                            layout: wgpu::ImageDataLayout {
+                                offset: 0,
+                                bytes_per_row: Some(bytes_per_row),
+                                rows_per_image: Some(1),
+                            },
+                        },
+                        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    );
+
+                    // Submit the copy command
+                    queue.submit(Some(encoder.finish()));
+
+                    // Map the buffer and read the pixel (synchronous for simplicity)
+                    let buffer_slice = staging_buffer.slice(..);
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                        sender.send(result).ok();
+                    });
+
+                    // Poll the device to complete the mapping
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // Read the pixel data
+                    if receiver.recv().is_ok() {
+                        let data = buffer_slice.get_mapped_range();
+                        if data.len() >= 4 {
+                            let r = data[0];
+                            let g = data[1];
+                            let b = data[2];
+                            let a = data[3];
+
+                            let sampled_color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+
+                            // Store the result in the global eyedropper results
+                            if let Ok(mut results) = EYEDROPPER_RESULTS
+                                .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+                                .lock() {
+                                results.insert(self.instance_id, (sampled_color, color_mode));
+                            }
+                        }
+                    }
+
+                    // Unmap the buffer
+                    let _ = buffer_slice;
+                    staging_buffer.unmap();
+                }
+            }
+        }
+
         Vec::new()
     }
 
@@ -970,10 +1059,15 @@ pub struct StagePane {
     last_pan_pos: Option<egui::Pos2>,
     // Unique ID for this stage instance (for Vello resources)
     instance_id: u64,
+    // Eyedropper state
+    pending_eyedropper_sample: Option<(egui::Pos2, super::ColorMode)>,
 }
 
 // Global counter for generating unique instance IDs
 static INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// Global storage for eyedropper results (instance_id -> (color, color_mode))
+static EYEDROPPER_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, (egui::Color32, super::ColorMode)>>>> = OnceLock::new();
 
 impl StagePane {
     pub fn new() -> Self {
@@ -984,6 +1078,7 @@ impl StagePane {
             is_panning: false,
             last_pan_pos: None,
             instance_id,
+            pending_eyedropper_sample: None,
         }
     }
 
@@ -1613,6 +1708,19 @@ impl StagePane {
                     *shared.tool_state = ToolState::Idle;
                 }
             }
+        }
+    }
+
+    fn handle_eyedropper_tool(
+        &mut self,
+        _ui: &mut egui::Ui,
+        response: &egui::Response,
+        screen_pos: egui::Pos2,
+        shared: &mut SharedPaneState,
+    ) {
+        // On click, store the screen position and color mode for sampling
+        if response.clicked() {
+            self.pending_eyedropper_sample = Some((screen_pos, *shared.active_color_mode));
         }
     }
 
@@ -2880,6 +2988,9 @@ impl StagePane {
                 Tool::Polygon => {
                     self.handle_polygon_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
+                Tool::Eyedropper => {
+                    self.handle_eyedropper_tool(ui, &response, mouse_pos, shared);
+                }
                 _ => {
                     // Other tools not implemented yet
                 }
@@ -2951,6 +3062,25 @@ impl PaneRenderer for StagePane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
+        // Check for completed eyedropper samples from GPU readback and apply them
+        if let Ok(mut results) = EYEDROPPER_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock() {
+            if let Some((color, color_mode)) = results.remove(&self.instance_id) {
+                // Apply the sampled color to the appropriate mode
+                match color_mode {
+                    super::ColorMode::Fill => {
+                        *shared.fill_color = color;
+                    }
+                    super::ColorMode::Stroke => {
+                        *shared.stroke_color = color;
+                    }
+                }
+                // Clear the pending request since we've processed it
+                self.pending_eyedropper_sample = None;
+            }
+        }
+
         // Handle input for pan/zoom and tool controls
         self.handle_input(ui, rect, shared);
 
@@ -3040,6 +3170,7 @@ impl PaneRenderer for StagePane {
             *shared.fill_color,
             *shared.stroke_color,
             *shared.selected_tool,
+            self.pending_eyedropper_sample,
         );
 
         let cb = egui_wgpu::Callback::new_paint_callback(

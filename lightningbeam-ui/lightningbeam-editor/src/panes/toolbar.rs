@@ -156,7 +156,11 @@ impl PaneRenderer for ToolbarPane {
 
         // Show fill color picker popup
         egui::popup::popup_below_widget(ui, fill_button_id, &fill_response, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui: &mut egui::Ui| {
-            egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
+            let changed = egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
+            // Track that the user interacted with the fill color
+            if changed {
+                *shared.active_color_mode = super::ColorMode::Fill;
+            }
         });
 
         y += color_button_size + button_spacing;
@@ -188,7 +192,11 @@ impl PaneRenderer for ToolbarPane {
 
         // Show stroke color picker popup
         egui::popup::popup_below_widget(ui, stroke_button_id, &stroke_response, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui: &mut egui::Ui| {
-            egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
+            let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
+            // Track that the user interacted with the stroke color
+            if changed {
+                *shared.active_color_mode = super::ColorMode::Stroke;
+            }
         });
     }
 

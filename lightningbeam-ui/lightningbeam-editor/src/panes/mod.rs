@@ -27,6 +27,19 @@ pub mod piano_roll;
 pub mod node_editor;
 pub mod preset_browser;
 
+/// Which color mode is active for the eyedropper tool
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Fill,
+    Stroke,
+}
+
+impl Default for ColorMode {
+    fn default() -> Self {
+        ColorMode::Fill
+    }
+}
+
 /// Shared state that all panes can access
 pub struct SharedPaneState<'a> {
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
@@ -34,6 +47,8 @@ pub struct SharedPaneState<'a> {
     pub selected_tool: &'a mut Tool,
     pub fill_color: &'a mut egui::Color32,
     pub stroke_color: &'a mut egui::Color32,
+    /// Tracks which color (fill or stroke) was last interacted with, for eyedropper tool
+    pub active_color_mode: &'a mut ColorMode,
     pub pending_view_action: &'a mut Option<crate::menu::MenuAction>,
     /// Tracks the priority of the best fallback pane for view actions
     /// Lower number = higher priority. None = no fallback pane seen yet

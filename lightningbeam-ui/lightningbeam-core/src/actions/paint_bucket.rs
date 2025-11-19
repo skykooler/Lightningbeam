@@ -83,6 +83,15 @@ impl Action for PaintBucketAction {
                         continue;
                     }
 
+                    // Check if the path is closed - winding number only makes sense for closed paths
+                    use vello::kurbo::PathEl;
+                    let is_closed = shape.path().elements().iter().any(|el| matches!(el, PathEl::ClosePath));
+
+                    if !is_closed {
+                        // Skip non-closed paths - can't use winding number test
+                        continue;
+                    }
+
                     // Apply the object's transform to get the transformed path
                     let transform_affine = object.transform.to_affine();
 
