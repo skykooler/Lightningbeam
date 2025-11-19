@@ -1572,6 +1572,60 @@ impl StagePane {
         }
     }
 
+    fn handle_paint_bucket_tool(
+        &mut self,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::shape::ShapeColor;
+        use lightningbeam_core::actions::PaintBucketAction;
+        use vello::kurbo::Point;
+
+        // Check if we have an active vector layer
+        let active_layer_id = match shared.active_layer_id {
+            Some(id) => id,
+            None => {
+                println!("Paint bucket: No active layer");
+                return;
+            }
+        };
+
+        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+            Some(layer) => layer,
+            None => {
+                println!("Paint bucket: Layer not found");
+                return;
+            }
+        };
+
+        // Only work on VectorLayer
+        if !matches!(active_layer, AnyLayer::Vector(_)) {
+            println!("Paint bucket: Not a vector layer");
+            return;
+        }
+
+        // On click: execute paint bucket fill
+        if response.clicked() {
+            let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
+            let fill_color = ShapeColor::from_egui(*shared.fill_color);
+
+            println!("Paint bucket clicked at ({:.1}, {:.1})", click_point.x, click_point.y);
+
+            // Create and execute paint bucket action
+            let action = PaintBucketAction::new(
+                *active_layer_id,
+                click_point,
+                fill_color,
+                2.0, // tolerance - could be made configurable
+                lightningbeam_core::gap_handling::GapHandlingMode::BridgeSegment,
+            );
+            shared.action_executor.execute(Box::new(action));
+            println!("Paint bucket action executed");
+        }
+    }
+
     /// Apply transform preview to objects based on current mouse position
     fn apply_transform_preview(
         vector_layer: &mut lightningbeam_core::layer::VectorLayer,
@@ -2507,6 +2561,9 @@ impl StagePane {
                 }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
+                }
+                Tool::PaintBucket => {
+                    self.handle_paint_bucket_tool(&response, world_pos, shared);
                 }
                 _ => {
                     // Other tools not implemented yet
