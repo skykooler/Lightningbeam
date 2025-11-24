@@ -121,6 +121,10 @@ jobs:
           node-version: lts/*
           cache: 'pnpm' # Set this to npm, yarn or pnpm.
 
+      - name: Install FFmpeg build dependencies (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: brew install pkg-config nasm yasm
+
       - name: Install FFmpeg (macOS)
         if: startsWith(matrix.platform, 'macos')
         run: |
