@@ -44,7 +44,7 @@ jobs:
         include:
           - platform: 'macos-latest' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest' # for Intel based macs.
+          - platform: 'macos-13' # for Intel based macs (Intel runner).
             args: '--target x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
             args: ''
@@ -120,6 +120,36 @@ jobs:
         with:
           node-version: lts/*
           cache: 'pnpm' # Set this to npm, yarn or pnpm.
+
+      - name: Install FFmpeg (macOS)
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          brew install ffmpeg pkg-config
+          FFMPEG_PREFIX=$(brew --prefix ffmpeg)
+          echo "PKG_CONFIG_PATH=$FFMPEG_PREFIX/lib/pkgconfig" >> $GITHUB_ENV
+          echo "FFMPEG_DIR=$FFMPEG_PREFIX" >> $GITHUB_ENV
+          echo "CPATH=$FFMPEG_PREFIX/include" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$FFMPEG_PREFIX/lib" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$FFMPEG_PREFIX/lib" >> $GITHUB_ENV
+          echo "CPPFLAGS=-I$FFMPEG_PREFIX/include" >> $GITHUB_ENV
+
+      - name: Install FFmpeg (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config libasound2-dev
+
+      - name: Install FFmpeg (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $FFMPEG_VERSION = "7.1"
+          $FFMPEG_URL = "https://github.com/GyanD/codexffmpeg/releases/download/$FFMPEG_VERSION/ffmpeg-$FFMPEG_VERSION-full_build-shared.zip"
+          Invoke-WebRequest -Uri $FFMPEG_URL -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath C:\ffmpeg
+          $ffmpegDir = Get-ChildItem -Path C:\ffmpeg -Directory | Select-Object -First 1
+          echo "FFMPEG_DIR=$($ffmpegDir.FullName)" >> $env:GITHUB_ENV
+          echo "$($ffmpegDir.FullName)\bin" >> $env:GITHUB_PATH
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable # Set this to dtolnay/rust-toolchain@nightly
