@@ -44,7 +44,7 @@ jobs:
         include:
           - platform: 'macos-latest' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest' # for Intel based macs.
+          - platform: 'macos-13' # for Intel based macs (Intel runner).
             args: '--target x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
             args: ''
@@ -120,6 +120,22 @@ jobs:
         with:
           node-version: lts/*
           cache: 'pnpm' # Set this to npm, yarn or pnpm.
+
+      - name: Install FFmpeg (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: brew install ffmpeg pkg-config
+
+      - name: Install FFmpeg (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
+
+      - name: Install FFmpeg (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          choco install ffmpeg-full
+          echo "FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg-full\tools\ffmpeg" >> $env:GITHUB_ENV
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable # Set this to dtolnay/rust-toolchain@nightly
