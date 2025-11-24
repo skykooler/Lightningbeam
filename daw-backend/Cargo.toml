@@ -1,0 +1,43 @@
+[package]
+name = "daw-backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.15"
+symphonia = { version = "0.5", features = ["all"] }
+rtrb = "0.3"
+midly = "0.5"
+midir = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+ratatui = "0.26"
+crossterm = "0.27"
+rand = "0.8"
+base64 = "0.22"
+pathdiff = "0.2"
+
+# Audio export
+hound = "3.5"
+# TODO: Add MP3 support with a different crate
+# mp3lame-encoder API is too complex, need to find a better option
+
+# Node-based audio graph dependencies
+dasp_graph = "0.11"
+dasp_signal = "0.11"
+dasp_sample = "0.11"
+dasp_interpolate = "0.11"
+dasp_envelope = "0.11"
+dasp_ring_buffer = "0.11"
+dasp_peak = "0.11"
+dasp_rms = "0.11"
+petgraph = "0.6"
+serde_json = "1.0"
+
+[dev-dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev]
+opt-level = 1  # Faster compile times while still reasonable performance

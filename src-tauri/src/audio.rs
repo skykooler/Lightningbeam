@@ -1,0 +1,1700 @@
+use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
+use daw_backend::audio::pool::AudioPoolEntry;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::path::Path;
+use tauri::{Emitter, Manager};
+use tokio::sync::oneshot;
+
+#[derive(serde::Serialize)]
+pub struct AudioFileMetadata {
+    pub pool_index: usize,
+    pub duration: f64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub waveform: Vec<WaveformPeak>,
+    pub detected_bpm: Option<f32>,  // Detected BPM from audio analysis
+}
+
+#[derive(serde::Serialize)]
+pub struct MidiNote {
+    pub note: u8,           // MIDI note number (0-127)
+    pub start_time: f64,    // Start time in seconds
+    pub duration: f64,      // Note duration in seconds
+    pub velocity: u8,       // Note velocity (0-127)
+}
+
+#[derive(serde::Serialize)]
+pub struct MidiFileMetadata {
+    pub duration: f64,
+    pub notes: Vec<MidiNote>,
+}
+
+pub struct AudioState {
+    pub(crate) controller: Option<EngineController>,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u32,
+    pub(crate) buffer_size: u32,
+    pub(crate) next_track_id: u32,
+    pub(crate) next_pool_index: usize,
+    pub(crate) next_graph_node_id: u32,
+    // Track next node ID for each VoiceAllocator template (VoiceAllocator backend ID -> next template node ID)
+    pub(crate) template_node_counters: HashMap<u32, u32>,
+    // Pending preset save notifications (preset_path -> oneshot sender)
+    pub(crate) preset_save_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+}
+
+impl Default for AudioState {
+    fn default() -> Self {
+        Self {
+            controller: None,
+            sample_rate: 0,
+            channels: 0,
+            buffer_size: 256, // Default buffer size
+            next_track_id: 0,
+            next_pool_index: 0,
+            next_graph_node_id: 0,
+            preset_save_waiters: Arc::new(Mutex::new(HashMap::new())),
+            template_node_counters: HashMap::new(),
+        }
+    }
+}
+
+/// Implementation of EventEmitter that uses Tauri's event system
+struct TauriEventEmitter {
+    app_handle: tauri::AppHandle,
+    preset_save_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+}
+
+impl EventEmitter for TauriEventEmitter {
+    fn emit(&self, event: AudioEvent) {
+        // Handle preset save notifications
+        if let AudioEvent::GraphPresetSaved(_, ref preset_path) = event {
+            if let Ok(mut waiters) = self.preset_save_waiters.lock() {
+                if let Some(sender) = waiters.remove(preset_path) {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        // Serialize the event to the format expected by the frontend
+        let serialized_event = match event {
+            AudioEvent::PlaybackPosition(time) => {
+                SerializedAudioEvent::PlaybackPosition { time }
+            }
+            AudioEvent::RecordingStarted(track_id, clip_id) => {
+                SerializedAudioEvent::RecordingStarted { track_id, clip_id }
+            }
+            AudioEvent::RecordingProgress(clip_id, duration) => {
+                SerializedAudioEvent::RecordingProgress { clip_id, duration }
+            }
+            AudioEvent::RecordingStopped(clip_id, pool_index, waveform) => {
+                SerializedAudioEvent::RecordingStopped { clip_id, pool_index, waveform }
+            }
+            AudioEvent::RecordingError(message) => {
+                SerializedAudioEvent::RecordingError { message }
+            }
+            AudioEvent::NoteOn(note, velocity) => {
+                SerializedAudioEvent::NoteOn { note, velocity }
+            }
+            AudioEvent::NoteOff(note) => {
+                SerializedAudioEvent::NoteOff { note }
+            }
+            AudioEvent::GraphNodeAdded(track_id, node_id, node_type) => {
+                SerializedAudioEvent::GraphNodeAdded { track_id, node_id, node_type }
+            }
+            AudioEvent::GraphConnectionError(track_id, message) => {
+                SerializedAudioEvent::GraphConnectionError { track_id, message }
+            }
+            AudioEvent::GraphStateChanged(track_id) => {
+                SerializedAudioEvent::GraphStateChanged { track_id }
+            }
+            AudioEvent::GraphPresetLoaded(track_id) => {
+                SerializedAudioEvent::GraphPresetLoaded { track_id }
+            }
+            AudioEvent::GraphPresetSaved(track_id, preset_path) => {
+                SerializedAudioEvent::GraphPresetSaved { track_id, preset_path }
+            }
+            AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count) => {
+                SerializedAudioEvent::MidiRecordingStopped { track_id, clip_id, note_count }
+            }
+            AudioEvent::MidiRecordingProgress(track_id, clip_id, duration, notes) => {
+                SerializedAudioEvent::MidiRecordingProgress { track_id, clip_id, duration, notes }
+            }
+            _ => return, // Ignore other event types for now
+        };
+
+        // Emit the event via Tauri
+        if let Err(e) = self.app_handle.emit("audio-event", serialized_event) {
+            eprintln!("Failed to emit audio event: {}", e);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn audio_init(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    app_handle: tauri::AppHandle,
+    buffer_size: Option<u32>,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Update buffer size if provided (from config)
+    if let Some(size) = buffer_size {
+        audio_state.buffer_size = size;
+    }
+
+    // Check if already initialized - if so, reset DAW state (for hot-reload)
+    if let Some(controller) = &mut audio_state.controller {
+        controller.reset();
+        audio_state.next_track_id = 0;
+        audio_state.next_pool_index = 0;
+        audio_state.next_graph_node_id = 0;
+        return Ok(format!(
+            "Audio already initialized (DAW state reset): {} Hz, {} ch",
+            audio_state.sample_rate, audio_state.channels
+        ));
+    }
+
+    // Create TauriEventEmitter
+    let emitter = Arc::new(TauriEventEmitter {
+        app_handle,
+        preset_save_waiters: audio_state.preset_save_waiters.clone(),
+    });
+
+    // Get buffer size from audio_state (default is 256)
+    let buffer_size = audio_state.buffer_size;
+
+    // AudioSystem handles all cpal initialization internally
+    let system = AudioSystem::new(Some(emitter), buffer_size)?;
+
+    let info = format!(
+        "Audio initialized: {} Hz, {} ch, {} frame buffer",
+        system.sample_rate, system.channels, buffer_size
+    );
+
+    // Leak the stream to keep it alive for the lifetime of the app
+    // This is intentional - we want the audio stream to run until app closes
+    Box::leak(Box::new(system.stream));
+
+    audio_state.controller = Some(system.controller);
+    audio_state.sample_rate = system.sample_rate;
+    audio_state.channels = system.channels;
+    audio_state.buffer_size = buffer_size;
+    audio_state.next_track_id = 0;
+    audio_state.next_pool_index = 0;
+    audio_state.next_graph_node_id = 0;
+
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn audio_reset(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.reset();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_play(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.play();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_stop(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.stop();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn set_metronome_enabled(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    enabled: bool
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.set_metronome_enabled(enabled);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_test_beep(state: tauri::State<'_, Arc<Mutex<AudioState>>>) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Create MIDI track
+        controller.create_midi_track("Test".to_string());
+
+        // Note: Track ID will be 0 (first track created)
+        // Create MIDI clip and add notes for a C major chord arpeggio
+        controller.create_midi_clip(0, 0.0, 2.0);
+        controller.add_midi_note(0, 0, 0.0, 60, 100, 0.5); // C
+        controller.add_midi_note(0, 0, 0.5, 64, 100, 0.5); // E
+        controller.add_midi_note(0, 0, 1.0, 67, 100, 0.5); // G
+
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_seek(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    seconds: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.seek(seconds);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_set_track_parameter(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    parameter: String,
+    value: f32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        match parameter.as_str() {
+            "volume" => controller.set_track_volume(track_id, value),
+            "mute" => controller.set_track_mute(track_id, value > 0.5),
+            "solo" => controller.set_track_solo(track_id, value > 0.5),
+            _ => return Err(format!("Unknown parameter: {}", parameter)),
+        }
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_create_track(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    name: String,
+    track_type: String,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        match track_type.as_str() {
+            "audio" => controller.create_audio_track_sync(name),
+            "midi" => controller.create_midi_track_sync(name),
+            _ => return Err(format!("Unknown track type: {}", track_type)),
+        }
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_load_file(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    path: String,
+) -> Result<AudioFileMetadata, String> {
+    // Load the audio file from disk
+    let audio_file = daw_backend::io::AudioFile::load(&path)?;
+
+    // Calculate duration
+    let duration = audio_file.duration();
+
+    // Generate adaptive waveform peaks based on duration
+    // Aim for ~300 peaks per second, with min 1000 and max 20000
+    let target_peaks = ((duration * 300.0) as usize).clamp(1000, 20000);
+    let waveform = audio_file.generate_waveform_overview(target_peaks);
+    let sample_rate = audio_file.sample_rate;
+    let channels = audio_file.channels;
+
+    // Detect BPM from audio (mix to mono if stereo)
+    let mono_audio: Vec<f32> = if channels == 2 {
+        // Mix stereo to mono
+        audio_file.data.chunks(2)
+            .map(|chunk| (chunk[0] + chunk.get(1).unwrap_or(&0.0)) * 0.5)
+            .collect()
+    } else {
+        audio_file.data.clone()
+    };
+
+    let detected_bpm = daw_backend::audio::bpm_detector::detect_bpm_offline(&mono_audio, sample_rate);
+
+    // Get a lock on the audio state and send the loaded data to the audio thread
+    let mut audio_state = state.lock().unwrap();
+
+    // Get pool index and increment counter before borrowing controller
+    let pool_index = audio_state.next_pool_index;
+    audio_state.next_pool_index += 1;
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.add_audio_file(
+            path,
+            audio_file.data,
+            audio_file.channels,
+            audio_file.sample_rate,
+        );
+
+        Ok(AudioFileMetadata {
+            pool_index,
+            duration,
+            sample_rate,
+            channels,
+            waveform,
+            detected_bpm,
+        })
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_add_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    pool_index: usize,
+    start_time: f64,
+    duration: f64,
+    offset: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.add_audio_clip(track_id, pool_index, start_time, duration, offset);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_move_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    new_start_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.move_clip(track_id, clip_id, new_start_time);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_trim_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    new_start_time: f64,
+    new_duration: f64,
+    new_offset: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.trim_clip(track_id, clip_id, new_start_time, new_duration, new_offset);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_start_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    start_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.start_recording(track_id, start_time);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_stop_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.stop_recording();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_pause_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.pause_recording();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_resume_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.resume_recording();
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_start_midi_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    start_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.start_midi_recording(track_id, clip_id, start_time);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_stop_midi_recording(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+) -> Result<(), String> {
+    eprintln!("[TAURI] audio_stop_midi_recording called");
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        eprintln!("[TAURI] Calling controller.stop_midi_recording()");
+        controller.stop_midi_recording();
+        eprintln!("[TAURI] controller.stop_midi_recording() returned");
+        Ok(())
+    } else {
+        eprintln!("[TAURI] Audio not initialized!");
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_create_midi_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    start_time: f64,
+    duration: f64,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        let clip_id = controller.create_midi_clip(track_id, start_time, duration);
+        Ok(clip_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_add_midi_note(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    time_offset: f64,
+    note: u8,
+    velocity: u8,
+    duration: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.add_midi_note(track_id, clip_id, time_offset, note, velocity, duration);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_send_midi_note_on(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    note: u8,
+    velocity: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // For now, send to the first MIDI track (track_id 0)
+        // TODO: Make this configurable to select which track to send to
+        controller.send_midi_note_on(track_id, note, velocity);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_send_midi_note_off(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    note: u8,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_midi_note_off(track_id, note);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_set_active_midi_track(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: Option<u32>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.set_active_midi_track(track_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_load_midi_file(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    path: String,
+    start_time: f64,
+) -> Result<MidiFileMetadata, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Extract sample_rate before the mutable borrow
+    let sample_rate = audio_state.sample_rate;
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Load and parse the MIDI file
+        let mut clip = daw_backend::load_midi_file(&path, 0, sample_rate)?;
+
+        // Set the start time
+        clip.start_time = start_time;
+        let duration = clip.duration;
+
+        // Extract note data from MIDI events
+        let mut notes = Vec::new();
+        let mut active_notes: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
+
+        for event in &clip.events {
+            let time_seconds = event.timestamp as f64 / sample_rate as f64;
+
+            if event.is_note_on() {
+                // Store note on event (time and velocity)
+                active_notes.insert(event.data1, (time_seconds, event.data2));
+            } else if event.is_note_off() {
+                // Find matching note on and create a MidiNote
+                if let Some((start, velocity)) = active_notes.remove(&event.data1) {
+                    notes.push(MidiNote {
+                        note: event.data1,
+                        start_time: start,
+                        duration: time_seconds - start,
+                        velocity,
+                    });
+                }
+            }
+        }
+
+        // Add the loaded MIDI clip to the track
+        controller.add_loaded_midi_clip(track_id, clip);
+
+        Ok(MidiFileMetadata {
+            duration,
+            notes,
+        })
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_get_midi_clip_data(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+) -> Result<MidiFileMetadata, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Query the MIDI clip data from the backend
+        let clip_data = controller.query_midi_clip(track_id, clip_id)?;
+
+        // Convert MIDI events to MidiNote format
+        let mut notes = Vec::new();
+        let mut active_notes: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
+
+        for event in &clip_data.events {
+            // event.timestamp is already in seconds (sample-rate independent)
+            let time_seconds = event.timestamp;
+
+            if event.is_note_on() {
+                // Store note on event (time and velocity)
+                active_notes.insert(event.data1, (time_seconds, event.data2));
+            } else if event.is_note_off() {
+                // Find matching note on and create a MidiNote
+                if let Some((start, velocity)) = active_notes.remove(&event.data1) {
+                    notes.push(MidiNote {
+                        note: event.data1,
+                        start_time: start,
+                        duration: time_seconds - start,
+                        velocity,
+                    });
+                }
+            }
+        }
+
+        Ok(MidiFileMetadata {
+            duration: clip_data.duration,
+            notes,
+        })
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_update_midi_clip_notes(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    notes: Vec<(f64, u8, u8, f64)>,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.update_midi_clip_notes(track_id, clip_id, notes);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_get_pool_file_info(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    pool_index: usize,
+) -> Result<(f64, u32, u32), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.get_pool_file_info(pool_index)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_get_pool_waveform(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    pool_index: usize,
+    target_peaks: usize,
+) -> Result<Vec<daw_backend::io::WaveformPeak>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.get_pool_waveform(pool_index, target_peaks)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+// Node graph commands
+
+#[tauri::command]
+pub async fn graph_add_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_type: String,
+    x: f32,
+    y: f32,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Get the next node ID before adding (nodes are added sequentially)
+    let node_id = audio_state.next_graph_node_id;
+    audio_state.next_graph_node_id += 1;
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_add_node(track_id, node_type, x, y);
+        Ok(node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_add_node_to_template(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+    node_type: String,
+    x: f32,
+    y: f32,
+) -> Result<u32, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    // Get template-local node ID for this VoiceAllocator
+    let node_id = audio_state.template_node_counters
+        .entry(voice_allocator_id)
+        .or_insert(0);
+    let template_node_id = *node_id;
+    *node_id += 1;
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_add_node_to_template(track_id, voice_allocator_id, node_type, x, y);
+        Ok(template_node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_remove_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_remove_node(track_id, node_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_connect(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_connect(track_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_connect_in_template(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_connect_in_template(track_id, voice_allocator_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_disconnect(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    from_node: u32,
+    from_port: usize,
+    to_node: u32,
+    to_port: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_disconnect(track_id, from_node, from_port, to_node, to_port);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_set_parameter(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    param_id: u32,
+    value: f32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_set_parameter(track_id, node_id, param_id, value);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_set_output_node(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.graph_set_output_node(track_id, node_id);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+// Preset management commands
+
+#[tauri::command]
+pub async fn graph_save_preset(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_name: String,
+    description: String,
+    tags: Vec<String>,
+) -> Result<String, String> {
+    use std::fs;
+
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Get user presets directory
+        let app_data_dir = app_handle.path().app_data_dir()
+            .map_err(|e| format!("Failed to get app data directory: {}", e))?;
+        let presets_dir = app_data_dir.join("presets");
+
+        // Create presets directory if it doesn't exist
+        fs::create_dir_all(&presets_dir)
+            .map_err(|e| format!("Failed to create presets directory: {}", e))?;
+
+        // Create preset path
+        let filename = format!("{}.json", preset_name.replace(" ", "_"));
+        let preset_path = presets_dir.join(&filename);
+        let preset_path_str = preset_path.to_string_lossy().to_string();
+
+        // Send command to save preset
+        controller.graph_save_preset(
+            track_id,
+            preset_path_str.clone(),
+            preset_name,
+            description,
+            tags
+        );
+
+        Ok(preset_path_str)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_load_preset(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_path: String,
+) -> Result<(), String> {
+    use daw_backend::GraphPreset;
+
+    let mut audio_state = state.lock().unwrap();
+
+    // Load the preset JSON to count nodes
+    let json = std::fs::read_to_string(&preset_path)
+        .map_err(|e| format!("Failed to read preset file: {}", e))?;
+    let preset = GraphPreset::from_json(&json)
+        .map_err(|e| format!("Failed to parse preset: {}", e))?;
+
+    // Update the node ID counter to account for nodes in the preset
+    let node_count = preset.nodes.len() as u32;
+    audio_state.next_graph_node_id = node_count;
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Send command to load preset
+        controller.graph_load_preset(track_id, preset_path);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_load_preset_from_json(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_json: String,
+) -> Result<(), String> {
+    use daw_backend::GraphPreset;
+    use std::io::Write;
+
+    let mut audio_state = state.lock().unwrap();
+
+    // Parse the preset JSON to count nodes
+    let preset = GraphPreset::from_json(&preset_json)
+        .map_err(|e| format!("Failed to parse preset: {}", e))?;
+
+    // Update the node ID counter to account for nodes in the preset
+    let node_count = preset.nodes.len() as u32;
+    audio_state.next_graph_node_id = node_count;
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Write JSON to a temporary file
+        let temp_path = std::env::temp_dir().join(format!("lb_temp_preset_{}.json", track_id));
+        let mut file = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        file.write_all(preset_json.as_bytes())
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        drop(file);
+
+        // Load from the temp file
+        controller.graph_load_preset(track_id, temp_path.to_string_lossy().to_string());
+
+        // Clean up temp file (after a delay to allow loading)
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = std::fs::remove_file(temp_path);
+        });
+
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct PresetInfo {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    pub author: String,
+    pub tags: Vec<String>,
+    pub is_factory: bool,
+}
+
+#[tauri::command]
+pub async fn graph_list_presets(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<PresetInfo>, String> {
+    use daw_backend::GraphPreset;
+    use std::fs;
+
+    let mut presets = Vec::new();
+
+    // Recursively scan for JSON files in instruments directory
+    fn scan_presets_recursive(dir: &std::path::Path, presets: &mut Vec<PresetInfo>) {
+        eprintln!("Scanning directory: {:?}", dir);
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Recurse into subdirectories
+                    scan_presets_recursive(&path, presets);
+                } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    eprintln!("Found JSON file: {:?}", path);
+                    // Load JSON preset files
+                    match std::fs::read_to_string(&path) {
+                        Ok(json) => {
+                            match daw_backend::GraphPreset::from_json(&json) {
+                                Ok(preset) => {
+                                    eprintln!("  ✓ Loaded preset: {}", preset.metadata.name);
+                                    presets.push(PresetInfo {
+                                        name: preset.metadata.name,
+                                        path: path.to_string_lossy().to_string(),
+                                        description: preset.metadata.description,
+                                        author: preset.metadata.author,
+                                        tags: preset.metadata.tags,
+                                        is_factory: true,
+                                    });
+                                }
+                                Err(e) => eprintln!("  ✗ Failed to parse preset: {}", e),
+                            }
+                        }
+                        Err(e) => eprintln!("  ✗ Failed to read file: {}", e),
+                    }
+                }
+            }
+        }
+    }
+
+    // Try multiple locations for instruments
+    let mut instruments_found = false;
+
+    // 1. Try bundled resources (production)
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let instruments_dir = resource_dir.join("assets/instruments");
+        eprintln!("Trying bundled path: {:?} (exists: {})", instruments_dir, instruments_dir.exists());
+        if instruments_dir.exists() {
+            scan_presets_recursive(&instruments_dir, &mut presets);
+            instruments_found = true;
+        }
+    }
+
+    // 2. Fallback to dev location (development mode)
+    if !instruments_found {
+        // Try relative to current working directory (dev mode)
+        if let Ok(cwd) = std::env::current_dir() {
+            let dev_instruments = cwd.join("../src/assets/instruments");
+            eprintln!("Trying dev path: {:?} (exists: {})", dev_instruments, dev_instruments.exists());
+            if dev_instruments.exists() {
+                scan_presets_recursive(&dev_instruments, &mut presets);
+            }
+        }
+    }
+
+    eprintln!("Found {} factory presets", presets.len());
+
+    // Load user presets
+    if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
+        let user_presets_dir = app_data_dir.join("presets");
+        if user_presets_dir.exists() {
+            if let Ok(entries) = fs::read_dir(user_presets_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(path) = entry.path().canonicalize() {
+                        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                            if let Ok(json) = fs::read_to_string(&path) {
+                                if let Ok(preset) = GraphPreset::from_json(&json) {
+                                    presets.push(PresetInfo {
+                                        name: preset.metadata.name,
+                                        path: path.to_string_lossy().to_string(),
+                                        description: preset.metadata.description,
+                                        author: preset.metadata.author,
+                                        tags: preset.metadata.tags,
+                                        is_factory: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(presets)
+}
+
+#[tauri::command]
+pub async fn graph_delete_preset(
+    app_handle: tauri::AppHandle,
+    preset_path: String,
+) -> Result<(), String> {
+    use std::fs;
+    use std::path::Path;
+
+    let preset_path = Path::new(&preset_path);
+
+    // Check if preset is in the app's resource directory (factory content - cannot delete)
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        if let Ok(canonical_preset) = preset_path.canonicalize() {
+            if let Ok(canonical_resource) = resource_dir.canonicalize() {
+                if canonical_preset.starts_with(canonical_resource) {
+                    return Err("Cannot delete factory presets or bundled instruments".to_string());
+                }
+            }
+        }
+    }
+
+    // If we get here, it's a user preset - safe to delete
+    fs::remove_file(&preset_path)
+        .map_err(|e| format!("Failed to delete preset: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn graph_get_state(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Use synchronous query to get graph state
+        controller.query_graph_state(track_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn graph_get_template_state(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    voice_allocator_id: u32,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        // Use synchronous query to get template graph state
+        controller.query_template_state(track_id, voice_allocator_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn sampler_load_sample(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    file_path: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.sampler_load_sample(track_id, node_id, file_path);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_add_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    file_path: String,
+    key_min: u8,
+    key_max: u8,
+    root_key: u8,
+    velocity_min: u8,
+    velocity_max: u8,
+    loop_start: Option<usize>,
+    loop_end: Option<usize>,
+    loop_mode: Option<String>,
+) -> Result<(), String> {
+    use daw_backend::audio::node_graph::nodes::LoopMode;
+
+    let mut audio_state = state.lock().unwrap();
+
+    // Parse loop mode string to enum
+    let loop_mode_enum = match loop_mode.as_deref() {
+        Some("continuous") => LoopMode::Continuous,
+        Some("oneshot") | Some("one-shot") => LoopMode::OneShot,
+        _ => LoopMode::OneShot,  // Default
+    };
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_add_layer(
+            track_id,
+            node_id,
+            file_path,
+            key_min,
+            key_max,
+            root_key,
+            velocity_min,
+            velocity_max,
+            loop_start,
+            loop_end,
+            loop_mode_enum,
+        );
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct LayerInfo {
+    pub file_path: String,
+    pub key_min: u8,
+    pub key_max: u8,
+    pub root_key: u8,
+    pub velocity_min: u8,
+    pub velocity_max: u8,
+    pub loop_start: Option<usize>,
+    pub loop_end: Option<usize>,
+    pub loop_mode: String,
+}
+
+#[tauri::command]
+pub async fn multi_sampler_get_layers(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<Vec<LayerInfo>, String> {
+    eprintln!("[multi_sampler_get_layers] FUNCTION CALLED with track_id: {}, node_id: {}", track_id, node_id);
+    use daw_backend::GraphPreset;
+
+    // Set up oneshot channel to wait for preset save completion
+    let (tx, rx) = oneshot::channel();
+
+    let (temp_path_str, preset_save_waiters) = {
+        let mut audio_state = state.lock().unwrap();
+
+        // Clone preset_save_waiters first before any mutable borrows
+        let preset_save_waiters = audio_state.preset_save_waiters.clone();
+
+        if let Some(controller) = &mut audio_state.controller {
+            // Use preset serialization to get node data including layers
+            // Use timestamp to ensure unique temp file for each query to avoid conflicts
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let temp_path = std::env::temp_dir().join(format!("temp_layers_query_{}_{}_{}.json", track_id, node_id, timestamp));
+            let temp_path_str = temp_path.to_string_lossy().to_string();
+            eprintln!("[multi_sampler_get_layers] Temp path: {}", temp_path_str);
+
+            // Register waiter for this preset path
+            {
+                let mut waiters = preset_save_waiters.lock().unwrap();
+                waiters.insert(temp_path_str.clone(), tx);
+            }
+
+            controller.graph_save_preset(
+                track_id,
+                temp_path_str.clone(),
+                "temp".to_string(),
+                "".to_string(),
+                vec![]
+            );
+
+            (temp_path_str, preset_save_waiters)
+        } else {
+            eprintln!("[multi_sampler_get_layers] Audio not initialized");
+            return Err("Audio not initialized".to_string());
+        }
+    };
+
+    // Wait for preset save event with timeout
+    eprintln!("[multi_sampler_get_layers] Waiting for preset save completion...");
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        Ok(Ok(())) => {
+            eprintln!("[multi_sampler_get_layers] Preset save complete, reading file...");
+        }
+        Ok(Err(_)) => {
+            eprintln!("[multi_sampler_get_layers] Preset save channel closed");
+            return Ok(Vec::new());
+        }
+        Err(_) => {
+            eprintln!("[multi_sampler_get_layers] Timeout waiting for preset save");
+            // Clean up waiter
+            let mut waiters = preset_save_waiters.lock().unwrap();
+            waiters.remove(&temp_path_str);
+            return Ok(Vec::new());
+        }
+    }
+
+    let temp_path = std::path::PathBuf::from(&temp_path_str);
+    // Read the temp file and parse it
+    eprintln!("[multi_sampler_get_layers] Reading temp file...");
+    match std::fs::read_to_string(&temp_path) {
+            Ok(json) => {
+                // Clean up temp file
+                let _ = std::fs::remove_file(&temp_path);
+
+                // Parse the preset JSON
+                let preset: GraphPreset = match serde_json::from_str(&json) {
+                    Ok(p) => p,
+                    Err(e) => return Err(format!("Failed to parse preset: {}", e)),
+                };
+
+                // Find the node with the matching ID
+                eprintln!("[multi_sampler_get_layers] Looking for node_id: {}", node_id);
+                eprintln!("[multi_sampler_get_layers] Available nodes: {:?}", preset.nodes.iter().map(|n| (n.id, &n.node_type)).collect::<Vec<_>>());
+
+                if let Some(node) = preset.nodes.iter().find(|n| n.id == node_id) {
+                    eprintln!("[multi_sampler_get_layers] Found node: {} type: {}", node.id, node.node_type);
+                    if let Some(ref sample_data) = node.sample_data {
+                        eprintln!("[multi_sampler_get_layers] Node has sample_data");
+                        // Check if it's a MultiSampler
+                        if let daw_backend::audio::node_graph::preset::SampleData::MultiSampler { layers } = sample_data {
+                            eprintln!("[multi_sampler_get_layers] Returning {} layers", layers.len());
+                            return Ok(layers.iter().map(|layer| {
+                                let loop_mode_str = match layer.loop_mode {
+                                    daw_backend::audio::node_graph::nodes::LoopMode::Continuous => "continuous",
+                                    daw_backend::audio::node_graph::nodes::LoopMode::OneShot => "oneshot",
+                                };
+                                LayerInfo {
+                                    file_path: layer.file_path.clone().unwrap_or_default(),
+                                    key_min: layer.key_min,
+                                    key_max: layer.key_max,
+                                    root_key: layer.root_key,
+                                    velocity_min: layer.velocity_min,
+                                    velocity_max: layer.velocity_max,
+                                    loop_start: layer.loop_start,
+                                    loop_end: layer.loop_end,
+                                    loop_mode: loop_mode_str.to_string(),
+                                }
+                            }).collect());
+                        } else {
+                            eprintln!("[multi_sampler_get_layers] sample_data is not MultiSampler type");
+                        }
+                    } else {
+                        eprintln!("[multi_sampler_get_layers] Node has no sample_data");
+                    }
+                } else {
+                    eprintln!("[multi_sampler_get_layers] Node not found");
+                }
+
+                Ok(Vec::new())
+            }
+            Err(e) => {
+                eprintln!("[multi_sampler_get_layers] Failed to read temp file: {}", e);
+                Ok(Vec::new()) // Return empty list if file doesn't exist
+            }
+        }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_update_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    layer_index: usize,
+    key_min: u8,
+    key_max: u8,
+    root_key: u8,
+    velocity_min: u8,
+    velocity_max: u8,
+    loop_start: Option<usize>,
+    loop_end: Option<usize>,
+    loop_mode: Option<String>,
+) -> Result<(), String> {
+    use daw_backend::audio::node_graph::nodes::LoopMode;
+
+    let mut audio_state = state.lock().unwrap();
+
+    // Parse loop mode string to enum
+    let loop_mode_enum = match loop_mode.as_deref() {
+        Some("continuous") => LoopMode::Continuous,
+        Some("oneshot") | Some("one-shot") => LoopMode::OneShot,
+        _ => LoopMode::OneShot,  // Default
+    };
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_update_layer(
+            track_id,
+            node_id,
+            layer_index,
+            key_min,
+            key_max,
+            root_key,
+            velocity_min,
+            velocity_max,
+            loop_start,
+            loop_end,
+            loop_mode_enum,
+        );
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn multi_sampler_remove_layer(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    layer_index: usize,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.multi_sampler_remove_layer(track_id, node_id, layer_index);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn get_oscilloscope_data(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    sample_count: usize,
+) -> Result<daw_backend::OscilloscopeData, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_oscilloscope_data(track_id, node_id, sample_count)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+// ===== Automation Input Node Commands =====
+
+#[tauri::command]
+pub async fn automation_add_keyframe(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    keyframe: daw_backend::AutomationKeyframeData,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationAddKeyframe(
+            track_id,
+            node_id,
+            keyframe.time,
+            keyframe.value,
+            keyframe.interpolation,
+            keyframe.ease_out,
+            keyframe.ease_in,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_remove_keyframe(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationRemoveKeyframe(
+            track_id,
+            node_id,
+            time,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_get_keyframes(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<Vec<daw_backend::AutomationKeyframeData>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_automation_keyframes(track_id, node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_set_name(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+    name: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.send_command(daw_backend::Command::AutomationSetName(
+            track_id,
+            node_id,
+            name,
+        ));
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn automation_get_name(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    node_id: u32,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.query_automation_name(track_id, node_id)
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum SerializedAudioEvent {
+    PlaybackPosition { time: f64 },
+    RecordingStarted { track_id: u32, clip_id: u32 },
+    RecordingProgress { clip_id: u32, duration: f64 },
+    RecordingStopped { clip_id: u32, pool_index: usize, waveform: Vec<WaveformPeak> },
+    RecordingError { message: String },
+    MidiRecordingStopped { track_id: u32, clip_id: u32, note_count: usize },
+    MidiRecordingProgress { track_id: u32, clip_id: u32, duration: f64, notes: Vec<(f64, u8, u8, f64)> },
+    NoteOn { note: u8, velocity: u8 },
+    NoteOff { note: u8 },
+    GraphNodeAdded { track_id: u32, node_id: u32, node_type: String },
+    GraphConnectionError { track_id: u32, message: String },
+    GraphStateChanged { track_id: u32 },
+    GraphPresetLoaded { track_id: u32 },
+    GraphPresetSaved { track_id: u32, preset_path: String },
+}
+
+// audio_get_events command removed - events are now pushed via Tauri event system
+
+/// Serialize the audio pool for project saving
+#[tauri::command]
+pub async fn audio_serialize_pool(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    project_path: String,
+) -> Result<Vec<AudioPoolEntry>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.serialize_audio_pool(Path::new(&project_path))
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+/// Load audio pool from serialized entries
+/// Returns a list of pool indices that failed to load (missing files)
+#[tauri::command]
+pub async fn audio_load_pool(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    entries: Vec<AudioPoolEntry>,
+    project_path: String,
+) -> Result<Vec<usize>, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.load_audio_pool(entries, Path::new(&project_path))
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+/// Resolve a missing audio file by loading from a new path
+#[tauri::command]
+pub async fn audio_resolve_missing_file(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    pool_index: usize,
+    new_path: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.resolve_missing_audio_file(pool_index, Path::new(&new_path))
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+/// Serialize a track's effects/instrument graph to JSON
+#[tauri::command]
+pub async fn audio_serialize_track_graph(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    project_path: String,
+) -> Result<String, String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.serialize_track_graph(track_id, Path::new(&project_path))
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+/// Load a track's effects/instrument graph from JSON
+#[tauri::command]
+pub async fn audio_load_track_graph(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    preset_json: String,
+    project_path: String,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        controller.load_track_graph(track_id, &preset_json, Path::new(&project_path))
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_export(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    output_path: String,
+    format: String,
+    sample_rate: u32,
+    channels: u32,
+    bit_depth: u16,
+    mp3_bitrate: u32,
+    start_time: f64,
+    end_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Parse format
+        let export_format = match format.as_str() {
+            "wav" => daw_backend::audio::ExportFormat::Wav,
+            "flac" => daw_backend::audio::ExportFormat::Flac,
+            _ => return Err(format!("Unsupported format: {}", format)),
+        };
+
+        // Create export settings
+        let settings = daw_backend::audio::ExportSettings {
+            format: export_format,
+            sample_rate,
+            channels,
+            bit_depth,
+            mp3_bitrate,
+            start_time,
+            end_time,
+        };
+
+        // Call export through controller
+        controller.export_audio(&settings, &output_path)?;
+
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}

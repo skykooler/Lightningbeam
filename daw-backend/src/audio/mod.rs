@@ -1,0 +1,27 @@
+pub mod automation;
+pub mod bpm_detector;
+pub mod buffer_pool;
+pub mod clip;
+pub mod engine;
+pub mod export;
+pub mod metronome;
+pub mod midi;
+pub mod node_graph;
+pub mod pool;
+pub mod project;
+pub mod recording;
+pub mod sample_loader;
+pub mod track;
+
+pub use automation::{AutomationLane, AutomationLaneId, AutomationPoint, CurveType, ParameterId};
+pub use buffer_pool::BufferPool;
+pub use clip::{Clip, ClipId};
+pub use engine::{Engine, EngineController};
+pub use export::{export_audio, ExportFormat, ExportSettings};
+pub use metronome::Metronome;
+pub use midi::{MidiClip, MidiClipId, MidiEvent};
+pub use pool::{AudioFile as PoolAudioFile, AudioPool};
+pub use project::Project;
+pub use recording::RecordingState;
+pub use sample_loader::{load_audio_file, SampleData};
+pub use track::{AudioTrack, Metatrack, MidiTrack, RenderContext, Track, TrackId, TrackNode};

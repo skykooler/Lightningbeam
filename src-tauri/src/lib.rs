@@ -1,10 +1,14 @@
-use std::{path::PathBuf, sync::Mutex};
+use std::{path::PathBuf, sync::{Arc, Mutex}};
 
 use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
 use tracing_subscriber::EnvFilter;
 use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+
+mod audio;
+mod video;
+mod video_server;
 
 
 #[derive(Default)]
@@ -37,6 +41,47 @@ fn warn(msg: String) {
 #[tauri::command]
 fn error(msg: String) {
   error!("{}",msg);
+}
+
+#[tauri::command]
+async fn open_folder_dialog(app: AppHandle, title: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app.dialog()
+        .file()
+        .set_title(&title)
+        .blocking_pick_folder();
+
+    Ok(folder.map(|path| path.to_string()))
+}
+
+#[tauri::command]
+async fn read_folder_files(path: String) -> Result<Vec<String>, String> {
+    use std::fs;
+
+    let entries = fs::read_dir(&path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
+
+    let audio_extensions = vec!["wav", "aif", "aiff", "flac", "mp3", "ogg"];
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if audio_extensions.contains(&ext_str.as_str()) {
+                    if let Some(filename) = path.file_name() {
+                        files.push(filename.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(files)
 }
 
 use tauri::PhysicalSize;
@@ -125,8 +170,16 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pkg_name = env!("CARGO_PKG_NAME").to_string();
+    // Initialize video HTTP server
+    let video_server = video_server::VideoServer::new()
+        .expect("Failed to start video server");
+    eprintln!("[App] Video server started on port {}", video_server.port());
+
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
+      .manage(Arc::new(Mutex::new(audio::AudioState::default())))
+      .manage(Arc::new(Mutex::new(video::VideoState::default())))
+      .manage(Arc::new(Mutex::new(video_server)))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -188,7 +241,80 @@ pub fn run() {
       .plugin(tauri_plugin_dialog::init())
       .plugin(tauri_plugin_fs::init())
       .plugin(tauri_plugin_shell::init())
-      .invoke_handler(tauri::generate_handler![greet, trace, debug, info, warn, error, create_window])
+      .invoke_handler(tauri::generate_handler![
+        greet, trace, debug, info, warn, error, create_window,
+        audio::audio_init,
+        audio::audio_reset,
+        audio::audio_play,
+        audio::audio_stop,
+        audio::set_metronome_enabled,
+        audio::audio_seek,
+        audio::audio_test_beep,
+        audio::audio_set_track_parameter,
+        audio::audio_create_track,
+        audio::audio_load_file,
+        audio::audio_add_clip,
+        audio::audio_move_clip,
+        audio::audio_trim_clip,
+        audio::audio_start_recording,
+        audio::audio_stop_recording,
+        audio::audio_pause_recording,
+        audio::audio_resume_recording,
+        audio::audio_start_midi_recording,
+        audio::audio_stop_midi_recording,
+        audio::audio_create_midi_clip,
+        audio::audio_add_midi_note,
+        audio::audio_load_midi_file,
+        audio::audio_get_midi_clip_data,
+        audio::audio_update_midi_clip_notes,
+        audio::audio_send_midi_note_on,
+        audio::audio_send_midi_note_off,
+        audio::audio_set_active_midi_track,
+        audio::audio_get_pool_file_info,
+        audio::audio_get_pool_waveform,
+        audio::graph_add_node,
+        audio::graph_add_node_to_template,
+        audio::graph_remove_node,
+        audio::graph_connect,
+        audio::graph_connect_in_template,
+        audio::graph_disconnect,
+        audio::graph_set_parameter,
+        audio::graph_set_output_node,
+        audio::graph_save_preset,
+        audio::graph_load_preset,
+        audio::graph_load_preset_from_json,
+        audio::graph_list_presets,
+        audio::graph_delete_preset,
+        audio::graph_get_state,
+        audio::graph_get_template_state,
+        audio::sampler_load_sample,
+        audio::multi_sampler_add_layer,
+        audio::multi_sampler_get_layers,
+        audio::multi_sampler_update_layer,
+        audio::multi_sampler_remove_layer,
+        audio::get_oscilloscope_data,
+        audio::automation_add_keyframe,
+        audio::automation_remove_keyframe,
+        audio::automation_get_keyframes,
+        audio::automation_set_name,
+        audio::automation_get_name,
+        audio::audio_serialize_pool,
+        audio::audio_load_pool,
+        audio::audio_resolve_missing_file,
+        audio::audio_serialize_track_graph,
+        audio::audio_load_track_graph,
+        audio::audio_export,
+        video::video_load_file,
+        video::video_get_frame,
+        video::video_get_frames_batch,
+        video::video_set_cache_size,
+        open_folder_dialog,
+        read_folder_files,
+        video::video_get_pool_info,
+        video::video_ipc_benchmark,
+        video::video_get_transcode_status,
+        video::video_allow_asset,
+      ])
       // .manage(window_counter)
       .build(tauri::generate_context!())
       .expect("error while running tauri application")

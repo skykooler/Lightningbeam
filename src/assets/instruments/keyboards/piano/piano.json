@@ -1,0 +1,62 @@
+{
+  "metadata": {
+    "name": "Grand Piano",
+    "description": "Acoustic grand piano with multi-octave sampling",
+    "author": "Lightningbeam",
+    "version": 1,
+    "tags": ["piano", "keyboard", "acoustic"]
+  },
+  "midi_targets": [0],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [100.0, 100.0]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Piano Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.001,
+        "2": 0.25,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          { "file_path": "samples/C1.mp3", "key_min": 0, "key_max": 28, "root_key": 24, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A1.mp3", "key_min": 29, "key_max": 34, "root_key": 33, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C2.mp3", "key_min": 35, "key_max": 40, "root_key": 36, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A2.mp3", "key_min": 41, "key_max": 46, "root_key": 45, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C3.mp3", "key_min": 47, "key_max": 52, "root_key": 48, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A3.mp3", "key_min": 53, "key_max": 58, "root_key": 57, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C4.mp3", "key_min": 59, "key_max": 64, "root_key": 60, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A4.mp3", "key_min": 65, "key_max": 70, "root_key": 69, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C5.mp3", "key_min": 71, "key_max": 76, "root_key": 72, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A5.mp3", "key_min": 77, "key_max": 82, "root_key": 81, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C6.mp3", "key_min": 83, "key_max": 88, "root_key": 84, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A6.mp3", "key_min": 89, "key_max": 94, "root_key": 93, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/C7.mp3", "key_min": 95, "key_max": 100, "root_key": 96, "velocity_min": 0, "velocity_max": 127 },
+          { "file_path": "samples/A7.mp3", "key_min": 101, "key_max": 127, "root_key": 105, "velocity_min": 0, "velocity_max": 127 }
+        ]
+      },
+      "position": [350.0, 0.0]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [700.0, 100.0]
+    }
+  ],
+  "connections": [
+    { "from_node": 0, "from_port": 0, "to_node": 1, "to_port": 0 },
+    { "from_node": 1, "from_port": 0, "to_node": 2, "to_port": 0 }
+  ]
+}
