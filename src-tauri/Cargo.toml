@@ -38,7 +38,12 @@ rtrb = "0.3"
 tokio = { version = "1", features = ["sync", "time"] }
 
 # Video decoding
+[target.'cfg(target_os = "macos")'.dependencies]
+ffmpeg-next = { version = "7.0", features = ["build"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 ffmpeg-next = "7.0"
+
 lru = "0.12"
 image = { version = "0.24", default-features = false, features = ["jpeg"] }
 
