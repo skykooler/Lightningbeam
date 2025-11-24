@@ -10508,11 +10508,108 @@ function piano() {
 }
 
 function pianoRoll() {
+  // Create container for piano roll and properties panel
+  let container = document.createElement("div");
+  container.className = "piano-roll-container";
+  container.style.position = "relative";
+  container.style.width = "100%";
+  container.style.height = "100%";
+  container.style.display = "flex";
+
   let canvas = document.createElement("canvas");
   canvas.className = "piano-roll";
+  canvas.style.flex = "1";
+
+  // Create properties panel
+  let propertiesPanel = document.createElement("div");
+  propertiesPanel.className = "piano-roll-properties";
+  propertiesPanel.style.display = "flex";
+  propertiesPanel.style.gap = "15px";
+  propertiesPanel.style.padding = "10px";
+  propertiesPanel.style.backgroundColor = "#1e1e1e";
+  propertiesPanel.style.borderLeft = "1px solid #333";
+  propertiesPanel.style.alignItems = "center";
+  propertiesPanel.style.fontSize = "12px";
+  propertiesPanel.style.color = "#ccc";
+
+  // Create property sections
+  const createPropertySection = (label, isEditable = false) => {
+    const section = document.createElement("div");
+    section.style.display = "flex";
+    section.style.flexDirection = "column";
+    section.style.gap = "5px";
+
+    const labelEl = document.createElement("label");
+    labelEl.textContent = label;
+    labelEl.style.fontSize = "11px";
+    labelEl.style.color = "#999";
+    section.appendChild(labelEl);
+
+    if (isEditable) {
+      const inputContainer = document.createElement("div");
+      inputContainer.style.display = "flex";
+      inputContainer.style.gap = "5px";
+      inputContainer.style.alignItems = "center";
+
+      const input = document.createElement("input");
+      input.type = "number";
+      input.style.width = "45px";
+      input.style.padding = "3px";
+      input.style.backgroundColor = "#2a2a2a";
+      input.style.border = "1px solid #444";
+      input.style.borderRadius = "3px";
+      input.style.color = "#ccc";
+      input.style.fontSize = "12px";
+      input.style.boxSizing = "border-box";
+      inputContainer.appendChild(input);
+
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.style.flex = "1";
+      slider.style.minWidth = "80px";
+      inputContainer.appendChild(slider);
+
+      section.appendChild(inputContainer);
+      return { section, input, slider };
+    } else {
+      const value = document.createElement("span");
+      value.style.color = "#fff";
+      value.textContent = "-";
+      section.appendChild(value);
+      return { section, value };
+    }
+  };
+
+  const pitchSection = createPropertySection("Pitch");
+  const velocitySection = createPropertySection("Velocity", true);
+  const modulationSection = createPropertySection("Modulation", true);
+
+  // Configure velocity slider
+  velocitySection.input.min = 1;
+  velocitySection.input.max = 127;
+  velocitySection.slider.min = 1;
+  velocitySection.slider.max = 127;
+
+  // Configure modulation slider
+  modulationSection.input.min = 0;
+  modulationSection.input.max = 127;
+  modulationSection.slider.min = 0;
+  modulationSection.slider.max = 127;
+
+  propertiesPanel.appendChild(pitchSection.section);
+  propertiesPanel.appendChild(velocitySection.section);
+  propertiesPanel.appendChild(modulationSection.section);
+
+  container.appendChild(canvas);
+  container.appendChild(propertiesPanel);
 
   // Create the piano roll editor widget
   canvas.pianoRollEditor = new PianoRollEditor(0, 0, 0, 0);
+  canvas.pianoRollEditor.propertiesPanel = {
+    pitch: pitchSection.value,
+    velocity: { input: velocitySection.input, slider: velocitySection.slider },
+    modulation: { input: modulationSection.input, slider: modulationSection.slider }
+  };
 
   function updateCanvasSize() {
     const canvasStyles = window.getComputedStyle(canvas);
@@ -10533,6 +10630,30 @@ function pianoRoll() {
 
     // Render the piano roll
     canvas.pianoRollEditor.draw(ctx);
+
+    // Update properties panel layout based on aspect ratio
+    const containerWidth = container.offsetWidth;
+    const containerHeight = container.offsetHeight;
+    const isWide = containerWidth > containerHeight;
+
+    if (isWide) {
+      // Side layout
+      container.style.flexDirection = "row";
+      propertiesPanel.style.flexDirection = "column";
+      propertiesPanel.style.width = "240px";
+      propertiesPanel.style.height = "auto";
+      propertiesPanel.style.borderLeft = "1px solid #333";
+      propertiesPanel.style.borderTop = "none";
+      propertiesPanel.style.alignItems = "stretch";
+    } else {
+      // Bottom layout
+      container.style.flexDirection = "column";
+      propertiesPanel.style.flexDirection = "row";
+      propertiesPanel.style.width = "auto";
+      propertiesPanel.style.height = "60px";
+      propertiesPanel.style.borderLeft = "none";
+      propertiesPanel.style.borderTop = "1px solid #333";
+    }
   }
 
   // Store references in context for global access and playback updates
@@ -10543,7 +10664,7 @@ function pianoRoll() {
   const resizeObserver = new ResizeObserver(() => {
     updateCanvasSize();
   });
-  resizeObserver.observe(canvas);
+  resizeObserver.observe(container);
 
   // Pointer event handlers (works with mouse and touch)
   canvas.addEventListener("pointerdown", (e) => {
@@ -10585,7 +10706,69 @@ function pianoRoll() {
   // Prevent text selection
   canvas.addEventListener("selectstart", (e) => e.preventDefault());
 
-  return canvas;
+  // Add event handlers for velocity and modulation inputs/sliders
+  const syncInputSlider = (input, slider) => {
+    input.addEventListener("input", () => {
+      const value = parseInt(input.value);
+      if (!isNaN(value)) {
+        slider.value = value;
+      }
+    });
+    slider.addEventListener("input", () => {
+      input.value = slider.value;
+    });
+  };
+
+  syncInputSlider(velocitySection.input, velocitySection.slider);
+  syncInputSlider(modulationSection.input, modulationSection.slider);
+
+  // Handle property changes
+  const updateNoteProperty = (property, value) => {
+    const clipData = canvas.pianoRollEditor.getSelectedClip();
+    if (!clipData || !clipData.clip || !clipData.clip.notes) return;
+
+    if (canvas.pianoRollEditor.selectedNotes.size === 0) return;
+
+    for (const noteIndex of canvas.pianoRollEditor.selectedNotes) {
+      if (noteIndex >= 0 && noteIndex < clipData.clip.notes.length) {
+        const note = clipData.clip.notes[noteIndex];
+        if (property === "velocity") {
+          note.velocity = value;
+        } else if (property === "modulation") {
+          note.modulation = value;
+        }
+      }
+    }
+
+    canvas.pianoRollEditor.syncNotesToBackend(clipData);
+    updateCanvasSize();
+  };
+
+  velocitySection.input.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    if (!isNaN(value) && value >= 1 && value <= 127) {
+      updateNoteProperty("velocity", value);
+    }
+  });
+
+  velocitySection.slider.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    updateNoteProperty("velocity", value);
+  });
+
+  modulationSection.input.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    if (!isNaN(value) && value >= 0 && value <= 127) {
+      updateNoteProperty("modulation", value);
+    }
+  });
+
+  modulationSection.slider.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    updateNoteProperty("modulation", value);
+  });
+
+  return container;
 }
 
 function presetBrowser() {

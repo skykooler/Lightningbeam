@@ -1390,6 +1390,18 @@ class TimelineWindowV2 extends Widget {
             trackHeight - 10
           )
 
+          // Highlight selected MIDI clip
+          if (isMIDI && context.pianoRollEditor && clip.clipId === context.pianoRollEditor.selectedClipId) {
+            ctx.strokeStyle = '#6fdc6f'  // Bright green for selected MIDI clip
+            ctx.lineWidth = 2
+            ctx.strokeRect(
+              startX,
+              y + 5,
+              clipWidth,
+              trackHeight - 10
+            )
+          }
+
           // Draw clip name if there's enough space
           const minWidthForLabel = 40
           if (clipWidth >= minWidthForLabel) {
@@ -2265,6 +2277,16 @@ class TimelineWindowV2 extends Widget {
           // Select the track
           this.selectTrack(track)
 
+          // If this is a MIDI clip, update piano roll selection
+          if (audioClipInfo.isMIDI && context.pianoRollEditor) {
+            context.pianoRollEditor.selectedClipId = audioClipInfo.clip.clipId
+            context.pianoRollEditor.selectedNotes.clear()
+            // Trigger piano roll redraw to show the selection change
+            if (context.pianoRollRedraw) {
+              context.pianoRollRedraw()
+            }
+          }
+
           // Start audio clip dragging
           const clickTime = this.timelineState.pixelToTime(adjustedX)
           this.draggingAudioClip = {
@@ -2866,7 +2888,8 @@ class TimelineWindowV2 extends Widget {
         return {
           clip: clip,
           clipIndex: i,
-          audioTrack: audioTrack
+          audioTrack: audioTrack,
+          isMIDI: audioTrack.type === 'midi'
         }
       }
     }
@@ -5372,10 +5395,12 @@ class PianoRollEditor extends Widget {
 
     // Interaction state
     this.selectedNotes = new Set()  // Set of note indices
-    this.dragMode = null  // null, 'move', 'resize-left', 'resize-right', 'create'
+    this.selectedClipId = null  // Currently selected clip ID for editing
+    this.dragMode = null  // null, 'move', 'resize', 'create', 'select'
     this.dragStartX = 0
     this.dragStartY = 0
     this.creatingNote = null  // Temporary note being created
+    this.selectionRect = null  // Rectangle for multi-select {startX, startY, endX, endY}
     this.isDragging = false
 
     // Note preview playback state
@@ -5387,8 +5412,22 @@ class PianoRollEditor extends Widget {
     this.autoScrollEnabled = true  // Auto-scroll to follow playhead during playback
     this.lastPlayheadTime = 0  // Track last playhead position
 
+    // Properties panel state
+    this.propertyInputs = {}  // Will hold references to input elements
+
     // Start timer to check for note duration expiry
     this.checkNoteDurationTimer = setInterval(() => this.checkNoteDuration(), 50)
+  }
+
+  // Get the dimensions of the piano roll grid area (excluding keyboard)
+  // Note: Properties panel is outside the canvas now, so we don't subtract it here
+  getGridBounds() {
+    return {
+      left: this.keyboardWidth,
+      top: 0,
+      width: this.width - this.keyboardWidth,
+      height: this.height
+    }
   }
 
   checkNoteDuration() {
@@ -5410,21 +5449,44 @@ class PianoRollEditor extends Widget {
     }
   }
 
-  // Get the currently selected MIDI clip from context
-  getSelectedClip() {
+  // Get all MIDI clips and the selected clip from the first MIDI track
+  getMidiClipsData() {
     if (typeof context === 'undefined' || !context.activeObject || !context.activeObject.audioTracks) {
       return null
     }
 
-    // Find the first MIDI track with a selected clip
+    // Find the first MIDI track
     for (const track of context.activeObject.audioTracks) {
       if (track.type === 'midi' && track.clips && track.clips.length > 0) {
-        // For now, just return the first clip on the first MIDI track
-        // TODO: Add proper clip selection mechanism
-        return { clip: track.clips[0], trackId: track.audioTrackId }
+        // If no clip is selected, default to the first clip
+        if (this.selectedClipId === null && track.clips.length > 0) {
+          this.selectedClipId = track.clips[0].clipId
+        }
+
+        // Find the selected clip
+        let selectedClip = track.clips.find(c => c.clipId === this.selectedClipId)
+
+        // If selected clip not found (maybe deleted), select first clip
+        if (!selectedClip && track.clips.length > 0) {
+          selectedClip = track.clips[0]
+          this.selectedClipId = selectedClip.clipId
+        }
+
+        return {
+          allClips: track.clips,
+          selectedClip: selectedClip,
+          trackId: track.audioTrackId
+        }
       }
     }
     return null
+  }
+
+  // Get the currently selected MIDI clip (for backward compatibility)
+  getSelectedClip() {
+    const data = this.getMidiClipsData()
+    if (!data || !data.selectedClip) return null
+    return { clip: data.selectedClip, trackId: data.trackId }
   }
 
   hitTest(x, y) {
@@ -5453,7 +5515,22 @@ class PianoRollEditor extends Widget {
     return time * this.pixelsPerSecond - this.scrollX + this.keyboardWidth
   }
 
-  // Find note at screen position
+  // Find which clip contains the given time
+  findClipAtTime(time) {
+    const clipsData = this.getMidiClipsData()
+    if (!clipsData || !clipsData.allClips) return null
+
+    for (const clip of clipsData.allClips) {
+      const clipStart = clip.startTime || 0
+      const clipEnd = clipStart + (clip.duration || 0)
+      if (time >= clipStart && time <= clipEnd) {
+        return clip
+      }
+    }
+    return null
+  }
+
+  // Find note at screen position (only searches selected clip)
   findNoteAtPosition(x, y) {
     const clipData = this.getSelectedClip()
     if (!clipData || !clipData.clip.notes) {
@@ -5462,12 +5539,14 @@ class PianoRollEditor extends Widget {
 
     const note = this.screenToNote(y)
     const time = this.screenToTime(x)
+    const clipStartTime = clipData.clip.startTime || 0
+    const clipLocalTime = time - clipStartTime
 
     // Search in reverse order so we find top-most notes first
     for (let i = clipData.clip.notes.length - 1; i >= 0; i--) {
       const n = clipData.clip.notes[i]
       const noteMatches = Math.round(n.note) === Math.round(note)
-      const timeInRange = time >= n.start_time && time <= (n.start_time + n.duration)
+      const timeInRange = clipLocalTime >= n.start_time && clipLocalTime <= (n.start_time + n.duration)
 
       if (noteMatches && timeInRange) {
         return i
@@ -5485,7 +5564,9 @@ class PianoRollEditor extends Widget {
     }
 
     const note = clipData.clip.notes[noteIndex]
-    const noteEndX = this.timeToScreenX(note.start_time + note.duration)
+    const clipStartTime = clipData.clip.startTime || 0
+    const globalEndTime = clipStartTime + note.start_time + note.duration
+    const noteEndX = this.timeToScreenX(globalEndTime)
 
     // Consider clicking within 8 pixels of the right edge as resize
     return Math.abs(x - noteEndX) < 8
@@ -5507,6 +5588,22 @@ class PianoRollEditor extends Widget {
 
     const note = this.screenToNote(y)
     const time = this.screenToTime(x)
+
+    // Check if clicking on a different clip and switch to it
+    const clickedClip = this.findClipAtTime(time)
+    if (clickedClip && clickedClip.clipId !== this.selectedClipId) {
+      this.selectedClipId = clickedClip.clipId
+      this.selectedNotes.clear()
+      // Redraw to show the new selection
+      if (context.timelineWidget) {
+        context.timelineWidget.requestRedraw()
+      }
+      // Don't start dragging/editing on the same click that switches clips
+      this.isDragging = false
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+      return
+    }
 
     // Check if clicking on an existing note
     const noteIndex = this.findNoteAtPosition(x, y)
@@ -5547,31 +5644,49 @@ class PianoRollEditor extends Widget {
         }
       }
     } else {
-      // Clicking on empty space - start creating a new note
-      this.dragMode = 'create'
-      this.selectedNotes.clear()
+      // Clicking on empty space
+      const isShiftHeld = this.lastClickEvent?.shiftKey || false
 
-      // Create a temporary note for preview
-      const newNoteValue = Math.round(note)
-      this.creatingNote = {
-        note: newNoteValue,
-        start_time: time,
-        duration: 0.1, // Minimum duration
-        velocity: 100
-      }
+      if (isShiftHeld) {
+        // Shift+click: Start creating a new note
+        this.dragMode = 'create'
+        this.selectedNotes.clear()
 
-      // Play preview of the new note
-      const clipData = this.getSelectedClip()
-      if (clipData) {
-        this.playingNote = newNoteValue
-        this.playingNoteMaxDuration = null // No max duration for creating notes
-        this.playingNoteStartTime = Date.now()
+        // Create a temporary note for preview (store in clip-local time)
+        const clipData = this.getSelectedClip()
+        const clipStartTime = clipData?.clip?.startTime || 0
+        const clipLocalTime = time - clipStartTime
 
-        invoke('audio_send_midi_note_on', {
-          trackId: clipData.trackId,
+        const newNoteValue = Math.round(note)
+        this.creatingNote = {
           note: newNoteValue,
+          start_time: clipLocalTime,
+          duration: 0.1, // Minimum duration
           velocity: 100
-        })
+        }
+
+        // Play preview of the new note
+        if (clipData) {
+          this.playingNote = newNoteValue
+          this.playingNoteMaxDuration = null // No max duration for creating notes
+          this.playingNoteStartTime = Date.now()
+
+          invoke('audio_send_midi_note_on', {
+            trackId: clipData.trackId,
+            note: newNoteValue,
+            velocity: 100
+          })
+        }
+      } else {
+        // Regular click: Start selection rectangle
+        this.dragMode = 'select'
+        this.selectedNotes.clear()
+        this.selectionRect = {
+          startX: x,
+          startY: y,
+          endX: x,
+          endY: y
+        }
       }
     }
   }
@@ -5596,7 +5711,9 @@ class PianoRollEditor extends Widget {
       // Extend the note being created
       if (this.creatingNote) {
         const currentTime = this.screenToTime(x)
-        const duration = Math.max(0.1, currentTime - this.creatingNote.start_time)
+        const clipStartTime = clipData.clip.startTime || 0
+        const clipLocalTime = currentTime - clipStartTime
+        const duration = Math.max(0.1, clipLocalTime - this.creatingNote.start_time)
         this.creatingNote.duration = duration
       }
     } else if (this.dragMode === 'move') {
@@ -5658,13 +5775,24 @@ class PianoRollEditor extends Widget {
       if (this.resizingNoteIndex >= 0 && this.resizingNoteIndex < clipData.clip.notes.length) {
         const note = clipData.clip.notes[this.resizingNoteIndex]
         const currentTime = this.screenToTime(x)
-        const newDuration = Math.max(0.1, currentTime - note.start_time)
+        const clipStartTime = clipData.clip.startTime || 0
+        const clipLocalTime = currentTime - clipStartTime
+        const newDuration = Math.max(0.1, clipLocalTime - note.start_time)
         note.duration = newDuration
 
         // Trigger timeline redraw to show updated notes
         if (context.timelineWidget) {
           context.timelineWidget.requestRedraw()
         }
+      }
+    } else if (this.dragMode === 'select') {
+      // Update selection rectangle
+      if (this.selectionRect) {
+        this.selectionRect.endX = x
+        this.selectionRect.endY = y
+
+        // Update selected notes based on rectangle
+        this.updateSelectionFromRect(clipData)
       }
     }
   }
@@ -5674,6 +5802,31 @@ class PianoRollEditor extends Widget {
     this._globalEvents.delete("mouseup")
 
     const clipData = this.getSelectedClip()
+
+    // Check if this was a simple click (not a drag) on empty space
+    if (this.dragMode === 'select' && this.dragStartX !== undefined && this.dragStartY !== undefined) {
+      const dragDistance = Math.sqrt(
+        Math.pow(x - this.dragStartX, 2) + Math.pow(y - this.dragStartY, 2)
+      )
+
+      // If drag distance is minimal (< 5 pixels), treat it as a click to reposition playhead
+      if (dragDistance < 5) {
+        const time = this.screenToTime(x)
+
+        // Set playhead position
+        if (context.activeObject) {
+          context.activeObject.currentTime = time
+
+          // Request redraws to show the new playhead position
+          if (context.timelineWidget) {
+            context.timelineWidget.requestRedraw()
+          }
+          if (context.pianoRollRedraw) {
+            context.pianoRollRedraw()
+          }
+        }
+      }
+    }
 
     // Stop playing note
     if (this.playingNote !== null && clipData) {
@@ -5728,6 +5881,7 @@ class PianoRollEditor extends Widget {
     this.isDragging = false
     this.dragMode = null
     this.creatingNote = null
+    this.selectionRect = null
     this.resizingNoteIndex = -1
   }
 
@@ -5749,6 +5903,76 @@ class PianoRollEditor extends Widget {
 
     // Disable auto-scroll when user manually scrolls
     this.autoScrollEnabled = false
+  }
+
+  keydown(e) {
+    // Handle delete/backspace to delete selected notes
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (this.selectedNotes.size > 0) {
+        const clipData = this.getSelectedClip()
+        if (clipData && clipData.clip && clipData.clip.notes) {
+          // Convert set to sorted array in reverse order to avoid index shifting
+          const indicesToDelete = Array.from(this.selectedNotes).sort((a, b) => b - a)
+
+          for (const index of indicesToDelete) {
+            if (index >= 0 && index < clipData.clip.notes.length) {
+              clipData.clip.notes.splice(index, 1)
+            }
+          }
+
+          // Clear selection
+          this.selectedNotes.clear()
+
+          // Sync to backend
+          this.syncNotesToBackend(clipData)
+
+          // Trigger redraws
+          if (context.timelineWidget) {
+            context.timelineWidget.requestRedraw()
+          }
+          if (context.pianoRollRedraw) {
+            context.pianoRollRedraw()
+          }
+        }
+        e.preventDefault()
+      }
+    }
+  }
+
+  updateSelectionFromRect(clipData) {
+    if (!clipData || !clipData.clip || !clipData.clip.notes || !this.selectionRect) {
+      return
+    }
+
+    const clipStartTime = clipData.clip.startTime || 0
+    this.selectedNotes.clear()
+
+    // Get rectangle bounds
+    const minX = Math.min(this.selectionRect.startX, this.selectionRect.endX)
+    const maxX = Math.max(this.selectionRect.startX, this.selectionRect.endX)
+    const minY = Math.min(this.selectionRect.startY, this.selectionRect.endY)
+    const maxY = Math.max(this.selectionRect.startY, this.selectionRect.endY)
+
+    // Convert to time/note coordinates
+    const minTime = this.screenToTime(minX)
+    const maxTime = this.screenToTime(maxX)
+    const minNote = this.screenToNote(maxY)  // Note: Y is inverted
+    const maxNote = this.screenToNote(minY)
+
+    // Check each note
+    for (let i = 0; i < clipData.clip.notes.length; i++) {
+      const note = clipData.clip.notes[i]
+      const noteGlobalStart = clipStartTime + note.start_time
+      const noteGlobalEnd = noteGlobalStart + note.duration
+
+      // Check if note overlaps with selection rectangle
+      const timeOverlaps = noteGlobalEnd >= minTime && noteGlobalStart <= maxTime
+      const noteOverlaps = note.note >= minNote && note.note <= maxNote
+
+      if (timeOverlaps && noteOverlaps) {
+        this.selectedNotes.add(i)
+      }
+    }
   }
 
   syncNotesToBackend(clipData) {
@@ -5810,14 +6034,124 @@ class PianoRollEditor extends Widget {
     // Draw grid
     this.drawGrid(ctx, this.width, this.height)
 
-    // Draw notes if we have a selected clip
-    const selected = this.getSelectedClip()
-    if (selected && selected.clip && selected.clip.notes) {
-      this.drawNotes(ctx, this.width, this.height, selected.clip)
+    // Draw clip boundaries
+    const clipsData = this.getMidiClipsData()
+    if (clipsData && clipsData.allClips) {
+      this.drawClipBoundaries(ctx, this.width, this.height, clipsData.allClips)
+    }
+
+    // Draw notes for all clips in the track
+    if (clipsData && clipsData.allClips) {
+      // Draw non-selected clips first (at lower opacity)
+      for (const clip of clipsData.allClips) {
+        if (clip.clipId !== this.selectedClipId && clip.notes) {
+          this.drawNotes(ctx, this.width, this.height, clip, 0.3)
+        }
+      }
+
+      // Draw selected clip on top (at full opacity)
+      if (clipsData.selectedClip && clipsData.selectedClip.notes) {
+        this.drawNotes(ctx, this.width, this.height, clipsData.selectedClip, 1.0)
+      }
     }
 
     // Draw playhead
     this.drawPlayhead(ctx, this.width, this.height)
+
+    // Draw selection rectangle
+    if (this.selectionRect) {
+      this.drawSelectionRect(ctx, this.width, this.height)
+    }
+
+    // Update HTML properties panel
+    this.updatePropertiesPanel()
+  }
+
+  drawSelectionRect(ctx, width, height) {
+    if (!this.selectionRect) return
+
+    const gridLeft = this.keyboardWidth
+    const minX = Math.max(gridLeft, Math.min(this.selectionRect.startX, this.selectionRect.endX))
+    const maxX = Math.min(width, Math.max(this.selectionRect.startX, this.selectionRect.endX))
+    const minY = Math.max(0, Math.min(this.selectionRect.startY, this.selectionRect.endY))
+    const maxY = Math.min(height, Math.max(this.selectionRect.startY, this.selectionRect.endY))
+
+    ctx.save()
+
+    // Draw filled rectangle with transparency
+    ctx.fillStyle = 'rgba(100, 150, 255, 0.2)'
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY)
+
+    // Draw border
+    ctx.strokeStyle = 'rgba(100, 150, 255, 0.6)'
+    ctx.lineWidth = 1
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY)
+
+    ctx.restore()
+  }
+
+  updatePropertiesPanel() {
+    // Update the HTML properties panel with current selection
+    if (!this.propertiesPanel) return
+
+    const clipData = this.getSelectedClip()
+    const properties = this.getSelectedNoteProperties(clipData)
+
+    // Update pitch (display-only)
+    this.propertiesPanel.pitch.textContent = properties.pitch || '-'
+
+    // Update velocity
+    if (properties.velocity !== null) {
+      this.propertiesPanel.velocity.input.value = properties.velocity
+      this.propertiesPanel.velocity.slider.value = properties.velocity
+    } else {
+      this.propertiesPanel.velocity.input.value = ''
+      this.propertiesPanel.velocity.slider.value = 64 // Default middle value
+    }
+
+    // Update modulation
+    if (properties.modulation !== null) {
+      this.propertiesPanel.modulation.input.value = properties.modulation
+      this.propertiesPanel.modulation.slider.value = properties.modulation
+    } else {
+      this.propertiesPanel.modulation.input.value = ''
+      this.propertiesPanel.modulation.slider.value = 0
+    }
+  }
+
+  getSelectedNoteProperties(clipData) {
+    if (!clipData || !clipData.clip || !clipData.clip.notes || this.selectedNotes.size === 0) {
+      return { pitch: null, velocity: null, modulation: null }
+    }
+
+    const selectedIndices = Array.from(this.selectedNotes)
+    const notes = selectedIndices.map(i => clipData.clip.notes[i]).filter(n => n)
+
+    if (notes.length === 0) {
+      return { pitch: null, velocity: null, modulation: null }
+    }
+
+    // Check if all selected notes have the same values
+    const firstNote = notes[0]
+    const allSamePitch = notes.every(n => n.note === firstNote.note)
+    const allSameVelocity = notes.every(n => n.velocity === firstNote.velocity)
+    const allSameModulation = notes.every(n => (n.modulation || 0) === (firstNote.modulation || 0))
+
+    // Convert MIDI note number to name
+    const noteName = allSamePitch ? this.midiNoteToName(firstNote.note) : null
+
+    return {
+      pitch: noteName,
+      velocity: allSameVelocity ? firstNote.velocity : null,
+      modulation: allSameModulation ? (firstNote.modulation || 0) : null
+    }
+  }
+
+  midiNoteToName(midiNote) {
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+    const octave = Math.floor(midiNote / 12) - 1
+    const noteName = noteNames[midiNote % 12]
+    return `${noteName}${octave} (${midiNote})`
   }
 
   drawKeyboard(ctx, width, height) {
@@ -5850,17 +6184,19 @@ class PianoRollEditor extends Widget {
   }
 
   drawGrid(ctx, width, height) {
-    const gridLeft = this.keyboardWidth
-    const gridWidth = width - gridLeft
+    const gridBounds = this.getGridBounds()
+    const gridLeft = gridBounds.left
+    const gridWidth = gridBounds.width
+    const gridHeight = gridBounds.height
 
     ctx.save()
     ctx.beginPath()
-    ctx.rect(gridLeft, 0, gridWidth, height)
+    ctx.rect(gridLeft, 0, gridWidth, gridHeight)
     ctx.clip()
 
     // Draw background
     ctx.fillStyle = backgroundColor
-    ctx.fillRect(gridLeft, 0, gridWidth, height)
+    ctx.fillRect(gridLeft, 0, gridWidth, gridHeight)
 
     // Draw horizontal lines (note separators)
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)'
@@ -5910,7 +6246,7 @@ class PianoRollEditor extends Widget {
     ctx.restore()
   }
 
-  drawNotes(ctx, width, height, clip) {
+  drawClipBoundaries(ctx, width, height, clips) {
     const gridLeft = this.keyboardWidth
 
     ctx.save()
@@ -5918,13 +6254,73 @@ class PianoRollEditor extends Widget {
     ctx.rect(gridLeft, 0, width - gridLeft, height)
     ctx.clip()
 
-    // Draw existing notes
-    ctx.fillStyle = '#6fdc6f'
+    // Draw background highlight for selected clip
+    const selectedClip = clips.find(c => c.clipId === this.selectedClipId)
+    if (selectedClip) {
+      const clipStart = selectedClip.startTime || 0
+      const clipEnd = clipStart + (selectedClip.duration || 0)
+      const startX = Math.max(gridLeft, this.timeToScreenX(clipStart))
+      const endX = Math.min(width, this.timeToScreenX(clipEnd))
 
+      if (endX > startX) {
+        ctx.fillStyle = 'rgba(111, 220, 111, 0.05)'  // Very subtle green tint
+        ctx.fillRect(startX, 0, endX - startX, height)
+      }
+    }
+
+    // Draw start and end lines for each clip
+    for (const clip of clips) {
+      const clipStart = clip.startTime || 0
+      const clipEnd = clipStart + (clip.duration || 0)
+      const isSelected = clip.clipId === this.selectedClipId
+
+      // Use brighter green for selected clip, dimmer for others
+      const color = isSelected ? 'rgba(111, 220, 111, 0.5)' : 'rgba(111, 220, 111, 0.2)'
+      const lineWidth = isSelected ? 2 : 1
+
+      ctx.strokeStyle = color
+      ctx.lineWidth = lineWidth
+
+      // Draw clip start line
+      const startX = this.timeToScreenX(clipStart)
+      if (startX >= gridLeft && startX <= width) {
+        ctx.beginPath()
+        ctx.moveTo(startX, 0)
+        ctx.lineTo(startX, height)
+        ctx.stroke()
+      }
+
+      // Draw clip end line
+      const endX = this.timeToScreenX(clipEnd)
+      if (endX >= gridLeft && endX <= width) {
+        ctx.beginPath()
+        ctx.moveTo(endX, 0)
+        ctx.lineTo(endX, height)
+        ctx.stroke()
+      }
+    }
+
+    ctx.restore()
+  }
+
+  drawNotes(ctx, width, height, clip, opacity = 1.0) {
+    const gridLeft = this.keyboardWidth
+    const clipStartTime = clip.startTime || 0
+    const isSelectedClip = clip.clipId === this.selectedClipId
+
+    ctx.save()
+    ctx.globalAlpha = opacity
+    ctx.beginPath()
+    ctx.rect(gridLeft, 0, width - gridLeft, height)
+    ctx.clip()
+
+    // Draw existing notes at their global timeline position
     for (let i = 0; i < clip.notes.length; i++) {
       const note = clip.notes[i]
 
-      const x = this.timeToScreenX(note.start_time)
+      // Convert note time to global timeline time
+      const globalTime = clipStartTime + note.start_time
+      const x = this.timeToScreenX(globalTime)
       const y = this.noteToScreenY(note.note)
       const noteWidth = note.duration * this.pixelsPerSecond
       const noteHeight = this.noteHeight - 2
@@ -5934,11 +6330,24 @@ class PianoRollEditor extends Widget {
         continue
       }
 
-      // Highlight selected notes
-      if (this.selectedNotes.has(i)) {
-        ctx.fillStyle = '#8ffc8f'
+      // Calculate brightness based on velocity (1-127)
+      // Map velocity to brightness range: 0.35 (min) to 1.0 (max)
+      const velocity = note.velocity || 100
+      const brightness = 0.35 + (velocity / 127) * 0.65
+
+      // Highlight selected notes (only for selected clip)
+      if (isSelectedClip && this.selectedNotes.has(i)) {
+        // Selected note: brighter green with velocity-based brightness
+        const r = Math.round(143 * brightness)
+        const g = Math.round(252 * brightness)
+        const b = Math.round(143 * brightness)
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
       } else {
-        ctx.fillStyle = '#6fdc6f'
+        // Normal note: velocity-based brightness
+        const r = Math.round(111 * brightness)
+        const g = Math.round(220 * brightness)
+        const b = Math.round(111 * brightness)
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
       }
 
       ctx.fillRect(x, y, noteWidth, noteHeight)
@@ -5948,9 +6357,11 @@ class PianoRollEditor extends Widget {
       ctx.strokeRect(x, y, noteWidth, noteHeight)
     }
 
-    // Draw note being created
-    if (this.creatingNote) {
-      const x = this.timeToScreenX(this.creatingNote.start_time)
+    // Draw note being created (only for selected clip)
+    if (this.creatingNote && isSelectedClip) {
+      // Note being created is in clip-local time, convert to global
+      const globalTime = clipStartTime + this.creatingNote.start_time
+      const x = this.timeToScreenX(globalTime)
       const y = this.noteToScreenY(this.creatingNote.note)
       const noteWidth = this.creatingNote.duration * this.pixelsPerSecond
       const noteHeight = this.noteHeight - 2
