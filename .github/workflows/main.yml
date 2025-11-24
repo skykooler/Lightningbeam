@@ -122,20 +122,29 @@ jobs:
           cache: 'pnpm' # Set this to npm, yarn or pnpm.
 
       - name: Install FFmpeg (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: brew install ffmpeg pkg-config
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          brew install ffmpeg pkg-config
+          echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "FFMPEG_DIR=$(brew --prefix ffmpeg)" >> $GITHUB_ENV
 
       - name: Install FFmpeg (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config
+          sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev pkg-config libasound2-dev
 
       - name: Install FFmpeg (Windows)
         if: matrix.platform == 'windows-latest'
+        shell: pwsh
         run: |
-          choco install ffmpeg-full
-          echo "FFMPEG_DIR=C:\ProgramData\chocolatey\lib\ffmpeg-full\tools\ffmpeg" >> $env:GITHUB_ENV
+          $FFMPEG_VERSION = "7.1"
+          $FFMPEG_URL = "https://github.com/GyanD/codexffmpeg/releases/download/$FFMPEG_VERSION/ffmpeg-$FFMPEG_VERSION-full_build-shared.zip"
+          Invoke-WebRequest -Uri $FFMPEG_URL -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath C:\ffmpeg
+          $ffmpegDir = Get-ChildItem -Path C:\ffmpeg -Directory | Select-Object -First 1
+          echo "FFMPEG_DIR=$($ffmpegDir.FullName)" >> $env:GITHUB_ENV
+          echo "$($ffmpegDir.FullName)\bin" >> $env:GITHUB_PATH
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable # Set this to dtolnay/rust-toolchain@nightly
