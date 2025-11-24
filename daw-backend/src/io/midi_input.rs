@@ -146,18 +146,9 @@ impl MidiInputManager {
                         connection,
                     });
                     println!("MIDI: Connected to: {}", port_name);
-
-                    // Need to recreate MidiInput for next iteration
-                    let _midi_in = MidiInput::new("Lightningbeam")
-                        .map_err(|e| format!("Failed to recreate MIDI input: {}", e))?;
-                    midi_in = _midi_in;
                 }
                 Err(e) => {
                     eprintln!("MIDI: Failed to connect to {}: {}", port_name, e);
-                    // Recreate MidiInput to continue with other ports
-                    let _midi_in = MidiInput::new("Lightningbeam")
-                        .map_err(|e| format!("Failed to recreate MIDI input: {}", e))?;
-                    midi_in = _midi_in;
                 }
             }
         }
