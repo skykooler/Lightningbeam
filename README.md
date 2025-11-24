@@ -5,7 +5,9 @@ A free and open-source 2D multimedia editor combining vector animation, audio pr
 ## Screenshots
 
 ![Animation View](screenshots/animation.png)
+
 ![Music Editing View](screenshots/music.png)
+
 ![Video Editing View](screenshots/video.png)
 
 ## Current Features
@@ -28,7 +30,7 @@ A free and open-source 2D multimedia editor combining vector animation, audio pr
 - **Frontend:** Vanilla JavaScript
 - **Backend:** Rust (Tauri framework)
 - **Audio:** cpal + dasp for audio processing
-- **Video:** FFmpeg for decode
+- **Video:** FFmpeg for encode/decode
 
 ## Project Status
 

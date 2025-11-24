@@ -1619,6 +1619,14 @@ impl Engine {
                     None => QueryResponse::PoolFileInfo(Err(format!("Pool index {} not found", pool_index))),
                 }
             }
+            Query::ExportAudio(settings, output_path) => {
+                // Perform export directly - this will block the audio thread but that's okay
+                // since we're exporting and not playing back anyway
+                match crate::audio::export_audio(&mut self.project, &self.audio_pool, &settings, &output_path) {
+                    Ok(()) => QueryResponse::AudioExported(Ok(())),
+                    Err(e) => QueryResponse::AudioExported(Err(e)),
+                }
+            }
         };
 
         // Send response back
@@ -2555,5 +2563,26 @@ impl EngineController {
         }
 
         Err("Query timeout".to_string())
+    }
+
+    /// Export audio to a file
+    pub fn export_audio<P: AsRef<std::path::Path>>(&mut self, settings: &crate::audio::ExportSettings, output_path: P) -> Result<(), String> {
+        // Send export query
+        if let Err(_) = self.query_tx.push(Query::ExportAudio(settings.clone(), output_path.as_ref().to_path_buf())) {
+            return Err("Failed to send export query - queue full".to_string());
+        }
+
+        // Wait for response (with longer timeout since export can take a while)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(300); // 5 minute timeout for export
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AudioExported(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        Err("Export timeout".to_string())
     }
 }

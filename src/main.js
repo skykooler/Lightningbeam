@@ -3212,6 +3212,124 @@ async function render() {
   document.querySelector("body").style.cursor = "default";
 }
 
+async function exportAudio() {
+  // Get the project duration from context
+  const duration = context.activeObject.duration || 60;
+
+  // Show a simple dialog to get export settings
+  const dialog = document.createElement('div');
+  dialog.style.cssText = `
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-color, #2a2a2a);
+    border: 1px solid var(--border-color, #555);
+    padding: 20px;
+    border-radius: 8px;
+    z-index: 10000;
+    color: var(--text-color, #eee);
+    min-width: 400px;
+  `;
+
+  dialog.innerHTML = `
+    <style>
+      #export-format option,
+      #export-sample-rate option,
+      #export-bit-depth option {
+        background: #333 !important;
+        color: #eee !important;
+      }
+    </style>
+    <h2 style="margin-top: 0;">Export Audio</h2>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Format:</label>
+      <select id="export-format" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="wav">WAV</option>
+        <option value="flac">FLAC</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Sample Rate:</label>
+      <select id="export-sample-rate" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="44100">44100 Hz</option>
+        <option value="48000" selected>48000 Hz</option>
+        <option value="96000">96000 Hz</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Bit Depth:</label>
+      <select id="export-bit-depth" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="16">16-bit</option>
+        <option value="24" selected>24-bit</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">End Time (seconds):</label>
+      <input type="number" id="export-end-time" value="${duration.toFixed(2)}" min="0.1" step="0.1" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+    </div>
+    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+      <button id="export-cancel" style="padding: 8px 16px; background: var(--button-bg, #444); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px; cursor: pointer;">Cancel</button>
+      <button id="export-ok" style="padding: 8px 16px; background: var(--primary-color, #0078d7); color: white; border: none; border-radius: 4px; cursor: pointer;">Export</button>
+    </div>
+  `;
+
+  document.body.appendChild(dialog);
+
+  return new Promise((resolve) => {
+    dialog.querySelector('#export-cancel').addEventListener('click', () => {
+      document.body.removeChild(dialog);
+      resolve(null);
+    });
+
+    dialog.querySelector('#export-ok').addEventListener('click', async () => {
+      const format = dialog.querySelector('#export-format').value;
+      const sampleRate = parseInt(dialog.querySelector('#export-sample-rate').value);
+      const bitDepth = parseInt(dialog.querySelector('#export-bit-depth').value);
+      const endTime = parseFloat(dialog.querySelector('#export-end-time').value);
+
+      document.body.removeChild(dialog);
+
+      // Show file save dialog
+      const path = await saveFileDialog({
+        filters: [
+          {
+            name: format.toUpperCase() + " files",
+            extensions: [format],
+          },
+        ],
+        defaultPath: await join(await documentDir(), `export.${format}`),
+      });
+
+      if (path) {
+        try {
+          document.querySelector("body").style.cursor = "wait";
+
+          await invoke('audio_export', {
+            outputPath: path,
+            format: format,
+            sampleRate: sampleRate,
+            channels: 2,
+            bitDepth: bitDepth,
+            mp3Bitrate: 320,
+            startTime: 0.0,
+            endTime: endTime,
+          });
+
+          document.querySelector("body").style.cursor = "default";
+          alert('Audio exported successfully!');
+        } catch (error) {
+          document.querySelector("body").style.cursor = "default";
+          console.error('Export failed:', error);
+          alert('Export failed: ' + error);
+        }
+      }
+
+      resolve();
+    });
+  });
+}
+
 function updateScrollPosition(zoomFactor) {
   if (context.mousePos) {
     for (let canvas of canvases) {
@@ -6726,10 +6844,15 @@ async function renderMenu() {
         accelerator: getShortcut("import"),
       },
       {
-        text: "Export...",
+        text: "Export Video...",
         enabled: true,
         action: render,
         accelerator: getShortcut("export"),
+      },
+      {
+        text: "Export Audio...",
+        enabled: true,
+        action: exportAudio,
       },
       {
         text: "Quit",

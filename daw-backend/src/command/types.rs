@@ -253,6 +253,8 @@ pub enum Query {
     GetPoolWaveform(usize, usize),
     /// Get file info from audio pool (pool_index) - returns (duration, sample_rate, channels)
     GetPoolFileInfo(usize),
+    /// Export audio to file (settings, output_path)
+    ExportAudio(crate::audio::ExportSettings, std::path::PathBuf),
 }
 
 /// Oscilloscope data from a node
@@ -310,4 +312,6 @@ pub enum QueryResponse {
     PoolWaveform(Result<Vec<crate::io::WaveformPeak>, String>),
     /// Pool file info (duration, sample_rate, channels)
     PoolFileInfo(Result<(f64, u32, u32), String>),
+    /// Audio exported
+    AudioExported(Result<(), String>),
 }

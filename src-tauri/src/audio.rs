@@ -1656,3 +1656,45 @@ pub async fn audio_load_track_graph(
         Err("Audio not initialized".to_string())
     }
 }
+
+#[tauri::command]
+pub async fn audio_export(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    output_path: String,
+    format: String,
+    sample_rate: u32,
+    channels: u32,
+    bit_depth: u16,
+    mp3_bitrate: u32,
+    start_time: f64,
+    end_time: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+
+    if let Some(controller) = &mut audio_state.controller {
+        // Parse format
+        let export_format = match format.as_str() {
+            "wav" => daw_backend::audio::ExportFormat::Wav,
+            "flac" => daw_backend::audio::ExportFormat::Flac,
+            _ => return Err(format!("Unsupported format: {}", format)),
+        };
+
+        // Create export settings
+        let settings = daw_backend::audio::ExportSettings {
+            format: export_format,
+            sample_rate,
+            channels,
+            bit_depth,
+            mp3_bitrate,
+            start_time,
+            end_time,
+        };
+
+        // Call export through controller
+        controller.export_audio(&settings, &output_path)?;
+
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}

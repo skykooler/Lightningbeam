@@ -303,6 +303,7 @@ pub fn run() {
         audio::audio_resolve_missing_file,
         audio::audio_serialize_track_graph,
         audio::audio_load_track_graph,
+        audio::audio_export,
         video::video_load_file,
         video::video_get_frame,
         video::video_get_frames_batch,
