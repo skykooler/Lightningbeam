@@ -42,6 +42,12 @@ export let context = {
   recordingTrackId: null,
   recordingClipId: null,
   playPauseButton: null, // Reference to play/pause button for updating appearance
+  // MIDI activity indicator
+  lastMidiInputTime: 0, // Timestamp (Date.now()) of last MIDI input
+  // Metronome state
+  metronomeEnabled: false,
+  metronomeButton: null, // Reference to metronome button for updating appearance
+  metronomeGroup: null, // Reference to metronome button group for showing/hiding
 };
 
 // Application configuration
@@ -91,7 +97,7 @@ export let config = {
   currentLayout: "animation",  // Current active layout key
   defaultLayout: "animation",  // Default layout for new files
   showStartScreen: false,  // Show layout picker on startup (disabled for now)
-  restoreLayoutFromFile: false,  // Restore layout when opening files
+  restoreLayoutFromFile: true,  // Restore layout when opening files
   customLayouts: []  // User-saved custom layouts
 };
 

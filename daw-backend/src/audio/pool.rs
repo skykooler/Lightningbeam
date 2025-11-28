@@ -119,13 +119,16 @@ impl AudioFile {
     }
 }
 
-/// Pool of shared audio files
-pub struct AudioPool {
+/// Pool of shared audio files (audio clip content)
+pub struct AudioClipPool {
     files: Vec<AudioFile>,
 }
 
-impl AudioPool {
-    /// Create a new empty audio pool
+/// Type alias for backwards compatibility
+pub type AudioPool = AudioClipPool;
+
+impl AudioClipPool {
+    /// Create a new empty audio clip pool
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
@@ -301,7 +304,7 @@ impl AudioPool {
     }
 }
 
-impl Default for AudioPool {
+impl Default for AudioClipPool {
     fn default() -> Self {
         Self::new()
     }
@@ -335,8 +338,8 @@ pub struct AudioPoolEntry {
     pub embedded_data: Option<EmbeddedAudioData>,
 }
 
-impl AudioPool {
-    /// Serialize the audio pool for project saving
+impl AudioClipPool {
+    /// Serialize the audio clip pool for project saving
     ///
     /// Files smaller than 10MB are embedded as base64.
     /// Larger files are stored as relative paths to the project file.

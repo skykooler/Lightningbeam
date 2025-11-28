@@ -32,7 +32,7 @@ export const defaultLayouts = {
               type: "vertical-grid",
               percent: 30,
               children: [
-                { type: "pane", name: "timelineV2" },
+                { type: "pane", name: "timeline" },
                 { type: "pane", name: "stage" }
               ]
             },
@@ -63,7 +63,7 @@ export const defaultLayouts = {
                 { type: "pane", name: "infopanel" }
               ]
             },
-            { type: "pane", name: "timelineV2" }
+            { type: "pane", name: "timeline" }
           ]
         }
       ]
@@ -81,7 +81,7 @@ export const defaultLayouts = {
           type: "vertical-grid",
           percent: 50,
           children: [
-            { type: "pane", name: "timelineV2" },
+            { type: "pane", name: "timeline" },
             { type: "pane", name: "nodeEditor"}
           ]
         },
@@ -107,7 +107,7 @@ export const defaultLayouts = {
               percent: 50,
               children: [
                 { type: "pane", name: "stage" },
-                { type: "pane", name: "timelineV2" }
+                { type: "pane", name: "timeline" }
               ]
             },
             {
@@ -142,7 +142,7 @@ export const defaultLayouts = {
               percent: 50,
               children: [
                 { type: "pane", name: "infopanel" },
-                { type: "pane", name: "timelineV2" }
+                { type: "pane", name: "timeline" }
               ]
             }
           ]
@@ -168,7 +168,7 @@ export const defaultLayouts = {
               percent: 70,
               children: [
                 { type: "pane", name: "stage" },
-                { type: "pane", name: "timelineV2" }
+                { type: "pane", name: "timeline" }
               ]
             },
             { type: "pane", name: "infopanel" }
@@ -196,7 +196,7 @@ export const defaultLayouts = {
               percent: 70,
               children: [
                 { type: "pane", name: "infopanel" },
-                { type: "pane", name: "timelineV2" }
+                { type: "pane", name: "timeline" }
               ]
             }
           ]
@@ -223,7 +223,7 @@ export const defaultLayouts = {
               percent: 60,
               children: [
                 { type: "pane", name: "infopanel" },
-                { type: "pane", name: "timelineV2" }
+                { type: "pane", name: "timeline" }
               ]
             }
           ]

@@ -793,7 +793,7 @@ window.addEventListener("DOMContentLoaded", () => {
     rootPane,
     10,
     true,
-    createPane(panes.timelineV2),
+    createPane(panes.timeline),
   );
   let [stageAndTimeline, _infopanel] = splitPane(
     panel,
@@ -1406,6 +1406,28 @@ async function handleAudioEvent(event) {
           context.pianoRedraw();
         }
       }
+      // Update MIDI activity timestamp
+      context.lastMidiInputTime = Date.now();
+      console.log('[NoteOn] Set lastMidiInputTime to:', context.lastMidiInputTime);
+
+      // Start animation loop to keep redrawing the MIDI indicator
+      if (!context.midiIndicatorAnimating) {
+        context.midiIndicatorAnimating = true;
+        const animateMidiIndicator = () => {
+          if (context.timelineWidget && context.timelineWidget.requestRedraw) {
+            context.timelineWidget.requestRedraw();
+          }
+
+          // Keep animating for 1 second after last MIDI input
+          const elapsed = Date.now() - context.lastMidiInputTime;
+          if (elapsed < 1000) {
+            requestAnimationFrame(animateMidiIndicator);
+          } else {
+            context.midiIndicatorAnimating = false;
+          }
+        };
+        requestAnimationFrame(animateMidiIndicator);
+      }
       break;
 
     case 'NoteOff':
@@ -1600,6 +1622,7 @@ async function toggleRecording() {
           name: 'Recording...',
           startTime: startTime,
           duration: clipDuration,
+          offset: 0,
           notes: [],
           loading: true
         });
@@ -1686,6 +1709,10 @@ async function _newFile(width, height, fps, layoutKey) {
     // Set default time format to measures for music mode
     if (layoutKey === 'audioDaw' && context.timelineWidget?.timelineState) {
       context.timelineWidget.timelineState.timeFormat = 'measures';
+      // Show metronome button for audio projects
+      if (context.metronomeGroup) {
+        context.metronomeGroup.style.display = '';
+      }
     }
   }
 
@@ -1792,12 +1819,28 @@ async function _save(path) {
     // Serialize current layout structure (panes, splits, sizes)
     const serializedLayout = serializeLayout(rootPane);
 
+    // Serialize timeline state
+    let timelineState = null;
+    if (context.timelineWidget?.timelineState) {
+      const ts = context.timelineWidget.timelineState;
+      timelineState = {
+        timeFormat: ts.timeFormat,
+        framerate: ts.framerate,
+        bpm: ts.bpm,
+        timeSignature: ts.timeSignature,
+        pixelsPerSecond: ts.pixelsPerSecond,
+        viewportStartTime: ts.viewportStartTime,
+        snapToFrames: ts.snapToFrames,
+      };
+    }
+
     const fileData = {
       version: "2.0.0",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
       layoutState: serializedLayout, // Save current layout structure
+      timelineState: timelineState, // Save timeline settings
       actions: undoStack,
       json: root.toJSON(),
       // Audio pool at the end for human readability
@@ -2247,6 +2290,44 @@ async function _open(path, returnJson = false) {
             }
           } else {
             console.log('[JS] Skipping layout restoration');
+          }
+
+          // Restore timeline state if saved
+          if (file.timelineState && context.timelineWidget?.timelineState) {
+            const ts = context.timelineWidget.timelineState;
+            const saved = file.timelineState;
+            console.log('[JS] Restoring timeline state:', saved);
+
+            if (saved.timeFormat) ts.timeFormat = saved.timeFormat;
+            if (saved.framerate) ts.framerate = saved.framerate;
+            if (saved.bpm) ts.bpm = saved.bpm;
+            if (saved.timeSignature) ts.timeSignature = saved.timeSignature;
+            if (saved.pixelsPerSecond) ts.pixelsPerSecond = saved.pixelsPerSecond;
+            if (saved.viewportStartTime !== undefined) ts.viewportStartTime = saved.viewportStartTime;
+            if (saved.snapToFrames !== undefined) ts.snapToFrames = saved.snapToFrames;
+
+            // Update metronome button visibility based on restored time format
+            if (context.metronomeGroup) {
+              context.metronomeGroup.style.display = ts.timeFormat === 'measures' ? '' : 'none';
+            }
+
+            // Update time display
+            if (context.updateTimeDisplay) {
+              context.updateTimeDisplay();
+            }
+
+            // Update snap checkbox if it exists
+            const snapCheckbox = document.getElementById('snap-checkbox');
+            if (snapCheckbox) {
+              snapCheckbox.checked = ts.snapToFrames;
+            }
+
+            // Trigger timeline redraw
+            if (context.timelineWidget.requestRedraw) {
+              context.timelineWidget.requestRedraw();
+            }
+
+            console.log('[JS] Timeline state restored successfully');
           }
 
           // Restore audio tracks and clips to the Rust backend
@@ -3184,6 +3265,124 @@ async function render() {
     }
   }
   document.querySelector("body").style.cursor = "default";
+}
+
+async function exportAudio() {
+  // Get the project duration from context
+  const duration = context.activeObject.duration || 60;
+
+  // Show a simple dialog to get export settings
+  const dialog = document.createElement('div');
+  dialog.style.cssText = `
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-color, #2a2a2a);
+    border: 1px solid var(--border-color, #555);
+    padding: 20px;
+    border-radius: 8px;
+    z-index: 10000;
+    color: var(--text-color, #eee);
+    min-width: 400px;
+  `;
+
+  dialog.innerHTML = `
+    <style>
+      #export-format option,
+      #export-sample-rate option,
+      #export-bit-depth option {
+        background: #333 !important;
+        color: #eee !important;
+      }
+    </style>
+    <h2 style="margin-top: 0;">Export Audio</h2>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Format:</label>
+      <select id="export-format" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="wav">WAV</option>
+        <option value="flac">FLAC</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Sample Rate:</label>
+      <select id="export-sample-rate" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="44100">44100 Hz</option>
+        <option value="48000" selected>48000 Hz</option>
+        <option value="96000">96000 Hz</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">Bit Depth:</label>
+      <select id="export-bit-depth" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+        <option value="16">16-bit</option>
+        <option value="24" selected>24-bit</option>
+      </select>
+    </div>
+    <div style="margin-bottom: 15px;">
+      <label style="display: block; margin-bottom: 5px;">End Time (seconds):</label>
+      <input type="number" id="export-end-time" value="${duration.toFixed(2)}" min="0.1" step="0.1" style="width: 100%; padding: 5px; background: var(--input-bg, #333); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px;">
+    </div>
+    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+      <button id="export-cancel" style="padding: 8px 16px; background: var(--button-bg, #444); color: var(--text-color, #eee); border: 1px solid var(--border-color, #555); border-radius: 4px; cursor: pointer;">Cancel</button>
+      <button id="export-ok" style="padding: 8px 16px; background: var(--primary-color, #0078d7); color: white; border: none; border-radius: 4px; cursor: pointer;">Export</button>
+    </div>
+  `;
+
+  document.body.appendChild(dialog);
+
+  return new Promise((resolve) => {
+    dialog.querySelector('#export-cancel').addEventListener('click', () => {
+      document.body.removeChild(dialog);
+      resolve(null);
+    });
+
+    dialog.querySelector('#export-ok').addEventListener('click', async () => {
+      const format = dialog.querySelector('#export-format').value;
+      const sampleRate = parseInt(dialog.querySelector('#export-sample-rate').value);
+      const bitDepth = parseInt(dialog.querySelector('#export-bit-depth').value);
+      const endTime = parseFloat(dialog.querySelector('#export-end-time').value);
+
+      document.body.removeChild(dialog);
+
+      // Show file save dialog
+      const path = await saveFileDialog({
+        filters: [
+          {
+            name: format.toUpperCase() + " files",
+            extensions: [format],
+          },
+        ],
+        defaultPath: await join(await documentDir(), `export.${format}`),
+      });
+
+      if (path) {
+        try {
+          document.querySelector("body").style.cursor = "wait";
+
+          await invoke('audio_export', {
+            outputPath: path,
+            format: format,
+            sampleRate: sampleRate,
+            channels: 2,
+            bitDepth: bitDepth,
+            mp3Bitrate: 320,
+            startTime: 0.0,
+            endTime: endTime,
+          });
+
+          document.querySelector("body").style.cursor = "default";
+          alert('Audio exported successfully!');
+        } catch (error) {
+          document.querySelector("body").style.cursor = "default";
+          console.error('Export failed:', error);
+          alert('Export failed: ' + error);
+        }
+      }
+
+      resolve();
+    });
+  });
 }
 
 function updateScrollPosition(zoomFactor) {
@@ -4262,9 +4461,9 @@ function toolbar() {
   return tools_scroller;
 }
 
-function timeline() {
+function timelineDeprecated() {
   let timeline_cvs = document.createElement("canvas");
-  timeline_cvs.className = "timeline";
+  timeline_cvs.className = "timeline-deprecated";
 
   // Start building widget hierarchy
   timeline_cvs.timelinewindow = new TimelineWindow(0, 0, context)
@@ -4532,9 +4731,9 @@ function timeline() {
   return timeline_cvs;
 }
 
-function timelineV2() {
+function timeline() {
   let canvas = document.createElement("canvas");
-  canvas.className = "timeline-v2";
+  canvas.className = "timeline";
 
   // Create TimelineWindowV2 widget
   const timelineWidget = new TimelineWindowV2(0, 0, context);
@@ -4623,6 +4822,54 @@ function timelineV2() {
 
     controls.push(recordGroup);
 
+    // Metronome button (only visible in measures mode)
+    const metronomeGroup = document.createElement("div");
+    metronomeGroup.className = "playback-controls-group";
+
+    // Initially hide if not in measures mode
+    if (timelineWidget.timelineState.timeFormat !== 'measures') {
+      metronomeGroup.style.display = 'none';
+    }
+
+    const metronomeButton = document.createElement("button");
+    metronomeButton.className = context.metronomeEnabled
+      ? "playback-btn playback-btn-metronome active"
+      : "playback-btn playback-btn-metronome";
+    metronomeButton.title = context.metronomeEnabled ? "Disable Metronome" : "Enable Metronome";
+
+    // Load SVG inline for currentColor support
+    (async () => {
+      try {
+        const response = await fetch('./assets/metronome.svg');
+        const svgText = await response.text();
+        metronomeButton.innerHTML = svgText;
+      } catch (error) {
+        console.error('Failed to load metronome icon:', error);
+      }
+    })();
+
+    metronomeButton.addEventListener("click", async () => {
+      context.metronomeEnabled = !context.metronomeEnabled;
+      const { invoke } = window.__TAURI__.core;
+      try {
+        await invoke('set_metronome_enabled', { enabled: context.metronomeEnabled });
+        // Update button appearance
+        metronomeButton.className = context.metronomeEnabled
+          ? "playback-btn playback-btn-metronome active"
+          : "playback-btn playback-btn-metronome";
+        metronomeButton.title = context.metronomeEnabled ? "Disable Metronome" : "Enable Metronome";
+      } catch (error) {
+        console.error('Failed to set metronome:', error);
+      }
+    });
+    metronomeGroup.appendChild(metronomeButton);
+
+    // Store reference for state updates and visibility toggling
+    context.metronomeButton = metronomeButton;
+    context.metronomeGroup = metronomeGroup;
+
+    controls.push(metronomeGroup);
+
     // Time display
     const timeDisplay = document.createElement("div");
     timeDisplay.className = "time-display";
@@ -4697,6 +4944,10 @@ function timelineV2() {
         timelineWidget.toggleTimeFormat();
         updateTimeDisplay();
         updateCanvasSize();
+        // Update metronome button visibility
+        if (context.metronomeGroup) {
+          context.metronomeGroup.style.display = timelineWidget.timelineState.timeFormat === 'measures' ? '' : 'none';
+        }
         return;
       }
 
@@ -4707,6 +4958,10 @@ function timelineV2() {
         timelineWidget.toggleTimeFormat();
         updateTimeDisplay();
         updateCanvasSize();
+        // Update metronome button visibility
+        if (context.metronomeGroup) {
+          context.metronomeGroup.style.display = timelineWidget.timelineState.timeFormat === 'measures' ? '' : 'none';
+        }
       } else if (action === 'edit-fps') {
         // Clicked on FPS - show input to edit framerate
         console.log('[FPS Edit] Starting FPS edit');
@@ -4873,6 +5128,35 @@ function timelineV2() {
     context.updateTimeDisplay = updateTimeDisplay;
 
     controls.push(timeDisplay);
+
+    // Snap checkbox
+    const snapGroup = document.createElement("div");
+    snapGroup.className = "playback-controls-group";
+    snapGroup.style.display = "flex";
+    snapGroup.style.alignItems = "center";
+    snapGroup.style.gap = "4px";
+
+    const snapCheckbox = document.createElement("input");
+    snapCheckbox.type = "checkbox";
+    snapCheckbox.id = "snap-checkbox";
+    snapCheckbox.checked = timelineWidget.timelineState.snapToFrames;
+    snapCheckbox.style.cursor = "pointer";
+    snapCheckbox.addEventListener("change", () => {
+      timelineWidget.timelineState.snapToFrames = snapCheckbox.checked;
+      console.log('Snapping', snapCheckbox.checked ? 'enabled' : 'disabled');
+    });
+
+    const snapLabel = document.createElement("label");
+    snapLabel.htmlFor = "snap-checkbox";
+    snapLabel.textContent = "Snap";
+    snapLabel.style.cursor = "pointer";
+    snapLabel.style.fontSize = "12px";
+    snapLabel.style.color = "var(--text-secondary)";
+
+    snapGroup.appendChild(snapCheckbox);
+    snapGroup.appendChild(snapLabel);
+
+    controls.push(snapGroup);
 
     return controls;
   };
@@ -5188,6 +5472,83 @@ async function startup() {
 
 startup();
 
+// Track maximized pane state
+let maximizedPane = null;
+let savedPaneParent = null;
+let savedRootPaneChildren = [];
+let savedRootPaneClasses = null;
+
+function toggleMaximizePane(paneDiv) {
+  if (maximizedPane === paneDiv) {
+    // Restore layout
+    if (savedPaneParent && savedRootPaneChildren.length > 0) {
+      // Remove pane from root
+      rootPane.removeChild(paneDiv);
+
+      // Restore all root pane children
+      while (rootPane.firstChild) {
+        rootPane.removeChild(rootPane.firstChild);
+      }
+      for (const child of savedRootPaneChildren) {
+        rootPane.appendChild(child);
+      }
+
+      // Put pane back in its original parent
+      savedPaneParent.appendChild(paneDiv);
+
+      // Restore root pane classes
+      if (savedRootPaneClasses) {
+        rootPane.className = savedRootPaneClasses;
+      }
+
+      savedPaneParent = null;
+      savedRootPaneChildren = [];
+      savedRootPaneClasses = null;
+    }
+    maximizedPane = null;
+
+    // Update button
+    const btn = paneDiv.querySelector('.maximize-btn');
+    if (btn) {
+      btn.innerHTML = "⛶";
+      btn.title = "Maximize Pane";
+    }
+
+    // Trigger updates
+    updateAll();
+  } else {
+    // Maximize pane
+    // Save pane's current parent
+    savedPaneParent = paneDiv.parentElement;
+
+    // Save all root pane children
+    savedRootPaneChildren = Array.from(rootPane.children);
+    savedRootPaneClasses = rootPane.className;
+
+    // Remove pane from its parent
+    savedPaneParent.removeChild(paneDiv);
+
+    // Clear root pane
+    while (rootPane.firstChild) {
+      rootPane.removeChild(rootPane.firstChild);
+    }
+
+    // Add only the maximized pane to root
+    rootPane.appendChild(paneDiv);
+    maximizedPane = paneDiv;
+
+    // Update button
+    const btn = paneDiv.querySelector('.maximize-btn');
+    if (btn) {
+      btn.innerHTML = "⛶"; // Could use different icon for restore
+      btn.title = "Restore Layout";
+    }
+
+    // Trigger updates
+    updateAll();
+  }
+}
+
 function createPaneMenu(div) {
   const menuItems = ["Item 1", "Item 2", "Item 3"]; // The items for the menu
 
@@ -5200,6 +5561,11 @@ function createPaneMenu(div) {
 
   // Loop through the menuItems array and create a <li> for each item
   for (let pane in panes) {
+    // Skip deprecated panes
+    if (pane === 'timelineDeprecated') {
+      continue;
+    }
+
     const li = document.createElement("li");
     // Create the <img> element for the icon
     const img = document.createElement("img");
@@ -5298,6 +5664,16 @@ function createPane(paneType = undefined, div = undefined) {
       header.appendChild(control);
     }
   }
+
+  // Add maximize/restore button in top right
+  const maximizeBtn = document.createElement("button");
+  maximizeBtn.className = "maximize-btn";
+  maximizeBtn.title = "Maximize Pane";
+  maximizeBtn.innerHTML = "⛶"; // Maximize icon
+  maximizeBtn.addEventListener("click", () => {
+    toggleMaximizePane(div);
+  });
+  header.appendChild(maximizeBtn);
 
   div.className = "vertical-grid pane";
   div.setAttribute("data-pane-name", paneType.name);
@@ -5766,7 +6142,7 @@ function renderLayers() {
     context.timelineWidget.requestRedraw();
   }
 
-  for (let canvas of document.querySelectorAll(".timeline")) {
+  for (let canvas of document.querySelectorAll(".timeline-deprecated")) {
     const width = canvas.width;
     const height = canvas.height;
     const ctx = canvas.getContext("2d");
@@ -6552,10 +6928,15 @@ async function renderMenu() {
         accelerator: getShortcut("import"),
       },
       {
-        text: "Export...",
+        text: "Export Video...",
         enabled: true,
         action: render,
         accelerator: getShortcut("export"),
+      },
+      {
+        text: "Export Audio...",
+        enabled: true,
+        action: exportAudio,
       },
       {
         text: "Quit",
@@ -6930,8 +7311,49 @@ function nodeEditor() {
   const header = document.createElement("div");
   header.className = "node-editor-header";
   // Initial header will be updated by updateBreadcrumb() after track info is available
-  header.innerHTML = '<div class="context-breadcrumb">Node Graph</div>';
+  header.innerHTML = `
+    <div class="context-breadcrumb">Node Graph</div>
+    <button class="node-graph-clear-btn" title="Clear all nodes">Clear</button>
+  `;
   container.appendChild(header);
+
+  // Add clear button handler
+  const clearBtn = header.querySelector('.node-graph-clear-btn');
+  clearBtn.addEventListener('click', async () => {
+    try {
+      // Get current track
+      const trackInfo = getCurrentTrack();
+      if (trackInfo === null) {
+        console.error('No track selected');
+        alert('Please select a track first');
+        return;
+      }
+      const trackId = trackInfo.trackId;
+
+      // Get the full backend graph state as JSON
+      const graphStateJson = await invoke('graph_get_state', { trackId });
+      const graphState = JSON.parse(graphStateJson);
+
+      if (!graphState.nodes || graphState.nodes.length === 0) {
+        return; // Nothing to clear
+      }
+
+      // Create and execute the action
+      redoStack.length = 0; // Clear redo stack
+      const action = {
+        trackId,
+        savedGraphJson: graphStateJson  // Save the entire graph state as JSON
+      };
+      undoStack.push({ name: 'clearNodeGraph', action });
+      await actions.clearNodeGraph.execute(action);
+      updateMenu();
+
+      console.log('Cleared node graph (undoable)');
+    } catch (e) {
+      console.error('Failed to clear node graph:', e);
+      alert('Failed to clear node graph: ' + e);
+    }
+  });
 
   // Create the Drawflow canvas
   const editorDiv = document.createElement("div");
@@ -7354,6 +7776,9 @@ function nodeEditor() {
 
     // Update minimap on pan/zoom
     drawflowDiv.addEventListener('wheel', () => setTimeout(updateMinimap, 10));
+
+    // Store updateMinimap in context so it can be called from actions
+    context.updateMinimap = updateMinimap;
 
     // Initial minimap render
     setTimeout(updateMinimap, 200);
@@ -8621,7 +9046,10 @@ function nodeEditor() {
                   keyMax: layerConfig.keyMax,
                   rootKey: layerConfig.rootKey,
                   velocityMin: layerConfig.velocityMin,
-                  velocityMax: layerConfig.velocityMax
+                  velocityMax: layerConfig.velocityMax,
+                  loopStart: layerConfig.loopStart,
+                  loopEnd: layerConfig.loopEnd,
+                  loopMode: layerConfig.loopMode
                 });
 
                 // Wait a bit for the audio thread to process the add command
@@ -8634,6 +9062,35 @@ function nodeEditor() {
           } catch (err) {
             console.error("Failed to add layer:", err);
             showError(`Failed to add layer: ${err}`);
+          }
+        });
+      }
+
+      // Handle Import Folder button for MultiSampler
+      const importFolderBtn = nodeElement.querySelector(".import-folder-btn");
+      if (importFolderBtn) {
+        importFolderBtn.addEventListener("mousedown", (e) => e.stopPropagation());
+        importFolderBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+        importFolderBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+
+          const nodeData = editor.getNodeFromId(nodeId);
+          if (!nodeData || nodeData.data.backendId === null) {
+            showError("Node not yet created on backend");
+            return;
+          }
+
+          const currentTrackId = getCurrentMidiTrack();
+          if (currentTrackId === null) {
+            showError("No MIDI track selected");
+            return;
+          }
+
+          try {
+            await showFolderImportDialog(currentTrackId, nodeData.data.backendId, nodeId);
+          } catch (err) {
+            console.error("Failed to import folder:", err);
+            showError(`Failed to import folder: ${err}`);
           }
         });
       }
@@ -8683,8 +9140,12 @@ function nodeEditor() {
         nodeId: nodeData.data.backendId
       });
 
-      const layersList = document.querySelector(`#sample-layers-list-${nodeId}`);
-      const layersContainer = document.querySelector(`#sample-layers-container-${nodeId}`);
+      // Find the node element and query within it for the layers list
+      const nodeElement = document.querySelector(`#node-${nodeId}`);
+      if (!nodeElement) return;
+
+      const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+      const layersContainer = nodeElement.querySelector('[id^="sample-layers-container-"]');
 
       if (!layersList) return;
 
@@ -8735,7 +9196,10 @@ function nodeEditor() {
               keyMax: layer.key_max,
               rootKey: layer.root_key,
               velocityMin: layer.velocity_min,
-              velocityMax: layer.velocity_max
+              velocityMax: layer.velocity_max,
+              loopStart: layer.loop_start,
+              loopEnd: layer.loop_end,
+              loopMode: layer.loop_mode
             });
 
             if (layerConfig) {
@@ -8748,7 +9212,10 @@ function nodeEditor() {
                   keyMax: layerConfig.keyMax,
                   rootKey: layerConfig.rootKey,
                   velocityMin: layerConfig.velocityMin,
-                  velocityMax: layerConfig.velocityMax
+                  velocityMax: layerConfig.velocityMax,
+                  loopStart: layerConfig.loopStart,
+                  loopEnd: layerConfig.loopEnd,
+                  loopMode: layerConfig.loopMode
                 });
 
                 // Refresh the list
@@ -9785,7 +10252,10 @@ function nodeEditor() {
                       keyMax: layerConfig.keyMax,
                       rootKey: layerConfig.rootKey,
                       velocityMin: layerConfig.velocityMin,
-                      velocityMax: layerConfig.velocityMax
+                      velocityMax: layerConfig.velocityMax,
+                      loopStart: layerConfig.loopStart,
+                      loopEnd: layerConfig.loopEnd,
+                      loopMode: layerConfig.loopMode
                     });
 
                     // Wait a bit for the audio thread to process the add command
@@ -9812,10 +10282,10 @@ function nodeEditor() {
           }
 
           if (nodeType === 'MultiSampler' && serializedNode.sample_data && serializedNode.sample_data.type === 'multi_sampler') {
-            console.log(`[reloadGraph] Condition met for node ${drawflowId}, looking for layers list element with backend ID ${serializedNode.id}`);
-            // Use backend ID (serializedNode.id) since that's what was used in getHTML
-            const layersList = nodeElement.querySelector(`#sample-layers-list-${serializedNode.id}`);
-            const layersContainer = nodeElement.querySelector(`#sample-layers-container-${serializedNode.id}`);
+            console.log(`[reloadGraph] Condition met for node ${drawflowId}, looking for layers list element`);
+            // Query for elements by prefix to avoid ID mismatch issues
+            const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+            const layersContainer = nodeElement.querySelector('[id^="sample-layers-container-"]');
             console.log(`[reloadGraph] layersList:`, layersList);
             console.log(`[reloadGraph] layersContainer:`, layersContainer);
 
@@ -9863,7 +10333,43 @@ function nodeEditor() {
                     const drawflowNodeId = parseInt(btn.dataset.drawflowNode);
                     const layerIndex = parseInt(btn.dataset.index);
                     const layer = layers[layerIndex];
-                    await showLayerEditDialog(drawflowNodeId, layerIndex, layer);
+
+                    // Show dialog with current layer settings
+                    const layerConfig = await showLayerConfigDialog(layer.file_path, {
+                      keyMin: layer.key_min,
+                      keyMax: layer.key_max,
+                      rootKey: layer.root_key,
+                      velocityMin: layer.velocity_min,
+                      velocityMax: layer.velocity_max,
+                      loopStart: layer.loop_start,
+                      loopEnd: layer.loop_end,
+                      loopMode: layer.loop_mode
+                    });
+
+                    if (layerConfig) {
+                      const nodeData = editor.getNodeFromId(drawflowNodeId);
+                      const currentTrackId = getCurrentMidiTrack();
+                      if (nodeData && currentTrackId !== null) {
+                        try {
+                          await invoke("multi_sampler_update_layer", {
+                            trackId: currentTrackId,
+                            nodeId: nodeData.data.backendId,
+                            layerIndex: layerIndex,
+                            keyMin: layerConfig.keyMin,
+                            keyMax: layerConfig.keyMax,
+                            rootKey: layerConfig.rootKey,
+                            velocityMin: layerConfig.velocityMin,
+                            velocityMax: layerConfig.velocityMax,
+                            loopStart: layerConfig.loopStart,
+                            loopEnd: layerConfig.loopEnd,
+                            loopMode: layerConfig.loopMode
+                          });
+                          await refreshSampleLayersList(drawflowNodeId);
+                        } catch (err) {
+                          showError(`Failed to update layer: ${err}`);
+                        }
+                      }
+                    }
                   });
                 });
 
@@ -10086,11 +10592,108 @@ function piano() {
 }
 
 function pianoRoll() {
+  // Create container for piano roll and properties panel
+  let container = document.createElement("div");
+  container.className = "piano-roll-container";
+  container.style.position = "relative";
+  container.style.width = "100%";
+  container.style.height = "100%";
+  container.style.display = "flex";
+
   let canvas = document.createElement("canvas");
   canvas.className = "piano-roll";
+  canvas.style.flex = "1";
+
+  // Create properties panel
+  let propertiesPanel = document.createElement("div");
+  propertiesPanel.className = "piano-roll-properties";
+  propertiesPanel.style.display = "flex";
+  propertiesPanel.style.gap = "15px";
+  propertiesPanel.style.padding = "10px";
+  propertiesPanel.style.backgroundColor = "#1e1e1e";
+  propertiesPanel.style.borderLeft = "1px solid #333";
+  propertiesPanel.style.alignItems = "center";
+  propertiesPanel.style.fontSize = "12px";
+  propertiesPanel.style.color = "#ccc";
+
+  // Create property sections
+  const createPropertySection = (label, isEditable = false) => {
+    const section = document.createElement("div");
+    section.style.display = "flex";
+    section.style.flexDirection = "column";
+    section.style.gap = "5px";
+
+    const labelEl = document.createElement("label");
+    labelEl.textContent = label;
+    labelEl.style.fontSize = "11px";
+    labelEl.style.color = "#999";
+    section.appendChild(labelEl);
+
+    if (isEditable) {
+      const inputContainer = document.createElement("div");
+      inputContainer.style.display = "flex";
+      inputContainer.style.gap = "5px";
+      inputContainer.style.alignItems = "center";
+
+      const input = document.createElement("input");
+      input.type = "number";
+      input.style.width = "45px";
+      input.style.padding = "3px";
+      input.style.backgroundColor = "#2a2a2a";
+      input.style.border = "1px solid #444";
+      input.style.borderRadius = "3px";
+      input.style.color = "#ccc";
+      input.style.fontSize = "12px";
+      input.style.boxSizing = "border-box";
+      inputContainer.appendChild(input);
+
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.style.flex = "1";
+      slider.style.minWidth = "80px";
+      inputContainer.appendChild(slider);
+
+      section.appendChild(inputContainer);
+      return { section, input, slider };
+    } else {
+      const value = document.createElement("span");
+      value.style.color = "#fff";
+      value.textContent = "-";
+      section.appendChild(value);
+      return { section, value };
+    }
+  };
+
+  const pitchSection = createPropertySection("Pitch");
+  const velocitySection = createPropertySection("Velocity", true);
+  const modulationSection = createPropertySection("Modulation", true);
+
+  // Configure velocity slider
+  velocitySection.input.min = 1;
+  velocitySection.input.max = 127;
+  velocitySection.slider.min = 1;
+  velocitySection.slider.max = 127;
+
+  // Configure modulation slider
+  modulationSection.input.min = 0;
+  modulationSection.input.max = 127;
+  modulationSection.slider.min = 0;
+  modulationSection.slider.max = 127;
+
+  propertiesPanel.appendChild(pitchSection.section);
+  propertiesPanel.appendChild(velocitySection.section);
+  propertiesPanel.appendChild(modulationSection.section);
+
+  container.appendChild(canvas);
+  container.appendChild(propertiesPanel);
 
   // Create the piano roll editor widget
   canvas.pianoRollEditor = new PianoRollEditor(0, 0, 0, 0);
+  canvas.pianoRollEditor.propertiesPanel = {
+    pitch: pitchSection.value,
+    velocity: { input: velocitySection.input, slider: velocitySection.slider },
+    modulation: { input: modulationSection.input, slider: modulationSection.slider }
+  };
 
   function updateCanvasSize() {
     const canvasStyles = window.getComputedStyle(canvas);
@@ -10111,6 +10714,30 @@ function pianoRoll() {
 
     // Render the piano roll
     canvas.pianoRollEditor.draw(ctx);
+
+    // Update properties panel layout based on aspect ratio
+    const containerWidth = container.offsetWidth;
+    const containerHeight = container.offsetHeight;
+    const isWide = containerWidth > containerHeight;
+
+    if (isWide) {
+      // Side layout
+      container.style.flexDirection = "row";
+      propertiesPanel.style.flexDirection = "column";
+      propertiesPanel.style.width = "240px";
+      propertiesPanel.style.height = "auto";
+      propertiesPanel.style.borderLeft = "1px solid #333";
+      propertiesPanel.style.borderTop = "none";
+      propertiesPanel.style.alignItems = "stretch";
+    } else {
+      // Bottom layout
+      container.style.flexDirection = "column";
+      propertiesPanel.style.flexDirection = "row";
+      propertiesPanel.style.width = "auto";
+      propertiesPanel.style.height = "60px";
+      propertiesPanel.style.borderLeft = "none";
+      propertiesPanel.style.borderTop = "1px solid #333";
+    }
   }
 
   // Store references in context for global access and playback updates
@@ -10121,7 +10748,7 @@ function pianoRoll() {
   const resizeObserver = new ResizeObserver(() => {
     updateCanvasSize();
   });
-  resizeObserver.observe(canvas);
+  resizeObserver.observe(container);
 
   // Pointer event handlers (works with mouse and touch)
   canvas.addEventListener("pointerdown", (e) => {
@@ -10163,7 +10790,69 @@ function pianoRoll() {
   // Prevent text selection
   canvas.addEventListener("selectstart", (e) => e.preventDefault());
 
-  return canvas;
+  // Add event handlers for velocity and modulation inputs/sliders
+  const syncInputSlider = (input, slider) => {
+    input.addEventListener("input", () => {
+      const value = parseInt(input.value);
+      if (!isNaN(value)) {
+        slider.value = value;
+      }
+    });
+    slider.addEventListener("input", () => {
+      input.value = slider.value;
+    });
+  };
+
+  syncInputSlider(velocitySection.input, velocitySection.slider);
+  syncInputSlider(modulationSection.input, modulationSection.slider);
+
+  // Handle property changes
+  const updateNoteProperty = (property, value) => {
+    const clipData = canvas.pianoRollEditor.getSelectedClip();
+    if (!clipData || !clipData.clip || !clipData.clip.notes) return;
+
+    if (canvas.pianoRollEditor.selectedNotes.size === 0) return;
+
+    for (const noteIndex of canvas.pianoRollEditor.selectedNotes) {
+      if (noteIndex >= 0 && noteIndex < clipData.clip.notes.length) {
+        const note = clipData.clip.notes[noteIndex];
+        if (property === "velocity") {
+          note.velocity = value;
+        } else if (property === "modulation") {
+          note.modulation = value;
+        }
+      }
+    }
+
+    canvas.pianoRollEditor.syncNotesToBackend(clipData);
+    updateCanvasSize();
+  };
+
+  velocitySection.input.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    if (!isNaN(value) && value >= 1 && value <= 127) {
+      updateNoteProperty("velocity", value);
+    }
+  });
+
+  velocitySection.slider.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    updateNoteProperty("velocity", value);
+  });
+
+  modulationSection.input.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    if (!isNaN(value) && value >= 0 && value <= 127) {
+      updateNoteProperty("modulation", value);
+    }
+  });
+
+  modulationSection.slider.addEventListener("change", (e) => {
+    const value = parseInt(e.target.value);
+    updateNoteProperty("modulation", value);
+  });
+
+  return container;
 }
 
 function presetBrowser() {
@@ -10578,6 +11267,368 @@ function midiToNoteName(midiNote) {
   return `${noteName}${octave}`;
 }
 
+// Parse note name from string (e.g., "A#3" -> 58)
+function noteNameToMidi(noteName) {
+  const noteMap = {
+    'C': 0, 'C#': 1, 'Db': 1,
+    'D': 2, 'D#': 3, 'Eb': 3,
+    'E': 4,
+    'F': 5, 'F#': 6, 'Gb': 6,
+    'G': 7, 'G#': 8, 'Ab': 8,
+    'A': 9, 'A#': 10, 'Bb': 10,
+    'B': 11
+  };
+
+  // Match note + optional accidental + octave
+  const match = noteName.match(/^([A-G][#b]?)(-?\d+)$/i);
+  if (!match) return null;
+
+  const note = match[1].toUpperCase();
+  const octave = parseInt(match[2]);
+
+  if (!(note in noteMap)) return null;
+
+  return (octave + 1) * 12 + noteMap[note];
+}
+
+// Parse filename to extract note and velocity layer
+function parseSampleFilename(filename) {
+  // Remove extension
+  const nameWithoutExt = filename.replace(/\.(wav|aif|aiff|flac|mp3|ogg)$/i, '');
+
+  // Try to find note patterns (e.g., A#3, Bb2, C4)
+  const notePattern = /([A-G][#b]?)(-?\d+)/gi;
+  const noteMatches = [...nameWithoutExt.matchAll(notePattern)];
+
+  if (noteMatches.length === 0) return null;
+
+  // Use the last note match (usually most reliable)
+  const noteMatch = noteMatches[noteMatches.length - 1];
+  const noteStr = noteMatch[1] + noteMatch[2];
+  const midiNote = noteNameToMidi(noteStr);
+
+  if (midiNote === null) return null;
+
+  // Try to find velocity indicators
+  // Common patterns: v1, v2, v3, pp, p, mp, mf, f, ff, fff
+  const velPatterns = [
+    { regex: /v(\d+)/i, type: 'numeric' },
+    { regex: /\b(ppp|pp|p|mp|mf|f|ff|fff)\b/i, type: 'dynamic' }
+  ];
+
+  let velocityMarker = null;
+  let velocityType = null;
+
+  for (const pattern of velPatterns) {
+    const match = nameWithoutExt.match(pattern.regex);
+    if (match) {
+      velocityMarker = match[1];
+      velocityType = pattern.type;
+      break;
+    }
+  }
+
+  return {
+    note: noteStr,
+    midiNote,
+    velocityMarker,
+    velocityType,
+    filename
+  };
+}
+
+// Group samples by note and velocity
+function groupSamples(samples) {
+  const groups = {};
+  const velocityLayers = new Set();
+
+  for (const sample of samples) {
+    const parsed = parseSampleFilename(sample);
+    if (!parsed) continue;
+
+    const key = parsed.midiNote;
+    if (!groups[key]) {
+      groups[key] = {
+        note: parsed.note,
+        midiNote: parsed.midiNote,
+        layers: []
+      };
+    }
+
+    groups[key].layers.push({
+      filename: parsed.filename,
+      velocityMarker: parsed.velocityMarker,
+      velocityType: parsed.velocityType
+    });
+
+    if (parsed.velocityMarker) {
+      velocityLayers.add(parsed.velocityMarker);
+    }
+  }
+
+  return { groups, velocityLayers: Array.from(velocityLayers).sort() };
+}
+
+// Show folder import dialog
+async function showFolderImportDialog(trackId, nodeId, drawflowNodeId) {
+  // Select folder
+  const folderPath = await invoke("open_folder_dialog", {
+    title: "Select Sample Folder"
+  });
+
+  if (!folderPath) return;
+
+  // Read files from folder
+  const files = await invoke("read_folder_files", {
+    path: folderPath
+  });
+
+  if (!files || files.length === 0) {
+    alert("No audio files found in folder");
+    return;
+  }
+
+  // Parse and group samples
+  const { groups, velocityLayers } = groupSamples(files);
+  const noteGroups = Object.values(groups).sort((a, b) => a.midiNote - b.midiNote);
+
+  if (noteGroups.length === 0) {
+    alert("Could not detect note names in filenames");
+    return;
+  }
+
+  // Show configuration dialog
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'dialog';
+    dialog.style.width = '600px';
+    dialog.style.maxWidth = '90vw';
+    dialog.style.maxHeight = '80vh';
+    dialog.style.padding = '20px';
+    dialog.style.backgroundColor = '#2a2a2a';
+    dialog.style.border = '1px solid #444';
+    dialog.style.borderRadius = '8px';
+    dialog.style.color = '#e0e0e0';
+
+    let velocityMapping = {};
+
+    // Initialize default velocity mappings
+    if (velocityLayers.length > 0) {
+      const step = Math.floor(127 / velocityLayers.length);
+      velocityLayers.forEach((marker, idx) => {
+        velocityMapping[marker] = {
+          min: idx * step,
+          max: (idx + 1) * step - 1
+        };
+      });
+      // Ensure last layer goes to 127
+      if (velocityLayers.length > 0) {
+        velocityMapping[velocityLayers[velocityLayers.length - 1]].max = 127;
+      }
+    }
+
+    dialog.innerHTML = `
+      <h3 style="margin-top: 0; margin-bottom: 15px; color: #e0e0e0;">Import Sample Folder</h3>
+      <div style="margin-bottom: 15px; font-size: 12px; line-height: 1.6;">
+        <strong>Folder:</strong> <span style="color: #888; word-break: break-all;">${folderPath}</span><br>
+        <strong>Found:</strong> ${noteGroups.length} notes, ${velocityLayers.length} velocity layer(s)
+      </div>
+
+      ${velocityLayers.length > 0 ? `
+        <div style="margin-bottom: 15px;">
+          <strong style="display: block; margin-bottom: 8px;">Velocity Mapping:</strong>
+          <table style="width: 100%; font-size: 11px; border-collapse: collapse;">
+            <thead>
+              <tr style="background: #333;">
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Marker</th>
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Min Velocity</th>
+                <th style="padding: 6px; text-align: left; border: 1px solid #444;">Max Velocity</th>
+              </tr>
+            </thead>
+            <tbody id="velocity-mapping-table">
+              ${velocityLayers.map(marker => `
+                <tr>
+                  <td style="padding: 6px; border: 1px solid #444;"><strong>${marker}</strong></td>
+                  <td style="padding: 6px; border: 1px solid #444;"><input type="number" class="vel-min" data-marker="${marker}" value="${velocityMapping[marker].min}" min="0" max="127" style="width: 60px; padding: 4px; background: #1a1a1a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px;"></td>
+                  <td style="padding: 6px; border: 1px solid #444;"><input type="number" class="vel-max" data-marker="${marker}" value="${velocityMapping[marker].max}" min="0" max="127" style="width: 60px; padding: 4px; background: #1a1a1a; color: #e0e0e0; border: 1px solid #555; border-radius: 3px;"></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      ` : ''}
+
+      <div style="max-height: 300px; overflow-y: auto; margin-bottom: 15px; border: 1px solid #444; padding: 10px; font-size: 11px; background: #1a1a1a; border-radius: 4px;">
+        <strong style="display: block; margin-bottom: 8px;">Preview:</strong>
+        <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+          ${noteGroups.slice(0, 20).map(group => `
+            <li>${group.note} (MIDI ${group.midiNote}): ${group.layers.length} sample(s)
+              ${group.layers.length <= 3 ? `<br><span style="color: #888; font-size: 10px;">&nbsp;&nbsp;${group.layers.map(l => l.filename).join('<br>&nbsp;&nbsp;')}</span>` : ''}
+            </li>
+          `).join('')}
+          ${noteGroups.length > 20 ? `<li style="color: #888;"><em>... and ${noteGroups.length - 20} more notes</em></li>` : ''}
+        </ul>
+      </div>
+
+      <div style="margin-bottom: 15px;">
+        <label style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="auto-key-ranges" checked style="margin-right: 8px;">
+          <span style="font-size: 12px;">Automatically set key ranges (split between adjacent notes)</span>
+        </label>
+      </div>
+
+      <div style="display: flex; gap: 10px; justify-content: flex-end;">
+        <button id="btn-cancel" style="padding: 8px 16px; background: #444; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; cursor: pointer; font-size: 12px;">Cancel</button>
+        <button id="btn-import" style="padding: 8px 16px; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">Import ${noteGroups.reduce((sum, g) => sum + g.layers.length, 0)} Samples</button>
+      </div>
+    `;
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    // Update velocity mapping when inputs change
+    const velInputs = dialog.querySelectorAll('.vel-min, .vel-max');
+    velInputs.forEach(input => {
+      input.addEventListener('input', () => {
+        const marker = input.dataset.marker;
+        const isMin = input.classList.contains('vel-min');
+        const value = parseInt(input.value);
+
+        if (isMin) {
+          velocityMapping[marker].min = value;
+        } else {
+          velocityMapping[marker].max = value;
+        }
+      });
+    });
+
+    dialog.querySelector('#btn-cancel').addEventListener('click', () => {
+      document.body.removeChild(overlay);
+      resolve();
+    });
+
+    dialog.querySelector('#btn-import').addEventListener('click', async () => {
+      const autoKeyRanges = dialog.querySelector('#auto-key-ranges').checked;
+
+      try {
+        // Build layer list
+        const layersToImport = [];
+
+        for (let i = 0; i < noteGroups.length; i++) {
+          const group = noteGroups[i];
+
+          // Calculate key range
+          let keyMin, keyMax;
+          if (autoKeyRanges) {
+            // Split range between adjacent notes
+            const prevNote = i > 0 ? noteGroups[i - 1].midiNote : 0;
+            const nextNote = i < noteGroups.length - 1 ? noteGroups[i + 1].midiNote : 127;
+
+            keyMin = i === 0 ? 0 : Math.ceil((prevNote + group.midiNote) / 2);
+            keyMax = i === noteGroups.length - 1 ? 127 : Math.floor((group.midiNote + nextNote) / 2);
+          } else {
+            keyMin = group.midiNote;
+            keyMax = group.midiNote;
+          }
+
+          // Add each velocity layer for this note
+          for (const layer of group.layers) {
+            let velMin = 0, velMax = 127;
+
+            if (layer.velocityMarker && velocityMapping[layer.velocityMarker]) {
+              velMin = velocityMapping[layer.velocityMarker].min;
+              velMax = velocityMapping[layer.velocityMarker].max;
+            }
+
+            layersToImport.push({
+              filePath: `${folderPath}/${layer.filename}`,
+              keyMin,
+              keyMax,
+              rootKey: group.midiNote,
+              velocityMin: velMin,
+              velocityMax: velMax
+            });
+          }
+        }
+
+        // Import all layers
+        dialog.querySelector('#btn-import').disabled = true;
+        dialog.querySelector('#btn-import').textContent = 'Importing...';
+
+        for (const layer of layersToImport) {
+          await invoke("multi_sampler_add_layer", {
+            trackId,
+            nodeId,
+            filePath: layer.filePath,
+            keyMin: layer.keyMin,
+            keyMax: layer.keyMax,
+            rootKey: layer.rootKey,
+            velocityMin: layer.velocityMin,
+            velocityMax: layer.velocityMax,
+            loopStart: null,
+            loopEnd: null,
+            loopMode: "Continuous"
+          });
+        }
+
+        // Refresh the layers list by re-fetching from backend
+        try {
+          const layers = await invoke("multi_sampler_get_layers", {
+            trackId,
+            nodeId
+          });
+
+          // Find the node element and update the layers list
+          const nodeElement = document.querySelector(`#node-${drawflowNodeId}`);
+          if (nodeElement) {
+            const layersList = nodeElement.querySelector('[id^="sample-layers-list-"]');
+
+            if (layersList) {
+              if (layers.length === 0) {
+                layersList.innerHTML = '<tr><td colspan="5" class="sample-layers-empty">No layers loaded</td></tr>';
+              } else {
+                layersList.innerHTML = layers.map((layer, index) => {
+                  const filename = layer.file_path.split('/').pop().split('\\').pop();
+                  const keyRange = `${midiToNoteName(layer.key_min)}-${midiToNoteName(layer.key_max)}`;
+                  const rootNote = midiToNoteName(layer.root_key);
+                  const velRange = `${layer.velocity_min}-${layer.velocity_max}`;
+
+                  return `
+                    <tr data-index="${index}">
+                      <td class="sample-layer-filename" title="${filename}">${filename}</td>
+                      <td>${keyRange}</td>
+                      <td>${rootNote}</td>
+                      <td>${velRange}</td>
+                      <td>
+                        <div class="sample-layer-actions">
+                          <button class="btn-edit-layer" data-node="${drawflowNodeId}" data-index="${index}">Edit</button>
+                          <button class="btn-delete-layer" data-node="${drawflowNodeId}" data-index="${index}">Del</button>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                }).join('');
+              }
+            }
+          }
+        } catch (refreshErr) {
+          console.error("Failed to refresh layers list:", refreshErr);
+        }
+
+        document.body.removeChild(overlay);
+        resolve();
+      } catch (err) {
+        alert(`Failed to import: ${err}`);
+        dialog.querySelector('#btn-import').disabled = false;
+        dialog.querySelector('#btn-import').textContent = 'Import';
+      }
+    });
+  });
+}
+
 // Show dialog to configure MultiSampler layer zones
 function showLayerConfigDialog(filePath, existingConfig = null) {
   return new Promise((resolve) => {
@@ -10590,6 +11641,9 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     const rootKey = existingConfig?.rootKey ?? 60;
     const velocityMin = existingConfig?.velocityMin ?? 0;
     const velocityMax = existingConfig?.velocityMax ?? 127;
+    const loopMode = existingConfig?.loopMode ?? 'oneshot';
+    const loopStart = existingConfig?.loopStart ?? null;
+    const loopEnd = existingConfig?.loopEnd ?? null;
 
     // Create modal dialog
     const dialog = document.createElement('div');
@@ -10636,6 +11690,33 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
               </div>
             </div>
           </div>
+          <div class="form-group">
+            <label>Loop Mode</label>
+            <select id="loop-mode">
+              <option value="oneshot" ${loopMode === 'oneshot' ? 'selected' : ''}>One-Shot (play once)</option>
+              <option value="continuous" ${loopMode === 'continuous' ? 'selected' : ''}>Continuous (loop)</option>
+            </select>
+            <div class="form-note" style="font-size: 11px; color: #888; margin-top: 4px;">
+              Continuous mode will auto-detect loop points if not specified
+            </div>
+          </div>
+          <div id="loop-points-group" class="form-group" style="display: ${loopMode === 'continuous' ? 'block' : 'none'};">
+            <label>Loop Points (optional, samples)</label>
+            <div class="form-group-inline">
+              <div>
+                <label style="font-size: 11px; color: #888;">Start</label>
+                <input type="number" id="loop-start" min="0" value="${loopStart ?? ''}" placeholder="Auto" />
+              </div>
+              <span>-</span>
+              <div>
+                <label style="font-size: 11px; color: #888;">End</label>
+                <input type="number" id="loop-end" min="0" value="${loopEnd ?? ''}" placeholder="Auto" />
+              </div>
+            </div>
+            <div class="form-note" style="font-size: 11px; color: #888; margin-top: 4px;">
+              Leave empty to auto-detect optimal loop points
+            </div>
+          </div>
           <div class="form-actions">
             <button type="button" class="btn-cancel">Cancel</button>
             <button type="submit" class="btn-primary">${isEdit ? 'Update' : 'Add'} Layer</button>
@@ -10650,6 +11731,8 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     const keyMinInput = dialog.querySelector('#key-min');
     const keyMaxInput = dialog.querySelector('#key-max');
     const rootKeyInput = dialog.querySelector('#root-key');
+    const loopModeSelect = dialog.querySelector('#loop-mode');
+    const loopPointsGroup = dialog.querySelector('#loop-points-group');
 
     const updateKeyMinName = () => {
       const note = parseInt(keyMinInput.value) || 0;
@@ -10670,6 +11753,12 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
     keyMaxInput.addEventListener('input', updateKeyMaxName);
     rootKeyInput.addEventListener('input', updateRootKeyName);
 
+    // Toggle loop points visibility based on loop mode
+    loopModeSelect.addEventListener('change', () => {
+      const isContinuous = loopModeSelect.value === 'continuous';
+      loopPointsGroup.style.display = isContinuous ? 'block' : 'none';
+    });
+
     // Focus first input
     setTimeout(() => dialog.querySelector('#key-min')?.focus(), 100);
 
@@ -10688,6 +11777,13 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
       const rootKey = parseInt(rootKeyInput.value);
       const velocityMin = parseInt(dialog.querySelector('#velocity-min').value);
       const velocityMax = parseInt(dialog.querySelector('#velocity-max').value);
+      const loopMode = loopModeSelect.value;
+
+      // Get loop points (null if empty)
+      const loopStartInput = dialog.querySelector('#loop-start');
+      const loopEndInput = dialog.querySelector('#loop-end');
+      const loopStart = loopStartInput.value ? parseInt(loopStartInput.value) : null;
+      const loopEnd = loopEndInput.value ? parseInt(loopEndInput.value) : null;
 
       // Validate ranges
       if (keyMin > keyMax) {
@@ -10705,13 +11801,22 @@ function showLayerConfigDialog(filePath, existingConfig = null) {
         return;
       }
 
+      // Validate loop points if both are specified
+      if (loopStart !== null && loopEnd !== null && loopStart >= loopEnd) {
+        alert('Loop Start must be less than Loop End');
+        return;
+      }
+
       dialog.remove();
       resolve({
         keyMin,
         keyMax,
         rootKey,
         velocityMin,
-        velocityMax
+        velocityMax,
+        loopMode,
+        loopStart,
+        loopEnd
       });
     });
 
@@ -10752,13 +11857,13 @@ const panes = {
     name: "toolbar",
     func: toolbar,
   },
+  timelineDeprecated: {
+    name: "timeline-deprecated",
+    func: timelineDeprecated,
+  },
   timeline: {
     name: "timeline",
     func: timeline,
-  },
-  timelineV2: {
-    name: "timeline-v2",
-    func: timelineV2,
   },
   infopanel: {
     name: "infopanel",
@@ -10824,6 +11929,13 @@ function switchLayout(layoutKey) {
     updateUI();
     updateLayers();
     updateMenu();
+
+    // Update metronome button visibility based on timeline format
+    // (especially important when switching to audioDaw layout)
+    if (context.metronomeGroup && context.timelineWidget?.timelineState) {
+      const shouldShow = context.timelineWidget.timelineState.timeFormat === 'measures';
+      context.metronomeGroup.style.display = shouldShow ? '' : 'none';
+    }
 
     console.log(`Layout switched to: ${layoutDef.name}`);
   } catch (error) {

@@ -9,11 +9,23 @@
 export async function waitForAppReady(timeout = 5000) {
   await browser.waitForApp();
 
-  // Check for "Create New File" dialog and click Create if present
-  const createButton = await browser.$('button*=Create');
-  if (await createButton.isExisting()) {
-    await createButton.click();
-    await browser.pause(500); // Wait for dialog to close
+  // Check for "Animation" card on start screen and click it if present
+  // The card has a label div with text "Animation"
+  const animationCard = await browser.$('.focus-card-label*=Animation');
+  if (await animationCard.isExisting()) {
+    // Click the parent focus-card element
+    const card = await animationCard.parentElement();
+    await card.waitForClickable({ timeout: 2000 });
+    await card.click();
+    await browser.pause(1000); // Wait longer for animation view to load
+  } else {
+    // Legacy: Check for "Create New File" dialog and click Create if present
+    const createButton = await browser.$('button*=Create');
+    if (await createButton.isExisting()) {
+      await createButton.waitForClickable({ timeout: 2000 });
+      await createButton.click();
+      await browser.pause(500); // Wait for dialog to close
+    }
   }
 
   // Wait for the main canvas to be present

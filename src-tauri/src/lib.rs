@@ -1,24 +1,19 @@
 use std::{path::PathBuf, sync::{Arc, Mutex}};
 
+use tauri_plugin_log::{Target, TargetKind};
 use log::{trace, info, debug, warn, error};
+use tracing_subscriber::EnvFilter;
+use chrono::Local;
 use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 mod audio;
 mod video;
-mod frame_streamer;
-mod renderer;
-mod render_window;
+mod video_server;
 
 
 #[derive(Default)]
 struct AppState {
   counter: u32,
-}
-
-struct RenderWindowState {
-  handle: Option<render_window::RenderWindowHandle>,
-  canvas_offset: (i32, i32), // Canvas position relative to window
-  canvas_size: (u32, u32),
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -49,170 +44,44 @@ fn error(msg: String) {
 }
 
 #[tauri::command]
-fn get_frame_streamer_port(
-    frame_streamer: tauri::State<'_, Arc<Mutex<frame_streamer::FrameStreamer>>>,
-) -> u16 {
-    let streamer = frame_streamer.lock().unwrap();
-    streamer.port()
+async fn open_folder_dialog(app: AppHandle, title: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let folder = app.dialog()
+        .file()
+        .set_title(&title)
+        .blocking_pick_folder();
+
+    Ok(folder.map(|path| path.to_string()))
 }
 
-// Render window commands
 #[tauri::command]
-fn render_window_create(
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    canvas_offset_x: i32,
-    canvas_offset_y: i32,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let mut render_state = state.lock().unwrap();
+async fn read_folder_files(path: String) -> Result<Vec<String>, String> {
+    use std::fs;
 
-    if render_state.handle.is_some() {
-        return Err("Render window already exists".to_string());
-    }
+    let entries = fs::read_dir(&path)
+        .map_err(|e| format!("Failed to read directory: {}", e))?;
 
-    let handle = render_window::spawn_render_window(x, y, width, height)?;
-    render_state.handle = Some(handle);
-    render_state.canvas_offset = (canvas_offset_x, canvas_offset_y);
-    render_state.canvas_size = (width, height);
+    let audio_extensions = vec!["wav", "aif", "aiff", "flac", "mp3", "ogg"];
 
-    // Start a background thread to poll main window position
-    let state_clone = state.inner().clone();
-    let app_clone = app.clone();
-    std::thread::spawn(move || {
-        let mut last_pos: Option<(i32, i32)> = None;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let path = entry.path();
 
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-
-            if let Some(main_window) = app_clone.get_webview_window("main") {
-                if let Ok(pos) = main_window.outer_position() {
-                    let current_pos = (pos.x, pos.y);
-
-                    // Only update if position actually changed
-                    if last_pos != Some(current_pos) {
-                        eprintln!("[WindowSync] Main window position: {:?}", current_pos);
-
-                        let render_state = state_clone.lock().unwrap();
-                        if let Some(handle) = &render_state.handle {
-                            let new_x = pos.x + render_state.canvas_offset.0;
-                            let new_y = pos.y + render_state.canvas_offset.1;
-                            handle.set_position(new_x, new_y);
-                            last_pos = Some(current_pos);
-                        } else {
-                            break; // No handle, exit thread
-                        }
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if audio_extensions.contains(&ext_str.as_str()) {
+                    if let Some(filename) = path.file_name() {
+                        files.push(filename.to_string_lossy().to_string());
                     }
-                } else {
-                    break; // Window closed, exit thread
                 }
-            } else {
-                break; // Main window gone, exit thread
             }
         }
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-fn render_window_update_gradient(
-    top_r: f32,
-    top_g: f32,
-    top_b: f32,
-    top_a: f32,
-    bottom_r: f32,
-    bottom_g: f32,
-    bottom_b: f32,
-    bottom_a: f32,
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let render_state = state.lock().unwrap();
-
-    if let Some(handle) = &render_state.handle {
-        handle.update_gradient(
-            [top_r, top_g, top_b, top_a],
-            [bottom_r, bottom_g, bottom_b, bottom_a],
-        );
-        Ok(())
-    } else {
-        Err("Render window not created".to_string())
     }
-}
 
-#[tauri::command]
-fn render_window_set_position(
-    x: i32,
-    y: i32,
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let render_state = state.lock().unwrap();
-
-    if let Some(handle) = &render_state.handle {
-        handle.set_position(x, y);
-        Ok(())
-    } else {
-        Err("Render window not created".to_string())
-    }
-}
-
-#[tauri::command]
-fn render_window_sync_position(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let render_state = state.lock().unwrap();
-
-    if let Some(main_window) = app.get_webview_window("main") {
-        if let Ok(pos) = main_window.outer_position() {
-            if let Some(handle) = &render_state.handle {
-                let new_x = pos.x + render_state.canvas_offset.0;
-                let new_y = pos.y + render_state.canvas_offset.1;
-                eprintln!("[Manual Sync] Updating to ({}, {})", new_x, new_y);
-                handle.set_position(new_x, new_y);
-                Ok(())
-            } else {
-                Err("Render window not created".to_string())
-            }
-        } else {
-            Err("Could not get window position".to_string())
-        }
-    } else {
-        Err("Main window not found".to_string())
-    }
-}
-
-#[tauri::command]
-fn render_window_set_size(
-    width: u32,
-    height: u32,
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let render_state = state.lock().unwrap();
-
-    if let Some(handle) = &render_state.handle {
-        handle.set_size(width, height);
-        Ok(())
-    } else {
-        Err("Render window not created".to_string())
-    }
-}
-
-#[tauri::command]
-fn render_window_close(
-    state: tauri::State<'_, Arc<Mutex<RenderWindowState>>>,
-) -> Result<(), String> {
-    let mut render_state = state.lock().unwrap();
-
-    if let Some(handle) = render_state.handle.take() {
-        handle.close();
-        Ok(())
-    } else {
-        Err("Render window not created".to_string())
-    }
+    Ok(files)
 }
 
 use tauri::PhysicalSize;
@@ -300,26 +169,17 @@ fn handle_file_associations(app: AppHandle, files: Vec<PathBuf>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize env_logger with Error level only
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Error)
-        .init();
-
-    // Initialize WebSocket frame streamer
-    let frame_streamer = frame_streamer::FrameStreamer::new()
-        .expect("Failed to start frame streamer");
-    eprintln!("[App] Frame streamer started on port {}", frame_streamer.port());
+    let pkg_name = env!("CARGO_PKG_NAME").to_string();
+    // Initialize video HTTP server
+    let video_server = video_server::VideoServer::new()
+        .expect("Failed to start video server");
+    eprintln!("[App] Video server started on port {}", video_server.port());
 
     tauri::Builder::default()
       .manage(Mutex::new(AppState::default()))
       .manage(Arc::new(Mutex::new(audio::AudioState::default())))
       .manage(Arc::new(Mutex::new(video::VideoState::default())))
-      .manage(Arc::new(Mutex::new(frame_streamer)))
-      .manage(Arc::new(Mutex::new(RenderWindowState {
-        handle: None,
-        canvas_offset: (0, 0),
-        canvas_size: (0, 0),
-      })))
+      .manage(Arc::new(Mutex::new(video_server)))
       .setup(|app| {
         #[cfg(any(windows, target_os = "linux"))] // Windows/Linux needs different handling from macOS
         {
@@ -355,48 +215,39 @@ pub fn run() {
         }
         Ok(())
       })
-      // .plugin(
-      //     tauri_plugin_log::Builder::new()
-      //         .filter(|metadata| {
-      //             // ONLY allow Error-level logs, block everything else
-      //             metadata.level() == log::Level::Error
-      //         })
-      //         .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-      //         .format(|out, message, record| {
-      //             let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-      //             out.finish(format_args!(
-      //                 "{}[{}] {}",
-      //                 date,
-      //                 record.level(),
-      //                 message
-      //               ))
-      //           })
-      //         .targets([
-      //             Target::new(TargetKind::Stdout),
-      //             // LogDir locations:
-      //             // Linux: /home/user/.local/share/org.lightningbeam.core/logs
-      //             // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
-      //             // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
-      //             Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
-      //             Target::new(TargetKind::Webview),
-      //         ])
-      //         .build()
-      // )
+      .plugin(
+          tauri_plugin_log::Builder::new()
+              .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+              .format(|out, message, record| {
+                  let date = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                  out.finish(format_args!(
+                      "{}[{}] {}",
+                      date,
+                      record.level(),
+                      message
+                    ))
+                })
+              .targets([
+                  Target::new(TargetKind::Stdout),
+                  // LogDir locations:
+                  // Linux: /home/user/.local/share/org.lightningbeam.core/logs
+                  // macOS: /Users/user/Library/Logs/org.lightningbeam.core/logs
+                  // Windows: C:\Users\user\AppData\Local\org.lightningbeam.core\logs
+                  Target::new(TargetKind::LogDir { file_name: Some("logs".to_string()) }),
+                  Target::new(TargetKind::Webview),
+              ])
+              .build()
+      )
       .plugin(tauri_plugin_dialog::init())
       .plugin(tauri_plugin_fs::init())
       .plugin(tauri_plugin_shell::init())
       .invoke_handler(tauri::generate_handler![
-        greet, trace, debug, info, warn, error, create_window, get_frame_streamer_port,
-        render_window_create,
-        render_window_update_gradient,
-        render_window_set_position,
-        render_window_set_size,
-        render_window_sync_position,
-        render_window_close,
+        greet, trace, debug, info, warn, error, create_window,
         audio::audio_init,
         audio::audio_reset,
         audio::audio_play,
         audio::audio_stop,
+        audio::set_metronome_enabled,
         audio::audio_seek,
         audio::audio_test_beep,
         audio::audio_set_track_parameter,
@@ -405,6 +256,7 @@ pub fn run() {
         audio::audio_add_clip,
         audio::audio_move_clip,
         audio::audio_trim_clip,
+        audio::audio_extend_clip,
         audio::audio_start_recording,
         audio::audio_stop_recording,
         audio::audio_pause_recording,
@@ -431,6 +283,7 @@ pub fn run() {
         audio::graph_set_output_node,
         audio::graph_save_preset,
         audio::graph_load_preset,
+        audio::graph_load_preset_from_json,
         audio::graph_list_presets,
         audio::graph_delete_preset,
         audio::graph_get_state,
@@ -451,10 +304,17 @@ pub fn run() {
         audio::audio_resolve_missing_file,
         audio::audio_serialize_track_graph,
         audio::audio_load_track_graph,
+        audio::audio_export,
         video::video_load_file,
-        video::video_stream_frame,
+        video::video_get_frame,
+        video::video_get_frames_batch,
         video::video_set_cache_size,
+        open_folder_dialog,
+        read_folder_files,
         video::video_get_pool_info,
+        video::video_ipc_benchmark,
+        video::video_get_transcode_status,
+        video::video_allow_asset,
       ])
       // .manage(window_counter)
       .build(tauri::generate_context!())
@@ -482,4 +342,5 @@ pub fn run() {
           }
         },
       );
+    tracing_subscriber::fmt().with_env_filter(EnvFilter::new(format!("{}=trace", pkg_name))).init();
 }

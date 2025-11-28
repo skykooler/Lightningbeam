@@ -48,9 +48,9 @@ describe('Shape Drawing', () => {
     });
 
     it('should draw large rectangles', async () => {
-      // Draw a large rectangle
-      await drawRectangle(50, 300, 400, 200);
-      await assertShapeExists(250, 400, 'Large rectangle should exist at center');
+      // Draw a large rectangle (canvas is ~350px tall, so keep within bounds)
+      await drawRectangle(50, 50, 400, 250);
+      await assertShapeExists(250, 175, 'Large rectangle should exist at center');
     });
   });
 

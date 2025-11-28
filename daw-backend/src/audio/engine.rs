@@ -1,8 +1,9 @@
 use crate::audio::buffer_pool::BufferPool;
-use crate::audio::clip::ClipId;
-use crate::audio::midi::{MidiClip, MidiClipId, MidiEvent};
+use crate::audio::clip::{AudioClipInstance, ClipId};
+use crate::audio::metronome::Metronome;
+use crate::audio::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiEvent};
 use crate::audio::node_graph::{nodes::*, AudioGraph};
-use crate::audio::pool::AudioPool;
+use crate::audio::pool::AudioClipPool;
 use crate::audio::project::Project;
 use crate::audio::recording::{MidiRecordingState, RecordingState};
 use crate::audio::track::{Track, TrackId, TrackNode};
@@ -15,7 +16,7 @@ use std::sync::Arc;
 /// Audio engine for Phase 6: hierarchical tracks with groups
 pub struct Engine {
     project: Project,
-    audio_pool: AudioPool,
+    audio_pool: AudioClipPool,
     buffer_pool: BufferPool,
     playhead: u64,          // Playhead position in samples
     sample_rate: u32,
@@ -55,6 +56,9 @@ pub struct Engine {
 
     // MIDI input manager for external MIDI devices
     midi_input_manager: Option<MidiInputManager>,
+
+    // Metronome for click track
+    metronome: Metronome,
 }
 
 impl Engine {
@@ -74,7 +78,7 @@ impl Engine {
 
         Self {
             project: Project::new(sample_rate),
-            audio_pool: AudioPool::new(),
+            audio_pool: AudioClipPool::new(),
             buffer_pool: BufferPool::new(8, buffer_size), // 8 buffers should handle deep nesting
             playhead: 0,
             sample_rate,
@@ -96,6 +100,7 @@ impl Engine {
             recording_progress_counter: 0,
             midi_recording_state: None,
             midi_input_manager: None,
+            metronome: Metronome::new(sample_rate),
         }
     }
 
@@ -159,12 +164,12 @@ impl Engine {
     }
 
     /// Get mutable reference to audio pool
-    pub fn audio_pool_mut(&mut self) -> &mut AudioPool {
+    pub fn audio_pool_mut(&mut self) -> &mut AudioClipPool {
         &mut self.audio_pool
     }
 
     /// Get reference to audio pool
-    pub fn audio_pool(&self) -> &AudioPool {
+    pub fn audio_pool(&self) -> &AudioClipPool {
         &self.audio_pool
     }
 
@@ -235,9 +240,15 @@ impl Engine {
             let playhead_seconds = self.playhead as f64 / self.sample_rate as f64;
 
             // Render the entire project hierarchy into the mix buffer
+            // Note: We need to use a raw pointer to avoid borrow checker issues
+            // The midi_clip_pool is part of project, so we extract a reference before mutable borrow
+            let midi_pool_ptr = &self.project.midi_clip_pool as *const _;
+            // SAFETY: The midi_clip_pool is not mutated during render, only read
+            let midi_pool_ref = unsafe { &*midi_pool_ptr };
             self.project.render(
                 &mut self.mix_buffer,
                 &self.audio_pool,
+                midi_pool_ref,
                 &mut self.buffer_pool,
                 playhead_seconds,
                 self.sample_rate,
@@ -246,6 +257,15 @@ impl Engine {
 
             // Copy mix to output
             output.copy_from_slice(&self.mix_buffer);
+
+            // Mix in metronome clicks
+            self.metronome.process(
+                output,
+                self.playhead,
+                self.playing,
+                self.sample_rate,
+                self.channels,
+            );
 
             // Update playhead (convert total samples to frames)
             self.playhead += (output.len() / self.channels as usize) as u64;
@@ -300,10 +320,12 @@ impl Engine {
                             let clip_id = recording.clip_id;
                             let track_id = recording.track_id;
 
-                            // Update clip duration in project
+                            // Update clip duration in project as recording progresses
                             if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
                                 if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                    clip.duration = duration;
+                                    // Update both internal_end and external_duration as recording progresses
+                                    clip.internal_end = clip.internal_start + duration;
+                                    clip.external_duration = duration;
                                 }
                             }
 
@@ -370,33 +392,58 @@ impl Engine {
                 }
             }
             Command::MoveClip(track_id, clip_id, new_start_time) => {
+                // Moving just changes external_start, external_duration stays the same
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.start_time = new_start_time;
+                            clip.external_start = new_start_time;
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.start_time = new_start_time;
+                        // Note: clip_id here is the pool clip ID, not instance ID
+                        if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
+                            instance.external_start = new_start_time;
                         }
                     }
                     _ => {}
                 }
             }
-            Command::TrimClip(track_id, clip_id, new_start_time, new_duration, new_offset) => {
+            Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end) => {
+                // Trim changes which portion of the source content is used
+                // Also updates external_duration to match internal duration (no looping after trim)
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.start_time = new_start_time;
-                            clip.duration = new_duration;
-                            clip.offset = new_offset;
+                            clip.internal_start = new_internal_start;
+                            clip.internal_end = new_internal_end;
+                            // By default, trimming sets external_duration to match internal duration
+                            clip.external_duration = new_internal_end - new_internal_start;
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        // Note: clip_id here is the pool clip ID, not instance ID
+                        if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
+                            instance.internal_start = new_internal_start;
+                            instance.internal_end = new_internal_end;
+                            // By default, trimming sets external_duration to match internal duration
+                            instance.external_duration = new_internal_end - new_internal_start;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Command::ExtendClip(track_id, clip_id, new_external_duration) => {
+                // Extend changes the external duration (enables looping if > internal duration)
+                match self.project.get_track_mut(track_id) {
+                    Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.start_time = new_start_time;
-                            clip.duration = new_duration;
+                            clip.external_duration = new_external_duration;
+                        }
+                    }
+                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                        // Note: clip_id here is the pool clip ID, not instance ID
+                        if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
+                            instance.external_duration = new_external_duration;
                         }
                     }
                     _ => {}
@@ -461,10 +508,10 @@ impl Engine {
                         pool_index, pool_size);
                 }
 
-                // Create a new clip with unique ID
+                // Create a new clip instance with unique ID using legacy parameters
                 let clip_id = self.next_clip_id;
                 self.next_clip_id += 1;
-                let clip = crate::audio::clip::Clip::new(
+                let clip = AudioClipInstance::from_legacy(
                     clip_id,
                     pool_index,
                     start_time,
@@ -490,55 +537,74 @@ impl Engine {
             Command::CreateMidiClip(track_id, start_time, duration) => {
                 // Get the next MIDI clip ID from the atomic counter
                 let clip_id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
-                let clip = MidiClip::new(clip_id, start_time, duration);
-                let _ = self.project.add_midi_clip(track_id, clip);
-                // Notify UI about the new clip with its ID
+
+                // Create clip content in the pool
+                let clip = MidiClip::empty(clip_id, duration, format!("MIDI Clip {}", clip_id));
+                self.project.midi_clip_pool.add_existing_clip(clip);
+
+                // Create an instance for this clip on the track
+                let instance_id = self.project.next_midi_clip_instance_id();
+                let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, start_time);
+
+                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    track.clip_instances.push(instance);
+                }
+
+                // Notify UI about the new clip with its ID (using clip_id for now)
                 let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
             }
             Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration) => {
-                // Add a MIDI note event to the specified clip
-                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        // Timestamp is now in seconds (sample-rate independent)
-                        let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
-                        clip.events.push(note_on);
+                // Add a MIDI note event to the specified clip in the pool
+                // Note: clip_id here refers to the clip in the pool, not the instance
+                if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
+                    // Timestamp is now in seconds (sample-rate independent)
+                    let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
+                    clip.add_event(note_on);
 
-                        // Add note off event
-                        let note_off_time = time_offset + duration;
-                        let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
-                        clip.events.push(note_off);
-
-                        // Sort events by timestamp (using partial_cmp for f64)
-                        clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    // Add note off event
+                    let note_off_time = time_offset + duration;
+                    let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
+                    clip.add_event(note_off);
+                } else {
+                    // Try legacy behavior: look for instance on track and find its clip
+                    if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                        if let Some(instance) = track.clip_instances.iter().find(|c| c.clip_id == clip_id) {
+                            let actual_clip_id = instance.clip_id;
+                            if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(actual_clip_id) {
+                                let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
+                                clip.add_event(note_on);
+                                let note_off_time = time_offset + duration;
+                                let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
+                                clip.add_event(note_off);
+                            }
+                        }
                     }
                 }
             }
-            Command::AddLoadedMidiClip(track_id, clip) => {
-                // Add a pre-loaded MIDI clip to the track
-                let _ = self.project.add_midi_clip(track_id, clip);
+            Command::AddLoadedMidiClip(track_id, clip, start_time) => {
+                // Add a pre-loaded MIDI clip to the track with the given start time
+                let _ = self.project.add_midi_clip_at(track_id, clip, start_time);
             }
-            Command::UpdateMidiClipNotes(track_id, clip_id, notes) => {
-                // Update all notes in a MIDI clip
-                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        // Clear existing events
-                        clip.events.clear();
+            Command::UpdateMidiClipNotes(_track_id, clip_id, notes) => {
+                // Update all notes in a MIDI clip (directly in the pool)
+                if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
+                    // Clear existing events
+                    clip.events.clear();
 
-                        // Add new events from the notes array
-                        // Timestamps are now stored in seconds (sample-rate independent)
-                        for (start_time, note, velocity, duration) in notes {
-                            let note_on = MidiEvent::note_on(start_time, 0, note, velocity);
-                            clip.events.push(note_on);
+                    // Add new events from the notes array
+                    // Timestamps are now stored in seconds (sample-rate independent)
+                    for (start_time, note, velocity, duration) in notes {
+                        let note_on = MidiEvent::note_on(start_time, 0, note, velocity);
+                        clip.events.push(note_on);
 
-                            // Add note off event
-                            let note_off_time = start_time + duration;
-                            let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
-                            clip.events.push(note_off);
-                        }
-
-                        // Sort events by timestamp (using partial_cmp for f64)
-                        clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                        // Add note off event
+                        let note_off_time = start_time + duration;
+                        let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
+                        clip.events.push(note_off);
                     }
+
+                    // Sort events by timestamp (using partial_cmp for f64)
+                    clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                 }
             }
             Command::RequestBufferPoolStats => {
@@ -714,7 +780,7 @@ impl Engine {
                 self.project = Project::new(self.sample_rate);
 
                 // Clear audio pool
-                self.audio_pool = AudioPool::new();
+                self.audio_pool = AudioClipPool::new();
 
                 // Reset buffer pool (recreate with same settings)
                 let buffer_size = 512 * self.channels as usize;
@@ -772,6 +838,10 @@ impl Engine {
                 if let Some(ref midi_manager) = self.midi_input_manager {
                     midi_manager.set_active_track(track_id);
                 }
+            }
+
+            Command::SetMetronomeEnabled(enabled) => {
+                self.metronome.set_enabled(enabled);
             }
 
             // Node graph commands
@@ -1096,11 +1166,20 @@ impl Engine {
 
                     // Write to file
                     if let Ok(json) = preset.to_json() {
-                        if let Err(e) = std::fs::write(&preset_path, json) {
-                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
-                                track_id,
-                                format!("Failed to save preset: {}", e)
-                            ));
+                        match std::fs::write(&preset_path, json) {
+                            Ok(_) => {
+                                // Emit success event with path
+                                let _ = self.event_tx.push(AudioEvent::GraphPresetSaved(
+                                    track_id,
+                                    preset_path.clone()
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to save preset: {}", e)
+                                ));
+                            }
                         }
                     } else {
                         let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
@@ -1212,7 +1291,7 @@ impl Engine {
                 }
             }
 
-            Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max) => {
+            Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) => {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
@@ -1226,7 +1305,7 @@ impl Engine {
 
                         unsafe {
                             let multi_sampler_node = &mut *node_ptr;
-                            if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max) {
+                            if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to add sample layer: {}", e);
                             }
                         }
@@ -1234,7 +1313,7 @@ impl Engine {
                 }
             }
 
-            Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max) => {
+            Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) => {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
@@ -1248,7 +1327,7 @@ impl Engine {
 
                         unsafe {
                             let multi_sampler_node = &mut *node_ptr;
-                            if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max) {
+                            if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to update sample layer: {}", e);
                             }
                         }
@@ -1412,19 +1491,16 @@ impl Engine {
                     ))),
                 }
             }
-            Query::GetMidiClip(track_id, clip_id) => {
-                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                        use crate::command::MidiClipData;
-                        QueryResponse::MidiClipData(Ok(MidiClipData {
-                            duration: clip.duration,
-                            events: clip.events.clone(),
-                        }))
-                    } else {
-                        QueryResponse::MidiClipData(Err(format!("Clip {} not found in track {}", clip_id, track_id)))
-                    }
+            Query::GetMidiClip(_track_id, clip_id) => {
+                // Get MIDI clip data from the pool
+                if let Some(clip) = self.project.midi_clip_pool.get_clip(clip_id) {
+                    use crate::command::MidiClipData;
+                    QueryResponse::MidiClipData(Ok(MidiClipData {
+                        duration: clip.duration,
+                        events: clip.events.clone(),
+                    }))
                 } else {
-                    QueryResponse::MidiClipData(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                    QueryResponse::MidiClipData(Err(format!("Clip {} not found in pool", clip_id)))
                 }
             }
 
@@ -1592,6 +1668,17 @@ impl Engine {
                     None => QueryResponse::PoolFileInfo(Err(format!("Pool index {} not found", pool_index))),
                 }
             }
+            Query::ExportAudio(settings, output_path) => {
+                // Perform export directly - this will block the audio thread but that's okay
+                // since we're exporting and not playing back anyway
+                // Use raw pointer to get midi_pool reference before mutable borrow of project
+                let midi_pool_ptr: *const _ = &self.project.midi_clip_pool;
+                let midi_pool_ref = unsafe { &*midi_pool_ptr };
+                match crate::audio::export_audio(&mut self.project, &self.audio_pool, midi_pool_ref, &settings, &output_path) {
+                    Ok(()) => QueryResponse::AudioExported(Ok(())),
+                    Err(e) => QueryResponse::AudioExported(Err(e)),
+                }
+            }
         };
 
         // Send response back
@@ -1623,9 +1710,10 @@ impl Engine {
                     let clip = crate::audio::clip::Clip::new(
                         clip_id,
                         0, // Temporary pool index, will be updated on finalization
-                        start_time,
-                        0.0, // Duration starts at 0, will be updated during recording
-                        0.0,
+                        0.0, // internal_start
+                        0.0, // internal_end - Duration starts at 0, will be updated during recording
+                        start_time, // external_start (timeline position)
+                        start_time, // external_end - will be updated during recording
                     );
 
                     // Add clip to track
@@ -1784,42 +1872,47 @@ impl Engine {
             eprintln!("[MIDI_RECORDING] Stopping MIDI recording for clip_id={}, track_id={}, captured {} notes, duration={:.3}s",
                       clip_id, track_id, note_count, recording_duration);
 
-            // Update the MIDI clip using the existing UpdateMidiClipNotes logic
-            eprintln!("[MIDI_RECORDING] Looking for track {} to update clip", track_id);
-            if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                eprintln!("[MIDI_RECORDING] Found MIDI track, looking for clip {}", clip_id);
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                    eprintln!("[MIDI_RECORDING] Found clip, clearing and adding {} notes", note_count);
-                    // Clear existing events
-                    clip.events.clear();
+            // Update the MIDI clip in the pool (new model: clips are stored centrally in the pool)
+            eprintln!("[MIDI_RECORDING] Looking for clip {} in midi_clip_pool", clip_id);
+            if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
+                eprintln!("[MIDI_RECORDING] Found clip in pool, clearing and adding {} notes", note_count);
+                // Clear existing events
+                clip.events.clear();
 
-                    // Update clip duration to match the actual recording time
-                    clip.duration = recording_duration;
+                // Update clip duration to match the actual recording time
+                clip.duration = recording_duration;
 
-                    // Add new events from the recorded notes
-                    // Timestamps are now stored in seconds (sample-rate independent)
-                    for (start_time, note, velocity, duration) in notes.iter() {
-                        let note_on = MidiEvent::note_on(*start_time, 0, *note, *velocity);
+                // Add new events from the recorded notes
+                // Timestamps are now stored in seconds (sample-rate independent)
+                for (start_time, note, velocity, duration) in notes.iter() {
+                    let note_on = MidiEvent::note_on(*start_time, 0, *note, *velocity);
 
-                        eprintln!("[MIDI_RECORDING] Note {}: start_time={:.3}s, duration={:.3}s",
-                                  note, start_time, duration);
+                    eprintln!("[MIDI_RECORDING] Note {}: start_time={:.3}s, duration={:.3}s",
+                              note, start_time, duration);
 
-                        clip.events.push(note_on);
+                    clip.events.push(note_on);
 
-                        // Add note off event
-                        let note_off_time = *start_time + *duration;
-                        let note_off = MidiEvent::note_off(note_off_time, 0, *note, 64);
-                        clip.events.push(note_off);
+                    // Add note off event
+                    let note_off_time = *start_time + *duration;
+                    let note_off = MidiEvent::note_off(note_off_time, 0, *note, 64);
+                    clip.events.push(note_off);
+                }
+
+                // Sort events by timestamp (using partial_cmp for f64)
+                clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                eprintln!("[MIDI_RECORDING] Updated clip {} with {} notes ({} events)", clip_id, note_count, clip.events.len());
+
+                // Also update the clip instance's internal_end and external_duration to match the recording duration
+                if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(instance) = track.clip_instances.iter_mut().find(|i| i.clip_id == clip_id) {
+                        instance.internal_end = recording_duration;
+                        instance.external_duration = recording_duration;
+                        eprintln!("[MIDI_RECORDING] Updated clip instance timing: internal_end={:.3}s, external_duration={:.3}s",
+                                  instance.internal_end, instance.external_duration);
                     }
-
-                    // Sort events by timestamp (using partial_cmp for f64)
-                    clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
-                    eprintln!("[MIDI_RECORDING] Updated clip {} with {} notes ({} events)", clip_id, note_count, clip.events.len());
-                } else {
-                    eprintln!("[MIDI_RECORDING] ERROR: Clip {} not found on track!", clip_id);
                 }
             } else {
-                eprintln!("[MIDI_RECORDING] ERROR: Track {} not found or not a MIDI track!", track_id);
+                eprintln!("[MIDI_RECORDING] ERROR: Clip {} not found in pool!", clip_id);
             }
 
             // Send event to UI
@@ -1906,13 +1999,20 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetTrackSolo(track_id, solo));
     }
 
-    /// Move a clip to a new timeline position
+    /// Move a clip to a new timeline position (changes external_start)
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
         let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
     }
 
-    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64, new_duration: f64, new_offset: f64) {
-        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_start_time, new_duration, new_offset));
+    /// Trim a clip's internal boundaries (changes which portion of source content is used)
+    /// This also resets external_duration to match internal duration (disables looping)
+    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_internal_start: f64, new_internal_end: f64) {
+        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end));
+    }
+
+    /// Extend or shrink a clip's external duration (enables looping if > internal duration)
+    pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: f64) {
+        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration));
     }
 
     /// Send a generic command to the audio thread
@@ -2036,9 +2136,9 @@ impl EngineController {
         let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration));
     }
 
-    /// Add a pre-loaded MIDI clip to a track
-    pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) {
-        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip));
+    /// Add a pre-loaded MIDI clip to a track at the given timeline position
+    pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) {
+        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip, start_time));
     }
 
     /// Update all notes in a MIDI clip
@@ -2165,6 +2265,11 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetActiveMidiTrack(track_id));
     }
 
+    /// Enable or disable the metronome click track
+    pub fn set_metronome_enabled(&mut self, enabled: bool) {
+        let _ = self.command_tx.push(Command::SetMetronomeEnabled(enabled));
+    }
+
     // Node graph operations
 
     /// Add a node to a track's instrument graph
@@ -2231,13 +2336,13 @@ impl EngineController {
     }
 
     /// Add a sample layer to a MultiSampler node
-    pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
-        let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max));
+    pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8, loop_start: Option<usize>, loop_end: Option<usize>, loop_mode: crate::audio::node_graph::nodes::LoopMode) {
+        let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode));
     }
 
     /// Update a MultiSampler layer's configuration
-    pub fn multi_sampler_update_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8) {
-        let _ = self.command_tx.push(Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max));
+    pub fn multi_sampler_update_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8, loop_start: Option<usize>, loop_end: Option<usize>, loop_mode: crate::audio::node_graph::nodes::LoopMode) {
+        let _ = self.command_tx.push(Command::MultiSamplerUpdateLayer(track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode));
     }
 
     /// Remove a layer from a MultiSampler node
@@ -2523,5 +2628,26 @@ impl EngineController {
         }
 
         Err("Query timeout".to_string())
+    }
+
+    /// Export audio to a file
+    pub fn export_audio<P: AsRef<std::path::Path>>(&mut self, settings: &crate::audio::ExportSettings, output_path: P) -> Result<(), String> {
+        // Send export query
+        if let Err(_) = self.query_tx.push(Query::ExportAudio(settings.clone(), output_path.as_ref().to_path_buf())) {
+            return Err("Failed to send export query - queue full".to_string());
+        }
+
+        // Wait for response (with longer timeout since export can take a while)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(300); // 5 minute timeout for export
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AudioExported(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        Err("Export timeout".to_string())
     }
 }

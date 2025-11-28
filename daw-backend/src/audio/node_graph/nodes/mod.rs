@@ -63,7 +63,7 @@ pub use math::MathNode;
 pub use midi_input::MidiInputNode;
 pub use midi_to_cv::MidiToCVNode;
 pub use mixer::MixerNode;
-pub use multi_sampler::MultiSamplerNode;
+pub use multi_sampler::{MultiSamplerNode, LoopMode};
 pub use noise::NoiseGeneratorNode;
 pub use oscillator::OscillatorNode;
 pub use oscilloscope::OscilloscopeNode;

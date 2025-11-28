@@ -14,6 +14,7 @@ import {
   clickCanvas
 } from '../helpers/canvas.js';
 import { assertShapeExists } from '../helpers/assertions.js';
+import { verifyManually, logStep } from '../helpers/manual.js';
 
 describe('Group Editing', () => {
   before(async () => {
@@ -71,6 +72,7 @@ describe('Group Editing', () => {
 
     it('should handle nested group editing with correct positioning', async () => {
       // Create first group with two shapes
+      await logStep('Drawing two rectangles for inner group');
       await drawRectangle(400, 100, 60, 60);
       await drawRectangle(480, 100, 60, 60);
       await selectMultipleShapes([
@@ -80,24 +82,47 @@ describe('Group Editing', () => {
       await useKeyboardShortcut('g', true);
       await browser.pause(300);
 
+      await verifyManually('VERIFY: Do you see two rectangles grouped together?\nClick OK if yes, Cancel if no');
+
       // Verify both shapes exist
       await assertShapeExists(430, 130, 'First shape should exist');
       await assertShapeExists(510, 130, 'Second shape should exist');
 
       // Create another shape and group everything together
+      await logStep('Drawing third rectangle and creating nested group');
       await drawRectangle(400, 180, 60, 60);
-      await selectMultipleShapes([
-        { x: 470, y: 130 }, // Center of first group
-        { x: 430, y: 210 }  // Center of new shape
-      ]);
+
+      // Select both the group and the new shape by dragging a selection box
+      // We need to start from well outside the shapes to avoid hitting them
+      // The first group spans x=400-540, y=100-160
+      // The third shape spans x=400-460, y=180-240
+      await selectTool('select');
+      await dragCanvas(390, 90, 550, 250); // Start from outside all shapes
+      await browser.pause(200);
+
       await useKeyboardShortcut('g', true);
       await browser.pause(300);
 
+      await verifyManually('VERIFY: All three rectangles now grouped together (nested group)?\nClick OK if yes, Cancel if no');
+
       // Double-click to enter outer group
+      await logStep('Double-clicking to enter outer group');
       await doubleClickCanvas(470, 130);
+      await browser.pause(300);
+
+      await verifyManually('VERIFY: Are we now inside the outer group?\nClick OK if yes, Cancel if no');
 
       // Double-click again to enter inner group
+      await logStep('Double-clicking again to enter inner group');
       await doubleClickCanvas(470, 130);
+      await browser.pause(300);
+
+      await verifyManually(
+        'VERIFY: Are we now inside the inner group?\n' +
+        'Can you see the two original rectangles at their original positions?\n' +
+        'First at (430, 130), second at (510, 130)?\n\n' +
+        'Click OK if yes, Cancel if no'
+      );
 
       // All shapes should still be at their original positions
       await assertShapeExists(430, 130, 'First shape should maintain position in nested group');

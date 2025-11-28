@@ -883,7 +883,8 @@ export const nodeTypes = {
           <input type="range" data-node="${nodeId}" data-param="3" min="-24" max="24" value="0" step="1">
         </div>
         <div class="node-param" style="margin-top: 4px;">
-          <button class="add-layer-btn" data-node="${nodeId}" style="width: 100%; padding: 4px; font-size: 10px;">Add Sample Layer</button>
+          <button class="add-layer-btn" data-node="${nodeId}" style="width: 100%; padding: 4px; font-size: 10px; margin-bottom: 2px;">Add Sample Layer</button>
+          <button class="import-folder-btn" data-node="${nodeId}" style="width: 100%; padding: 4px; font-size: 10px;">Import Folder...</button>
         </div>
         <div id="sample-layers-container-${nodeId}" class="sample-layers-container">
           <table id="sample-layers-table-${nodeId}" class="sample-layers-table">

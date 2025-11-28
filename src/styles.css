@@ -213,6 +213,23 @@ button {
   user-select: none;
 }
 
+/* Maximize button in pane headers */
+.maximize-btn {
+  margin-left: auto;
+  margin-right: 8px;
+  padding: 4px 8px;
+  background: none;
+  border: 1px solid var(--foreground-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 14px;
+}
+
+.maximize-btn:hover {
+  background-color: var(--surface-light);
+}
+
 .pane {
   user-select: none;
 }
@@ -675,7 +692,7 @@ button {
   margin: 0px;
 }
 #popupMenu li {
-  color: var(--keyframe);
+  color: var(--text-primary);
   list-style-type: none;
   display: flex;
   align-items: center;  /* Vertically center the image and text */
@@ -773,7 +790,7 @@ button {
     background-color: var(--shade);
   }
   #popupMenu li {
-    color: var(--background-color);
+    color: var(--text-primary);
   }
   #popupMenu li:hover {
     background-color: var(--surface-light);
@@ -1022,6 +1039,24 @@ button {
   animation: pulse 1s ease-in-out infinite;
 }
 
+/* Metronome Button - Inline SVG with currentColor */
+.playback-btn-metronome {
+  color: var(--text-primary);
+}
+
+.playback-btn-metronome svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  margin: auto;
+}
+
+/* Active metronome state - use highlight color */
+.playback-btn-metronome.active {
+  background-color: var(--highlight);
+  border-color: var(--highlight);
+}
+
 /* Dark mode playback button adjustments */
 @media (prefers-color-scheme: dark) {
   .playback-btn {
@@ -1209,6 +1244,7 @@ button {
   border-bottom: 1px solid #3d3d3d;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 16px;
   z-index: 200;
   user-select: none;
@@ -1247,6 +1283,22 @@ button {
 .exit-template-btn:hover {
   background: #4d4d4d;
   border-color: #5d5d5d;
+}
+
+.node-graph-clear-btn {
+  padding: 4px 12px;
+  background: #d32f2f;
+  border: 1px solid #b71c1c;
+  border-radius: 3px;
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.node-graph-clear-btn:hover {
+  background: #e53935;
+  border-color: #c62828;
 }
 
 .exit-template-btn:active {

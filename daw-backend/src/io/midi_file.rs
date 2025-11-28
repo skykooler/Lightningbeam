@@ -157,9 +157,8 @@ pub fn load_midi_file<P: AsRef<Path>>(
         (final_delta_ticks as f64 / ticks_per_beat) * (microseconds_per_beat / 1_000_000.0);
     let duration_seconds = accumulated_time + final_delta_time;
 
-    // Create the MIDI clip
-    let mut clip = MidiClip::new(clip_id, 0.0, duration_seconds);
-    clip.events = events;
+    // Create the MIDI clip (content only, positioning happens when creating instance)
+    let clip = MidiClip::new(clip_id, events, duration_seconds, "Imported MIDI".to_string());
 
     Ok(clip)
 }

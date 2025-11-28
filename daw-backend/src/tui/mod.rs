@@ -847,8 +847,7 @@ fn execute_command(
 
             // Load the MIDI file
             match load_midi_file(file_path, app.next_clip_id, 48000) {
-                Ok(mut midi_clip) => {
-                    midi_clip.start_time = start_time;
+                Ok(midi_clip) => {
                     let clip_id = midi_clip.id;
                     let duration = midi_clip.duration;
                     let event_count = midi_clip.events.len();
@@ -882,8 +881,8 @@ fn execute_command(
                     app.add_clip(track_id, clip_id, start_time, duration, file_path.to_string(), notes);
                     app.next_clip_id += 1;
 
-                    // Send to audio engine
-                    controller.add_loaded_midi_clip(track_id, midi_clip);
+                    // Send to audio engine with the start_time (clip content is separate from timeline position)
+                    controller.add_loaded_midi_clip(track_id, midi_clip, start_time);
 
                     app.set_status(format!("Loaded {} ({} events, {:.2}s) to track {} at {:.2}s",
                         file_path, event_count, duration, track_id, start_time));

@@ -3,11 +3,29 @@
  */
 
 /**
+ * Reset canvas scroll/pan to origin
+ */
+export async function resetCanvasView() {
+  await browser.execute(function() {
+    if (window.context && window.context.stageWidget) {
+      window.context.stageWidget.offsetX = 0;
+      window.context.stageWidget.offsetY = 0;
+      // Trigger redraw to apply the reset
+      if (window.context.updateUI) {
+        window.context.updateUI();
+      }
+    }
+  });
+  await browser.pause(100); // Wait for canvas to reset
+}
+
+/**
  * Click at specific coordinates on the canvas
  * @param {number} x - X coordinate relative to canvas
  * @param {number} y - Y coordinate relative to canvas
  */
 export async function clickCanvas(x, y) {
+  await resetCanvasView();
   await browser.clickCanvas(x, y);
   await browser.pause(100); // Wait for render
 }
@@ -20,6 +38,7 @@ export async function clickCanvas(x, y) {
  * @param {number} toY - Ending Y coordinate
  */
 export async function dragCanvas(fromX, fromY, toX, toY) {
+  await resetCanvasView();
   await browser.dragCanvas(fromX, fromY, toX, toY);
   await browser.pause(200); // Wait for render
 }
@@ -31,17 +50,21 @@ export async function dragCanvas(fromX, fromY, toX, toY) {
  * @param {number} width - Rectangle width
  * @param {number} height - Rectangle height
  * @param {boolean} filled - Whether to fill the shape (default: true)
+ * @param {string} color - Fill color in hex format (e.g., '#ff0000')
  */
-export async function drawRectangle(x, y, width, height, filled = true) {
+export async function drawRectangle(x, y, width, height, filled = true, color = null) {
   // Select the rectangle tool
   await selectTool('rectangle');
 
-  // Set fill option
-  await browser.execute((filled) => {
+  // Set fill option and color if provided
+  await browser.execute((filled, color) => {
     if (window.context) {
       window.context.fillShape = filled;
+      if (color) {
+        window.context.fillStyle = color;
+      }
     }
-  }, filled);
+  }, filled, color);
 
   // Draw by dragging from start to end point
   await dragCanvas(x, y, x + width, y + height);
@@ -192,14 +215,24 @@ export async function doubleClickCanvas(x, y) {
 export async function setPlayheadTime(time) {
   await browser.execute(function(timeValue) {
     if (window.context && window.context.activeObject) {
+      // Set time on both the active object and timeline state
       window.context.activeObject.currentTime = timeValue;
-      // Update timeline widget if it exists
       if (window.context.timelineWidget && window.context.timelineWidget.timelineState) {
         window.context.timelineWidget.timelineState.currentTime = timeValue;
       }
+
+      // Trigger timeline redraw to show updated playhead position
+      if (window.context.timelineWidget && window.context.timelineWidget.requestRedraw) {
+        window.context.timelineWidget.requestRedraw();
+      }
+
+      // Trigger stage redraw to show shapes at new time
+      if (window.context.updateUI) {
+        window.context.updateUI();
+      }
     }
   }, time);
-  await browser.pause(100);
+  await browser.pause(200);
 }
 
 /**

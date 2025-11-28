@@ -1,3 +1,17 @@
+# 0.8.1-alpha:
+Changes:
+- Rewrite timeline UI
+- Add start screen
+- Move audio engine to backend
+- Add node editor for audio synthesis
+- Add factory presets for instruments
+- Add MIDI input support
+- Add BPM handling and time signature
+- Add metronome
+- Add preset layouts for different tasks
+- Add video import
+- Add animation curves for object properties
+
 # 0.7.14-alpha:
 Changes:
 - Moving frames can now be undone
