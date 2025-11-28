@@ -8,6 +8,7 @@ use uuid::Uuid;
 use vello::kurbo::Shape as KurboShape;
 
 /// 2D transform for an object
+/// Contains only geometric transformations (position, rotation, scale, skew)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transform {
     /// X position
@@ -24,8 +25,6 @@ pub struct Transform {
     pub skew_x: f64,
     /// Y skew in degrees
     pub skew_y: f64,
-    /// Opacity (0.0 to 1.0)
-    pub opacity: f64,
 }
 
 impl Default for Transform {
@@ -38,7 +37,6 @@ impl Default for Transform {
             scale_y: 1.0,
             skew_x: 0.0,
             skew_y: 0.0,
-            opacity: 1.0,
         }
     }
 }
@@ -119,39 +117,46 @@ impl Transform {
     }
 }
 
-/// An object instance (shape with transform)
+/// A shape instance (shape with transform)
+/// Represents an instance of a Shape with its own transform properties.
+/// Multiple instances can reference the same shape.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Object {
+pub struct ShapeInstance {
     /// Unique identifier
     pub id: Uuid,
 
     /// Reference to the shape this object uses
     pub shape_id: Uuid,
 
-    /// Transform properties
+    /// Transform properties (position, rotation, scale, skew)
     pub transform: Transform,
+
+    /// Opacity (0.0 to 1.0, separate from geometric transform)
+    pub opacity: f64,
 
     /// Name for display in UI
     pub name: Option<String>,
 }
 
-impl Object {
-    /// Create a new object for a shape
+impl ShapeInstance {
+    /// Create a new shape instance for a shape
     pub fn new(shape_id: Uuid) -> Self {
         Self {
             id: Uuid::new_v4(),
             shape_id,
             transform: Transform::default(),
+            opacity: 1.0,
             name: None,
         }
     }
 
-    /// Create a new object with a specific ID
+    /// Create a new shape instance with a specific ID
     pub fn with_id(id: Uuid, shape_id: Uuid) -> Self {
         Self {
             id,
             shape_id,
             transform: Transform::default(),
+            opacity: 1.0,
             name: None,
         }
     }
@@ -174,15 +179,15 @@ impl Object {
         self
     }
 
-    /// Convert object transform to affine matrix
+    /// Convert shape instance transform to affine matrix
     pub fn to_affine(&self) -> kurbo::Affine {
         self.transform.to_affine()
     }
 
-    /// Get the bounding box of this object given its shape
+    /// Get the bounding box of this shape instance given its shape
     ///
-    /// Returns the bounding box in the object's parent coordinate space
-    /// (i.e., with the object's transform applied).
+    /// Returns the bounding box in the instance's parent coordinate space
+    /// (i.e., with the instance's transform applied).
     pub fn bounding_box(&self, shape: &crate::shape::Shape) -> kurbo::Rect {
         let path_bbox = shape.path().bounding_box();
         self.to_affine().transform_rect_bbox(path_bbox)
@@ -214,11 +219,11 @@ mod tests {
     }
 
     #[test]
-    fn test_object_creation() {
+    fn test_shape_instance_creation() {
         let shape_id = Uuid::new_v4();
-        let object = Object::new(shape_id);
+        let shape_instance = ShapeInstance::new(shape_id);
 
-        assert_eq!(object.shape_id, shape_id);
-        assert_eq!(object.transform.x, 0.0);
+        assert_eq!(shape_instance.shape_id, shape_id);
+        assert_eq!(shape_instance.transform.x, 0.0);
     }
 }

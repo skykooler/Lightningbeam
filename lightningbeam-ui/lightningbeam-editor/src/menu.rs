@@ -164,6 +164,7 @@ pub enum MenuAction {
     AddVideoLayer,
     AddAudioTrack,
     AddMidiTrack,
+    AddTestClip, // For testing: adds a test clip instance to the current layer
     DeleteLayer,
     ToggleLayerVisibility,
 
@@ -254,6 +255,7 @@ impl MenuItemDef {
     const ADD_VIDEO_LAYER: Self = Self { label: "Add Video Layer", action: MenuAction::AddVideoLayer, shortcut: None };
     const ADD_AUDIO_TRACK: Self = Self { label: "Add Audio Track", action: MenuAction::AddAudioTrack, shortcut: None };
     const ADD_MIDI_TRACK: Self = Self { label: "Add MIDI Track", action: MenuAction::AddMidiTrack, shortcut: None };
+    const ADD_TEST_CLIP: Self = Self { label: "Add Test Clip", action: MenuAction::AddTestClip, shortcut: None };
     const DELETE_LAYER: Self = Self { label: "Delete Layer", action: MenuAction::DeleteLayer, shortcut: None };
     const TOGGLE_LAYER_VISIBILITY: Self = Self { label: "Hide/Show Layer", action: MenuAction::ToggleLayerVisibility, shortcut: None };
 
@@ -363,6 +365,8 @@ impl MenuItemDef {
                     MenuDef::Item(&Self::ADD_VIDEO_LAYER),
                     MenuDef::Item(&Self::ADD_AUDIO_TRACK),
                     MenuDef::Item(&Self::ADD_MIDI_TRACK),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::ADD_TEST_CLIP),
                     MenuDef::Separator,
                     MenuDef::Item(&Self::DELETE_LAYER),
                     MenuDef::Item(&Self::TOGGLE_LAYER_VISIBILITY),

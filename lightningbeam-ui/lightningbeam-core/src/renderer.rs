@@ -5,6 +5,7 @@
 use crate::animation::TransformProperty;
 use crate::document::Document;
 use crate::layer::{AnyLayer, VectorLayer};
+use crate::object::ShapeInstance;
 use kurbo::{Affine, Shape};
 use vello::kurbo::Rect;
 use vello::peniko::Fill;
@@ -21,8 +22,9 @@ pub fn render_document_with_transform(document: &Document, scene: &mut Scene, ba
     // 1. Draw background
     render_background(document, scene, base_transform);
 
-    // 2. Recursively render the root graphics object
-    render_graphics_object(document, scene, base_transform);
+    // 2. Recursively render the root graphics object at current time
+    let time = document.current_time;
+    render_graphics_object(document, time, scene, base_transform);
 }
 
 /// Draw the document background
@@ -42,17 +44,17 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
 }
 
 /// Recursively render the root graphics object and its children
-fn render_graphics_object(document: &Document, scene: &mut Scene, base_transform: Affine) {
+fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, base_transform: Affine) {
     // Render all visible layers in the root graphics object
     for layer in document.visible_layers() {
-        render_layer(document, layer, scene, base_transform);
+        render_layer(document, time, layer, scene, base_transform);
     }
 }
 
 /// Render a single layer
-fn render_layer(document: &Document, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine) {
+fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine) {
     match layer {
-        AnyLayer::Vector(vector_layer) => render_vector_layer(document, vector_layer, scene, base_transform),
+        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform),
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
         }
@@ -62,28 +64,65 @@ fn render_layer(document: &Document, layer: &AnyLayer, scene: &mut Scene, base_t
     }
 }
 
-/// Render a vector layer with all its objects
-fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine) {
-    let time = document.current_time;
+/// Render a clip instance (recursive rendering for nested compositions)
+fn render_clip_instance(
+    document: &Document,
+    time: f64,
+    clip_instance: &crate::clip::ClipInstance,
+    _parent_opacity: f64,
+    scene: &mut Scene,
+    base_transform: Affine,
+) {
+    // Try to find the clip in the document's clip libraries
+    // For now, only handle VectorClips (VideoClip and AudioClip rendering not yet implemented)
+    let Some(vector_clip) = document.vector_clips.get(&clip_instance.clip_id) else {
+        return; // Clip not found or not a vector clip
+    };
+
+    // Remap timeline time to clip's internal time
+    let Some(clip_time) = clip_instance.remap_time(time, vector_clip.duration) else {
+        return; // Clip instance not active at this time
+    };
+
+    // Build transform for this clip instance
+    let instance_transform = base_transform * clip_instance.to_affine();
+
+    // TODO: Properly handle clip instance opacity by threading opacity through rendering pipeline
+    // Currently clip_instance.opacity is not being applied to nested layers
+
+    // Recursively render all root layers in the clip at the remapped time
+    for layer_node in vector_clip.layers.iter() {
+        // TODO: Filter by visibility and time range once LayerNode exposes that data
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform);
+    }
+}
+
+/// Render a vector layer with all its clip instances and shape instances
+fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine) {
 
     // Get layer-level opacity
     let layer_opacity = layer.layer.opacity;
 
-    // Render each object in the layer
-    for object in &layer.objects {
-        // Get the shape for this object
-        let Some(shape) = layer.get_shape(&object.shape_id) else {
+    // Render clip instances first (they appear under shape instances)
+    for clip_instance in &layer.clip_instances {
+        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform);
+    }
+
+    // Render each shape instance in the layer
+    for shape_instance in &layer.shape_instances {
+        // Get the shape for this instance
+        let Some(shape) = layer.get_shape(&shape_instance.shape_id) else {
             continue;
         };
 
         // Evaluate animated properties
-        let transform = &object.transform;
+        let transform = &shape_instance.transform;
         let x = layer
             .layer
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::X,
                 },
                 time,
@@ -94,7 +133,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::Y,
                 },
                 time,
@@ -105,7 +144,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::Rotation,
                 },
                 time,
@@ -116,7 +155,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::ScaleX,
                 },
                 time,
@@ -127,7 +166,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::ScaleY,
                 },
                 time,
@@ -138,7 +177,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::SkewX,
                 },
                 time,
@@ -149,7 +188,7 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::SkewY,
                 },
                 time,
@@ -160,11 +199,11 @@ fn render_vector_layer(document: &Document, layer: &VectorLayer, scene: &mut Sce
             .animation_data
             .eval(
                 &crate::animation::AnimationTarget::Object {
-                    id: object.id,
+                    id: shape_instance.id,
                     property: TransformProperty::Opacity,
                 },
                 time,
-                transform.opacity,
+                shape_instance.opacity,
             );
 
         // Check if shape has morphing animation
@@ -276,7 +315,7 @@ mod tests {
     use super::*;
     use crate::document::Document;
     use crate::layer::{AnyLayer, VectorLayer};
-    use crate::object::Object;
+    use crate::object::ShapeInstance;
     use crate::shape::{Shape, ShapeColor};
     use kurbo::{Circle, Shape as KurboShape};
 
@@ -298,13 +337,13 @@ mod tests {
         let path = circle.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
 
-        // Create an object for the shape
-        let object = Object::new(shape.id);
+        // Create a shape instance for the shape
+        let shape_instance = ShapeInstance::new(shape.id);
 
         // Create a vector layer
         let mut vector_layer = VectorLayer::new("Layer 1");
         vector_layer.add_shape(shape);
-        vector_layer.add_object(object);
+        vector_layer.add_object(shape_instance);
 
         // Add to document
         doc.root.add_child(AnyLayer::Vector(vector_layer));

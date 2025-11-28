@@ -332,7 +332,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     // 1. Draw selection outlines around selected objects
                     // NOTE: Skip this if Transform tool is active (it has its own handles)
                     if !self.selection.is_empty() && !matches!(self.selected_tool, Tool::Transform) {
-                        for &object_id in self.selection.objects() {
+                        for &object_id in self.selection.shape_instances() {
                             if let Some(object) = vector_layer.get_object(&object_id) {
                                 if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                                     // Get shape bounding box
@@ -382,6 +382,66 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                             &corner_circle,
                                         );
                                     }
+                                }
+                            }
+                        }
+
+                        // Also draw selection outlines for clip instances
+                        for &clip_id in self.selection.clip_instances() {
+                            if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
+                                // Get clip dimensions from document
+                                let (width, height) = if let Some(vector_clip) = self.document.get_vector_clip(&clip_instance.clip_id) {
+                                    (vector_clip.width, vector_clip.height)
+                                } else if let Some(video_clip) = self.document.get_video_clip(&clip_instance.clip_id) {
+                                    (video_clip.width, video_clip.height)
+                                } else {
+                                    continue; // Clip not found or is audio
+                                };
+
+                                // Create bounding box from clip dimensions
+                                let bbox = KurboRect::new(0.0, 0.0, width, height);
+
+                                // Apply clip instance transform and camera transform
+                                let clip_transform = clip_instance.transform.to_affine();
+                                let combined_transform = camera_transform * clip_transform;
+
+                                // Draw selection outline with different color for clip instances
+                                let clip_selection_color = Color::rgb8(255, 120, 0); // Orange
+                                scene.stroke(
+                                    &Stroke::new(stroke_width),
+                                    combined_transform,
+                                    clip_selection_color,
+                                    None,
+                                    &bbox,
+                                );
+
+                                // Draw corner handles (4 circles at corners)
+                                let handle_radius = (6.0 / self.zoom.max(0.5) as f64).max(4.0);
+                                let corners = [
+                                    (bbox.x0, bbox.y0),
+                                    (bbox.x1, bbox.y0),
+                                    (bbox.x1, bbox.y1),
+                                    (bbox.x0, bbox.y1),
+                                ];
+
+                                for (x, y) in corners {
+                                    let corner_circle = Circle::new((x, y), handle_radius);
+                                    // Fill with orange
+                                    scene.fill(
+                                        Fill::NonZero,
+                                        combined_transform,
+                                        clip_selection_color,
+                                        None,
+                                        &corner_circle,
+                                    );
+                                    // White outline
+                                    scene.stroke(
+                                        &Stroke::new(1.0),
+                                        combined_transform,
+                                        Color::rgb8(255, 255, 255),
+                                        None,
+                                        &corner_circle,
+                                    );
                                 }
                             }
                         }
@@ -673,9 +733,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // For single object: use object-aligned (rotated) bounding box
                         // For multiple objects: use axis-aligned bounding box (simpler for now)
 
-                        if self.selection.objects().len() == 1 {
+                        if self.selection.shape_instances().len() == 1 {
                             // Single object - draw rotated bounding box
-                            let object_id = *self.selection.objects().iter().next().unwrap();
+                            let object_id = *self.selection.shape_instances().iter().next().unwrap();
 
                             if let Some(object) = vector_layer.get_object(&object_id) {
                                 if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
@@ -863,7 +923,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // Multiple objects - use axis-aligned bbox (existing code)
                             let mut combined_bbox: Option<KurboRect> = None;
 
-                            for &object_id in self.selection.objects() {
+                            for &object_id in self.selection.shape_instances() {
                                 if let Some(object) = vector_layer.get_object(&object_id) {
                                     if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                                         let shape_bbox = shape.path().bounding_box();
@@ -1178,7 +1238,7 @@ impl StagePane {
             None => return, // No active layer
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1194,38 +1254,92 @@ impl StagePane {
         // Mouse down: start interaction (use drag_started for immediate feedback)
         if response.drag_started() || response.clicked() {
             // Hit test at click position
-            let hit = hit_test::hit_test_layer(vector_layer, point, 5.0, Affine::IDENTITY);
+            // Test clip instances first (they're on top of shapes)
+            let document = shared.action_executor.document();
+            let clip_hit = hit_test::hit_test_clip_instances(
+                &vector_layer.clip_instances,
+                &document.vector_clips,
+                &document.video_clips,
+                point,
+                Affine::IDENTITY,
+            );
 
-            if let Some(object_id) = hit {
-                // Object was hit
-                if shift_held {
-                    // Shift: toggle selection
-                    shared.selection.toggle_object(object_id);
-                } else {
-                    // No shift: replace selection
-                    if !shared.selection.contains_object(&object_id) {
-                        shared.selection.select_only_object(object_id);
-                    }
-                }
+            let hit_result = if let Some(clip_id) = clip_hit {
+                Some(hit_test::HitResult::ClipInstance(clip_id))
+            } else {
+                // No clip hit, test shape instances
+                hit_test::hit_test_layer(vector_layer, point, 5.0, Affine::IDENTITY)
+                    .map(|id| hit_test::HitResult::ShapeInstance(id))
+            };
 
-                // If object is now selected, prepare for dragging
-                if shared.selection.contains_object(&object_id) {
-                    // Store original positions of all selected objects
-                    let mut original_positions = std::collections::HashMap::new();
-                    for &obj_id in shared.selection.objects() {
-                        if let Some(obj) = vector_layer.get_object(&obj_id) {
-                            original_positions.insert(
-                                obj_id,
-                                Point::new(obj.transform.x, obj.transform.y),
-                            );
+            if let Some(hit) = hit_result {
+                match hit {
+                    hit_test::HitResult::ShapeInstance(object_id) => {
+                        // Shape instance was hit
+                        if shift_held {
+                            // Shift: toggle selection
+                            shared.selection.toggle_shape_instance(object_id);
+                        } else {
+                            // No shift: replace selection
+                            if !shared.selection.contains_shape_instance(&object_id) {
+                                shared.selection.select_only_shape_instance(object_id);
+                            }
+                        }
+
+                        // If object is now selected, prepare for dragging
+                        if shared.selection.contains_shape_instance(&object_id) {
+                            // Store original positions of all selected objects
+                            let mut original_positions = std::collections::HashMap::new();
+                            for &obj_id in shared.selection.shape_instances() {
+                                if let Some(obj) = vector_layer.get_object(&obj_id) {
+                                    original_positions.insert(
+                                        obj_id,
+                                        Point::new(obj.transform.x, obj.transform.y),
+                                    );
+                                }
+                            }
+
+                            *shared.tool_state = ToolState::DraggingSelection {
+                                start_pos: point,
+                                start_mouse: point,
+                                original_positions,
+                            };
                         }
                     }
+                    hit_test::HitResult::ClipInstance(clip_id) => {
+                        // Clip instance was hit
+                        if shift_held {
+                            // Shift: toggle selection
+                            shared.selection.toggle_clip_instance(clip_id);
+                        } else {
+                            // No shift: replace selection
+                            if !shared.selection.contains_clip_instance(&clip_id) {
+                                shared.selection.select_only_clip_instance(clip_id);
+                            }
+                        }
 
-                    *shared.tool_state = ToolState::DraggingSelection {
-                        start_pos: point,
-                        start_mouse: point,
-                        original_positions,
-                    };
+                        // If clip instance is now selected, prepare for dragging
+                        if shared.selection.contains_clip_instance(&clip_id) {
+                            // Store original positions of all selected clip instances
+                            let mut original_positions = std::collections::HashMap::new();
+                            for &clip_inst_id in shared.selection.clip_instances() {
+                                // Find the clip instance in the layer
+                                if let Some(clip_inst) = vector_layer.clip_instances.iter()
+                                    .find(|ci| ci.id == clip_inst_id) {
+                                    original_positions.insert(
+                                        clip_inst_id,
+                                        Point::new(clip_inst.transform.x, clip_inst.transform.y),
+                                    );
+                                }
+                            }
+
+                            *shared.tool_state = ToolState::DraggingSelection {
+                                start_pos: point,
+                                start_mouse: point,
+                                original_positions,
+                            };
+                        }
+                    }
                 }
             } else {
                 // Nothing hit - start marquee selection
@@ -1266,22 +1380,54 @@ impl StagePane {
                     let delta = point - start_mouse;
 
                     if delta.x.abs() > 0.01 || delta.y.abs() > 0.01 {
-                        // Create move action with new positions
+                        // Create move actions with new positions
                         use std::collections::HashMap;
-                        let mut object_positions = HashMap::new();
 
-                        for (object_id, original_pos) in original_positions {
+                        // Separate shape instances from clip instances
+                        use lightningbeam_core::object::Transform;
+                        let mut shape_instance_positions = HashMap::new();
+                        let mut clip_instance_transforms = HashMap::new();
+
+                        for (id, original_pos) in original_positions {
                             let new_pos = Point::new(
                                 original_pos.x + delta.x,
                                 original_pos.y + delta.y,
                             );
-                            object_positions.insert(object_id, (original_pos, new_pos));
+
+                            // Check if this is a shape instance or clip instance
+                            if shared.selection.contains_shape_instance(&id) {
+                                shape_instance_positions.insert(id, (original_pos, new_pos));
+                            } else if shared.selection.contains_clip_instance(&id) {
+                                // For clip instances, we need to get the full Transform
+                                // Find the clip instance in the layer
+                                if let Some(clip_inst) = vector_layer.clip_instances.iter()
+                                    .find(|ci| ci.id == id) {
+                                    let mut old_transform = clip_inst.transform.clone();
+                                    old_transform.x = original_pos.x;
+                                    old_transform.y = original_pos.y;
+
+                                    let mut new_transform = clip_inst.transform.clone();
+                                    new_transform.x = new_pos.x;
+                                    new_transform.y = new_pos.y;
+
+                                    clip_instance_transforms.insert(id, (old_transform, new_transform));
+                                }
+                            }
                         }
 
-                        // Create and submit the action
-                        use lightningbeam_core::actions::MoveObjectsAction;
-                        let action = MoveObjectsAction::new(*active_layer_id, object_positions);
-                        shared.pending_actions.push(Box::new(action));
+                        // Create and submit move action for shape instances
+                        if !shape_instance_positions.is_empty() {
+                            use lightningbeam_core::actions::MoveShapeInstancesAction;
+                            let action = MoveShapeInstancesAction::new(*active_layer_id, shape_instance_positions);
+                            shared.pending_actions.push(Box::new(action));
+                        }
+
+                        // Create and submit transform action for clip instances
+                        if !clip_instance_transforms.is_empty() {
+                            use lightningbeam_core::actions::TransformClipInstancesAction;
+                            let action = TransformClipInstancesAction::new(*active_layer_id, clip_instance_transforms);
+                            shared.pending_actions.push(Box::new(action));
+                        }
                     }
 
                     // Reset tool state
@@ -1296,24 +1442,49 @@ impl StagePane {
 
                     let selection_rect = KurboRect::new(min_x, min_y, max_x, max_y);
 
-                    // Hit test all objects in rectangle
-                    let hits = hit_test::hit_test_objects_in_rect(
+                    // Hit test clip instances in rectangle
+                    let document = shared.action_executor.document();
+                    let clip_hits = hit_test::hit_test_clip_instances_in_rect(
+                        &vector_layer.clip_instances,
+                        &document.vector_clips,
+                        &document.video_clips,
+                        selection_rect,
+                        Affine::IDENTITY,
+                    );
+
+                    // Hit test shape instances in rectangle
+                    let shape_hits = hit_test::hit_test_objects_in_rect(
                         vector_layer,
                         selection_rect,
                         Affine::IDENTITY,
                     );
 
-                    // Add to selection
-                    for obj_id in hits {
+                    // Add clip instances to selection
+                    for clip_id in clip_hits {
                         if shift_held {
-                            shared.selection.add_object(obj_id);
+                            shared.selection.add_clip_instance(clip_id);
                         } else {
                             // First hit replaces selection
                             if shared.selection.is_empty() {
-                                shared.selection.add_object(obj_id);
+                                shared.selection.add_clip_instance(clip_id);
                             } else {
                                 // Subsequent hits add to selection
-                                shared.selection.add_object(obj_id);
+                                shared.selection.add_clip_instance(clip_id);
+                            }
+                        }
+                    }
+
+                    // Add shape instances to selection
+                    for obj_id in shape_hits {
+                        if shift_held {
+                            shared.selection.add_shape_instance(obj_id);
+                        } else {
+                            // First hit replaces selection
+                            if shared.selection.is_empty() {
+                                shared.selection.add_shape_instance(obj_id);
+                            } else {
+                                // Subsequent hits add to selection
+                                shared.selection.add_shape_instance(obj_id);
                             }
                         }
                     }
@@ -1340,12 +1511,12 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1428,7 +1599,7 @@ impl StagePane {
                 // Only create shape if rectangle has non-zero size
                 if width > 1.0 && height > 1.0 {
                     use lightningbeam_core::shape::{Shape, ShapeColor};
-                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Create shape with rectangle path (built from lines)
@@ -1436,10 +1607,10 @@ impl StagePane {
                     let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
 
                     // Create object at the calculated position
-                    let object = Object::new(shape.id).with_position(position.x, position.y);
+                    let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
 
                     // Create and execute action immediately
-                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    let action = AddShapeAction::new(active_layer_id, shape, object);
                     shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -1463,12 +1634,12 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1545,7 +1716,7 @@ impl StagePane {
                 // Only create shape if ellipse has non-zero size
                 if rx > 1.0 && ry > 1.0 {
                     use lightningbeam_core::shape::{Shape, ShapeColor};
-                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Create shape with ellipse path (built from bezier curves)
@@ -1553,10 +1724,10 @@ impl StagePane {
                     let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
 
                     // Create object at the calculated position
-                    let object = Object::new(shape.id).with_position(position.x, position.y);
+                    let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
 
                     // Create and execute action immediately
-                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    let action = AddShapeAction::new(active_layer_id, shape, object);
                     shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -1580,12 +1751,12 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1626,7 +1797,7 @@ impl StagePane {
                 // Only create shape if line has reasonable length
                 if length > 1.0 {
                     use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
-                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Create shape with line path
@@ -1643,10 +1814,10 @@ impl StagePane {
                         );
 
                     // Create object at the start point
-                    let object = Object::new(shape.id).with_position(start_point.x, start_point.y);
+                    let object = ShapeInstance::new(shape.id).with_position(start_point.x, start_point.y);
 
                     // Create and execute action immediately
-                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    let action = AddShapeAction::new(active_layer_id, shape, object);
                     shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -1670,12 +1841,12 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1718,7 +1889,7 @@ impl StagePane {
                 // Only create shape if polygon has reasonable size
                 if radius > 5.0 {
                     use lightningbeam_core::shape::{Shape, ShapeColor};
-                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Create shape with polygon path
@@ -1726,10 +1897,10 @@ impl StagePane {
                     let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
 
                     // Create object at the center point
-                    let object = Object::new(shape.id).with_position(center.x, center.y);
+                    let object = ShapeInstance::new(shape.id).with_position(center.x, center.y);
 
                     // Create and execute action immediately
-                    let action = AddShapeAction::new(*active_layer_id, shape, object);
+                    let action = AddShapeAction::new(active_layer_id, shape, object);
                     shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -1893,12 +2064,12 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
         };
@@ -1944,7 +2115,7 @@ impl StagePane {
                         simplify_rdp, fit_bezier_curves, RdpConfig, SchneiderConfig,
                     };
                     use lightningbeam_core::shape::{Shape, ShapeColor};
-                    use lightningbeam_core::object::Object;
+                    use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Convert points to the appropriate path based on simplify mode
@@ -2003,10 +2174,10 @@ impl StagePane {
                             );
 
                         // Create object at the calculated position
-                        let object = Object::new(shape.id).with_position(position.x, position.y);
+                        let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
 
                         // Create and execute action immediately
-                        let action = AddShapeAction::new(*active_layer_id, shape, object);
+                        let action = AddShapeAction::new(active_layer_id, shape, object);
                         shared.action_executor.execute(Box::new(action));
                     }
                 }
@@ -2037,7 +2208,7 @@ impl StagePane {
             }
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => {
                 println!("Paint bucket: Layer not found");
@@ -2069,6 +2240,57 @@ impl StagePane {
             shared.action_executor.execute(Box::new(action));
             println!("Paint bucket action executed");
         }
+    }
+
+    /// Decompose an affine matrix into transform components
+    /// Returns (translation_x, translation_y, rotation_deg, scale_x, scale_y, skew_x_deg, skew_y_deg)
+    fn decompose_affine(affine: kurbo::Affine) -> (f64, f64, f64, f64, f64, f64, f64) {
+        let coeffs = affine.as_coeffs();
+        let a = coeffs[0];
+        let b = coeffs[1];
+        let c = coeffs[2];
+        let d = coeffs[3];
+        let e = coeffs[4]; // translation_x
+        let f = coeffs[5]; // translation_y
+
+        // Extract translation
+        let tx = e;
+        let ty = f;
+
+        // Decompose linear part [[a, c], [b, d]] into rotate * scale * skew
+        // Using QR-like decomposition
+
+        // Extract rotation
+        let rotation_rad = b.atan2(a);
+        let cos_r = rotation_rad.cos();
+        let sin_r = rotation_rad.sin();
+
+        // Remove rotation to get scale * skew
+        // R^(-1) * M where M = [[a, c], [b, d]]
+        let m11 = a * cos_r + b * sin_r;
+        let m12 = c * cos_r + d * sin_r;
+        let m21 = -a * sin_r + b * cos_r;
+        let m22 = -c * sin_r + d * cos_r;
+
+        // Now [[m11, m12], [m21, m22]] = scale * skew
+        // scale * skew = [[sx, 0], [0, sy]] * [[1, tan(skew_y)], [tan(skew_x), 1]]
+        //              = [[sx, sx*tan(skew_y)], [sy*tan(skew_x), sy]]
+
+        let scale_x = m11;
+        let scale_y = m22;
+
+        let skew_x_rad = if scale_y.abs() > 0.001 { (m21 / scale_y).atan() } else { 0.0 };
+        let skew_y_rad = if scale_x.abs() > 0.001 { (m12 / scale_x).atan() } else { 0.0 };
+
+        (
+            tx,
+            ty,
+            rotation_rad.to_degrees(),
+            scale_x,
+            scale_y,
+            skew_x_rad.to_degrees(),
+            skew_y_rad.to_degrees(),
+        )
     }
 
     /// Apply transform preview to objects based on current mouse position
@@ -2169,12 +2391,15 @@ impl StagePane {
             }
 
             TransformMode::ScaleEdge { axis, origin } => {
-                // Calculate scale along one axis
+                // UNIFIED MATRIX APPROACH: Calculate bounding box transform, then apply to each object
+
+                // Step 1: Calculate the bounding box transform (world-space scale from origin)
+                // Preserve sign to allow flipping when dragging past the origin
                 let (scale_x_world, scale_y_world) = match axis {
                     Axis::Horizontal => {
-                        let start_dist = (start_mouse.x - origin.x).abs();
-                        let current_dist = (current_mouse.x - origin.x).abs();
-                        let scale = if start_dist > 0.001 {
+                        let start_dist = start_mouse.x - origin.x;
+                        let current_dist = current_mouse.x - origin.x;
+                        let scale = if start_dist.abs() > 0.001 {
                             current_dist / start_dist
                         } else {
                             1.0
@@ -2182,9 +2407,9 @@ impl StagePane {
                         (scale, 1.0)
                     }
                     Axis::Vertical => {
-                        let start_dist = (start_mouse.y - origin.y).abs();
-                        let current_dist = (current_mouse.y - origin.y).abs();
-                        let scale = if start_dist > 0.001 {
+                        let start_dist = start_mouse.y - origin.y;
+                        let current_dist = current_mouse.y - origin.y;
+                        let scale = if start_dist.abs() > 0.001 {
                             current_dist / start_dist
                         } else {
                             1.0
@@ -2193,36 +2418,59 @@ impl StagePane {
                     }
                 };
 
-                // Apply scale to all selected objects
+                // Build the bounding box transform: translate to origin, scale, translate back
+                use kurbo::Affine;
+                let bbox_transform = Affine::translate((origin.x, origin.y))
+                    * Affine::scale_non_uniform(scale_x_world, scale_y_world)
+                    * Affine::translate((-origin.x, -origin.y));
+
+                // Step 2: Apply to each object using matrix composition
                 for (object_id, original_transform) in original_transforms {
+                    // Get original opacity (now separate from transform)
+                    let original_opacity = if let Some(obj) = vector_layer.get_object(object_id) {
+                        obj.opacity
+                    } else {
+                        1.0
+                    };
+
+                    // New position: transform the object's position through bbox_transform
+                    let new_pos = bbox_transform * kurbo::Point::new(original_transform.x, original_transform.y);
+
+                    // Transform bbox operation to object's local space
+                    // local_transform = R^(-1) * bbox_transform * R
+                    let rotation = Affine::rotate(original_transform.rotation.to_radians());
+                    let rotation_inv = Affine::rotate(-original_transform.rotation.to_radians());
+
+                    // Extract just the linear part of bbox_transform (no translation)
+                    let bbox_linear = Affine::scale_non_uniform(scale_x_world, scale_y_world);
+
+                    // Transform to local space
+                    let local_transform = rotation_inv * bbox_linear * rotation;
+
+                    // Extract scale and skew directly from the 2x2 matrix
+                    // Matrix form: [[a, c], [b, d]] = [[sx, sx*tan(ky)], [sy*tan(kx), sy]]
+                    let coeffs = local_transform.as_coeffs();
+                    let a = coeffs[0];
+                    let b = coeffs[1];
+                    let c = coeffs[2];
+                    let d = coeffs[3];
+
+                    // Direct extraction (no rotation assumed in local space)
+                    let local_sx = a;
+                    let local_sy = d;
+                    let local_skew_x = if d.abs() > 0.001 { (b / d).atan().to_degrees() } else { 0.0 };
+                    let local_skew_y = if a.abs() > 0.001 { (c / a).atan().to_degrees() } else { 0.0 };
+
+                    // Apply to object
                     vector_layer.modify_object_internal(object_id, |obj| {
-                        // Get object's rotation in radians
-                        let rotation_rad = original_transform.rotation.to_radians();
-                        let cos_r = rotation_rad.cos();
-                        let sin_r = rotation_rad.sin();
-
-                        // Transform scale from world space to local space (same as corner mode)
-                        let cos_r_sq = cos_r * cos_r;
-                        let sin_r_sq = sin_r * sin_r;
-                        let sx_abs = scale_x_world.abs();
-                        let sy_abs = scale_y_world.abs();
-
-                        let local_scale_x = (cos_r_sq * sx_abs * sx_abs + sin_r_sq * sy_abs * sy_abs).sqrt();
-                        let local_scale_y = (sin_r_sq * sx_abs * sx_abs + cos_r_sq * sy_abs * sy_abs).sqrt();
-
-                        // Scale position relative to origin in world space
-                        let rel_x = original_transform.x - origin.x;
-                        let rel_y = original_transform.y - origin.y;
-
-                        obj.transform.x = origin.x + rel_x * scale_x_world;
-                        obj.transform.y = origin.y + rel_y * scale_y_world;
-
-                        // Apply local-space scale
-                        obj.transform.scale_x = original_transform.scale_x * local_scale_x;
-                        obj.transform.scale_y = original_transform.scale_y * local_scale_y;
-
-                        // Keep rotation unchanged
-                        obj.transform.rotation = original_transform.rotation;
+                        obj.transform.x = new_pos.x;
+                        obj.transform.y = new_pos.y;
+                        obj.transform.rotation = original_transform.rotation; // Preserve rotation
+                        obj.transform.scale_x = original_transform.scale_x * local_sx;
+                        obj.transform.scale_y = original_transform.scale_y * local_sy;
+                        obj.transform.skew_x = original_transform.skew_x + local_skew_x;
+                        obj.transform.skew_y = original_transform.skew_y + local_skew_y;
+                        obj.opacity = original_opacity; // Preserve opacity (now separate from transform)
                     });
                 }
             }
@@ -2492,14 +2740,14 @@ impl StagePane {
         use vello::kurbo::Point;
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
         // Only work on VectorLayer - just check type, don't hold reference
         {
-            let active_layer = match shared.action_executor.document().get_layer(active_layer_id) {
+            let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
                 Some(layer) => layer,
                 None => return,
             };
@@ -2518,17 +2766,17 @@ impl StagePane {
 
         // For single object: use rotated bounding box
         // For multiple objects: use axis-aligned bounding box
-        if shared.selection.objects().len() == 1 {
+        if shared.selection.shape_instances().len() == 1 {
             // Single object - rotated bounding box
-            self.handle_transform_single_object(ui, response, point, active_layer_id, shared);
+            self.handle_transform_single_object(ui, response, point, &active_layer_id, shared);
         } else {
             // Multiple objects - axis-aligned bounding box
             // Calculate combined bounding box for handle hit testing
             let mut combined_bbox: Option<vello::kurbo::Rect> = None;
 
             // Get immutable reference just for bbox calculation
-            if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
-                for &object_id in shared.selection.objects() {
+            if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
+                for &object_id in shared.selection.shape_instances() {
                     if let Some(object) = vector_layer.get_object(&object_id) {
                         if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                             // Get shape's local bounding box
@@ -2603,8 +2851,8 @@ impl StagePane {
                 use std::collections::HashMap;
                 let mut original_transforms = HashMap::new();
 
-                if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
-                    for &object_id in shared.selection.objects() {
+                if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
+                    for &object_id in shared.selection.shape_instances() {
                         if let Some(object) = vector_layer.get_object(&object_id) {
                             original_transforms.insert(object_id, object.transform.clone());
                         }
@@ -2661,12 +2909,12 @@ impl StagePane {
             if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
                 if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                     use std::collections::HashMap;
-                    use lightningbeam_core::actions::TransformObjectsAction;
+                    use lightningbeam_core::actions::TransformShapeInstancesAction;
 
                     let mut object_transforms = HashMap::new();
 
                     // Get current transforms and pair with originals
-                    if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
+                    if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                         for (object_id, original) in original_transforms {
                             if let Some(object) = vector_layer.get_object(&object_id) {
                                 let new_transform = object.transform.clone();
@@ -2676,7 +2924,7 @@ impl StagePane {
                     }
 
                     if !object_transforms.is_empty() {
-                        let action = TransformObjectsAction::new(*active_layer_id, object_transforms);
+                        let action = TransformShapeInstancesAction::new(active_layer_id, object_transforms);
                         shared.pending_actions.push(Box::new(action));
                     }
 
@@ -2699,11 +2947,11 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Affine;
 
-        let object_id = *shared.selection.objects().iter().next().unwrap();
+        let object_id = *shared.selection.shape_instances().iter().next().unwrap();
 
         // Calculate rotated bounding box corners
         let (local_bbox, world_corners, obj_transform, object) = {
-            if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
+            if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                 if let Some(object) = vector_layer.get_object(&object_id) {
                     if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                         let local_bbox = shape.path().bounding_box();
@@ -3303,11 +3551,11 @@ impl StagePane {
         if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
             if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                 use std::collections::HashMap;
-                use lightningbeam_core::actions::TransformObjectsAction;
+                use lightningbeam_core::actions::TransformShapeInstancesAction;
 
                 let mut object_transforms = HashMap::new();
 
-                if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
+                if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                     for (obj_id, original) in original_transforms {
                         if let Some(object) = vector_layer.get_object(&obj_id) {
                             object_transforms.insert(obj_id, (original, object.transform.clone()));
@@ -3316,7 +3564,7 @@ impl StagePane {
                 }
 
                 if !object_transforms.is_empty() {
-                    let action = TransformObjectsAction::new(*active_layer_id, object_transforms);
+                    let action = TransformShapeInstancesAction::new(*active_layer_id, object_transforms);
                     shared.pending_actions.push(Box::new(action));
                 }
 
@@ -3356,8 +3604,8 @@ impl StagePane {
                                     object_positions.insert(object_id, (original_pos, new_pos));
                                 }
 
-                                use lightningbeam_core::actions::MoveObjectsAction;
-                                let action = MoveObjectsAction::new(*active_layer_id, object_positions);
+                                use lightningbeam_core::actions::MoveShapeInstancesAction;
+                                let action = MoveShapeInstancesAction::new(*active_layer_id, object_positions);
                                 shared.pending_actions.push(Box::new(action));
                             }
                         }
@@ -3372,7 +3620,7 @@ impl StagePane {
                         use lightningbeam_core::hit_test;
                         use vello::kurbo::{Rect as KurboRect, Affine};
 
-                        if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(active_layer_id) {
+                        if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                             // Create selection rectangle
                             let min_x = start.x.min(current.x);
                             let min_y = start.y.min(current.y);
@@ -3390,7 +3638,7 @@ impl StagePane {
 
                             // Add to selection
                             for obj_id in hits {
-                                shared.selection.add_object(obj_id);
+                                shared.selection.add_shape_instance(obj_id);
                             }
                         }
                     }

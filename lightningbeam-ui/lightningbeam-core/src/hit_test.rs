@@ -3,11 +3,22 @@
 //! Provides functions for testing if points or rectangles intersect with
 //! shapes and objects, taking into account transform hierarchies.
 
+use crate::clip::{ClipInstance, VectorClip, VideoClip};
 use crate::layer::VectorLayer;
-use crate::object::Object;
+use crate::object::ShapeInstance;
 use crate::shape::Shape;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vello::kurbo::{Affine, Point, Rect, Shape as KurboShape};
+
+/// Result of a hit test operation
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HitResult {
+    /// Hit a shape instance
+    ShapeInstance(Uuid),
+    /// Hit a clip instance
+    ClipInstance(Uuid),
+}
 
 /// Hit test a layer at a specific point
 ///
@@ -31,7 +42,7 @@ pub fn hit_test_layer(
     parent_transform: Affine,
 ) -> Option<Uuid> {
     // Test objects in reverse order (back to front in Vec = front to back for hit testing)
-    for object in layer.objects.iter().rev() {
+    for object in layer.shape_instances.iter().rev() {
         // Get the shape for this object
         let shape = layer.get_shape(&object.shape_id)?;
 
@@ -127,7 +138,7 @@ pub fn hit_test_objects_in_rect(
 ) -> Vec<Uuid> {
     let mut hits = Vec::new();
 
-    for object in &layer.objects {
+    for object in &layer.shape_instances {
         // Get the shape for this object
         if let Some(shape) = layer.get_shape(&object.shape_id) {
             // Combine parent transform with object transform
@@ -161,13 +172,161 @@ pub fn hit_test_objects_in_rect(
 ///
 /// The bounding box in screen/canvas space
 pub fn get_object_bounds(
-    object: &Object,
+    object: &ShapeInstance,
     shape: &Shape,
     parent_transform: Affine,
 ) -> Rect {
     let combined_transform = parent_transform * object.to_affine();
     let local_bbox = shape.path().bounding_box();
     combined_transform.transform_rect_bbox(local_bbox)
+}
+
+/// Hit test a single clip instance with a given clip bounds
+///
+/// Tests if a point hits the clip instance's bounding box.
+///
+/// # Arguments
+///
+/// * `clip_instance` - The clip instance to test
+/// * `clip_width` - The clip's width in pixels
+/// * `clip_height` - The clip's height in pixels
+/// * `point` - The point to test in screen/canvas space
+/// * `parent_transform` - Transform from parent layer/clip
+///
+/// # Returns
+///
+/// true if the point hits the clip instance, false otherwise
+pub fn hit_test_clip_instance(
+    clip_instance: &ClipInstance,
+    clip_width: f64,
+    clip_height: f64,
+    point: Point,
+    parent_transform: Affine,
+) -> bool {
+    // Create bounding rectangle for the clip
+    let clip_rect = Rect::new(0.0, 0.0, clip_width, clip_height);
+
+    // Combine parent transform with clip instance transform
+    let combined_transform = parent_transform * clip_instance.transform.to_affine();
+
+    // Transform the bounding rectangle to screen space
+    let transformed_rect = combined_transform.transform_rect_bbox(clip_rect);
+
+    // Test if point is inside the transformed rectangle
+    transformed_rect.contains(point)
+}
+
+/// Get the bounding box of a clip instance in screen space
+///
+/// # Arguments
+///
+/// * `clip_instance` - The clip instance to get bounds for
+/// * `clip_width` - The clip's width in pixels
+/// * `clip_height` - The clip's height in pixels
+/// * `parent_transform` - Transform from parent layer/clip
+///
+/// # Returns
+///
+/// The bounding box in screen/canvas space
+pub fn get_clip_instance_bounds(
+    clip_instance: &ClipInstance,
+    clip_width: f64,
+    clip_height: f64,
+    parent_transform: Affine,
+) -> Rect {
+    let clip_rect = Rect::new(0.0, 0.0, clip_width, clip_height);
+    let combined_transform = parent_transform * clip_instance.transform.to_affine();
+    combined_transform.transform_rect_bbox(clip_rect)
+}
+
+/// Hit test clip instances at a specific point
+///
+/// Tests clip instances in reverse order (front to back) and returns the first hit.
+/// This function requires the clip libraries to look up clip dimensions.
+///
+/// # Arguments
+///
+/// * `clip_instances` - The clip instances to test
+/// * `vector_clips` - HashMap of vector clips for looking up dimensions
+/// * `video_clips` - HashMap of video clips for looking up dimensions
+/// * `point` - The point to test in screen/canvas space
+/// * `parent_transform` - Transform from parent layer/clip
+///
+/// # Returns
+///
+/// The UUID of the first clip instance hit, or None if no hit
+pub fn hit_test_clip_instances(
+    clip_instances: &[ClipInstance],
+    vector_clips: &std::collections::HashMap<Uuid, VectorClip>,
+    video_clips: &std::collections::HashMap<Uuid, VideoClip>,
+    point: Point,
+    parent_transform: Affine,
+) -> Option<Uuid> {
+    // Test in reverse order (front to back)
+    for clip_instance in clip_instances.iter().rev() {
+        // Try to get clip dimensions from either vector or video clips
+        let (width, height) = if let Some(vector_clip) = vector_clips.get(&clip_instance.clip_id) {
+            (vector_clip.width, vector_clip.height)
+        } else if let Some(video_clip) = video_clips.get(&clip_instance.clip_id) {
+            (video_clip.width, video_clip.height)
+        } else {
+            // Clip not found or is audio (no spatial representation)
+            continue;
+        };
+
+        if hit_test_clip_instance(clip_instance, width, height, point, parent_transform) {
+            return Some(clip_instance.id);
+        }
+    }
+
+    None
+}
+
+/// Hit test clip instances within a rectangle (for marquee selection)
+///
+/// Returns all clip instances whose bounding boxes intersect with the given rectangle.
+///
+/// # Arguments
+///
+/// * `clip_instances` - The clip instances to test
+/// * `vector_clips` - HashMap of vector clips for looking up dimensions
+/// * `video_clips` - HashMap of video clips for looking up dimensions
+/// * `rect` - The selection rectangle in screen/canvas space
+/// * `parent_transform` - Transform from parent layer/clip
+///
+/// # Returns
+///
+/// Vector of UUIDs for all clip instances that intersect the rectangle
+pub fn hit_test_clip_instances_in_rect(
+    clip_instances: &[ClipInstance],
+    vector_clips: &std::collections::HashMap<Uuid, VectorClip>,
+    video_clips: &std::collections::HashMap<Uuid, VideoClip>,
+    rect: Rect,
+    parent_transform: Affine,
+) -> Vec<Uuid> {
+    let mut hits = Vec::new();
+
+    for clip_instance in clip_instances {
+        // Try to get clip dimensions from either vector or video clips
+        let (width, height) = if let Some(vector_clip) = vector_clips.get(&clip_instance.clip_id) {
+            (vector_clip.width, vector_clip.height)
+        } else if let Some(video_clip) = video_clips.get(&clip_instance.clip_id) {
+            (video_clip.width, video_clip.height)
+        } else {
+            // Clip not found or is audio (no spatial representation)
+            continue;
+        };
+
+        // Get clip instance bounding box in screen space
+        let clip_bbox = get_clip_instance_bounds(clip_instance, width, height, parent_transform);
+
+        // Check if rectangles intersect
+        if rect.intersect(clip_bbox).area() > 0.0 {
+            hits.push(clip_instance.id);
+        }
+    }
+
+    hits
 }
 
 #[cfg(test)]

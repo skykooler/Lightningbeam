@@ -5,13 +5,13 @@
 use crate::action::Action;
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use crate::object::Object;
+use crate::object::ShapeInstance;
 use crate::shape::Shape;
 use uuid::Uuid;
 
 /// Action that adds a shape and object to a vector layer
 ///
-/// This action creates both a Shape (the path/geometry) and an Object
+/// This action creates both a Shape (the path/geometry) and an ShapeInstance
 /// (the instance with transform). Both are added to the layer.
 pub struct AddShapeAction {
     /// Layer ID to add the shape to
@@ -21,7 +21,7 @@ pub struct AddShapeAction {
     shape: Shape,
 
     /// The object to add (references the shape with transform)
-    object: Object,
+    object: ShapeInstance,
 
     /// ID of the created shape (set after execution)
     created_shape_id: Option<Uuid>,
@@ -38,7 +38,7 @@ impl AddShapeAction {
     /// * `layer_id` - The layer to add the shape to
     /// * `shape` - The shape to add
     /// * `object` - The object instance referencing the shape
-    pub fn new(layer_id: Uuid, shape: Shape, object: Object) -> Self {
+    pub fn new(layer_id: Uuid, shape: Shape, object: ShapeInstance) -> Self {
         Self {
             layer_id,
             shape,
@@ -110,7 +110,7 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
         let path = rect.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
-        let object = Object::new(shape.id).with_position(50.0, 50.0);
+        let object = ShapeInstance::new(shape.id).with_position(50.0, 50.0);
 
         // Create and execute action
         let mut action = AddShapeAction::new(layer_id, shape, object);
@@ -119,9 +119,9 @@ mod tests {
         // Verify shape and object were added
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.objects.len(), 1);
+            assert_eq!(layer.shape_instances.len(), 1);
 
-            let added_object = &layer.objects[0];
+            let added_object = &layer.shape_instances[0];
             assert_eq!(added_object.transform.x, 50.0);
             assert_eq!(added_object.transform.y, 50.0);
         } else {
@@ -134,7 +134,7 @@ mod tests {
         // Verify shape and object were removed
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             assert_eq!(layer.shapes.len(), 0);
-            assert_eq!(layer.objects.len(), 0);
+            assert_eq!(layer.shape_instances.len(), 0);
         }
     }
 
@@ -149,7 +149,7 @@ mod tests {
         let path = circle.to_path(0.1);
         let shape = Shape::new(path)
             .with_fill(ShapeColor::rgb(0, 255, 0));
-        let object = Object::new(shape.id);
+        let object = ShapeInstance::new(shape.id);
 
         let mut action = AddShapeAction::new(layer_id, shape, object);
 
@@ -161,7 +161,7 @@ mod tests {
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.objects.len(), 1);
+            assert_eq!(layer.shape_instances.len(), 1);
         }
     }
 
@@ -174,7 +174,7 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 50.0, 50.0);
         let path = rect.to_path(0.1);
         let shape = Shape::new(path);
-        let object = Object::new(shape.id);
+        let object = ShapeInstance::new(shape.id);
 
         let mut action = AddShapeAction::new(layer_id, shape, object);
 
@@ -185,7 +185,7 @@ mod tests {
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Should have 2 shapes and 2 objects
             assert_eq!(layer.shapes.len(), 2);
-            assert_eq!(layer.objects.len(), 2);
+            assert_eq!(layer.shape_instances.len(), 2);
         }
     }
 }

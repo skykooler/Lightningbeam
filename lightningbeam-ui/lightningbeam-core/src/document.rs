@@ -3,9 +3,11 @@
 //! The Document represents a complete animation project with settings
 //! and a root graphics object containing the scene graph.
 
+use crate::clip::{AudioClip, VideoClip, VectorClip};
 use crate::layer::AnyLayer;
 use crate::shape::ShapeColor;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Root graphics object containing all layers in the scene
@@ -91,6 +93,16 @@ pub struct Document {
     /// Root graphics object containing all layers
     pub root: GraphicsObject,
 
+    /// Clip libraries - reusable clip definitions
+    /// VectorClips can be instantiated multiple times with different transforms/timing
+    pub vector_clips: HashMap<Uuid, VectorClip>,
+
+    /// Video clip library - references to video files
+    pub video_clips: HashMap<Uuid, VideoClip>,
+
+    /// Audio clip library - sampled audio and MIDI clips
+    pub audio_clips: HashMap<Uuid, AudioClip>,
+
     /// Current playback time in seconds
     #[serde(skip)]
     pub current_time: f64,
@@ -107,6 +119,9 @@ impl Default for Document {
             framerate: 60.0,
             duration: 10.0,
             root: GraphicsObject::default(),
+            vector_clips: HashMap::new(),
+            video_clips: HashMap::new(),
+            audio_clips: HashMap::new(),
             current_time: 0.0,
         }
     }
@@ -159,15 +174,12 @@ impl Document {
         self.current_time = time.max(0.0).min(self.duration);
     }
 
-    /// Get visible layers at the current time from the root graphics object
+    /// Get visible layers from the root graphics object
     pub fn visible_layers(&self) -> impl Iterator<Item = &AnyLayer> {
         self.root
             .children
             .iter()
-            .filter(|layer| {
-                let layer = layer.layer();
-                layer.visible && layer.contains_time(self.current_time)
-            })
+            .filter(|layer| layer.layer().visible)
     }
 
     /// Get a layer by ID
@@ -191,6 +203,74 @@ impl Document {
     /// only happen through the action system.
     pub fn get_layer_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
         self.root.get_child_mut(id)
+    }
+
+    // === CLIP LIBRARY METHODS ===
+
+    /// Add a vector clip to the library
+    pub fn add_vector_clip(&mut self, clip: VectorClip) -> Uuid {
+        let id = clip.id;
+        self.vector_clips.insert(id, clip);
+        id
+    }
+
+    /// Add a video clip to the library
+    pub fn add_video_clip(&mut self, clip: VideoClip) -> Uuid {
+        let id = clip.id;
+        self.video_clips.insert(id, clip);
+        id
+    }
+
+    /// Add an audio clip to the library
+    pub fn add_audio_clip(&mut self, clip: AudioClip) -> Uuid {
+        let id = clip.id;
+        self.audio_clips.insert(id, clip);
+        id
+    }
+
+    /// Get a vector clip by ID
+    pub fn get_vector_clip(&self, id: &Uuid) -> Option<&VectorClip> {
+        self.vector_clips.get(id)
+    }
+
+    /// Get a video clip by ID
+    pub fn get_video_clip(&self, id: &Uuid) -> Option<&VideoClip> {
+        self.video_clips.get(id)
+    }
+
+    /// Get an audio clip by ID
+    pub fn get_audio_clip(&self, id: &Uuid) -> Option<&AudioClip> {
+        self.audio_clips.get(id)
+    }
+
+    /// Get a mutable vector clip by ID
+    pub fn get_vector_clip_mut(&mut self, id: &Uuid) -> Option<&mut VectorClip> {
+        self.vector_clips.get_mut(id)
+    }
+
+    /// Get a mutable video clip by ID
+    pub fn get_video_clip_mut(&mut self, id: &Uuid) -> Option<&mut VideoClip> {
+        self.video_clips.get_mut(id)
+    }
+
+    /// Get a mutable audio clip by ID
+    pub fn get_audio_clip_mut(&mut self, id: &Uuid) -> Option<&mut AudioClip> {
+        self.audio_clips.get_mut(id)
+    }
+
+    /// Remove a vector clip from the library
+    pub fn remove_vector_clip(&mut self, id: &Uuid) -> Option<VectorClip> {
+        self.vector_clips.remove(id)
+    }
+
+    /// Remove a video clip from the library
+    pub fn remove_video_clip(&mut self, id: &Uuid) -> Option<VideoClip> {
+        self.video_clips.remove(id)
+    }
+
+    /// Remove an audio clip from the library
+    pub fn remove_audio_clip(&mut self, id: &Uuid) -> Option<AudioClip> {
+        self.audio_clips.remove(id)
     }
 }
 

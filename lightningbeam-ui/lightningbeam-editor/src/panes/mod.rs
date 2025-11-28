@@ -64,7 +64,7 @@ pub struct SharedPaneState<'a> {
     /// Current selection state (mutable for tools to modify)
     pub selection: &'a mut lightningbeam_core::selection::Selection,
     /// Currently active layer ID
-    pub active_layer_id: &'a Option<uuid::Uuid>,
+    pub active_layer_id: &'a mut Option<uuid::Uuid>,
     /// Current tool interaction state (mutable for tools to modify)
     pub tool_state: &'a mut lightningbeam_core::tool::ToolState,
     /// Actions to execute after rendering completes (two-phase dispatch)

@@ -10,6 +10,8 @@ pub mod path_fitting;
 pub mod shape;
 pub mod object;
 pub mod layer;
+pub mod layer_tree;
+pub mod clip;
 pub mod document;
 pub mod renderer;
 pub mod action;

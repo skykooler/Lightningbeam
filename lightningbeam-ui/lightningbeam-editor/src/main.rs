@@ -266,6 +266,9 @@ struct EditorApp {
     draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
+    // Audio engine integration
+    audio_controller: Option<daw_backend::EngineController>, // Audio engine controller for playback
+    audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
 }
 
 impl EditorApp {
@@ -282,14 +285,14 @@ impl EditorApp {
 
         // Add a test layer with a simple shape to visualize
         use lightningbeam_core::layer::{AnyLayer, VectorLayer};
-        use lightningbeam_core::object::Object;
+        use lightningbeam_core::object::ShapeInstance;
         use lightningbeam_core::shape::{Shape, ShapeColor};
         use vello::kurbo::{Circle, Shape as KurboShape};
 
         let circle = Circle::new((200.0, 150.0), 50.0);
         let path = circle.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(100, 150, 250));
-        let object = Object::new(shape.id);
+        let object = ShapeInstance::new(shape.id);
 
         let mut vector_layer = VectorLayer::new("Layer 1");
         vector_layer.add_shape(shape);
@@ -464,8 +467,17 @@ impl EditorApp {
 
             // Layer menu
             MenuAction::AddLayer => {
-                println!("Menu: Add Layer");
-                // TODO: Implement add layer
+                // Create a new vector layer with a default name
+                let layer_count = self.action_executor.document().root.children.len();
+                let layer_name = format!("Layer {}", layer_count + 1);
+
+                let action = lightningbeam_core::actions::AddLayerAction::new_vector(layer_name);
+                self.action_executor.execute(Box::new(action));
+
+                // Select the newly created layer (last child in the document)
+                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                    self.active_layer_id = Some(last_layer.id());
+                }
             }
             MenuAction::AddVideoLayer => {
                 println!("Menu: Add Video Layer");
@@ -478,6 +490,65 @@ impl EditorApp {
             MenuAction::AddMidiTrack => {
                 println!("Menu: Add MIDI Track");
                 // TODO: Implement add MIDI track
+            }
+            MenuAction::AddTestClip => {
+                // Require an active layer
+                if let Some(layer_id) = self.active_layer_id {
+                    // Create a test vector clip (5 second duration)
+                    use lightningbeam_core::clip::{VectorClip, ClipInstance};
+                    use lightningbeam_core::layer::{VectorLayer, AnyLayer};
+                    use lightningbeam_core::shape::{Shape, ShapeColor};
+                    use lightningbeam_core::object::ShapeInstance;
+                    use kurbo::{Circle, Rect, Shape as KurboShape};
+
+                    let mut test_clip = VectorClip::new("Test Clip", 400.0, 400.0, 5.0);
+
+                    // Create a layer with some shapes
+                    let mut layer = VectorLayer::new("Test Layer");
+
+                    // Create a red circle shape
+                    let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
+                    let mut circle_shape = Shape::new(circle_path);
+                    circle_shape.fill_color = Some(ShapeColor::rgb(255, 0, 0));
+                    let circle_id = circle_shape.id;
+                    layer.add_shape(circle_shape);
+
+                    // Create a blue rectangle shape
+                    let rect_path = Rect::new(200.0, 50.0, 350.0, 150.0).to_path(0.1);
+                    let mut rect_shape = Shape::new(rect_path);
+                    rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
+                    let rect_id = rect_shape.id;
+                    layer.add_shape(rect_shape);
+
+                    // Add shape instances
+                    layer.shape_instances.push(ShapeInstance::new(circle_id));
+                    layer.shape_instances.push(ShapeInstance::new(rect_id));
+
+                    // Add the layer to the clip
+                    test_clip.layers.add_root(AnyLayer::Vector(layer));
+
+                    // Add to document's clip library
+                    let clip_id = self.action_executor.document_mut().add_vector_clip(test_clip);
+
+                    // Create clip instance at current time
+                    let current_time = self.action_executor.document().current_time;
+                    let instance = ClipInstance::new(clip_id)
+                        .with_timeline_start(current_time)
+                        .with_name("Test Instance");
+
+                    // Add to layer (only vector layers can have clip instances)
+                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
+                        use lightningbeam_core::layer::AnyLayer;
+                        if let AnyLayer::Vector(vector_layer) = layer {
+                            vector_layer.clip_instances.push(instance);
+                            println!("Added test clip instance with red circle and blue rectangle at time {}", current_time);
+                        } else {
+                            println!("Can only add clip instances to vector layers");
+                        }
+                    }
+                } else {
+                    println!("No active layer selected");
+                }
             }
             MenuAction::DeleteLayer => {
                 println!("Menu: Delete Layer");
@@ -678,7 +749,7 @@ impl eframe::App for EditorApp {
                 &self.theme,
                 &mut self.action_executor,
                 &mut self.selection,
-                &self.active_layer_id,
+                &mut self.active_layer_id,
                 &mut self.tool_state,
                 &mut pending_actions,
                 &mut self.draw_simplify_mode,
@@ -769,7 +840,7 @@ fn render_layout_node(
     theme: &Theme,
     action_executor: &mut lightningbeam_core::action::ActionExecutor,
     selection: &mut lightningbeam_core::selection::Selection,
-    active_layer_id: &Option<Uuid>,
+    active_layer_id: &mut Option<Uuid>,
     tool_state: &mut lightningbeam_core::tool::ToolState,
     pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
     draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,
@@ -1121,7 +1192,7 @@ fn render_pane(
     theme: &Theme,
     action_executor: &mut lightningbeam_core::action::ActionExecutor,
     selection: &mut lightningbeam_core::selection::Selection,
-    active_layer_id: &Option<Uuid>,
+    active_layer_id: &mut Option<Uuid>,
     tool_state: &mut lightningbeam_core::tool::ToolState,
     pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
     draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,

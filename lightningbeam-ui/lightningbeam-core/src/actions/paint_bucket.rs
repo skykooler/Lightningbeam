@@ -8,7 +8,7 @@ use crate::curve_segment::CurveSegment;
 use crate::document::Document;
 use crate::gap_handling::GapHandlingMode;
 use crate::layer::AnyLayer;
-use crate::object::Object;
+use crate::object::ShapeInstance;
 use crate::planar_graph::PlanarGraph;
 use crate::shape::ShapeColor;
 use uuid::Uuid;
@@ -34,8 +34,8 @@ pub struct PaintBucketAction {
     /// ID of the created shape (set after execution)
     created_shape_id: Option<Uuid>,
 
-    /// ID of the created object (set after execution)
-    created_object_id: Option<Uuid>,
+    /// ID of the created shape instance (set after execution)
+    created_shape_instance_id: Option<Uuid>,
 }
 
 impl PaintBucketAction {
@@ -62,7 +62,7 @@ impl PaintBucketAction {
             tolerance,
             gap_mode,
             created_shape_id: None,
-            created_object_id: None,
+            created_shape_instance_id: None,
         }
     }
 }
@@ -74,10 +74,10 @@ impl Action for PaintBucketAction {
         // Optimization: Check if we're clicking on an existing shape first
         // This is much faster than building a planar graph
         if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer_mut(&self.layer_id) {
-            // Iterate through objects in reverse order (topmost first)
-            for object in vector_layer.objects.iter().rev() {
-                // Find the corresponding shape
-                if let Some(shape) = vector_layer.shapes.iter().find(|s| s.id == object.shape_id) {
+            // Iterate through shape instances in reverse order (topmost first)
+            for shape_instance in vector_layer.shape_instances.iter().rev() {
+                // Find the corresponding shape (O(1) HashMap lookup)
+                if let Some(shape) = vector_layer.shapes.get(&shape_instance.shape_id) {
                     // Skip shapes without fill color (e.g., lines with only stroke)
                     if shape.fill_color.is_none() {
                         continue;
@@ -92,8 +92,8 @@ impl Action for PaintBucketAction {
                         continue;
                     }
 
-                    // Apply the object's transform to get the transformed path
-                    let transform_affine = object.transform.to_affine();
+                    // Apply the shape instance's transform to get the transformed path
+                    let transform_affine = shape_instance.transform.to_affine();
 
                     // Transform the click point to shape's local coordinates (inverse transform)
                     let inverse_transform = transform_affine.inverse();
@@ -110,8 +110,8 @@ impl Action for PaintBucketAction {
                         // Store the shape ID before the immutable borrow ends
                         let shape_id = shape.id;
 
-                        // Find mutable reference to the shape and update its fill
-                        if let Some(shape_mut) = vector_layer.shapes.iter_mut().find(|s| s.id == shape_id) {
+                        // Find mutable reference to the shape and update its fill (O(1) HashMap lookup)
+                        if let Some(shape_mut) = vector_layer.shapes.get_mut(&shape_id) {
                             shape_mut.fill_color = Some(self.fill_color);
                             println!("Updated shape fill color");
                         }
@@ -154,20 +154,20 @@ impl Action for PaintBucketAction {
 
             println!("DEBUG: Face shape created with fill_color: {:?}", face_shape.fill_color);
 
-            let face_object = Object::new(face_shape.id);
+            let face_shape_instance = ShapeInstance::new(face_shape.id);
 
             // Store the created IDs for rollback
             self.created_shape_id = Some(face_shape.id);
-            self.created_object_id = Some(face_object.id);
+            self.created_shape_instance_id = Some(face_shape_instance.id);
 
             if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer_mut(&self.layer_id) {
                 let shape_id_for_debug = face_shape.id;
                 vector_layer.add_shape_internal(face_shape);
-                vector_layer.add_object_internal(face_object);
+                vector_layer.add_object_internal(face_shape_instance);
                 println!("DEBUG: Added filled shape");
 
-                // Verify the shape still has the fill color after being added
-                if let Some(added_shape) = vector_layer.shapes.iter().find(|s| s.id == shape_id_for_debug) {
+                // Verify the shape still has the fill color after being added (O(1) HashMap lookup)
+                if let Some(added_shape) = vector_layer.shapes.get(&shape_id_for_debug) {
                     println!("DEBUG: After adding to layer, shape fill_color = {:?}", added_shape.fill_color);
                 }
             }
@@ -180,7 +180,7 @@ impl Action for PaintBucketAction {
 
     fn rollback(&mut self, document: &mut Document) {
         // Remove the created shape and object if they exist
-        if let (Some(shape_id), Some(object_id)) = (self.created_shape_id, self.created_object_id) {
+        if let (Some(shape_id), Some(object_id)) = (self.created_shape_id, self.created_shape_instance_id) {
             let layer = match document.get_layer_mut(&self.layer_id) {
                 Some(l) => l,
                 None => return,
@@ -192,7 +192,7 @@ impl Action for PaintBucketAction {
             }
 
             self.created_shape_id = None;
-            self.created_object_id = None;
+            self.created_shape_instance_id = None;
         }
     }
 
@@ -219,11 +219,11 @@ fn extract_curves_from_all_shapes(
 
     // Extract curves only from this vector layer
     if let AnyLayer::Vector(vector_layer) = layer {
-        println!("Extracting curves from {} objects in layer", vector_layer.objects.len());
+        println!("Extracting curves from {} objects in layer", vector_layer.shape_instances.len());
         // Extract curves from each object (which applies transforms to shapes)
-        for (obj_idx, object) in vector_layer.objects.iter().enumerate() {
-            // Find the shape for this object
-            let shape = match vector_layer.shapes.iter().find(|s| s.id == object.shape_id) {
+        for (obj_idx, object) in vector_layer.shape_instances.iter().enumerate() {
+            // Find the shape for this object (O(1) HashMap lookup)
+            let shape = match vector_layer.shapes.get(&object.shape_id) {
                 Some(s) => s,
                 None => continue,
             };
@@ -313,12 +313,12 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 100.0, 100.0);
         let path = rect.to_path(0.1);
         let shape = Shape::new(path);
-        let object = Object::new(shape.id);
+        let shape_instance = ShapeInstance::new(shape.id);
 
         // Add the boundary shape
         if let Some(AnyLayer::Vector(layer)) = document.get_layer_mut(&layer_id) {
             layer.add_shape_internal(shape);
-            layer.add_object_internal(object);
+            layer.add_object_internal(shape_instance);
         }
 
         // Create and execute paint bucket action
@@ -336,7 +336,7 @@ mod tests {
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Should have original shape + filled shape
             assert!(layer.shapes.len() >= 1);
-            assert!(layer.objects.len() >= 1);
+            assert!(layer.shape_instances.len() >= 1);
         } else {
             panic!("Layer not found or not a vector layer");
         }
@@ -347,7 +347,7 @@ mod tests {
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Should only have original shape
             assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.objects.len(), 1);
+            assert_eq!(layer.shape_instances.len(), 1);
         }
     }
 
