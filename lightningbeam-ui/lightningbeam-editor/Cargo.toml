@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 lightningbeam-core = { path = "../lightningbeam-core" }
 daw-backend = { path = "../../daw-backend" }
+rtrb = "0.3"
 
 # UI Framework
 eframe = { workspace = true }

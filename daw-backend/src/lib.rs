@@ -37,6 +37,8 @@ pub struct AudioSystem {
     pub stream: cpal::Stream,
     pub sample_rate: u32,
     pub channels: u32,
+    /// Event receiver for polling audio events (only present when no EventEmitter is provided)
+    pub event_rx: Option<rtrb::Consumer<AudioEvent>>,
 }
 
 impl AudioSystem {
@@ -152,6 +154,7 @@ impl AudioSystem {
                     stream: output_stream,
                     sample_rate,
                     channels,
+                    event_rx: None, // No event receiver when audio device unavailable
                 });
             }
         };
@@ -179,6 +182,7 @@ impl AudioSystem {
                     stream: output_stream,
                     sample_rate,
                     channels,
+                    event_rx: None, // No event receiver when audio device unavailable
                 });
             }
         };
@@ -205,16 +209,20 @@ impl AudioSystem {
         // Leak the input stream to keep it alive
         Box::leak(Box::new(input_stream));
 
-        // Spawn emitter thread if provided
-        if let Some(emitter) = event_emitter {
+        // Spawn emitter thread if provided, or store event_rx for manual polling
+        let event_rx_option = if let Some(emitter) = event_emitter {
             Self::spawn_emitter_thread(event_rx, emitter);
-        }
+            None
+        } else {
+            Some(event_rx)
+        };
 
         Ok(Self {
             controller,
             stream: output_stream,
             sample_rate,
             channels,
+            event_rx: event_rx_option,
         })
     }
 

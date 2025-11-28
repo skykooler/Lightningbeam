@@ -3,6 +3,7 @@ const { listen } = window.__TAURI__.event;
 import * as fitCurve from "/fit-curve.js";
 import { Bezier } from "/bezier.js";
 import { Quadtree } from "./quadtree.js";
+import { initRenderWindow, updateGradient, syncPosition, closeRenderWindow } from "./render-window-integration.js";
 import {
   createNewFileDialog,
   showNewFileDialog,
@@ -820,6 +821,30 @@ window.addEventListener("DOMContentLoaded", () => {
       } else {
         console.error('Failed to initialize audio system:', error);
       }
+    }
+  })();
+
+  // Initialize native render window after layout is ready
+  (async () => {
+    try {
+      // Wait for layout to be fully positioned
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Find the stage canvas (should be first in canvases array)
+      const stageCanvas = canvases[0];
+      if (stageCanvas) {
+        console.log('Initializing native render window...');
+        await initRenderWindow(stageCanvas);
+        console.log('Native render window initialized successfully');
+
+        // Make functions available globally for testing
+        window.updateRenderGradient = updateGradient;
+        window.syncRenderWindow = syncPosition;
+      } else {
+        console.warn('Stage canvas not found, skipping render window initialization');
+      }
+    } catch (error) {
+      console.error('Failed to initialize native render window:', error);
     }
   })();
 });

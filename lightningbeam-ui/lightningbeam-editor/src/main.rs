@@ -267,8 +267,10 @@ struct EditorApp {
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
     // Audio engine integration
-    audio_controller: Option<daw_backend::EngineController>, // Audio engine controller for playback
-    audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
+    audio_system: Option<daw_backend::AudioSystem>, // Audio system (must be kept alive for stream)
+    // Playback state (global for all panes)
+    playback_time: f64, // Current playback position in seconds (persistent - save with document)
+    is_playing: bool,   // Whether playback is currently active (transient - don't save)
 }
 
 impl EditorApp {
@@ -302,6 +304,19 @@ impl EditorApp {
         // Wrap document in ActionExecutor
         let action_executor = lightningbeam_core::action::ActionExecutor::new(document);
 
+        // Initialize audio system (keep the whole system to maintain the audio stream)
+        let audio_system = match daw_backend::AudioSystem::new(None, 256) {
+            Ok(audio_system) => {
+                println!("✅ Audio engine initialized successfully");
+                Some(audio_system)
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to initialize audio engine: {}", e);
+                eprintln!("   Playback will be disabled");
+                None
+            }
+        };
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -327,6 +342,9 @@ impl EditorApp {
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
+            audio_system,
+            playback_time: 0.0, // Start at beginning
+            is_playing: false,  // Start paused
         }
     }
 
@@ -665,6 +683,29 @@ impl eframe::App for EditorApp {
             }
         }
 
+        // Poll audio events from the audio engine
+        if let Some(audio_system) = &mut self.audio_system {
+            if let Some(event_rx) = &mut audio_system.event_rx {
+                while let Ok(event) = event_rx.pop() {
+                    use daw_backend::AudioEvent;
+                    match event {
+                        AudioEvent::PlaybackPosition(time) => {
+                            self.playback_time = time;
+                        }
+                        AudioEvent::PlaybackStopped => {
+                            self.is_playing = false;
+                        }
+                        _ => {} // Ignore other events for now
+                    }
+                }
+            }
+        }
+
+        // Request continuous repaints when playing to update time display
+        if self.is_playing {
+            ctx.request_repaint();
+        }
+
         // Check keyboard shortcuts (works on all platforms)
         ctx.input(|i| {
             // Check menu shortcuts
@@ -726,6 +767,32 @@ impl eframe::App for EditorApp {
             // Registry for actions to execute after rendering (two-phase dispatch)
             let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
 
+            // Create render context
+            let mut ctx = RenderContext {
+                tool_icon_cache: &mut self.tool_icon_cache,
+                icon_cache: &mut self.icon_cache,
+                selected_tool: &mut self.selected_tool,
+                fill_color: &mut self.fill_color,
+                stroke_color: &mut self.stroke_color,
+                active_color_mode: &mut self.active_color_mode,
+                pane_instances: &mut self.pane_instances,
+                pending_view_action: &mut self.pending_view_action,
+                fallback_pane_priority: &mut fallback_pane_priority,
+                pending_handlers: &mut pending_handlers,
+                theme: &self.theme,
+                action_executor: &mut self.action_executor,
+                selection: &mut self.selection,
+                active_layer_id: &mut self.active_layer_id,
+                tool_state: &mut self.tool_state,
+                pending_actions: &mut pending_actions,
+                draw_simplify_mode: &mut self.draw_simplify_mode,
+                rdp_tolerance: &mut self.rdp_tolerance,
+                schneider_max_error: &mut self.schneider_max_error,
+                audio_controller: self.audio_system.as_mut().map(|sys| &mut sys.controller),
+                playback_time: &mut self.playback_time,
+                is_playing: &mut self.is_playing,
+            };
+
             render_layout_node(
                 ui,
                 &mut self.current_layout,
@@ -735,26 +802,8 @@ impl eframe::App for EditorApp {
                 &mut self.selected_pane,
                 &mut layout_action,
                 &mut self.split_preview_mode,
-                &mut self.icon_cache,
-                &mut self.tool_icon_cache,
-                &mut self.selected_tool,
-                &mut self.fill_color,
-                &mut self.stroke_color,
-                &mut self.active_color_mode,
-                &mut self.pane_instances,
                 &Vec::new(), // Root path
-                &mut self.pending_view_action,
-                &mut fallback_pane_priority,
-                &mut pending_handlers,
-                &self.theme,
-                &mut self.action_executor,
-                &mut self.selection,
-                &mut self.active_layer_id,
-                &mut self.tool_state,
-                &mut pending_actions,
-                &mut self.draw_simplify_mode,
-                &mut self.rdp_tolerance,
-                &mut self.schneider_max_error,
+                &mut ctx,
             );
 
             // Execute action on the best handler (two-phase dispatch)
@@ -782,9 +831,9 @@ impl eframe::App for EditorApp {
             // Set cursor based on hover state
             if let Some((_, is_horizontal)) = self.hovered_divider {
                 if is_horizontal {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 } else {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 }
             }
         });
@@ -816,6 +865,33 @@ impl eframe::App for EditorApp {
 
 }
 
+/// Context for rendering operations - bundles all mutable state needed during rendering
+/// This avoids having 25+ individual parameters in rendering functions
+struct RenderContext<'a> {
+    tool_icon_cache: &'a mut ToolIconCache,
+    icon_cache: &'a mut IconCache,
+    selected_tool: &'a mut Tool,
+    fill_color: &'a mut egui::Color32,
+    stroke_color: &'a mut egui::Color32,
+    active_color_mode: &'a mut panes::ColorMode,
+    pane_instances: &'a mut HashMap<NodePath, PaneInstance>,
+    pending_view_action: &'a mut Option<MenuAction>,
+    fallback_pane_priority: &'a mut Option<u32>,
+    pending_handlers: &'a mut Vec<panes::ViewActionHandler>,
+    theme: &'a Theme,
+    action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
+    selection: &'a mut lightningbeam_core::selection::Selection,
+    active_layer_id: &'a mut Option<Uuid>,
+    tool_state: &'a mut lightningbeam_core::tool::ToolState,
+    pending_actions: &'a mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
+    rdp_tolerance: &'a mut f64,
+    schneider_max_error: &'a mut f64,
+    audio_controller: Option<&'a mut daw_backend::EngineController>,
+    playback_time: &'a mut f64,
+    is_playing: &'a mut bool,
+}
+
 /// Recursively render a layout node with drag support
 fn render_layout_node(
     ui: &mut egui::Ui,
@@ -826,30 +902,12 @@ fn render_layout_node(
     selected_pane: &mut Option<NodePath>,
     layout_action: &mut Option<LayoutAction>,
     split_preview_mode: &mut SplitPreviewMode,
-    icon_cache: &mut IconCache,
-    tool_icon_cache: &mut ToolIconCache,
-    selected_tool: &mut Tool,
-    fill_color: &mut egui::Color32,
-    stroke_color: &mut egui::Color32,
-    active_color_mode: &mut panes::ColorMode,
-    pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
-    pending_view_action: &mut Option<MenuAction>,
-    fallback_pane_priority: &mut Option<u32>,
-    pending_handlers: &mut Vec<panes::ViewActionHandler>,
-    theme: &Theme,
-    action_executor: &mut lightningbeam_core::action::ActionExecutor,
-    selection: &mut lightningbeam_core::selection::Selection,
-    active_layer_id: &mut Option<Uuid>,
-    tool_state: &mut lightningbeam_core::tool::ToolState,
-    pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
-    draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,
-    rdp_tolerance: &mut f64,
-    schneider_max_error: &mut f64,
+    ctx: &mut RenderContext,
 ) {
     match node {
         LayoutNode::Pane { name } => {
-            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, icon_cache, tool_icon_cache, selected_tool, fill_color, stroke_color, active_color_mode, pane_instances, path, pending_view_action, fallback_pane_priority, pending_handlers, theme, action_executor, selection, active_layer_id, tool_state, pending_actions, draw_simplify_mode, rdp_tolerance, schneider_max_error);
+            render_pane(ui, name, rect, selected_pane, layout_action, split_preview_mode, path, ctx);
         }
         LayoutNode::HorizontalGrid { percent, children } => {
             // Handle dragging
@@ -882,26 +940,8 @@ fn render_layout_node(
                 selected_pane,
                 layout_action,
                 split_preview_mode,
-                icon_cache,
-                tool_icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pane_instances,
                 &left_path,
-                pending_view_action,
-                fallback_pane_priority,
-                pending_handlers,
-                theme,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                ctx,
             );
 
             let mut right_path = path.clone();
@@ -915,26 +955,8 @@ fn render_layout_node(
                 selected_pane,
                 layout_action,
                 split_preview_mode,
-                icon_cache,
-                tool_icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pane_instances,
                 &right_path,
-                pending_view_action,
-                fallback_pane_priority,
-                pending_handlers,
-                theme,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                ctx,
             );
 
             // Draw divider with interaction
@@ -1040,26 +1062,8 @@ fn render_layout_node(
                 selected_pane,
                 layout_action,
                 split_preview_mode,
-                icon_cache,
-                tool_icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pane_instances,
                 &top_path,
-                pending_view_action,
-                fallback_pane_priority,
-                pending_handlers,
-                theme,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                ctx,
             );
 
             let mut bottom_path = path.clone();
@@ -1073,26 +1077,8 @@ fn render_layout_node(
                 selected_pane,
                 layout_action,
                 split_preview_mode,
-                icon_cache,
-                tool_icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pane_instances,
                 &bottom_path,
-                pending_view_action,
-                fallback_pane_priority,
-                pending_handlers,
-                theme,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                ctx,
             );
 
             // Draw divider with interaction
@@ -1178,26 +1164,8 @@ fn render_pane(
     selected_pane: &mut Option<NodePath>,
     layout_action: &mut Option<LayoutAction>,
     split_preview_mode: &mut SplitPreviewMode,
-    icon_cache: &mut IconCache,
-    tool_icon_cache: &mut ToolIconCache,
-    selected_tool: &mut Tool,
-    fill_color: &mut egui::Color32,
-    stroke_color: &mut egui::Color32,
-    active_color_mode: &mut panes::ColorMode,
-    pane_instances: &mut HashMap<NodePath, PaneInstance>,
     path: &NodePath,
-    pending_view_action: &mut Option<MenuAction>,
-    fallback_pane_priority: &mut Option<u32>,
-    pending_handlers: &mut Vec<panes::ViewActionHandler>,
-    theme: &Theme,
-    action_executor: &mut lightningbeam_core::action::ActionExecutor,
-    selection: &mut lightningbeam_core::selection::Selection,
-    active_layer_id: &mut Option<Uuid>,
-    tool_state: &mut lightningbeam_core::tool::ToolState,
-    pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
-    draw_simplify_mode: &mut lightningbeam_core::tool::SimplifyMode,
-    rdp_tolerance: &mut f64,
-    schneider_max_error: &mut f64,
+    ctx: &mut RenderContext,
 ) {
     let pane_type = PaneType::from_name(pane_name);
 
@@ -1260,7 +1228,7 @@ fn render_pane(
 
     // Load and render icon if available
     if let Some(pane_type) = pane_type {
-        if let Some(icon) = icon_cache.get_or_load(pane_type) {
+        if let Some(icon) = ctx.icon_cache.get_or_load(pane_type) {
             let icon_texture_id = icon.texture_id(ui.ctx());
             let icon_rect = icon_button_rect.shrink(2.0); // Small padding inside button
             ui.painter().image(
@@ -1297,7 +1265,7 @@ fn render_pane(
 
         for pane_type_option in PaneType::all() {
             // Load icon for this pane type
-            if let Some(icon) = icon_cache.get_or_load(*pane_type_option) {
+            if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option) {
                 ui.horizontal(|ui| {
                     // Show icon
                     let icon_texture_id = icon.texture_id(ui.ctx());
@@ -1351,80 +1319,86 @@ fn render_pane(
     // Render pane-specific header controls (if pane has them)
     if let Some(pane_type) = pane_type {
         // Get or create pane instance for header rendering
-        let needs_new_instance = pane_instances
+        let needs_new_instance = ctx.pane_instances
             .get(path)
             .map(|instance| instance.pane_type() != pane_type)
             .unwrap_or(true);
 
         if needs_new_instance {
-            pane_instances.insert(path.clone(), panes::PaneInstance::new(pane_type));
+            ctx.pane_instances.insert(path.clone(), panes::PaneInstance::new(pane_type));
         }
 
-        if let Some(pane_instance) = pane_instances.get_mut(path) {
+        if let Some(pane_instance) = ctx.pane_instances.get_mut(path) {
             let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_controls_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
             let mut shared = panes::SharedPaneState {
-                tool_icon_cache,
-                icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pending_view_action,
-                fallback_pane_priority,
-                theme,
-                pending_handlers,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                tool_icon_cache: ctx.tool_icon_cache,
+                icon_cache: ctx.icon_cache,
+                selected_tool: ctx.selected_tool,
+                fill_color: ctx.fill_color,
+                stroke_color: ctx.stroke_color,
+                active_color_mode: ctx.active_color_mode,
+                pending_view_action: ctx.pending_view_action,
+                fallback_pane_priority: ctx.fallback_pane_priority,
+                theme: ctx.theme,
+                pending_handlers: ctx.pending_handlers,
+                action_executor: ctx.action_executor,
+                selection: ctx.selection,
+                active_layer_id: ctx.active_layer_id,
+                tool_state: ctx.tool_state,
+                pending_actions: ctx.pending_actions,
+                draw_simplify_mode: ctx.draw_simplify_mode,
+                rdp_tolerance: ctx.rdp_tolerance,
+                schneider_max_error: ctx.schneider_max_error,
+                audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                playback_time: ctx.playback_time,
+                is_playing: ctx.is_playing,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
     }
 
-    // Make pane content clickable (use full rect for split preview interaction)
+    // Make pane content clickable (use content rect, not header, for split preview interaction)
     let pane_id = ui.id().with(("pane", path));
-    let response = ui.interact(rect, pane_id, egui::Sense::click());
+    let response = ui.interact(content_rect, pane_id, egui::Sense::click());
 
     // Render pane-specific content using trait-based system
     if let Some(pane_type) = pane_type {
         // Get or create pane instance for this path
         // Check if we need a new instance (either doesn't exist or type changed)
-        let needs_new_instance = pane_instances
+        let needs_new_instance = ctx.pane_instances
             .get(path)
             .map(|instance| instance.pane_type() != pane_type)
             .unwrap_or(true);
 
         if needs_new_instance {
-            pane_instances.insert(path.clone(), PaneInstance::new(pane_type));
+            ctx.pane_instances.insert(path.clone(), PaneInstance::new(pane_type));
         }
 
         // Get the pane instance and render its content
-        if let Some(pane_instance) = pane_instances.get_mut(path) {
+        if let Some(pane_instance) = ctx.pane_instances.get_mut(path) {
             // Create shared state
             let mut shared = SharedPaneState {
-                tool_icon_cache,
-                icon_cache,
-                selected_tool,
-                fill_color,
-                stroke_color,
-                active_color_mode,
-                pending_view_action,
-                fallback_pane_priority,
-                theme,
-                pending_handlers,
-                action_executor,
-                selection,
-                active_layer_id,
-                tool_state,
-                pending_actions,
-                draw_simplify_mode,
-                rdp_tolerance,
-                schneider_max_error,
+                tool_icon_cache: ctx.tool_icon_cache,
+                icon_cache: ctx.icon_cache,
+                selected_tool: ctx.selected_tool,
+                fill_color: ctx.fill_color,
+                stroke_color: ctx.stroke_color,
+                active_color_mode: ctx.active_color_mode,
+                pending_view_action: ctx.pending_view_action,
+                fallback_pane_priority: ctx.fallback_pane_priority,
+                theme: ctx.theme,
+                pending_handlers: ctx.pending_handlers,
+                action_executor: ctx.action_executor,
+                selection: ctx.selection,
+                active_layer_id: ctx.active_layer_id,
+                tool_state: ctx.tool_state,
+                pending_actions: ctx.pending_actions,
+                draw_simplify_mode: ctx.draw_simplify_mode,
+                rdp_tolerance: ctx.rdp_tolerance,
+                schneider_max_error: ctx.schneider_max_error,
+                audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                playback_time: ctx.playback_time,
+                is_playing: ctx.is_playing,
             };
 
             // Render pane content (header was already rendered above)

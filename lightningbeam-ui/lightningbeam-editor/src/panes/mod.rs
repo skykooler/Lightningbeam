@@ -73,6 +73,11 @@ pub struct SharedPaneState<'a> {
     pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     pub rdp_tolerance: &'a mut f64,
     pub schneider_max_error: &'a mut f64,
+    /// Audio engine controller for playback control
+    pub audio_controller: Option<&'a mut daw_backend::EngineController>,
+    /// Global playback state
+    pub playback_time: &'a mut f64,  // Current playback position in seconds
+    pub is_playing: &'a mut bool,    // Whether playback is currently active
 }
 
 /// Trait for pane rendering

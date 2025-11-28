@@ -25,9 +25,6 @@ enum ClipDragType {
 }
 
 pub struct TimelinePane {
-    /// Current playback time in seconds
-    current_time: f64,
-
     /// Horizontal zoom level (pixels per second)
     pixels_per_second: f32,
 
@@ -53,15 +50,11 @@ pub struct TimelinePane {
 
     /// Cached mouse position from mousedown (used for edge detection when drag starts)
     mousedown_pos: Option<egui::Pos2>,
-
-    /// Is playback currently active?
-    is_playing: bool,
 }
 
 impl TimelinePane {
     pub fn new() -> Self {
         Self {
-            current_time: 0.0,
             pixels_per_second: 100.0,
             viewport_start_time: 0.0,
             viewport_scroll_y: 0.0,
@@ -72,7 +65,6 @@ impl TimelinePane {
             clip_drag_state: None,
             drag_offset: 0.0,
             mousedown_pos: None,
-            is_playing: false,
         }
     }
 
@@ -302,8 +294,8 @@ impl TimelinePane {
     }
 
     /// Render the playhead (current time indicator)
-    fn render_playhead(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme) {
-        let x = self.time_to_x(self.current_time);
+    fn render_playhead(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme, playback_time: f64) {
+        let x = self.time_to_x(playback_time);
 
         if x >= 0.0 && x <= rect.width() {
             let painter = ui.painter();
@@ -684,6 +676,9 @@ impl TimelinePane {
         active_layer_id: &mut Option<uuid::Uuid>,
         selection: &mut lightningbeam_core::selection::Selection,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+        playback_time: &mut f64,
+        is_playing: &mut bool,
+        audio_controller: Option<&mut daw_backend::EngineController>,
     ) {
         let response = ui.allocate_rect(full_timeline_rect, egui::Sense::click_and_drag());
 
@@ -1034,7 +1029,8 @@ impl TimelinePane {
         if cursor_over_ruler && !alt_held && (response.clicked() || (response.dragged() && !self.is_panning)) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                self.current_time = self.x_to_time(x).max(0.0);
+                let new_time = self.x_to_time(x).max(0.0);
+                *playback_time = new_time;
                 self.is_scrubbing = true;
             }
         }
@@ -1042,12 +1038,17 @@ impl TimelinePane {
         else if self.is_scrubbing && response.dragged() && !self.is_panning {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                self.current_time = self.x_to_time(x).max(0.0);
+                let new_time = self.x_to_time(x).max(0.0);
+                *playback_time = new_time;
             }
         }
-        // Stop scrubbing when drag ends
-        else if !response.dragged() {
+        // Stop scrubbing when drag ends - seek the audio engine
+        else if !response.dragged() && self.is_scrubbing {
             self.is_scrubbing = false;
+            // Seek the audio engine to the new position
+            if let Some(controller) = audio_controller {
+                controller.seek(*playback_time);
+            }
         }
 
         // Distinguish between mouse wheel (discrete) and trackpad (smooth)
@@ -1154,29 +1155,54 @@ impl PaneRenderer for TimelinePane {
 
                 // Go to start
                 if ui.add_sized(button_size, egui::Button::new("|◀")).clicked() {
-                    self.current_time = 0.0;
+                    *shared.playback_time = 0.0;
+                    if let Some(controller) = shared.audio_controller.as_mut() {
+                        controller.seek(0.0);
+                    }
                 }
 
                 // Rewind (step backward)
                 if ui.add_sized(button_size, egui::Button::new("◀◀")).clicked() {
-                    self.current_time = (self.current_time - 0.1).max(0.0);
+                    *shared.playback_time = (*shared.playback_time - 0.1).max(0.0);
+                    if let Some(controller) = shared.audio_controller.as_mut() {
+                        controller.seek(*shared.playback_time);
+                    }
                 }
 
                 // Play/Pause toggle
-                let play_pause_text = if self.is_playing { "⏸" } else { "▶" };
+                let play_pause_text = if *shared.is_playing { "⏸" } else { "▶" };
                 if ui.add_sized(button_size, egui::Button::new(play_pause_text)).clicked() {
-                    self.is_playing = !self.is_playing;
-                    // TODO: Actually start/stop playback
+                    *shared.is_playing = !*shared.is_playing;
+                    println!("🔘 Play/Pause button clicked! is_playing = {}", *shared.is_playing);
+
+                    // Send play/pause command to audio engine
+                    if let Some(controller) = shared.audio_controller.as_mut() {
+                        if *shared.is_playing {
+                            controller.play();
+                            println!("▶ Started playback");
+                        } else {
+                            controller.pause();
+                            println!("⏸ Paused playback");
+                        }
+                    } else {
+                        println!("⚠️  No audio controller available (audio system failed to initialize)");
+                    }
                 }
 
                 // Fast forward (step forward)
                 if ui.add_sized(button_size, egui::Button::new("▶▶")).clicked() {
-                    self.current_time = (self.current_time + 0.1).min(self.duration);
+                    *shared.playback_time = (*shared.playback_time + 0.1).min(self.duration);
+                    if let Some(controller) = shared.audio_controller.as_mut() {
+                        controller.seek(*shared.playback_time);
+                    }
                 }
 
                 // Go to end
                 if ui.add_sized(button_size, egui::Button::new("▶|")).clicked() {
-                    self.current_time = self.duration;
+                    *shared.playback_time = self.duration;
+                    if let Some(controller) = shared.audio_controller.as_mut() {
+                        controller.seek(self.duration);
+                    }
                 }
             });
         });
@@ -1188,7 +1214,7 @@ impl PaneRenderer for TimelinePane {
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
 
         // Time display
-        ui.colored_label(text_color, format!("Time: {:.2}s / {:.2}s", self.current_time, self.duration));
+        ui.colored_label(text_color, format!("Time: {:.2}s / {:.2}s", *shared.playback_time, self.duration));
 
         ui.separator();
 
@@ -1205,8 +1231,8 @@ impl PaneRenderer for TimelinePane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
-        // Sync timeline's current_time to document
-        shared.action_executor.document_mut().current_time = self.current_time;
+        // Sync playback_time to document
+        shared.action_executor.document_mut().current_time = *shared.playback_time;
 
         // Get document from action executor
         let document = shared.action_executor.document();
@@ -1306,7 +1332,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
-        self.render_playhead(ui, timeline_rect, shared.theme);
+        self.render_playhead(ui, timeline_rect, shared.theme, *shared.playback_time);
 
         // Restore original clip rect
         ui.set_clip_rect(original_clip_rect);
@@ -1323,6 +1349,9 @@ impl PaneRenderer for TimelinePane {
             shared.active_layer_id,
             shared.selection,
             shared.pending_actions,
+            shared.playback_time,
+            shared.is_playing,
+            shared.audio_controller.as_mut().map(|c| &mut **c),
         );
 
         // Register handler for pending view actions (two-phase dispatch)
