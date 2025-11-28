@@ -582,6 +582,54 @@ class TimelineWindowV2 extends Widget {
     this.automationNameCache = new Map()
   }
 
+  /**
+   * Quantize a time value to the nearest beat/measure division based on zoom level.
+   * Only applies when in measures mode and snapping is enabled.
+   * @param {number} time - The time value to quantize (in seconds)
+   * @returns {number} - The quantized time value
+   */
+  quantizeTime(time) {
+    // Only quantize in measures mode with snapping enabled
+    if (this.timelineState.timeFormat !== 'measures' || !this.timelineState.snapToFrames) {
+      return time
+    }
+
+    const bpm = this.timelineState.bpm || 120
+    const beatsPerSecond = bpm / 60
+    const beatDuration = 1 / beatsPerSecond  // Duration of one beat in seconds
+    const beatsPerMeasure = this.timelineState.timeSignature?.numerator || 4
+
+    // Calculate beat width in pixels
+    const beatWidth = beatDuration * this.timelineState.pixelsPerSecond
+
+    // Base threshold for zoom level detection (adjustable)
+    const zoomThreshold = 30
+
+    // Determine quantization level based on zoom (beat width in pixels)
+    // When zoomed out (small beat width), quantize to measures
+    // When zoomed in (large beat width), quantize to smaller divisions
+    let quantizeDuration
+    if (beatWidth < zoomThreshold * 0.5) {
+      // Very zoomed out: quantize to whole measures
+      quantizeDuration = beatDuration * beatsPerMeasure
+    } else if (beatWidth < zoomThreshold) {
+      // Zoomed out: quantize to half measures (2 beats in 4/4)
+      quantizeDuration = beatDuration * (beatsPerMeasure / 2)
+    } else if (beatWidth < zoomThreshold * 2) {
+      // Medium zoom: quantize to beats
+      quantizeDuration = beatDuration
+    } else if (beatWidth < zoomThreshold * 4) {
+      // Zoomed in: quantize to half beats (eighth notes in 4/4)
+      quantizeDuration = beatDuration / 2
+    } else {
+      // Very zoomed in: quantize to quarter beats (sixteenth notes in 4/4)
+      quantizeDuration = beatDuration / 4
+    }
+
+    // Round time to nearest quantization unit
+    return Math.round(time / quantizeDuration) * quantizeDuration
+  }
+
   draw(ctx) {
     ctx.save()
 
@@ -593,9 +641,6 @@ class TimelineWindowV2 extends Widget {
     // Draw background
     ctx.fillStyle = backgroundColor
     ctx.fillRect(0, 0, this.width, this.height)
-
-    // Draw snapping checkbox in ruler header area (Phase 5)
-    this.drawSnappingCheckbox(ctx)
 
     // Draw time ruler at top, offset by track header width
     ctx.save()
@@ -657,33 +702,6 @@ class TimelineWindowV2 extends Widget {
     }
 
     ctx.restore()
-  }
-
-  /**
-   * Draw snapping checkbox in ruler header area (Phase 5)
-   */
-  drawSnappingCheckbox(ctx) {
-    const checkboxSize = 14
-    const checkboxX = 10
-    const checkboxY = (this.ruler.height - checkboxSize) / 2
-
-    // Draw checkbox border
-    ctx.strokeStyle = foregroundColor
-    ctx.lineWidth = 1
-    ctx.strokeRect(checkboxX, checkboxY, checkboxSize, checkboxSize)
-
-    // Fill if snapping is enabled
-    if (this.timelineState.snapToFrames) {
-      ctx.fillStyle = foregroundColor
-      ctx.fillRect(checkboxX + 2, checkboxY + 2, checkboxSize - 4, checkboxSize - 4)
-    }
-
-    // Draw label
-    ctx.fillStyle = labelColor
-    ctx.font = '11px sans-serif'
-    ctx.textAlign = 'left'
-    ctx.textBaseline = 'middle'
-    ctx.fillText('Snap', checkboxX + checkboxSize + 6, this.ruler.height / 2)
   }
 
   /**
@@ -1430,60 +1448,99 @@ class TimelineWindowV2 extends Widget {
               const availableHeight = trackHeight - 10 - (verticalPadding * 2)
               const noteHeight = availableHeight / 12
 
-              // Calculate visible time range within the clip
+              // Get clip trim boundaries (internal_start = offset, internal_end depends on source)
+              const clipOffset = clip.offset || 0
+              // Use stored internalDuration if available (set when trimming), otherwise calculate from notes
+              let internalDuration
+              if (clip.internalDuration !== undefined) {
+                internalDuration = clip.internalDuration
+              } else {
+                // Fallback: calculate from actual notes (for clips that haven't been trimmed)
+                let contentEndTime = clipOffset
+                for (const note of clip.notes) {
+                  const noteEnd = note.start_time + note.duration
+                  if (noteEnd > contentEndTime) {
+                    contentEndTime = noteEnd
+                  }
+                }
+                internalDuration = contentEndTime - clipOffset
+              }
+              const contentEndTime = clipOffset + internalDuration
+              // If clip.duration exceeds internal duration, we're looping
+              const isLooping = clip.duration > internalDuration && internalDuration > 0
+
+              // Calculate visible time range within the clip (in clip-local time)
               const clipEndX = startX + clipWidth
               const visibleStartTime = this.timelineState.pixelToTime(Math.max(startX, 0)) - clip.startTime
               const visibleEndTime = this.timelineState.pixelToTime(Math.min(clipEndX, this.width)) - clip.startTime
 
-              // Binary search to find first visible note
-              let firstVisibleIdx = 0
-              let left = 0
-              let right = clip.notes.length - 1
-              while (left <= right) {
-                const mid = Math.floor((left + right) / 2)
-                const noteEndTime = clip.notes[mid].start_time + clip.notes[mid].duration
+              // Helper function to draw notes for a given loop iteration
+              const drawNotesForIteration = (loopOffset, opacity) => {
+                ctx.fillStyle = opacity < 1 ? `rgba(111, 220, 111, ${opacity})` : '#6fdc6f'
 
-                if (noteEndTime < visibleStartTime) {
-                  left = mid + 1
-                  firstVisibleIdx = left
-                } else {
-                  right = mid - 1
+                for (let i = 0; i < clip.notes.length; i++) {
+                  const note = clip.notes[i]
+                  const noteEndTime = note.start_time + note.duration
+
+                  // Skip notes that are outside the trimmed region
+                  if (noteEndTime <= clipOffset || note.start_time >= contentEndTime) {
+                    continue
+                  }
+
+                  // Calculate note position in this loop iteration
+                  const noteDisplayStart = note.start_time - clipOffset + loopOffset
+                  const noteDisplayEnd = noteEndTime - clipOffset + loopOffset
+
+                  // Skip if this iteration's note is beyond clip duration
+                  if (noteDisplayStart >= clip.duration) {
+                    continue
+                  }
+
+                  // Exit early if note starts after visible range
+                  if (noteDisplayStart > visibleEndTime) {
+                    continue
+                  }
+
+                  // Skip if note ends before visible range
+                  if (noteDisplayEnd < visibleStartTime) {
+                    continue
+                  }
+
+                  // Calculate note position (pitch mod 12 for chromatic representation)
+                  const pitchClass = note.note % 12
+                  // Invert Y so higher pitches appear at top
+                  const noteY = y + 5 + ((11 - pitchClass) * noteHeight)
+
+                  // Calculate note timing on timeline
+                  const noteStartX = this.timelineState.timeToPixel(clip.startTime + noteDisplayStart)
+                  let noteEndX = this.timelineState.timeToPixel(clip.startTime + Math.min(noteDisplayEnd, clip.duration))
+
+                  // Clip to visible bounds
+                  const visibleStartX = Math.max(noteStartX, startX + 2)
+                  const visibleEndX = Math.min(noteEndX, startX + clipWidth - 2)
+                  const visibleWidth = visibleEndX - visibleStartX
+
+                  if (visibleWidth > 0) {
+                    // Draw note rectangle
+                    ctx.fillRect(
+                      visibleStartX,
+                      noteY,
+                      visibleWidth,
+                      noteHeight - 1  // Small gap between notes
+                    )
+                  }
                 }
               }
 
-              // Draw visible notes only
-              ctx.fillStyle = '#6fdc6f'  // Bright green for note bars
+              // Draw primary notes at full opacity
+              drawNotesForIteration(0, 1.0)
 
-              for (let i = firstVisibleIdx; i < clip.notes.length; i++) {
-                const note = clip.notes[i]
-
-                // Exit early if note starts after visible range
-                if (note.start_time > visibleEndTime) {
-                  break
-                }
-
-                // Calculate note position (pitch mod 12 for chromatic representation)
-                const pitchClass = note.note % 12
-                // Invert Y so higher pitches appear at top
-                const noteY = y + 5 + ((11 - pitchClass) * noteHeight)
-
-                // Calculate note timing on timeline
-                const noteStartX = this.timelineState.timeToPixel(clip.startTime + note.start_time)
-                const noteEndX = this.timelineState.timeToPixel(clip.startTime + note.start_time + note.duration)
-
-                // Clip to visible bounds
-                const visibleStartX = Math.max(noteStartX, startX + 2)
-                const visibleEndX = Math.min(noteEndX, startX + clipWidth - 2)
-                const visibleWidth = visibleEndX - visibleStartX
-
-                if (visibleWidth > 0) {
-                  // Draw note rectangle
-                  ctx.fillRect(
-                    visibleStartX,
-                    noteY,
-                    visibleWidth,
-                    noteHeight - 1  // Small gap between notes
-                  )
+              // Draw looped iterations at 50% opacity
+              if (isLooping) {
+                let loopOffset = internalDuration
+                while (loopOffset < clip.duration) {
+                  drawNotesForIteration(loopOffset, 0.5)
+                  loopOffset += internalDuration
                 }
               }
             } else if (!isMIDI && clip.waveform && clip.waveform.length > 0) {
@@ -1986,22 +2043,6 @@ class TimelineWindowV2 extends Widget {
   }
 
   mousedown(x, y) {
-    // Check if clicking on snapping checkbox (Phase 5)
-    if (y <= this.ruler.height && x < this.trackHeaderWidth) {
-      const checkboxSize = 14
-      const checkboxX = 10
-      const checkboxY = (this.ruler.height - checkboxSize) / 2
-
-      if (x >= checkboxX && x <= checkboxX + checkboxSize &&
-          y >= checkboxY && y <= checkboxY + checkboxSize) {
-        // Toggle snapping
-        this.timelineState.snapToFrames = !this.timelineState.snapToFrames
-        console.log('Snapping', this.timelineState.snapToFrames ? 'enabled' : 'disabled')
-        if (this.requestRedraw) this.requestRedraw()
-        return true
-      }
-    }
-
     // Check if clicking in ruler area (after track headers)
     if (y <= this.ruler.height && x >= this.trackHeaderWidth) {
       // Adjust x for ruler (remove track header offset)
@@ -2229,6 +2270,36 @@ class TimelineWindowV2 extends Widget {
           this._globalEvents.add("mouseup")
 
           console.log('Started dragging', edgeInfo.edge, 'edge at time', edgeInfo.keyframe.time)
+          if (this.requestRedraw) this.requestRedraw()
+          return true
+        }
+
+        // Check if clicking on loop corner (top-right) to extend/loop clip
+        const loopCornerInfo = this.getAudioClipLoopCornerAtPoint(track, adjustedX, adjustedY)
+        if (loopCornerInfo) {
+          // Skip if right-clicking (button 2)
+          if (this.lastClickEvent?.button === 2) {
+            return false
+          }
+
+          // Select the track
+          this.selectTrack(track)
+
+          // Start loop corner dragging
+          this.draggingLoopCorner = {
+            track: track,
+            clip: loopCornerInfo.clip,
+            clipIndex: loopCornerInfo.clipIndex,
+            audioTrack: loopCornerInfo.audioTrack,
+            isMIDI: loopCornerInfo.isMIDI,
+            initialDuration: loopCornerInfo.clip.duration
+          }
+
+          // Enable global mouse events for dragging
+          this._globalEvents.add("mousemove")
+          this._globalEvents.add("mouseup")
+
+          console.log('Started dragging loop corner')
           if (this.requestRedraw) this.requestRedraw()
           return true
         }
@@ -2928,6 +2999,47 @@ class TimelineWindowV2 extends Widget {
         audioTrack: clipInfo.audioTrack,
         clipStart: clipStart,
         clipEnd: clipEnd
+      }
+    }
+
+    return null
+  }
+
+  /**
+   * Check if hovering over the loop corner (top-right) of an audio/MIDI clip
+   * Returns clip info if in the loop corner zone
+   */
+  getAudioClipLoopCornerAtPoint(track, x, y) {
+    if (track.type !== 'audio') return null
+
+    const trackIndex = this.trackHierarchy.tracks.indexOf(track)
+    if (trackIndex === -1) return null
+
+    const trackY = this.trackHierarchy.getTrackY(trackIndex)
+    const trackHeight = this.trackHierarchy.trackHeight
+    const clipTop = trackY + 5
+    const cornerSize = 12  // Size of the corner hot zone in pixels
+
+    // Check if y is in the top portion of the clip
+    if (y < clipTop || y > clipTop + cornerSize) return null
+
+    const clickTime = this.timelineState.pixelToTime(x)
+    const audioTrack = track.object
+
+    // Check each clip
+    for (let i = 0; i < audioTrack.clips.length; i++) {
+      const clip = audioTrack.clips[i]
+      const clipEnd = clip.startTime + clip.duration
+      const clipEndX = this.timelineState.timeToPixel(clipEnd)
+
+      // Check if x is near the right edge (within corner zone)
+      if (x >= clipEndX - cornerSize && x <= clipEndX) {
+        return {
+          clip: clip,
+          clipIndex: i,
+          audioTrack: audioTrack,
+          isMIDI: audioTrack.type === 'midi'
+        }
       }
     }
 
@@ -3848,19 +3960,23 @@ class TimelineWindowV2 extends Widget {
     // Handle audio clip edge dragging (trimming)
     if (this.draggingAudioClipEdge) {
       const adjustedX = x - this.trackHeaderWidth
-      const newTime = this.timelineState.pixelToTime(adjustedX)
+      const rawTime = this.timelineState.pixelToTime(adjustedX)
       const minClipDuration = this.context.config.minClipDuration
 
       if (this.draggingAudioClipEdge.edge === 'left') {
         // Dragging left edge - adjust startTime and offset
         const initialEnd = this.draggingAudioClipEdge.initialClipStart + this.draggingAudioClipEdge.initialClipDuration
         const maxStartTime = initialEnd - minClipDuration
-        const newStartTime = Math.max(0, Math.min(newTime, maxStartTime))
+        // Quantize the new start time
+        let newStartTime = Math.max(0, Math.min(rawTime, maxStartTime))
+        newStartTime = this.quantizeTime(newStartTime)
         const startTimeDelta = newStartTime - this.draggingAudioClipEdge.initialClipStart
 
         this.draggingAudioClipEdge.clip.startTime = newStartTime
         this.draggingAudioClipEdge.clip.offset = this.draggingAudioClipEdge.initialClipOffset + startTimeDelta
         this.draggingAudioClipEdge.clip.duration = this.draggingAudioClipEdge.initialClipDuration - startTimeDelta
+        // Also update internalDuration when trimming (this is the content length before looping)
+        this.draggingAudioClipEdge.clip.internalDuration = this.draggingAudioClipEdge.initialClipDuration - startTimeDelta
 
         // Also trim linked video clip if it exists
         if (this.draggingAudioClipEdge.clip.linkedVideoClip) {
@@ -3872,14 +3988,21 @@ class TimelineWindowV2 extends Widget {
       } else {
         // Dragging right edge - adjust duration
         const minEndTime = this.draggingAudioClipEdge.initialClipStart + minClipDuration
-        const newEndTime = Math.max(minEndTime, newTime)
+        // Quantize the new end time
+        let newEndTime = Math.max(minEndTime, rawTime)
+        newEndTime = this.quantizeTime(newEndTime)
         let newDuration = newEndTime - this.draggingAudioClipEdge.clip.startTime
 
-        // Constrain duration to not exceed source file duration minus offset
-        const maxAvailableDuration = this.draggingAudioClipEdge.clip.sourceDuration - this.draggingAudioClipEdge.clip.offset
-        newDuration = Math.min(newDuration, maxAvailableDuration)
+        // Constrain duration to not exceed source file duration minus offset (for audio clips only)
+        // MIDI clips don't have sourceDuration and can be extended freely
+        if (this.draggingAudioClipEdge.clip.sourceDuration !== undefined) {
+          const maxAvailableDuration = this.draggingAudioClipEdge.clip.sourceDuration - (this.draggingAudioClipEdge.clip.offset || 0)
+          newDuration = Math.min(newDuration, maxAvailableDuration)
+        }
 
         this.draggingAudioClipEdge.clip.duration = newDuration
+        // Also update internalDuration when trimming (this is the content length before looping)
+        this.draggingAudioClipEdge.clip.internalDuration = newDuration
 
         // Also trim linked video clip if it exists
         if (this.draggingAudioClipEdge.clip.linkedVideoClip) {
@@ -3887,6 +4010,25 @@ class TimelineWindowV2 extends Widget {
           this.draggingAudioClipEdge.clip.linkedVideoClip.duration = Math.min(newDuration, linkedMaxDuration)
         }
       }
+
+      // Trigger timeline redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
+    // Handle loop corner dragging (extending/looping clip)
+    if (this.draggingLoopCorner) {
+      const adjustedX = x - this.trackHeaderWidth
+      const newTime = this.timelineState.pixelToTime(adjustedX)
+      const minClipDuration = this.context.config.minClipDuration
+
+      // Calculate new end time and quantize it
+      let newEndTime = Math.max(this.draggingLoopCorner.clip.startTime + minClipDuration, newTime)
+      newEndTime = this.quantizeTime(newEndTime)
+      const newDuration = newEndTime - this.draggingLoopCorner.clip.startTime
+
+      // Update clip duration (no maximum constraint - allows looping)
+      this.draggingLoopCorner.clip.duration = newDuration
 
       // Trigger timeline redraw
       if (this.requestRedraw) this.requestRedraw()
@@ -4046,7 +4188,8 @@ class TimelineWindowV2 extends Widget {
     // Update cursor based on hover position (when not dragging)
     if (!this.draggingAudioClip && !this.draggingVideoClip &&
         !this.draggingAudioClipEdge && !this.draggingVideoClipEdge &&
-        !this.draggingKeyframe && !this.draggingPlayhead && !this.draggingSegment) {
+        !this.draggingKeyframe && !this.draggingPlayhead && !this.draggingSegment &&
+        !this.draggingLoopCorner) {
       const trackY = y - this.ruler.height
       if (trackY >= 0 && x >= this.trackHeaderWidth) {
         const adjustedY = trackY - this.trackScrollOffset
@@ -4054,6 +4197,16 @@ class TimelineWindowV2 extends Widget {
         const track = this.trackHierarchy.getTrackAtY(adjustedY)
 
         if (track) {
+          // Check for audio/MIDI clip loop corner (top-right) - must check before edge detection
+          if (track.type === 'audio') {
+            const loopCornerInfo = this.getAudioClipLoopCornerAtPoint(track, adjustedX, adjustedY)
+            if (loopCornerInfo) {
+              // Use the same rotate cursor as the transform tool corner handles
+              this.cursor = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' fill='currentColor' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z'/%3E%3Cpath d='M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466'/%3E%3C/svg%3E\") 12 12, auto"
+              return false
+            }
+          }
+
           // Check for audio clip edge
           if (track.type === 'audio') {
             const audioEdgeInfo = this.getAudioClipEdgeAtPoint(track, adjustedX, adjustedY)
@@ -4142,13 +4295,28 @@ class TimelineWindowV2 extends Widget {
     if (this.draggingAudioClipEdge) {
       console.log('Finished trimming audio clip edge')
 
-      // Update backend with new clip trim
+      const clip = this.draggingAudioClipEdge.clip
+      const trackId = this.draggingAudioClipEdge.audioTrack.audioTrackId
+      const clipId = clip.clipId
+
+      // If dragging left edge, also move the clip's timeline position
+      if (this.draggingAudioClipEdge.edge === 'left') {
+        invoke('audio_move_clip', {
+          trackId: trackId,
+          clipId: clipId,
+          newStartTime: clip.startTime
+        }).catch(error => {
+          console.error('Failed to move audio clip in backend:', error)
+        })
+      }
+
+      // Update the internal trim boundaries
+      // internal_start = offset, internal_end = offset + duration (content region)
       invoke('audio_trim_clip', {
-        trackId: this.draggingAudioClipEdge.audioTrack.audioTrackId,
-        clipId: this.draggingAudioClipEdge.clip.clipId,
-        newStartTime: this.draggingAudioClipEdge.clip.startTime,
-        newDuration: this.draggingAudioClipEdge.clip.duration,
-        newOffset: this.draggingAudioClipEdge.clip.offset
+        trackId: trackId,
+        clipId: clipId,
+        internalStart: clip.offset,
+        internalEnd: clip.offset + clip.duration
       }).catch(error => {
         console.error('Failed to trim audio clip in backend:', error)
       })
@@ -4168,6 +4336,33 @@ class TimelineWindowV2 extends Widget {
       return true
     }
 
+    // Complete loop corner dragging (extending/looping clip)
+    if (this.draggingLoopCorner) {
+      console.log('Finished extending clip via loop corner')
+
+      const clip = this.draggingLoopCorner.clip
+      const trackId = this.draggingLoopCorner.audioTrack.audioTrackId
+      const clipId = clip.clipId
+
+      // Call audio_extend_clip to update the external duration in the backend
+      invoke('audio_extend_clip', {
+        trackId: trackId,
+        clipId: clipId,
+        newExternalDuration: clip.duration
+      }).catch(error => {
+        console.error('Failed to extend audio clip in backend:', error)
+      })
+
+      // Clean up dragging state
+      this.draggingLoopCorner = null
+      this._globalEvents.delete("mousemove")
+      this._globalEvents.delete("mouseup")
+
+      // Final redraw
+      if (this.requestRedraw) this.requestRedraw()
+      return true
+    }
+
     // Complete video clip edge dragging (trimming)
     if (this.draggingVideoClipEdge) {
       console.log('Finished trimming video clip edge')
@@ -4177,12 +4372,26 @@ class TimelineWindowV2 extends Widget {
         const linkedAudioClip = this.draggingVideoClipEdge.clip.linkedAudioClip
         const audioTrack = this.draggingVideoClipEdge.videoLayer.linkedAudioTrack
         if (audioTrack) {
+          const trackId = audioTrack.audioTrackId
+          const clipId = linkedAudioClip.clipId
+
+          // If dragging left edge, also move the clip's timeline position
+          if (this.draggingVideoClipEdge.edge === 'left') {
+            invoke('audio_move_clip', {
+              trackId: trackId,
+              clipId: clipId,
+              newStartTime: linkedAudioClip.startTime
+            }).catch(error => {
+              console.error('Failed to move linked audio clip in backend:', error)
+            })
+          }
+
+          // Update the internal trim boundaries
           invoke('audio_trim_clip', {
-            trackId: audioTrack.audioTrackId,
-            clipId: linkedAudioClip.clipId,
-            newStartTime: linkedAudioClip.startTime,
-            newDuration: linkedAudioClip.duration,
-            newOffset: linkedAudioClip.offset
+            trackId: trackId,
+            clipId: clipId,
+            internalStart: linkedAudioClip.offset,
+            internalEnd: linkedAudioClip.offset + linkedAudioClip.duration
           }).catch(error => {
             console.error('Failed to trim linked audio clip in backend:', error)
           })

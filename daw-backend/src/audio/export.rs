@@ -1,4 +1,5 @@
 use super::buffer_pool::BufferPool;
+use super::midi_pool::MidiClipPool;
 use super::pool::AudioPool;
 use super::project::Project;
 use std::path::Path;
@@ -61,11 +62,12 @@ impl Default for ExportSettings {
 pub fn export_audio<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
+    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
 ) -> Result<(), String> {
     // Render the project to memory
-    let samples = render_to_memory(project, pool, settings)?;
+    let samples = render_to_memory(project, pool, midi_pool, settings)?;
 
     // Write to file based on format
     match settings.format {
@@ -80,6 +82,7 @@ pub fn export_audio<P: AsRef<Path>>(
 fn render_to_memory(
     project: &mut Project,
     pool: &AudioPool,
+    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
 ) -> Result<Vec<f32>, String> {
     // Calculate total number of frames
@@ -113,6 +116,7 @@ fn render_to_memory(
         project.render(
             &mut render_buffer,
             pool,
+            midi_pool,
             &mut buffer_pool,
             playhead,
             settings.sample_rate,

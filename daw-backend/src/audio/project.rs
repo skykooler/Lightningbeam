@@ -1,19 +1,27 @@
 use super::buffer_pool::BufferPool;
 use super::clip::Clip;
-use super::midi::{MidiClip, MidiEvent};
-use super::pool::AudioPool;
+use super::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};
+use super::midi_pool::MidiClipPool;
+use super::pool::AudioClipPool;
 use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
 use std::collections::HashMap;
 
-/// Project manages the hierarchical track structure
+/// Project manages the hierarchical track structure and clip pools
 ///
 /// Tracks are stored in a flat HashMap but can be organized into groups,
 /// forming a tree structure. Groups render their children recursively.
+///
+/// Clip content is stored in pools (MidiClipPool), while tracks store
+/// clip instances that reference the pool content.
 pub struct Project {
     tracks: HashMap<TrackId, TrackNode>,
     next_track_id: TrackId,
     root_tracks: Vec<TrackId>, // Top-level tracks (not in any group)
     sample_rate: u32, // System sample rate
+    /// Pool for MIDI clip content
+    pub midi_clip_pool: MidiClipPool,
+    /// Next MIDI clip instance ID (for generating unique IDs)
+    next_midi_clip_instance_id: MidiClipInstanceId,
 }
 
 impl Project {
@@ -24,6 +32,8 @@ impl Project {
             next_track_id: 0,
             root_tracks: Vec::new(),
             sample_rate,
+            midi_clip_pool: MidiClipPool::new(),
+            next_midi_clip_instance_id: 1,
         }
     }
 
@@ -241,21 +251,81 @@ impl Project {
         }
     }
 
-    /// Add a MIDI clip to a MIDI track
-    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<(), &'static str> {
+    /// Add a MIDI clip instance to a MIDI track
+    /// The clip content should already exist in the midi_clip_pool
+    pub fn add_midi_clip_instance(&mut self, track_id: TrackId, instance: MidiClipInstance) -> Result<(), &'static str> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            track.add_clip(clip);
+            track.add_clip_instance(instance);
             Ok(())
         } else {
             Err("Track not found or is not a MIDI track")
         }
     }
 
+    /// Create a new MIDI clip in the pool and add an instance to a track
+    /// Returns (clip_id, instance_id) on success
+    pub fn create_midi_clip_with_instance(
+        &mut self,
+        track_id: TrackId,
+        events: Vec<MidiEvent>,
+        duration: f64,
+        name: String,
+        external_start: f64,
+    ) -> Result<(MidiClipId, MidiClipInstanceId), &'static str> {
+        // Verify track exists and is a MIDI track
+        if !matches!(self.tracks.get(&track_id), Some(TrackNode::Midi(_))) {
+            return Err("Track not found or is not a MIDI track");
+        }
+
+        // Create clip in pool
+        let clip_id = self.midi_clip_pool.add_clip(events, duration, name);
+
+        // Create instance
+        let instance_id = self.next_midi_clip_instance_id;
+        self.next_midi_clip_instance_id += 1;
+
+        let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, external_start);
+
+        // Add instance to track
+        if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
+            track.add_clip_instance(instance);
+        }
+
+        Ok((clip_id, instance_id))
+    }
+
+    /// Generate a new unique MIDI clip instance ID
+    pub fn next_midi_clip_instance_id(&mut self) -> MidiClipInstanceId {
+        let id = self.next_midi_clip_instance_id;
+        self.next_midi_clip_instance_id += 1;
+        id
+    }
+
+    /// Legacy method for backwards compatibility - creates clip and instance from old MidiClip format
+    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<(), &'static str> {
+        self.add_midi_clip_at(track_id, clip, 0.0)
+    }
+
+    /// Add a MIDI clip to the pool and create an instance at the given timeline position
+    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) -> Result<(), &'static str> {
+        // Add the clip to the pool (it already has events and duration)
+        let duration = clip.duration;
+        let clip_id = clip.id;
+        self.midi_clip_pool.add_existing_clip(clip);
+
+        // Create an instance that uses the full clip at the given position
+        let instance_id = self.next_midi_clip_instance_id();
+        let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, start_time);
+
+        self.add_midi_clip_instance(track_id, instance)
+    }
+
     /// Render all root tracks into the output buffer
     pub fn render(
         &mut self,
         output: &mut [f32],
-        pool: &AudioPool,
+        audio_pool: &AudioClipPool,
+        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
         playhead_seconds: f64,
         sample_rate: u32,
@@ -278,7 +348,8 @@ impl Project {
             self.render_track(
                 track_id,
                 output,
-                pool,
+                audio_pool,
+                midi_pool,
                 buffer_pool,
                 ctx,
                 any_solo,
@@ -292,7 +363,8 @@ impl Project {
         &mut self,
         track_id: TrackId,
         output: &mut [f32],
-        pool: &AudioPool,
+        audio_pool: &AudioClipPool,
+        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
         ctx: RenderContext,
         any_solo: bool,
@@ -336,11 +408,11 @@ impl Project {
         match self.tracks.get_mut(&track_id) {
             Some(TrackNode::Audio(track)) => {
                 // Render audio track directly into output
-                track.render(output, pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                track.render(output, audio_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Midi(track)) => {
                 // Render MIDI track directly into output
-                track.render(output, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                track.render(output, midi_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Group(group)) => {
                 // Get children IDs, check if this group is soloed, and transform context
@@ -360,7 +432,8 @@ impl Project {
                     self.render_track(
                         child_id,
                         &mut group_buffer,
-                        pool,
+                        audio_pool,
+                        midi_pool,
                         buffer_pool,
                         child_ctx,
                         any_solo,

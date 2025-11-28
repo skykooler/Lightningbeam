@@ -28,10 +28,14 @@ pub enum Command {
     SetTrackSolo(TrackId, bool),
 
     // Clip management commands
-    /// Move a clip to a new timeline position
+    /// Move a clip to a new timeline position (track_id, clip_id, new_external_start)
     MoveClip(TrackId, ClipId, f64),
-    /// Trim a clip (track_id, clip_id, new_start_time, new_duration, new_offset)
-    TrimClip(TrackId, ClipId, f64, f64, f64),
+    /// Trim a clip's internal boundaries (track_id, clip_id, new_internal_start, new_internal_end)
+    /// This changes which portion of the source content is used
+    TrimClip(TrackId, ClipId, f64, f64),
+    /// Extend/shrink a clip's external duration (track_id, clip_id, new_external_duration)
+    /// If duration > internal duration, the clip will loop
+    ExtendClip(TrackId, ClipId, f64),
 
     // Metatrack management commands
     /// Create a new metatrack with a name
@@ -67,8 +71,8 @@ pub enum Command {
     CreateMidiClip(TrackId, f64, f64),
     /// Add a MIDI note to a clip (track_id, clip_id, time_offset, note, velocity, duration)
     AddMidiNote(TrackId, MidiClipId, f64, u8, u8, f64),
-    /// Add a pre-loaded MIDI clip to a track
-    AddLoadedMidiClip(TrackId, MidiClip),
+    /// Add a pre-loaded MIDI clip to a track (track_id, clip, start_time)
+    AddLoadedMidiClip(TrackId, MidiClip, f64),
     /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
     /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
     UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),

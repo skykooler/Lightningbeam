@@ -1622,6 +1622,7 @@ async function toggleRecording() {
           name: 'Recording...',
           startTime: startTime,
           duration: clipDuration,
+          offset: 0,
           notes: [],
           loading: true
         });
@@ -1818,12 +1819,28 @@ async function _save(path) {
     // Serialize current layout structure (panes, splits, sizes)
     const serializedLayout = serializeLayout(rootPane);
 
+    // Serialize timeline state
+    let timelineState = null;
+    if (context.timelineWidget?.timelineState) {
+      const ts = context.timelineWidget.timelineState;
+      timelineState = {
+        timeFormat: ts.timeFormat,
+        framerate: ts.framerate,
+        bpm: ts.bpm,
+        timeSignature: ts.timeSignature,
+        pixelsPerSecond: ts.pixelsPerSecond,
+        viewportStartTime: ts.viewportStartTime,
+        snapToFrames: ts.snapToFrames,
+      };
+    }
+
     const fileData = {
       version: "2.0.0",
       width: config.fileWidth,
       height: config.fileHeight,
       fps: config.framerate,
       layoutState: serializedLayout, // Save current layout structure
+      timelineState: timelineState, // Save timeline settings
       actions: undoStack,
       json: root.toJSON(),
       // Audio pool at the end for human readability
@@ -2273,6 +2290,44 @@ async function _open(path, returnJson = false) {
             }
           } else {
             console.log('[JS] Skipping layout restoration');
+          }
+
+          // Restore timeline state if saved
+          if (file.timelineState && context.timelineWidget?.timelineState) {
+            const ts = context.timelineWidget.timelineState;
+            const saved = file.timelineState;
+            console.log('[JS] Restoring timeline state:', saved);
+
+            if (saved.timeFormat) ts.timeFormat = saved.timeFormat;
+            if (saved.framerate) ts.framerate = saved.framerate;
+            if (saved.bpm) ts.bpm = saved.bpm;
+            if (saved.timeSignature) ts.timeSignature = saved.timeSignature;
+            if (saved.pixelsPerSecond) ts.pixelsPerSecond = saved.pixelsPerSecond;
+            if (saved.viewportStartTime !== undefined) ts.viewportStartTime = saved.viewportStartTime;
+            if (saved.snapToFrames !== undefined) ts.snapToFrames = saved.snapToFrames;
+
+            // Update metronome button visibility based on restored time format
+            if (context.metronomeGroup) {
+              context.metronomeGroup.style.display = ts.timeFormat === 'measures' ? '' : 'none';
+            }
+
+            // Update time display
+            if (context.updateTimeDisplay) {
+              context.updateTimeDisplay();
+            }
+
+            // Update snap checkbox if it exists
+            const snapCheckbox = document.getElementById('snap-checkbox');
+            if (snapCheckbox) {
+              snapCheckbox.checked = ts.snapToFrames;
+            }
+
+            // Trigger timeline redraw
+            if (context.timelineWidget.requestRedraw) {
+              context.timelineWidget.requestRedraw();
+            }
+
+            console.log('[JS] Timeline state restored successfully');
           }
 
           // Restore audio tracks and clips to the Rust backend
@@ -5073,6 +5128,35 @@ function timeline() {
     context.updateTimeDisplay = updateTimeDisplay;
 
     controls.push(timeDisplay);
+
+    // Snap checkbox
+    const snapGroup = document.createElement("div");
+    snapGroup.className = "playback-controls-group";
+    snapGroup.style.display = "flex";
+    snapGroup.style.alignItems = "center";
+    snapGroup.style.gap = "4px";
+
+    const snapCheckbox = document.createElement("input");
+    snapCheckbox.type = "checkbox";
+    snapCheckbox.id = "snap-checkbox";
+    snapCheckbox.checked = timelineWidget.timelineState.snapToFrames;
+    snapCheckbox.style.cursor = "pointer";
+    snapCheckbox.addEventListener("change", () => {
+      timelineWidget.timelineState.snapToFrames = snapCheckbox.checked;
+      console.log('Snapping', snapCheckbox.checked ? 'enabled' : 'disabled');
+    });
+
+    const snapLabel = document.createElement("label");
+    snapLabel.htmlFor = "snap-checkbox";
+    snapLabel.textContent = "Snap";
+    snapLabel.style.cursor = "pointer";
+    snapLabel.style.fontSize = "12px";
+    snapLabel.style.color = "var(--text-secondary)";
+
+    snapGroup.appendChild(snapCheckbox);
+    snapGroup.appendChild(snapLabel);
+
+    controls.push(snapGroup);
 
     return controls;
   };

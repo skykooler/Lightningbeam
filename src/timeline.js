@@ -24,7 +24,7 @@ class TimelineState {
     this.rulerHeight = 30  // Height of time ruler in pixels
 
     // Snapping (Phase 5)
-    this.snapToFrames = false  // Whether to snap keyframes to frame boundaries
+    this.snapToFrames = true  // Whether to snap keyframes to frame boundaries (default: on)
   }
 
   /**

@@ -1,9 +1,10 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
-use super::clip::Clip;
-use super::midi::{MidiClip, MidiEvent};
+use super::clip::AudioClipInstance;
+use super::midi::{MidiClipInstance, MidiEvent};
+use super::midi_pool::MidiClipPool;
 use super::node_graph::AudioGraph;
 use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
-use super::pool::AudioPool;
+use super::pool::AudioClipPool;
 use std::collections::HashMap;
 
 /// Track ID type
@@ -285,11 +286,12 @@ impl Metatrack {
     }
 }
 
-/// MIDI track with MIDI clips and a node-based instrument
+/// MIDI track with MIDI clip instances and a node-based instrument
 pub struct MidiTrack {
     pub id: TrackId,
     pub name: String,
-    pub clips: Vec<MidiClip>,
+    /// Clip instances placed on this track (reference clips in the MidiClipPool)
+    pub clip_instances: Vec<MidiClipInstance>,
     pub instrument_graph: AudioGraph,
     pub volume: f32,
     pub muted: bool,
@@ -310,7 +312,7 @@ impl MidiTrack {
         Self {
             id,
             name,
-            clips: Vec::new(),
+            clip_instances: Vec::new(),
             instrument_graph: AudioGraph::new(sample_rate, default_buffer_size),
             volume: 1.0,
             muted: false,
@@ -346,9 +348,9 @@ impl MidiTrack {
         self.automation_lanes.remove(&lane_id).is_some()
     }
 
-    /// Add a MIDI clip to this track
-    pub fn add_clip(&mut self, clip: MidiClip) {
-        self.clips.push(clip);
+    /// Add a MIDI clip instance to this track
+    pub fn add_clip_instance(&mut self, instance: MidiClipInstance) {
+        self.clip_instances.push(instance);
     }
 
     /// Set track volume
@@ -420,6 +422,7 @@ impl MidiTrack {
     pub fn render(
         &mut self,
         output: &mut [f32],
+        midi_pool: &MidiClipPool,
         playhead_seconds: f64,
         sample_rate: u32,
         channels: u32,
@@ -427,17 +430,18 @@ impl MidiTrack {
         let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
         let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
 
-        // Collect MIDI events from all clips that overlap with current time range
+        // Collect MIDI events from all clip instances that overlap with current time range
         let mut midi_events = Vec::new();
-        for clip in &self.clips {
-            let events = clip.get_events_in_range(
-                playhead_seconds,
-                buffer_end_seconds,
-                sample_rate,
-            );
-
-            // Events now have timestamps in seconds relative to clip start
-            midi_events.extend(events);
+        for instance in &self.clip_instances {
+            // Get the clip content from the pool
+            if let Some(clip) = midi_pool.get_clip(instance.clip_id) {
+                let events = instance.get_events_in_range(
+                    clip,
+                    playhead_seconds,
+                    buffer_end_seconds,
+                );
+                midi_events.extend(events);
+            }
         }
 
         // Add live MIDI events (from virtual keyboard or MIDI controllers)
@@ -480,11 +484,12 @@ impl MidiTrack {
     }
 }
 
-/// Audio track with clips
+/// Audio track with audio clip instances
 pub struct AudioTrack {
     pub id: TrackId,
     pub name: String,
-    pub clips: Vec<Clip>,
+    /// Audio clip instances (reference content in the AudioClipPool)
+    pub clips: Vec<AudioClipInstance>,
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
@@ -560,8 +565,8 @@ impl AudioTrack {
         self.automation_lanes.remove(&lane_id).is_some()
     }
 
-    /// Add a clip to this track
-    pub fn add_clip(&mut self, clip: Clip) {
+    /// Add an audio clip instance to this track
+    pub fn add_clip(&mut self, clip: AudioClipInstance) {
         self.clips.push(clip);
     }
 
@@ -590,7 +595,7 @@ impl AudioTrack {
     pub fn render(
         &mut self,
         output: &mut [f32],
-        pool: &AudioPool,
+        pool: &AudioClipPool,
         playhead_seconds: f64,
         sample_rate: u32,
         channels: u32,
@@ -602,10 +607,10 @@ impl AudioTrack {
         let mut clip_buffer = vec![0.0f32; output.len()];
         let mut rendered = 0;
 
-        // Render all active clips into the temporary buffer
+        // Render all active clip instances into the temporary buffer
         for clip in &self.clips {
             // Check if clip overlaps with current buffer time range
-            if clip.start_time < buffer_end_seconds && clip.end_time() > playhead_seconds {
+            if clip.external_start < buffer_end_seconds && clip.external_end() > playhead_seconds {
                 rendered += self.render_clip(
                     clip,
                     &mut clip_buffer,
@@ -667,12 +672,13 @@ impl AudioTrack {
         volume
     }
 
-    /// Render a single clip into the output buffer
+    /// Render a single audio clip instance into the output buffer
+    /// Handles looping when external_duration > internal_duration
     fn render_clip(
         &self,
-        clip: &Clip,
+        clip: &AudioClipInstance,
         output: &mut [f32],
-        pool: &AudioPool,
+        pool: &AudioClipPool,
         playhead_seconds: f64,
         sample_rate: u32,
         channels: u32,
@@ -680,46 +686,94 @@ impl AudioTrack {
         let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
         let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
 
-        // Determine the time range we need to render (intersection of buffer and clip)
-        let render_start_seconds = playhead_seconds.max(clip.start_time);
-        let render_end_seconds = buffer_end_seconds.min(clip.end_time());
+        // Determine the time range we need to render (intersection of buffer and clip external bounds)
+        let render_start_seconds = playhead_seconds.max(clip.external_start);
+        let render_end_seconds = buffer_end_seconds.min(clip.external_end());
 
         // If no overlap, return early
         if render_start_seconds >= render_end_seconds {
             return 0;
         }
 
-        // Calculate offset into the output buffer (in interleaved samples)
-        let output_offset_seconds = render_start_seconds - playhead_seconds;
-        let output_offset_samples = (output_offset_seconds * sample_rate as f64 * channels as f64) as usize;
-
-        // Calculate position within the clip's audio file (in seconds)
-        let clip_position_seconds = render_start_seconds - clip.start_time + clip.offset;
-
-        // Calculate how many samples to render in the output
-        let render_duration_seconds = render_end_seconds - render_start_seconds;
-        let samples_to_render = (render_duration_seconds * sample_rate as f64 * channels as f64) as usize;
-        let samples_to_render = samples_to_render.min(output.len() - output_offset_samples);
-
-        // Get the slice of output buffer to write to
-        if output_offset_samples + samples_to_render > output.len() {
+        let internal_duration = clip.internal_duration();
+        if internal_duration <= 0.0 {
             return 0;
         }
-
-        let output_slice = &mut output[output_offset_samples..output_offset_samples + samples_to_render];
 
         // Calculate combined gain
         let combined_gain = clip.gain * self.volume;
 
-        // Render from pool with sample rate conversion
-        // Pass the time position in seconds, let the pool handle sample rate conversion
-        pool.render_from_file(
-            clip.audio_pool_index,
-            output_slice,
-            clip_position_seconds,
-            combined_gain,
-            sample_rate,
-            channels,
-        )
+        let mut total_rendered = 0;
+
+        // Process the render range sample by sample (or in chunks for efficiency)
+        // For looping clips, we need to handle wrap-around at the loop boundary
+        let samples_per_second = sample_rate as f64 * channels as f64;
+
+        // For now, render in a simpler way - iterate through the timeline range
+        // and use get_content_position for each sample position
+        let output_start_offset = ((render_start_seconds - playhead_seconds) * samples_per_second) as usize;
+        let output_end_offset = ((render_end_seconds - playhead_seconds) * samples_per_second) as usize;
+
+        if output_end_offset > output.len() || output_start_offset > output.len() {
+            return 0;
+        }
+
+        // If not looping, we can render in one chunk (more efficient)
+        if !clip.is_looping() {
+            // Simple case: no looping
+            let content_start = clip.get_content_position(render_start_seconds).unwrap_or(clip.internal_start);
+            let output_len = output.len();
+            let output_slice = &mut output[output_start_offset..output_end_offset.min(output_len)];
+
+            total_rendered = pool.render_from_file(
+                clip.audio_pool_index,
+                output_slice,
+                content_start,
+                combined_gain,
+                sample_rate,
+                channels,
+            );
+        } else {
+            // Looping case: need to handle wrap-around at loop boundaries
+            // Render in segments, one per loop iteration
+            let mut timeline_pos = render_start_seconds;
+            let mut output_offset = output_start_offset;
+
+            while timeline_pos < render_end_seconds && output_offset < output.len() {
+                // Calculate position within the loop
+                let relative_pos = timeline_pos - clip.external_start;
+                let loop_offset = relative_pos % internal_duration;
+                let content_pos = clip.internal_start + loop_offset;
+
+                // Calculate how much we can render before hitting the loop boundary
+                let time_to_loop_end = internal_duration - loop_offset;
+                let time_to_render_end = render_end_seconds - timeline_pos;
+                let chunk_duration = time_to_loop_end.min(time_to_render_end);
+
+                let chunk_samples = (chunk_duration * samples_per_second) as usize;
+                let chunk_samples = chunk_samples.min(output.len() - output_offset);
+
+                if chunk_samples == 0 {
+                    break;
+                }
+
+                let output_slice = &mut output[output_offset..output_offset + chunk_samples];
+
+                let rendered = pool.render_from_file(
+                    clip.audio_pool_index,
+                    output_slice,
+                    content_pos,
+                    combined_gain,
+                    sample_rate,
+                    channels,
+                );
+
+                total_rendered += rendered;
+                output_offset += chunk_samples;
+                timeline_pos += chunk_duration;
+            }
+        }
+
+        total_rendered
     }
 }

@@ -1178,12 +1178,12 @@ class AudioTrack {
           name: clip.name,
           startTime: clip.startTime,
           duration: clip.duration,
+          offset: clip.offset || 0,  // Default to 0 if not present
         };
 
         // Restore audio-specific fields
         if (clip.poolIndex !== undefined) {
           clipData.poolIndex = clip.poolIndex;
-          clipData.offset = clip.offset;
         }
 
         // Restore MIDI-specific fields

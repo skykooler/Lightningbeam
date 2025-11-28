@@ -97,7 +97,7 @@ export let config = {
   currentLayout: "animation",  // Current active layout key
   defaultLayout: "animation",  // Default layout for new files
   showStartScreen: false,  // Show layout picker on startup (disabled for now)
-  restoreLayoutFromFile: false,  // Restore layout when opening files
+  restoreLayoutFromFile: true,  // Restore layout when opening files
   customLayouts: []  // User-saved custom layouts
 };
 

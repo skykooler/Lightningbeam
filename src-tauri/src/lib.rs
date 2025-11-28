@@ -256,6 +256,7 @@ pub fn run() {
         audio::audio_add_clip,
         audio::audio_move_clip,
         audio::audio_trim_clip,
+        audio::audio_extend_clip,
         audio::audio_start_recording,
         audio::audio_stop_recording,
         audio::audio_pause_recording,

@@ -63,73 +63,216 @@ impl MidiEvent {
     }
 }
 
-/// MIDI clip ID type
+/// MIDI clip ID type (for clips stored in the pool)
 pub type MidiClipId = u32;
 
-/// MIDI clip containing a sequence of MIDI events
+/// MIDI clip instance ID type (for instances placed on tracks)
+pub type MidiClipInstanceId = u32;
+
+/// MIDI clip content - stores the actual MIDI events
+///
+/// This represents the content data stored in the MidiClipPool.
+/// Events have timestamps relative to the start of the clip (0.0 = clip beginning).
 #[derive(Debug, Clone)]
 pub struct MidiClip {
     pub id: MidiClipId,
     pub events: Vec<MidiEvent>,
-    pub start_time: f64,  // Position on timeline in seconds
-    pub duration: f64,    // Clip duration in seconds
-    pub loop_enabled: bool,
+    pub duration: f64,    // Total content duration in seconds
+    pub name: String,
 }
 
 impl MidiClip {
-    /// Create a new MIDI clip
-    pub fn new(id: MidiClipId, start_time: f64, duration: f64) -> Self {
+    /// Create a new MIDI clip with content
+    pub fn new(id: MidiClipId, events: Vec<MidiEvent>, duration: f64, name: String) -> Self {
+        let mut clip = Self {
+            id,
+            events,
+            duration,
+            name,
+        };
+        // Sort events by timestamp
+        clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+        clip
+    }
+
+    /// Create an empty MIDI clip
+    pub fn empty(id: MidiClipId, duration: f64, name: String) -> Self {
         Self {
             id,
             events: Vec::new(),
-            start_time,
             duration,
-            loop_enabled: false,
+            name,
         }
     }
 
     /// Add a MIDI event to the clip
     pub fn add_event(&mut self, event: MidiEvent) {
         self.events.push(event);
-        // Keep events sorted by timestamp (using partial_cmp for f64)
+        // Keep events sorted by timestamp
         self.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
     }
 
-    /// Get the end time of the clip
-    pub fn end_time(&self) -> f64 {
-        self.start_time + self.duration
+    /// Get events within a time range (relative to clip start)
+    /// This is used by MidiClipInstance to fetch events for a given portion
+    pub fn get_events_in_range(&self, start: f64, end: f64) -> Vec<MidiEvent> {
+        self.events
+            .iter()
+            .filter(|e| e.timestamp >= start && e.timestamp < end)
+            .copied()
+            .collect()
+    }
+}
+
+/// MIDI clip instance - a reference to MidiClip content with timeline positioning
+///
+/// ## Timing Model
+/// - `internal_start` / `internal_end`: Define the region of the source clip to play (trimming)
+/// - `external_start` / `external_duration`: Define where the instance appears on the timeline and how long
+///
+/// ## Looping
+/// If `external_duration` is greater than `internal_end - internal_start`,
+/// the instance will seamlessly loop back to `internal_start` when it reaches `internal_end`.
+#[derive(Debug, Clone)]
+pub struct MidiClipInstance {
+    pub id: MidiClipInstanceId,
+    pub clip_id: MidiClipId,  // Reference to MidiClip in pool
+
+    /// Start position within the clip content (seconds)
+    pub internal_start: f64,
+    /// End position within the clip content (seconds)
+    pub internal_end: f64,
+
+    /// Start position on the timeline (seconds)
+    pub external_start: f64,
+    /// Duration on the timeline (seconds) - can be longer than internal duration for looping
+    pub external_duration: f64,
+}
+
+impl MidiClipInstance {
+    /// Create a new MIDI clip instance
+    pub fn new(
+        id: MidiClipInstanceId,
+        clip_id: MidiClipId,
+        internal_start: f64,
+        internal_end: f64,
+        external_start: f64,
+        external_duration: f64,
+    ) -> Self {
+        Self {
+            id,
+            clip_id,
+            internal_start,
+            internal_end,
+            external_start,
+            external_duration,
+        }
     }
 
-    /// Get events that should be triggered in a given time range
+    /// Create an instance that uses the full clip content (no trimming, no looping)
+    pub fn from_full_clip(
+        id: MidiClipInstanceId,
+        clip_id: MidiClipId,
+        clip_duration: f64,
+        external_start: f64,
+    ) -> Self {
+        Self {
+            id,
+            clip_id,
+            internal_start: 0.0,
+            internal_end: clip_duration,
+            external_start,
+            external_duration: clip_duration,
+        }
+    }
+
+    /// Get the internal (content) duration
+    pub fn internal_duration(&self) -> f64 {
+        self.internal_end - self.internal_start
+    }
+
+    /// Get the end time on the timeline
+    pub fn external_end(&self) -> f64 {
+        self.external_start + self.external_duration
+    }
+
+    /// Check if this instance loops
+    pub fn is_looping(&self) -> bool {
+        self.external_duration > self.internal_duration()
+    }
+
+    /// Get the end time on the timeline (for backwards compatibility)
+    pub fn end_time(&self) -> f64 {
+        self.external_end()
+    }
+
+    /// Get the start time on the timeline (for backwards compatibility)
+    pub fn start_time(&self) -> f64 {
+        self.external_start
+    }
+
+    /// Check if this instance overlaps with a time range
+    pub fn overlaps_range(&self, range_start: f64, range_end: f64) -> bool {
+        self.external_start < range_end && self.external_end() > range_start
+    }
+
+    /// Get events that should be triggered in a given timeline range
     ///
-    /// Returns events along with their absolute timestamps in samples
+    /// This handles:
+    /// - Trimming (internal_start/internal_end)
+    /// - Looping (when external duration > internal duration)
+    /// - Time mapping from timeline to clip content
+    ///
+    /// Returns events with timestamps adjusted to timeline time (not clip-relative)
     pub fn get_events_in_range(
         &self,
+        clip: &MidiClip,
         range_start_seconds: f64,
         range_end_seconds: f64,
-        _sample_rate: u32,
     ) -> Vec<MidiEvent> {
         let mut result = Vec::new();
 
-        // Check if clip overlaps with the range
-        if range_start_seconds >= self.end_time() || range_end_seconds <= self.start_time {
+        // Check if instance overlaps with the range
+        if !self.overlaps_range(range_start_seconds, range_end_seconds) {
             return result;
         }
 
-        // Calculate the intersection
-        let play_start = range_start_seconds.max(self.start_time);
-        let play_end = range_end_seconds.min(self.end_time());
+        let internal_duration = self.internal_duration();
+        if internal_duration <= 0.0 {
+            return result;
+        }
 
-        // Position within the clip
-        let clip_position_seconds = play_start - self.start_time;
-        let clip_end_seconds = play_end - self.start_time;
+        // Calculate how many complete loops fit in the external duration
+        let num_loops = if self.external_duration > internal_duration {
+            (self.external_duration / internal_duration).ceil() as usize
+        } else {
+            1
+        };
 
-        // Find events in this range
-        // Note: event.timestamp is now in seconds relative to clip start
-        // Use half-open interval [start, end) to avoid triggering events twice
-        for event in &self.events {
-            if event.timestamp >= clip_position_seconds && event.timestamp < clip_end_seconds {
-                result.push(*event);
+        let external_end = self.external_end();
+
+        for loop_idx in 0..num_loops {
+            let loop_offset = loop_idx as f64 * internal_duration;
+
+            // Get events from the clip that fall within the internal range
+            for event in &clip.events {
+                // Skip events outside the trimmed region
+                if event.timestamp < self.internal_start || event.timestamp >= self.internal_end {
+                    continue;
+                }
+
+                // Convert to timeline time
+                let relative_content_time = event.timestamp - self.internal_start;
+                let timeline_time = self.external_start + loop_offset + relative_content_time;
+
+                // Check if within current buffer range and instance bounds
+                if timeline_time >= range_start_seconds
+                    && timeline_time < range_end_seconds
+                    && timeline_time < external_end
+                {
+                    let mut adjusted_event = *event;
+                    adjusted_event.timestamp = timeline_time;
+                    result.push(adjusted_event);
+                }
             }
         }
 

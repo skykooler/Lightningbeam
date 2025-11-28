@@ -1,5 +1,6 @@
 use daw_backend::{AudioEvent, AudioSystem, EngineController, EventEmitter, WaveformPeak};
 use daw_backend::audio::pool::AudioPoolEntry;
+use ffmpeg_next::ffi::FF_LOSS_COLORQUANT;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::path::Path;
@@ -406,13 +407,28 @@ pub async fn audio_trim_clip(
     state: tauri::State<'_, Arc<Mutex<AudioState>>>,
     track_id: u32,
     clip_id: u32,
-    new_start_time: f64,
-    new_duration: f64,
-    new_offset: f64,
+    internal_start: f64,
+    internal_end: f64,
 ) -> Result<(), String> {
     let mut audio_state = state.lock().unwrap();
     if let Some(controller) = &mut audio_state.controller {
-        controller.trim_clip(track_id, clip_id, new_start_time, new_duration, new_offset);
+        controller.trim_clip(track_id, clip_id, internal_start, internal_end);
+        Ok(())
+    } else {
+        Err("Audio not initialized".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn audio_extend_clip(
+    state: tauri::State<'_, Arc<Mutex<AudioState>>>,
+    track_id: u32,
+    clip_id: u32,
+    new_external_duration: f64,
+) -> Result<(), String> {
+    let mut audio_state = state.lock().unwrap();
+    if let Some(controller) = &mut audio_state.controller {
+        controller.extend_clip(track_id, clip_id, new_external_duration);
         Ok(())
     } else {
         Err("Audio not initialized".to_string())
@@ -601,11 +617,8 @@ pub async fn audio_load_midi_file(
     let sample_rate = audio_state.sample_rate;
 
     if let Some(controller) = &mut audio_state.controller {
-        // Load and parse the MIDI file
-        let mut clip = daw_backend::load_midi_file(&path, 0, sample_rate)?;
-
-        // Set the start time
-        clip.start_time = start_time;
+        // Load and parse the MIDI file (clip content only, no positioning)
+        let clip = daw_backend::load_midi_file(&path, 0, sample_rate)?;
         let duration = clip.duration;
 
         // Extract note data from MIDI events
@@ -631,8 +644,8 @@ pub async fn audio_load_midi_file(
             }
         }
 
-        // Add the loaded MIDI clip to the track
-        controller.add_loaded_midi_clip(track_id, clip);
+        // Add the loaded MIDI clip to the track at the specified start_time
+        controller.add_loaded_midi_clip(track_id, clip, start_time);
 
         Ok(MidiFileMetadata {
             duration,
