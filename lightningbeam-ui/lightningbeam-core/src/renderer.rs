@@ -4,7 +4,7 @@
 
 use crate::animation::TransformProperty;
 use crate::document::Document;
-use crate::layer::{AnyLayer, VectorLayer};
+use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
 use crate::object::ShapeInstance;
 use kurbo::{Affine, Shape};
 use vello::kurbo::Rect;
@@ -45,16 +45,30 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
 
 /// Recursively render the root graphics object and its children
 fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, base_transform: Affine) {
-    // Render all visible layers in the root graphics object
+    // Check if any layers are soloed
+    let any_soloed = document.visible_layers().any(|layer| layer.soloed());
+
+    // Render layers based on solo state
+    // If any layer is soloed, only render soloed layers
+    // Otherwise, render all visible layers
+    // Start with full opacity (1.0)
     for layer in document.visible_layers() {
-        render_layer(document, time, layer, scene, base_transform);
+        if any_soloed {
+            // Only render soloed layers when solo is active
+            if layer.soloed() {
+                render_layer(document, time, layer, scene, base_transform, 1.0);
+            }
+        } else {
+            // Render all visible layers when no solo is active
+            render_layer(document, time, layer, scene, base_transform, 1.0);
+        }
     }
 }
 
 /// Render a single layer
-fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine) {
+fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64) {
     match layer {
-        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform),
+        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity),
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
         }
@@ -69,9 +83,10 @@ fn render_clip_instance(
     document: &Document,
     time: f64,
     clip_instance: &crate::clip::ClipInstance,
-    _parent_opacity: f64,
+    parent_opacity: f64,
     scene: &mut Scene,
     base_transform: Affine,
+    animation_data: &crate::animation::AnimationData,
 ) {
     // Try to find the clip in the document's clip libraries
     // For now, only handle VectorClips (VideoClip and AudioClip rendering not yet implemented)
@@ -84,28 +99,134 @@ fn render_clip_instance(
         return; // Clip instance not active at this time
     };
 
-    // Build transform for this clip instance
-    let instance_transform = base_transform * clip_instance.to_affine();
+    // Evaluate animated transform properties
+    let transform = &clip_instance.transform;
+    let x = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::X,
+        },
+        time,
+        transform.x,
+    );
+    let y = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::Y,
+        },
+        time,
+        transform.y,
+    );
+    let rotation = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::Rotation,
+        },
+        time,
+        transform.rotation,
+    );
+    let scale_x = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::ScaleX,
+        },
+        time,
+        transform.scale_x,
+    );
+    let scale_y = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::ScaleY,
+        },
+        time,
+        transform.scale_y,
+    );
+    let skew_x = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::SkewX,
+        },
+        time,
+        transform.skew_x,
+    );
+    let skew_y = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::SkewY,
+        },
+        time,
+        transform.skew_y,
+    );
 
-    // TODO: Properly handle clip instance opacity by threading opacity through rendering pipeline
-    // Currently clip_instance.opacity is not being applied to nested layers
+    // Build transform matrix (similar to shape instances)
+    // For clip instances, we don't have a path to calculate center from,
+    // so we use the clip's center point (width/2, height/2)
+    let center_x = vector_clip.width / 2.0;
+    let center_y = vector_clip.height / 2.0;
+
+    // Build skew transforms (applied around clip center)
+    let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
+        let skew_x_affine = if skew_x != 0.0 {
+            let tan_skew = skew_x.to_radians().tan();
+            Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+        } else {
+            Affine::IDENTITY
+        };
+
+        let skew_y_affine = if skew_y != 0.0 {
+            let tan_skew = skew_y.to_radians().tan();
+            Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+        } else {
+            Affine::IDENTITY
+        };
+
+        // Skew around center: translate to origin, skew, translate back
+        Affine::translate((center_x, center_y))
+            * skew_x_affine
+            * skew_y_affine
+            * Affine::translate((-center_x, -center_y))
+    } else {
+        Affine::IDENTITY
+    };
+
+    let clip_transform = Affine::translate((x, y))
+        * Affine::rotate(rotation.to_radians())
+        * Affine::scale_non_uniform(scale_x, scale_y)
+        * skew_transform;
+    let instance_transform = base_transform * clip_transform;
+
+    // Evaluate animated opacity
+    let opacity = animation_data.eval(
+        &crate::animation::AnimationTarget::Object {
+            id: clip_instance.id,
+            property: TransformProperty::Opacity,
+        },
+        time,
+        clip_instance.opacity,
+    );
+
+    // Cascade opacity: parent_opacity × animated opacity
+    let clip_opacity = parent_opacity * opacity;
 
     // Recursively render all root layers in the clip at the remapped time
     for layer_node in vector_clip.layers.iter() {
-        // TODO: Filter by visibility and time range once LayerNode exposes that data
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform);
+        // Skip invisible layers for performance
+        if !layer_node.data.visible() {
+            continue;
+        }
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity);
     }
 }
 
 /// Render a vector layer with all its clip instances and shape instances
-fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine) {
+fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64) {
 
-    // Get layer-level opacity
-    let layer_opacity = layer.layer.opacity;
+    // Cascade opacity: parent_opacity × layer.opacity
+    let layer_opacity = parent_opacity * layer.layer.opacity;
 
     // Render clip instances first (they appear under shape instances)
     for clip_instance in &layer.clip_instances {
-        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform);
+        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data);
     }
 
     // Render each shape instance in the layer
@@ -259,7 +380,8 @@ fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scen
             * skew_transform;
         let affine = base_transform * object_transform;
 
-        // Calculate final opacity (layer * object)
+        // Calculate final opacity (cascaded from parent → layer → shape instance)
+        // layer_opacity already includes parent_opacity from render_vector_layer
         let final_opacity = (layer_opacity * opacity) as f32;
 
         // Render fill if present

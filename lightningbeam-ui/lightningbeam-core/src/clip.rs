@@ -16,6 +16,7 @@ use crate::layer_tree::LayerTree;
 use crate::object::Transform;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vello::kurbo::{Rect, Affine, Shape as KurboShape};
 
 /// Vector clip containing nested layers
 ///
@@ -72,6 +73,88 @@ impl VectorClip {
             duration,
             layers: LayerTree::new(),
         }
+    }
+
+    /// Calculate the bounding box of all content in this clip at a specific time
+    ///
+    /// This recursively calculates the union of all shape and nested clip bounding boxes
+    /// across all layers, evaluating animations at the specified clip-local time.
+    ///
+    /// # Arguments
+    /// * `document` - The document containing all clip definitions (for resolving nested clips)
+    /// * `clip_time` - The time within this clip (already converted from timeline time)
+    ///
+    /// # Returns
+    /// The bounding box of all visible content at the specified time
+    pub fn calculate_content_bounds(&self, document: &crate::document::Document, clip_time: f64) -> Rect {
+        let mut combined_bounds: Option<Rect> = None;
+
+        // Iterate through all layers in the layer tree
+        for layer_node in self.layers.iter() {
+            // Only process vector layers (skip other layer types)
+            if let AnyLayer::Vector(vector_layer) = &layer_node.data {
+                // Calculate bounds for all shape instances in this layer
+                for shape_instance in &vector_layer.shape_instances {
+                    // Get the shape for this instance
+                    if let Some(shape) = vector_layer.shapes.get(&shape_instance.shape_id) {
+                        // Get the local bounding box of the shape's path
+                        let local_bbox = shape.path().bounding_box();
+
+                        // Apply the shape instance's transform (TODO: evaluate animations at clip_time)
+                        let instance_transform = shape_instance.to_affine();
+                        let transformed_bbox = instance_transform.transform_rect_bbox(local_bbox);
+
+                        // Union with combined bounds
+                        combined_bounds = Some(match combined_bounds {
+                            None => transformed_bbox,
+                            Some(existing) => existing.union(transformed_bbox),
+                        });
+                    }
+                }
+
+                // Handle nested clip instances recursively
+                for clip_instance in &vector_layer.clip_instances {
+                    // Convert parent clip time to nested clip local time
+                    // Apply timeline offset and playback speed, then add trim offset
+                    let nested_clip_time = ((clip_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+
+                    // Look up the nested clip definition
+                    let nested_bounds = if let Some(nested_clip) = document.get_vector_clip(&clip_instance.clip_id) {
+                        // Recursively calculate bounds for nested clip at its local time
+                        nested_clip.calculate_content_bounds(document, nested_clip_time)
+                    } else if let Some(video_clip) = document.get_video_clip(&clip_instance.clip_id) {
+                        // Video clips have fixed dimensions
+                        Rect::new(0.0, 0.0, video_clip.width, video_clip.height)
+                    } else {
+                        // Clip not found or is audio (no spatial representation)
+                        continue;
+                    };
+
+                    // Apply clip instance transform to the nested bounds
+                    let instance_transform = clip_instance.transform.to_affine();
+                    let transformed_bounds = instance_transform.transform_rect_bbox(nested_bounds);
+
+                    // Union with combined bounds
+                    combined_bounds = Some(match combined_bounds {
+                        None => transformed_bounds,
+                        Some(existing) => existing.union(transformed_bounds),
+                    });
+                }
+            }
+        }
+
+        // If no content found, return a small rect at origin
+        combined_bounds.unwrap_or_else(|| Rect::new(0.0, 0.0, 1.0, 1.0))
+    }
+
+    /// Get the width of the content bounds at a specific time
+    pub fn content_width(&self, document: &crate::document::Document, clip_time: f64) -> f64 {
+        self.calculate_content_bounds(document, clip_time).width()
+    }
+
+    /// Get the height of the content bounds at a specific time
+    pub fn content_height(&self, document: &crate::document::Document, clip_time: f64) -> f64 {
+        self.calculate_content_bounds(document, clip_time).height()
     }
 }
 

@@ -203,7 +203,7 @@ pub fn hit_test_clip_instance(
     point: Point,
     parent_transform: Affine,
 ) -> bool {
-    // Create bounding rectangle for the clip
+    // Create bounding rectangle for the clip (top-left origin)
     let clip_rect = Rect::new(0.0, 0.0, clip_width, clip_height);
 
     // Combine parent transform with clip instance transform
@@ -242,39 +242,48 @@ pub fn get_clip_instance_bounds(
 /// Hit test clip instances at a specific point
 ///
 /// Tests clip instances in reverse order (front to back) and returns the first hit.
-/// This function requires the clip libraries to look up clip dimensions.
+/// Uses dynamic bounds calculation based on clip content and current time.
 ///
 /// # Arguments
 ///
 /// * `clip_instances` - The clip instances to test
-/// * `vector_clips` - HashMap of vector clips for looking up dimensions
-/// * `video_clips` - HashMap of video clips for looking up dimensions
+/// * `document` - Document containing all clip definitions
 /// * `point` - The point to test in screen/canvas space
 /// * `parent_transform` - Transform from parent layer/clip
+/// * `timeline_time` - Current timeline time for evaluating animations
 ///
 /// # Returns
 ///
 /// The UUID of the first clip instance hit, or None if no hit
 pub fn hit_test_clip_instances(
     clip_instances: &[ClipInstance],
-    vector_clips: &std::collections::HashMap<Uuid, VectorClip>,
-    video_clips: &std::collections::HashMap<Uuid, VideoClip>,
+    document: &crate::document::Document,
     point: Point,
     parent_transform: Affine,
+    timeline_time: f64,
 ) -> Option<Uuid> {
     // Test in reverse order (front to back)
     for clip_instance in clip_instances.iter().rev() {
-        // Try to get clip dimensions from either vector or video clips
-        let (width, height) = if let Some(vector_clip) = vector_clips.get(&clip_instance.clip_id) {
-            (vector_clip.width, vector_clip.height)
-        } else if let Some(video_clip) = video_clips.get(&clip_instance.clip_id) {
-            (video_clip.width, video_clip.height)
+        // Calculate clip-local time from timeline time
+        // Apply timeline offset and playback speed, then add trim offset
+        let clip_time = ((timeline_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+
+        // Get dynamic clip bounds from content at this time
+        let content_bounds = if let Some(vector_clip) = document.get_vector_clip(&clip_instance.clip_id) {
+            vector_clip.calculate_content_bounds(document, clip_time)
+        } else if let Some(video_clip) = document.get_video_clip(&clip_instance.clip_id) {
+            Rect::new(0.0, 0.0, video_clip.width, video_clip.height)
         } else {
             // Clip not found or is audio (no spatial representation)
             continue;
         };
 
-        if hit_test_clip_instance(clip_instance, width, height, point, parent_transform) {
+        // Transform content bounds to screen space
+        let clip_transform = parent_transform * clip_instance.transform.to_affine();
+        let clip_bbox = clip_transform.transform_rect_bbox(content_bounds);
+
+        // Test if point is inside the transformed rectangle
+        if clip_bbox.contains(point) {
             return Some(clip_instance.id);
         }
     }
@@ -285,40 +294,46 @@ pub fn hit_test_clip_instances(
 /// Hit test clip instances within a rectangle (for marquee selection)
 ///
 /// Returns all clip instances whose bounding boxes intersect with the given rectangle.
+/// Uses dynamic bounds calculation based on clip content and current time.
 ///
 /// # Arguments
 ///
 /// * `clip_instances` - The clip instances to test
-/// * `vector_clips` - HashMap of vector clips for looking up dimensions
-/// * `video_clips` - HashMap of video clips for looking up dimensions
+/// * `document` - Document containing all clip definitions
 /// * `rect` - The selection rectangle in screen/canvas space
 /// * `parent_transform` - Transform from parent layer/clip
+/// * `timeline_time` - Current timeline time for evaluating animations
 ///
 /// # Returns
 ///
 /// Vector of UUIDs for all clip instances that intersect the rectangle
 pub fn hit_test_clip_instances_in_rect(
     clip_instances: &[ClipInstance],
-    vector_clips: &std::collections::HashMap<Uuid, VectorClip>,
-    video_clips: &std::collections::HashMap<Uuid, VideoClip>,
+    document: &crate::document::Document,
     rect: Rect,
     parent_transform: Affine,
+    timeline_time: f64,
 ) -> Vec<Uuid> {
     let mut hits = Vec::new();
 
     for clip_instance in clip_instances {
-        // Try to get clip dimensions from either vector or video clips
-        let (width, height) = if let Some(vector_clip) = vector_clips.get(&clip_instance.clip_id) {
-            (vector_clip.width, vector_clip.height)
-        } else if let Some(video_clip) = video_clips.get(&clip_instance.clip_id) {
-            (video_clip.width, video_clip.height)
+        // Calculate clip-local time from timeline time
+        // Apply timeline offset and playback speed, then add trim offset
+        let clip_time = ((timeline_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+
+        // Get dynamic clip bounds from content at this time
+        let content_bounds = if let Some(vector_clip) = document.get_vector_clip(&clip_instance.clip_id) {
+            vector_clip.calculate_content_bounds(document, clip_time)
+        } else if let Some(video_clip) = document.get_video_clip(&clip_instance.clip_id) {
+            Rect::new(0.0, 0.0, video_clip.width, video_clip.height)
         } else {
             // Clip not found or is audio (no spatial representation)
             continue;
         };
 
-        // Get clip instance bounding box in screen space
-        let clip_bbox = get_clip_instance_bounds(clip_instance, width, height, parent_transform);
+        // Transform content bounds to screen space
+        let clip_transform = parent_transform * clip_instance.transform.to_affine();
+        let clip_bbox = clip_transform.transform_rect_bbox(content_bounds);
 
         // Check if rectangles intersect
         if rect.intersect(clip_bbox).area() > 0.0 {

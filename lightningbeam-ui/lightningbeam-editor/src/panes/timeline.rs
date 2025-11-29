@@ -7,6 +7,7 @@
 /// - Basic layer visualization
 
 use eframe::egui;
+use lightningbeam_core::layer::LayerTrait;
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
 const RULER_HEIGHT: f32 = 30.0;
@@ -50,6 +51,9 @@ pub struct TimelinePane {
 
     /// Cached mouse position from mousedown (used for edge detection when drag starts)
     mousedown_pos: Option<egui::Pos2>,
+
+    /// Track if a layer control widget was clicked this frame
+    layer_control_clicked: bool,
 }
 
 impl TimelinePane {
@@ -65,6 +69,7 @@ impl TimelinePane {
             clip_drag_state: None,
             drag_offset: 0.0,
             mousedown_pos: None,
+            layer_control_clicked: false,
         }
     }
 
@@ -328,19 +333,18 @@ impl TimelinePane {
 
     /// Render layer header column (left side with track names and controls)
     fn render_layer_headers(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
         theme: &crate::theme::Theme,
-        document: &lightningbeam_core::document::Document,
         active_layer_id: &Option<uuid::Uuid>,
+        pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+        document: &lightningbeam_core::document::Document,
     ) {
-        let painter = ui.painter();
-
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
         let header_bg = header_style.background_color.unwrap_or(egui::Color32::from_rgb(17, 17, 17));
-        painter.rect_filled(
+        ui.painter().rect_filled(
             rect,
             0.0,
             header_bg,
@@ -379,7 +383,7 @@ impl TimelinePane {
                 inactive_color
             };
 
-            painter.rect_filled(header_rect, 0.0, bg_color);
+            ui.painter().rect_filled(header_rect, 0.0, bg_color);
 
             // Get layer info
             let layer_data = layer.layer();
@@ -395,10 +399,10 @@ impl TimelinePane {
                 header_rect.min,
                 egui::vec2(4.0, LAYER_HEIGHT),
             );
-            painter.rect_filled(indicator_rect, 0.0, type_color);
+            ui.painter().rect_filled(indicator_rect, 0.0, type_color);
 
             // Layer name
-            painter.text(
+            ui.painter().text(
                 header_rect.min + egui::vec2(10.0, 10.0),
                 egui::Align2::LEFT_TOP,
                 layer_name,
@@ -408,7 +412,7 @@ impl TimelinePane {
 
             // Layer type (smaller text below name with colored background)
             let type_text_pos = header_rect.min + egui::vec2(10.0, 28.0);
-            let type_text_galley = painter.layout_no_wrap(
+            let type_text_galley = ui.painter().layout_no_wrap(
                 layer_type.to_string(),
                 egui::FontId::proportional(11.0),
                 secondary_text_color,
@@ -419,13 +423,13 @@ impl TimelinePane {
                 type_text_pos + egui::vec2(-2.0, -1.0),
                 egui::vec2(type_text_galley.size().x + 4.0, type_text_galley.size().y + 2.0),
             );
-            painter.rect_filled(
+            ui.painter().rect_filled(
                 type_bg_rect,
                 2.0,
                 egui::Color32::from_rgba_unmultiplied(type_color.r(), type_color.g(), type_color.b(), 60),
             );
 
-            painter.text(
+            ui.painter().text(
                 type_text_pos,
                 egui::Align2::LEFT_TOP,
                 layer_type,
@@ -433,8 +437,151 @@ impl TimelinePane {
                 secondary_text_color,
             );
 
+            // Layer controls (mute, solo, lock, volume)
+            let controls_top = header_rect.min.y + 4.0;
+            let controls_right = header_rect.max.x - 8.0;
+            let button_size = egui::vec2(20.0, 20.0);
+            let slider_width = 60.0;
+
+            // Position controls from right to left
+            let volume_slider_rect = egui::Rect::from_min_size(
+                egui::pos2(controls_right - slider_width, controls_top),
+                egui::vec2(slider_width, 20.0),
+            );
+
+            let lock_button_rect = egui::Rect::from_min_size(
+                egui::pos2(volume_slider_rect.min.x - button_size.x - 4.0, controls_top),
+                button_size,
+            );
+
+            let solo_button_rect = egui::Rect::from_min_size(
+                egui::pos2(lock_button_rect.min.x - button_size.x - 4.0, controls_top),
+                button_size,
+            );
+
+            let mute_button_rect = egui::Rect::from_min_size(
+                egui::pos2(solo_button_rect.min.x - button_size.x - 4.0, controls_top),
+                button_size,
+            );
+
+            // Get layer ID and current property values from the layer we already have
+            let layer_id = layer.id();
+            let current_volume = layer.volume();
+            let is_muted = layer.muted();
+            let is_soloed = layer.soloed();
+            let is_locked = layer.locked();
+
+            // Mute button
+            // TODO: Replace with SVG icon (volume-up-fill.svg / volume-mute.svg)
+            let mute_response = ui.allocate_ui_at_rect(mute_button_rect, |ui| {
+                let mute_text = if is_muted { "🔇" } else { "🔊" };
+                let button = egui::Button::new(mute_text)
+                    .fill(if is_muted {
+                        egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100)
+                    } else {
+                        egui::Color32::from_gray(40)
+                    })
+                    .stroke(egui::Stroke::NONE);
+                ui.add(button)
+            }).inner;
+
+            if mute_response.clicked() {
+                self.layer_control_clicked = true;
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                        layer_id,
+                        lightningbeam_core::actions::LayerProperty::Muted(!is_muted),
+                    )
+                ));
+            }
+
+            // Solo button
+            // TODO: Replace with SVG headphones icon
+            let solo_response = ui.allocate_ui_at_rect(solo_button_rect, |ui| {
+                let button = egui::Button::new("🎧")
+                    .fill(if is_soloed {
+                        egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
+                    } else {
+                        egui::Color32::from_gray(40)
+                    })
+                    .stroke(egui::Stroke::NONE);
+                ui.add(button)
+            }).inner;
+
+            if solo_response.clicked() {
+                self.layer_control_clicked = true;
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                        layer_id,
+                        lightningbeam_core::actions::LayerProperty::Soloed(!is_soloed),
+                    )
+                ));
+            }
+
+            // Lock button
+            // TODO: Replace with SVG lock/lock-open icons
+            let lock_response = ui.allocate_ui_at_rect(lock_button_rect, |ui| {
+                let lock_text = if is_locked { "🔒" } else { "🔓" };
+                let button = egui::Button::new(lock_text)
+                    .fill(if is_locked {
+                        egui::Color32::from_rgba_unmultiplied(200, 150, 100, 100)
+                    } else {
+                        egui::Color32::from_gray(40)
+                    })
+                    .stroke(egui::Stroke::NONE);
+                ui.add(button)
+            }).inner;
+
+            if lock_response.clicked() {
+                self.layer_control_clicked = true;
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                        layer_id,
+                        lightningbeam_core::actions::LayerProperty::Locked(!is_locked),
+                    )
+                ));
+            }
+
+            // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
+            let volume_response = ui.allocate_ui_at_rect(volume_slider_rect, |ui| {
+                // Map volume (0.0-2.0) to slider position (0.0-1.0)
+                let slider_value = if current_volume <= 1.0 {
+                    // 0.0-1.0 volume maps to 0.0-0.7 slider (70%)
+                    current_volume * 0.7
+                } else {
+                    // 1.0-2.0 volume maps to 0.7-1.0 slider (30%)
+                    0.7 + (current_volume - 1.0) * 0.3
+                };
+
+                let mut temp_slider_value = slider_value;
+                let slider = egui::Slider::new(&mut temp_slider_value, 0.0..=1.0)
+                    .show_value(false);
+
+                let response = ui.add(slider);
+                (response, temp_slider_value)
+            }).inner;
+
+            if volume_response.0.changed() {
+                self.layer_control_clicked = true;
+                // Map slider position (0.0-1.0) back to volume (0.0-2.0)
+                let new_volume = if volume_response.1 <= 0.7 {
+                    // 0.0-0.7 slider maps to 0.0-1.0 volume
+                    volume_response.1 / 0.7
+                } else {
+                    // 0.7-1.0 slider maps to 1.0-2.0 volume
+                    1.0 + (volume_response.1 - 0.7) / 0.3
+                };
+
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                        layer_id,
+                        lightningbeam_core::actions::LayerProperty::Volume(new_volume),
+                    )
+                ));
+            }
+
             // Separator line at bottom
-            painter.line_segment(
+            ui.painter().line_segment(
                 [
                     egui::pos2(header_rect.min.x, header_rect.max.y),
                     egui::pos2(header_rect.max.x, header_rect.max.y),
@@ -444,7 +591,7 @@ impl TimelinePane {
         }
 
         // Right border for header column
-        painter.line_segment(
+        ui.painter().line_segment(
             [
                 egui::pos2(rect.max.x, rect.min.y),
                 egui::pos2(rect.max.x, rect.max.y),
@@ -680,10 +827,27 @@ impl TimelinePane {
         is_playing: &mut bool,
         audio_controller: Option<&mut daw_backend::EngineController>,
     ) {
-        let response = ui.allocate_rect(full_timeline_rect, egui::Sense::click_and_drag());
+        // Don't allocate the header area for input - let widgets handle it directly
+        // Only allocate content area (ruler + layers) with click and drag
+        let content_response = ui.allocate_rect(
+            egui::Rect::from_min_size(
+                egui::pos2(content_rect.min.x, ruler_rect.min.y),
+                egui::vec2(
+                    content_rect.width(),
+                    ruler_rect.height() + content_rect.height()
+                )
+            ),
+            egui::Sense::click_and_drag()
+        );
+
+        let response = content_response;
+
+        // Check if mouse is over either area
+        let header_hovered = ui.rect_contains_pointer(header_rect);
+        let any_hovered = response.hovered() || header_hovered;
 
         // Only process input if mouse is over the timeline pane
-        if !response.hovered() {
+        if !any_hovered {
             self.is_panning = false;
             self.last_pan_pos = None;
             self.is_scrubbing = false;
@@ -756,6 +920,28 @@ impl TimelinePane {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Handle layer header selection (only if no control widget was clicked)
+        // Check for clicks in header area using direct input query
+        let header_clicked = ui.input(|i| {
+            i.pointer.button_clicked(egui::PointerButton::Primary) &&
+            i.pointer.interact_pos().map_or(false, |pos| header_rect.contains(pos))
+        });
+
+        if header_clicked && !alt_held && !clicked_clip_instance && !self.layer_control_clicked {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
+                let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
+
+                // Get the layer at this index (accounting for reversed display order)
+                if clicked_layer_index < layer_count {
+                    let layers: Vec<_> = document.root.children.iter().rev().collect();
+                    if let Some(layer) = layers.get(clicked_layer_index) {
+                        *active_layer_id = Some(layer.id());
                     }
                 }
             }
@@ -1231,6 +1417,9 @@ impl PaneRenderer for TimelinePane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
+        // Reset layer control click flag at start of frame
+        self.layer_control_clicked = false;
+
         // Sync playback_time to document
         shared.action_executor.document_mut().current_time = *shared.playback_time;
 
@@ -1320,7 +1509,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, document, shared.active_layer_id);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, &mut shared.pending_actions, document);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
