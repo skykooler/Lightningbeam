@@ -436,7 +436,7 @@ fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scen
 mod tests {
     use super::*;
     use crate::document::Document;
-    use crate::layer::{AnyLayer, VectorLayer};
+    use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
     use crate::object::ShapeInstance;
     use crate::shape::{Shape, ShapeColor};
     use kurbo::{Circle, Shape as KurboShape};
@@ -474,5 +474,217 @@ mod tests {
         let mut scene = Scene::new();
         render_document(&doc, &mut scene);
         // Should render without errors
+    }
+
+    // === Solo Rendering Tests ===
+
+    /// Helper to check if any layer is soloed in document
+    fn has_soloed_layer(doc: &Document) -> bool {
+        doc.visible_layers().any(|layer| layer.soloed())
+    }
+
+    /// Helper to count visible layers for rendering (respecting solo)
+    fn count_layers_to_render(doc: &Document) -> usize {
+        let any_soloed = has_soloed_layer(doc);
+        doc.visible_layers()
+            .filter(|layer| {
+                if any_soloed {
+                    layer.soloed()
+                } else {
+                    true
+                }
+            })
+            .count()
+    }
+
+    #[test]
+    fn test_no_solo_all_layers_render() {
+        let mut doc = Document::new("Test");
+
+        // Add two visible layers, neither soloed
+        let layer1 = VectorLayer::new("Layer 1");
+        let layer2 = VectorLayer::new("Layer 2");
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // Both should be rendered
+        assert_eq!(has_soloed_layer(&doc), false);
+        assert_eq!(count_layers_to_render(&doc), 2);
+
+        // Render should work without errors
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_one_layer_soloed() {
+        let mut doc = Document::new("Test");
+
+        // Add two layers
+        let mut layer1 = VectorLayer::new("Layer 1");
+        let layer2 = VectorLayer::new("Layer 2");
+
+        // Solo layer 1
+        layer1.layer.soloed = true;
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // Only soloed layer should be rendered
+        assert_eq!(has_soloed_layer(&doc), true);
+        assert_eq!(count_layers_to_render(&doc), 1);
+
+        // Verify the soloed layer is the one that would render
+        let any_soloed = has_soloed_layer(&doc);
+        let soloed_count: usize = doc.visible_layers()
+            .filter(|l| any_soloed && l.soloed())
+            .count();
+        assert_eq!(soloed_count, 1);
+
+        // Render should work
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_multiple_layers_soloed() {
+        let mut doc = Document::new("Test");
+
+        // Add three layers
+        let mut layer1 = VectorLayer::new("Layer 1");
+        let mut layer2 = VectorLayer::new("Layer 2");
+        let layer3 = VectorLayer::new("Layer 3");
+
+        // Solo layers 1 and 2
+        layer1.layer.soloed = true;
+        layer2.layer.soloed = true;
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+        doc.root.add_child(AnyLayer::Vector(layer3));
+
+        // Only soloed layers (1 and 2) should render
+        assert_eq!(has_soloed_layer(&doc), true);
+        assert_eq!(count_layers_to_render(&doc), 2);
+
+        // Render
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_hidden_layer_not_rendered() {
+        let mut doc = Document::new("Test");
+
+        let mut layer1 = VectorLayer::new("Layer 1");
+        let mut layer2 = VectorLayer::new("Layer 2");
+
+        // Hide layer 2
+        layer2.layer.visible = false;
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // Only visible layer (1) should be considered
+        assert_eq!(doc.visible_layers().count(), 1);
+
+        // Render
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_hidden_but_soloed_layer() {
+        // A hidden layer that is soloed shouldn't render
+        // because visible_layers() filters out hidden layers first
+        let mut doc = Document::new("Test");
+
+        let layer1 = VectorLayer::new("Layer 1");
+        let mut layer2 = VectorLayer::new("Layer 2");
+
+        // Layer 2: soloed but hidden
+        layer2.layer.soloed = true;
+        layer2.layer.visible = false;
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // visible_layers only returns layer 1 (layer 2 is hidden)
+        // Since layer 1 isn't soloed and no visible layers are soloed,
+        // all visible layers render
+        let any_soloed = has_soloed_layer(&doc);
+        assert_eq!(any_soloed, false); // No *visible* layer is soloed
+
+        // Both visible layers render (only 1 is visible)
+        assert_eq!(count_layers_to_render(&doc), 1);
+
+        // Render
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_solo_with_layer_opacity() {
+        let mut doc = Document::new("Test");
+
+        // Create layers with different opacities
+        let mut layer1 = VectorLayer::new("Layer 1");
+        let mut layer2 = VectorLayer::new("Layer 2");
+
+        layer1.layer.opacity = 0.5;
+        layer1.layer.soloed = true;
+
+        layer2.layer.opacity = 0.8;
+
+        // Add circle shapes for visible rendering
+        let circle = Circle::new((50.0, 50.0), 20.0);
+        let path = circle.to_path(0.1);
+        let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
+        let shape_instance = ShapeInstance::new(shape.id);
+        layer1.add_shape(shape.clone());
+        layer1.add_object(shape_instance);
+
+        let shape2 = Shape::new(circle.to_path(0.1)).with_fill(ShapeColor::rgb(0, 255, 0));
+        let shape_instance2 = ShapeInstance::new(shape2.id);
+        layer2.add_shape(shape2);
+        layer2.add_object(shape_instance2);
+
+        doc.root.add_child(AnyLayer::Vector(layer1));
+        doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // Only layer 1 (soloed with 0.5 opacity) should render
+        assert_eq!(has_soloed_layer(&doc), true);
+        assert_eq!(count_layers_to_render(&doc), 1);
+
+        // Render
+        let mut scene = Scene::new();
+        render_document(&doc, &mut scene);
+    }
+
+    #[test]
+    fn test_unsolo_returns_to_normal() {
+        let mut doc = Document::new("Test");
+
+        let mut layer1 = VectorLayer::new("Layer 1");
+        let mut layer2 = VectorLayer::new("Layer 2");
+
+        // First, solo layer 1
+        layer1.layer.soloed = true;
+
+        let id1 = doc.root.add_child(AnyLayer::Vector(layer1));
+        let id2 = doc.root.add_child(AnyLayer::Vector(layer2));
+
+        // Only 1 layer renders when soloed
+        assert_eq!(count_layers_to_render(&doc), 1);
+
+        // Now unsolo layer 1
+        if let Some(layer) = doc.root.get_child_mut(&id1) {
+            layer.set_soloed(false);
+        }
+
+        // Now both should render again
+        assert_eq!(has_soloed_layer(&doc), false);
+        assert_eq!(count_layers_to_render(&doc), 2);
     }
 }

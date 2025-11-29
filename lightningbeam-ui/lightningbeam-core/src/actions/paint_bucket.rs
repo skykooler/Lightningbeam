@@ -300,6 +300,7 @@ fn extract_curves_from_all_shapes(
 mod tests {
     use super::*;
     use crate::layer::VectorLayer;
+    use crate::shape::Shape;
     use vello::kurbo::{Rect, Shape as KurboShape};
 
     #[test]

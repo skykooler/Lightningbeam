@@ -584,12 +584,23 @@ mod tests {
 
     #[test]
     fn test_visited_segment_quantization() {
+        // VisitedSegment quantizes to 0.01 precision (t * 100 rounded)
+        // Values differing by less than 0.005 will round to the same value
         let seg1 = VisitedSegment::new(0, 0.123, 0.456);
-        let seg2 = VisitedSegment::new(0, 0.124, 0.457);
+        let seg2 = VisitedSegment::new(0, 0.135, 0.467); // Differs by > 0.01 to ensure different quantization
         let seg3 = VisitedSegment::new(0, 0.123, 0.456);
+        let seg4 = VisitedSegment::new(0, 0.124, 0.457); // Within 0.01 - should be same as seg1
 
+        // Different quantized values
         assert_ne!(seg1, seg2);
+
+        // Same exact values
         assert_eq!(seg1, seg3);
+
+        // seg4 has values within 0.01 of seg1, so they quantize to the same
+        // 0.123 * 100 = 12.3 -> 12, 0.124 * 100 = 12.4 -> 12
+        // 0.456 * 100 = 45.6 -> 46, 0.457 * 100 = 45.7 -> 46
+        assert_eq!(seg1, seg4);
     }
 
     #[test]
@@ -616,10 +627,15 @@ mod tests {
 
     #[test]
     fn test_find_curve_at_point() {
+        use crate::curve_segment::CurveType;
+
         let curves = vec![
             CurveSegment::new(
                 0,
                 0,
+                CurveType::Cubic,
+                0.0,
+                1.0,
                 vec![
                     Point::new(0.0, 0.0),
                     Point::new(100.0, 0.0),

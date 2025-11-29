@@ -143,7 +143,7 @@ impl Action for SetLayerPropertiesAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layer::{AnyLayer, VectorLayer};
+    use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
 
     #[test]
     fn test_set_volume() {
@@ -152,7 +152,7 @@ mod tests {
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
         // Initial volume should be 1.0
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.volume(), 1.0);
 
         // Create and execute action
@@ -160,14 +160,14 @@ mod tests {
         action.execute(&mut document);
 
         // Verify volume changed
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.volume(), 0.5);
 
         // Rollback
         action.rollback(&mut document);
 
         // Verify volume restored
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.volume(), 1.0);
     }
 
@@ -178,20 +178,20 @@ mod tests {
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
         // Initial state should be unmuted
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.muted(), false);
 
         // Mute
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Muted(true));
         action.execute(&mut document);
 
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.muted(), true);
 
         // Unmute via rollback
         action.rollback(&mut document);
 
-        let layer_ref = document.root().find_child(&layer_id).unwrap();
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.muted(), false);
     }
 
@@ -211,14 +211,182 @@ mod tests {
         action.execute(&mut document);
 
         // Verify both soloed
-        assert_eq!(document.root().find_child(&id1).unwrap().soloed(), true);
-        assert_eq!(document.root().find_child(&id2).unwrap().soloed(), true);
+        assert_eq!(document.root.get_child(&id1).unwrap().soloed(), true);
+        assert_eq!(document.root.get_child(&id2).unwrap().soloed(), true);
 
         // Rollback
         action.rollback(&mut document);
 
         // Verify both unsoloed
-        assert_eq!(document.root().find_child(&id1).unwrap().soloed(), false);
-        assert_eq!(document.root().find_child(&id2).unwrap().soloed(), false);
+        assert_eq!(document.root.get_child(&id1).unwrap().soloed(), false);
+        assert_eq!(document.root.get_child(&id2).unwrap().soloed(), false);
+    }
+
+    #[test]
+    fn test_set_locked() {
+        let mut document = Document::new("Test");
+        let layer = VectorLayer::new("Test Layer");
+        let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
+
+        // Initial state should be unlocked
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.locked(), false);
+
+        // Lock
+        let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Locked(true));
+        action.execute(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.locked(), true);
+
+        // Unlock via rollback
+        action.rollback(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.locked(), false);
+    }
+
+    #[test]
+    fn test_set_opacity() {
+        let mut document = Document::new("Test");
+        let layer = VectorLayer::new("Test Layer");
+        let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
+
+        // Initial opacity should be 1.0
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.opacity(), 1.0);
+
+        // Set opacity to 0.5
+        let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Opacity(0.5));
+        action.execute(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.opacity(), 0.5);
+
+        // Rollback
+        action.rollback(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.opacity(), 1.0);
+    }
+
+    #[test]
+    fn test_set_visible() {
+        let mut document = Document::new("Test");
+        let layer = VectorLayer::new("Test Layer");
+        let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
+
+        // Initial state should be visible
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.visible(), true);
+
+        // Hide
+        let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Visible(false));
+        action.execute(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.visible(), false);
+
+        // Show via rollback
+        action.rollback(&mut document);
+
+        let layer_ref = document.root.get_child(&layer_id).unwrap();
+        assert_eq!(layer_ref.visible(), true);
+    }
+
+    #[test]
+    fn test_batch_lock() {
+        let mut document = Document::new("Test");
+        let layer1 = VectorLayer::new("Layer 1");
+        let layer2 = VectorLayer::new("Layer 2");
+        let id1 = document.root_mut().add_child(AnyLayer::Vector(layer1));
+        let id2 = document.root_mut().add_child(AnyLayer::Vector(layer2));
+
+        // Lock both layers
+        let mut action = SetLayerPropertiesAction::new_batch(
+            vec![id1, id2],
+            LayerProperty::Locked(true),
+        );
+        action.execute(&mut document);
+
+        // Verify both locked
+        assert_eq!(document.root.get_child(&id1).unwrap().locked(), true);
+        assert_eq!(document.root.get_child(&id2).unwrap().locked(), true);
+
+        // Rollback
+        action.rollback(&mut document);
+
+        // Verify both unlocked
+        assert_eq!(document.root.get_child(&id1).unwrap().locked(), false);
+        assert_eq!(document.root.get_child(&id2).unwrap().locked(), false);
+    }
+
+    #[test]
+    fn test_batch_opacity() {
+        let mut document = Document::new("Test");
+        let layer1 = VectorLayer::new("Layer 1");
+        let layer2 = VectorLayer::new("Layer 2");
+        let id1 = document.root_mut().add_child(AnyLayer::Vector(layer1));
+        let id2 = document.root_mut().add_child(AnyLayer::Vector(layer2));
+
+        // Set opacity on both layers
+        let mut action = SetLayerPropertiesAction::new_batch(
+            vec![id1, id2],
+            LayerProperty::Opacity(0.25),
+        );
+        action.execute(&mut document);
+
+        // Verify both have reduced opacity
+        assert_eq!(document.root.get_child(&id1).unwrap().opacity(), 0.25);
+        assert_eq!(document.root.get_child(&id2).unwrap().opacity(), 0.25);
+
+        // Rollback
+        action.rollback(&mut document);
+
+        // Verify both restored to 1.0
+        assert_eq!(document.root.get_child(&id1).unwrap().opacity(), 1.0);
+        assert_eq!(document.root.get_child(&id2).unwrap().opacity(), 1.0);
+    }
+
+    #[test]
+    fn test_description() {
+        let layer_id = uuid::Uuid::new_v4();
+
+        let action1 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Volume(0.5));
+        assert_eq!(action1.description(), "Set layer volume");
+
+        let action2 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Muted(true));
+        assert_eq!(action2.description(), "Set layer mute");
+
+        let action3 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Soloed(true));
+        assert_eq!(action3.description(), "Set layer solo");
+
+        let action4 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Locked(true));
+        assert_eq!(action4.description(), "Set layer lock");
+
+        let action5 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Opacity(0.5));
+        assert_eq!(action5.description(), "Set layer opacity");
+
+        let action6 = SetLayerPropertiesAction::new(layer_id, LayerProperty::Visible(false));
+        assert_eq!(action6.description(), "Set layer visibility");
+
+        // Test batch description
+        let action_batch = SetLayerPropertiesAction::new_batch(
+            vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()],
+            LayerProperty::Locked(true),
+        );
+        assert_eq!(action_batch.description(), "Set layer lock on 2 layers");
+    }
+
+    #[test]
+    fn test_nonexistent_layer() {
+        let mut document = Document::new("Test");
+        let fake_id = uuid::Uuid::new_v4();
+
+        let mut action = SetLayerPropertiesAction::new(fake_id, LayerProperty::Locked(true));
+
+        // Should not panic
+        action.execute(&mut document);
+        action.rollback(&mut document);
     }
 }

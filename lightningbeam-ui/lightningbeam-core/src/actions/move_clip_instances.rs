@@ -87,7 +87,7 @@ impl Action for MoveClipInstancesAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::{Clip, ClipInstance, ClipType};
+    use crate::clip::ClipInstance;
     use crate::layer::VectorLayer;
 
     #[test]
@@ -95,11 +95,10 @@ mod tests {
         // Create a document with a test clip instance
         let mut document = Document::new("Test");
 
-        let clip = Clip::new(ClipType::Vector, "Test Clip", None);
-        let clip_id = clip.id;
+        // Create a clip ID (no Clip definition needed for ClipInstance)
+        let clip_id = uuid::Uuid::new_v4();
 
         let mut vector_layer = VectorLayer::new("Layer 1");
-        vector_layer.clips.push(clip);
 
         let mut clip_instance = ClipInstance::new(clip_id);
         clip_instance.timeline_start = 1.0; // Start at 1 second

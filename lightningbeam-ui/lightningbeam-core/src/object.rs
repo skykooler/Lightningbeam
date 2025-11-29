@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(transform.x, 0.0);
         assert_eq!(transform.y, 0.0);
         assert_eq!(transform.scale_x, 1.0);
-        assert_eq!(transform.opacity, 1.0);
+        assert_eq!(transform.scale_y, 1.0);
     }
 
     #[test]

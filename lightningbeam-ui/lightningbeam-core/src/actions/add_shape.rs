@@ -178,12 +178,42 @@ mod tests {
 
         let mut action = AddShapeAction::new(layer_id, shape, object);
 
-        // Execute twice (should add duplicate)
+        // Execute twice - shapes are stored in HashMap (keyed by ID, so same shape overwrites)
+        // while shape_instances are stored in Vec (so duplicates accumulate)
         action.execute(&mut document);
         action.execute(&mut document);
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            // Should have 2 shapes and 2 objects
+            // Shapes use HashMap keyed by shape.id, so same shape overwrites = 1
+            // Shape instances use Vec, so duplicates accumulate = 2
+            assert_eq!(layer.shapes.len(), 1);
+            assert_eq!(layer.shape_instances.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_add_multiple_different_shapes() {
+        let mut document = Document::new("Test");
+        let vector_layer = VectorLayer::new("Layer 1");
+        let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
+
+        // Create two different shapes
+        let rect1 = Rect::new(0.0, 0.0, 50.0, 50.0);
+        let shape1 = Shape::new(rect1.to_path(0.1));
+        let object1 = ShapeInstance::new(shape1.id);
+
+        let rect2 = Rect::new(100.0, 100.0, 150.0, 150.0);
+        let shape2 = Shape::new(rect2.to_path(0.1));
+        let object2 = ShapeInstance::new(shape2.id);
+
+        let mut action1 = AddShapeAction::new(layer_id, shape1, object1);
+        let mut action2 = AddShapeAction::new(layer_id, shape2, object2);
+
+        action1.execute(&mut document);
+        action2.execute(&mut document);
+
+        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
+            // Two different shapes = 2 entries in HashMap
             assert_eq!(layer.shapes.len(), 2);
             assert_eq!(layer.shape_instances.len(), 2);
         }

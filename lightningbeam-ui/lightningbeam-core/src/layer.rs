@@ -702,13 +702,15 @@ mod tests {
     }
 
     #[test]
-    fn test_layer_time_range() {
-        let layer = Layer::new(LayerType::Vector, "Test")
-            .with_time_range(5.0, 15.0);
+    fn test_layer_basic_properties() {
+        let layer = Layer::new(LayerType::Vector, "Test");
 
-        assert_eq!(layer.duration(), 10.0);
-        assert!(layer.contains_time(10.0));
-        assert!(!layer.contains_time(3.0));
-        assert!(!layer.contains_time(20.0));
+        assert_eq!(layer.name, "Test");
+        assert_eq!(layer.visible, true);
+        assert_eq!(layer.opacity, 1.0);
+        assert_eq!(layer.volume, 1.0);
+        assert_eq!(layer.muted, false);
+        assert_eq!(layer.soloed, false);
+        assert_eq!(layer.locked, false);
     }
 }

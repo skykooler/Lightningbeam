@@ -282,4 +282,103 @@ mod tests {
         selection.clear();
         assert!(selection.is_empty());
     }
+
+    #[test]
+    fn test_add_remove_clip_instances() {
+        let mut selection = Selection::new();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        selection.add_clip_instance(id1);
+        assert_eq!(selection.clip_instance_count(), 1);
+        assert!(selection.contains_clip_instance(&id1));
+
+        selection.add_clip_instance(id2);
+        assert_eq!(selection.clip_instance_count(), 2);
+
+        selection.remove_clip_instance(&id1);
+        assert_eq!(selection.clip_instance_count(), 1);
+        assert!(!selection.contains_clip_instance(&id1));
+        assert!(selection.contains_clip_instance(&id2));
+    }
+
+    #[test]
+    fn test_toggle_clip_instance() {
+        let mut selection = Selection::new();
+        let id = Uuid::new_v4();
+
+        selection.toggle_clip_instance(id);
+        assert!(selection.contains_clip_instance(&id));
+
+        selection.toggle_clip_instance(id);
+        assert!(!selection.contains_clip_instance(&id));
+    }
+
+    #[test]
+    fn test_select_only_clip_instance() {
+        let mut selection = Selection::new();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        selection.add_clip_instance(id1);
+        selection.add_clip_instance(id2);
+        assert_eq!(selection.clip_instance_count(), 2);
+
+        selection.select_only_clip_instance(id1);
+        assert_eq!(selection.clip_instance_count(), 1);
+        assert!(selection.contains_clip_instance(&id1));
+        assert!(!selection.contains_clip_instance(&id2));
+    }
+
+    #[test]
+    fn test_clear_clip_instances() {
+        let mut selection = Selection::new();
+        selection.add_clip_instance(Uuid::new_v4());
+        selection.add_clip_instance(Uuid::new_v4());
+        selection.add_shape_instance(Uuid::new_v4());
+
+        assert_eq!(selection.clip_instance_count(), 2);
+        assert_eq!(selection.shape_instance_count(), 1);
+
+        selection.clear_clip_instances();
+        assert_eq!(selection.clip_instance_count(), 0);
+        assert_eq!(selection.shape_instance_count(), 1);
+    }
+
+    #[test]
+    fn test_clip_instances_getter() {
+        let mut selection = Selection::new();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+
+        selection.add_clip_instance(id1);
+        selection.add_clip_instance(id2);
+
+        let clip_instances = selection.clip_instances();
+        assert_eq!(clip_instances.len(), 2);
+        assert!(clip_instances.contains(&id1));
+        assert!(clip_instances.contains(&id2));
+    }
+
+    #[test]
+    fn test_mixed_selection() {
+        let mut selection = Selection::new();
+        let shape_instance_id = Uuid::new_v4();
+        let clip_instance_id = Uuid::new_v4();
+
+        selection.add_shape_instance(shape_instance_id);
+        selection.add_clip_instance(clip_instance_id);
+
+        assert_eq!(selection.shape_instance_count(), 1);
+        assert_eq!(selection.clip_instance_count(), 1);
+        assert!(!selection.is_empty());
+
+        selection.clear_shape_instances();
+        assert_eq!(selection.shape_instance_count(), 0);
+        assert_eq!(selection.clip_instance_count(), 1);
+        assert!(!selection.is_empty());
+
+        selection.clear();
+        assert!(selection.is_empty());
+    }
 }

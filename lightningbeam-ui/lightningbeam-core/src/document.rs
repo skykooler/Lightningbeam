@@ -277,7 +277,7 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layer::VectorLayer;
+    use crate::layer::{LayerTrait, VectorLayer};
 
     #[test]
     fn test_document_creation() {
@@ -302,21 +302,24 @@ mod tests {
     fn test_document_with_layers() {
         let mut doc = Document::new("Test");
 
-        let mut layer1 = VectorLayer::new("Layer 1");
-        layer1.layer.start_time = 0.0;
-        layer1.layer.end_time = 5.0;
-
+        let layer1 = VectorLayer::new("Layer 1");
         let mut layer2 = VectorLayer::new("Layer 2");
-        layer2.layer.start_time = 3.0;
-        layer2.layer.end_time = 8.0;
+
+        // Hide layer2 to test visibility filtering
+        layer2.layer.visible = false;
 
         doc.root.add_child(AnyLayer::Vector(layer1));
         doc.root.add_child(AnyLayer::Vector(layer2));
 
-        doc.set_time(4.0);
-        assert_eq!(doc.visible_layers().count(), 2);
-
-        doc.set_time(6.0);
+        // Only visible layers should be returned
         assert_eq!(doc.visible_layers().count(), 1);
+
+        // Update layer2 to be visible via root access
+        let ids: Vec<_> = doc.root.children.iter().map(|n| n.id()).collect();
+        if let Some(layer) = doc.root.get_child_mut(&ids[1]) {
+            layer.set_visible(true);
+        }
+
+        assert_eq!(doc.visible_layers().count(), 2);
     }
 }

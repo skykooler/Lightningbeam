@@ -147,18 +147,17 @@ impl Action for TrimClipInstancesAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::{Clip, ClipInstance, ClipType};
+    use crate::clip::ClipInstance;
     use crate::layer::VectorLayer;
 
     #[test]
     fn test_trim_left_action() {
         let mut document = Document::new("Test");
 
-        let clip = Clip::new(ClipType::Vector, "Test Clip", Some(10.0));
-        let clip_id = clip.id;
+        // Create a clip ID (ClipInstance references clip by ID)
+        let clip_id = uuid::Uuid::new_v4();
 
         let mut vector_layer = VectorLayer::new("Layer 1");
-        vector_layer.clips.push(clip);
 
         let mut clip_instance = ClipInstance::new(clip_id);
         clip_instance.timeline_start = 0.0;
@@ -215,11 +214,10 @@ mod tests {
     fn test_trim_right_action() {
         let mut document = Document::new("Test");
 
-        let clip = Clip::new(ClipType::Vector, "Test Clip", Some(10.0));
-        let clip_id = clip.id;
+        // Create a clip ID (ClipInstance references clip by ID)
+        let clip_id = uuid::Uuid::new_v4();
 
         let mut vector_layer = VectorLayer::new("Layer 1");
-        vector_layer.clips.push(clip);
 
         let mut clip_instance = ClipInstance::new(clip_id);
         clip_instance.trim_end = None; // Full duration

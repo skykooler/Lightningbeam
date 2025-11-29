@@ -358,10 +358,10 @@ mod tests {
         let circle = Circle::new((100.0, 100.0), 50.0);
         let path = circle.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
-        let object = Object::new(shape.id);
+        let shape_instance = ShapeInstance::new(shape.id);
 
         layer.add_shape(shape);
-        layer.add_object(object);
+        layer.add_object(shape_instance);
 
         // Test hit inside circle
         let hit = hit_test_layer(&layer, Point::new(100.0, 100.0), 0.0, Affine::IDENTITY);
@@ -381,11 +381,11 @@ mod tests {
         let path = circle.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
 
-        // Create object with translation
-        let object = Object::new(shape.id).with_position(100.0, 100.0);
+        // Create shape instance with translation
+        let shape_instance = ShapeInstance::new(shape.id).with_position(100.0, 100.0);
 
         layer.add_shape(shape);
-        layer.add_object(object);
+        layer.add_object(shape_instance);
 
         // Test hit at translated position
         let hit = hit_test_layer(&layer, Point::new(100.0, 100.0), 0.0, Affine::IDENTITY);
@@ -404,17 +404,17 @@ mod tests {
         let circle1 = Circle::new((50.0, 50.0), 20.0);
         let path1 = circle1.to_path(0.1);
         let shape1 = Shape::new(path1).with_fill(ShapeColor::rgb(255, 0, 0));
-        let object1 = Object::new(shape1.id);
+        let shape_instance1 = ShapeInstance::new(shape1.id);
 
         let circle2 = Circle::new((150.0, 150.0), 20.0);
         let path2 = circle2.to_path(0.1);
         let shape2 = Shape::new(path2).with_fill(ShapeColor::rgb(0, 255, 0));
-        let object2 = Object::new(shape2.id);
+        let shape_instance2 = ShapeInstance::new(shape2.id);
 
         layer.add_shape(shape1);
-        layer.add_object(object1);
+        layer.add_object(shape_instance1);
         layer.add_shape(shape2);
-        layer.add_object(object2);
+        layer.add_object(shape_instance2);
 
         // Marquee that contains both circles
         let rect = Rect::new(0.0, 0.0, 200.0, 200.0);
