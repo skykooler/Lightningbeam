@@ -97,6 +97,7 @@ impl PaneRenderer for ToolbarPane {
                     button_rect,
                     4.0,
                     egui::Stroke::new(2.0, egui::Color32::from_gray(180)),
+                    egui::StrokeKind::Middle,
                 );
             }
 
@@ -109,6 +110,7 @@ impl PaneRenderer for ToolbarPane {
                     button_rect,
                     4.0,
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255)),
+                    egui::StrokeKind::Middle,
                 );
             }
 
@@ -239,5 +241,6 @@ fn draw_color_button(ui: &mut egui::Ui, rect: egui::Rect, color: egui::Color32) 
         rect,
         2.0,
         egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+        egui::StrokeKind::Middle,
     );
 }

@@ -3,7 +3,7 @@
 //! The Document represents a complete animation project with settings
 //! and a root graphics object containing the scene graph.
 
-use crate::clip::{AudioClip, VideoClip, VectorClip};
+use crate::clip::{AudioClip, ImageAsset, VideoClip, VectorClip};
 use crate::layer::AnyLayer;
 use crate::shape::ShapeColor;
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,9 @@ pub struct Document {
     /// Audio clip library - sampled audio and MIDI clips
     pub audio_clips: HashMap<Uuid, AudioClip>,
 
+    /// Image asset library - static images for fill textures
+    pub image_assets: HashMap<Uuid, ImageAsset>,
+
     /// Current playback time in seconds
     #[serde(skip)]
     pub current_time: f64,
@@ -122,6 +125,7 @@ impl Default for Document {
             vector_clips: HashMap::new(),
             video_clips: HashMap::new(),
             audio_clips: HashMap::new(),
+            image_assets: HashMap::new(),
             current_time: 0.0,
         }
     }
@@ -271,6 +275,30 @@ impl Document {
     /// Remove an audio clip from the library
     pub fn remove_audio_clip(&mut self, id: &Uuid) -> Option<AudioClip> {
         self.audio_clips.remove(id)
+    }
+
+    // === IMAGE ASSET METHODS ===
+
+    /// Add an image asset to the library
+    pub fn add_image_asset(&mut self, asset: ImageAsset) -> Uuid {
+        let id = asset.id;
+        self.image_assets.insert(id, asset);
+        id
+    }
+
+    /// Get an image asset by ID
+    pub fn get_image_asset(&self, id: &Uuid) -> Option<&ImageAsset> {
+        self.image_assets.get(id)
+    }
+
+    /// Get a mutable image asset by ID
+    pub fn get_image_asset_mut(&mut self, id: &Uuid) -> Option<&mut ImageAsset> {
+        self.image_assets.get_mut(id)
+    }
+
+    /// Remove an image asset from the library
+    pub fn remove_image_asset(&mut self, id: &Uuid) -> Option<ImageAsset> {
+        self.image_assets.remove(id)
     }
 }
 

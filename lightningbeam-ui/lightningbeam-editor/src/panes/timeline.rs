@@ -7,8 +7,9 @@
 /// - Basic layer visualization
 
 use eframe::egui;
-use lightningbeam_core::layer::LayerTrait;
-use super::{NodePath, PaneRenderer, SharedPaneState};
+use lightningbeam_core::clip::ClipInstance;
+use lightningbeam_core::layer::{AnyLayer, AudioLayerType, LayerTrait};
+use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
@@ -54,6 +55,21 @@ pub struct TimelinePane {
 
     /// Track if a layer control widget was clicked this frame
     layer_control_clicked: bool,
+}
+
+/// Check if a clip type can be dropped on a layer type
+fn can_drop_on_layer(layer: &AnyLayer, clip_type: DragClipType) -> bool {
+    match (layer, clip_type) {
+        (AnyLayer::Vector(_), DragClipType::Vector) => true,
+        (AnyLayer::Video(_), DragClipType::Video) => true,
+        (AnyLayer::Audio(audio), DragClipType::AudioSampled) => {
+            audio.audio_layer_type == AudioLayerType::Sampled
+        }
+        (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
+            audio.audio_layer_type == AudioLayerType::Midi
+        }
+        _ => false,
+    }
 }
 
 impl TimelinePane {
@@ -780,6 +796,7 @@ impl TimelinePane {
                                 clip_rect,
                                 3.0,
                                 egui::Stroke::new(3.0, bright_color),
+                                egui::StrokeKind::Middle,
                             );
                         }
 
@@ -1542,6 +1559,79 @@ impl PaneRenderer for TimelinePane {
             shared.is_playing,
             shared.audio_controller.as_mut().map(|c| &mut **c),
         );
+
+        // Handle asset drag-and-drop from Asset Library
+        if let Some(dragging) = shared.dragging_asset.as_ref() {
+            if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+                // Check if pointer is in content area (not ruler or header column)
+                if content_rect.contains(pointer_pos) {
+                    // Calculate which layer the pointer is over
+                    let relative_y = pointer_pos.y - content_rect.min.y + self.viewport_scroll_y;
+                    let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
+
+                    // Get the layer at this index (accounting for reversed display order)
+                    let layers: Vec<_> = document.root.children.iter().rev().collect();
+
+                    if let Some(layer) = layers.get(hovered_layer_index) {
+                        let is_compatible = can_drop_on_layer(layer, dragging.clip_type);
+
+                        // Visual feedback: highlight compatible tracks
+                        let layer_y = content_rect.min.y + hovered_layer_index as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+                        let highlight_rect = egui::Rect::from_min_size(
+                            egui::pos2(content_rect.min.x, layer_y),
+                            egui::vec2(content_rect.width(), LAYER_HEIGHT),
+                        );
+
+                        let highlight_color = if is_compatible {
+                            egui::Color32::from_rgba_unmultiplied(100, 255, 100, 40) // Green
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(255, 100, 100, 40) // Red
+                        };
+
+                        ui.painter().rect_filled(highlight_rect, 0.0, highlight_color);
+
+                        // Show drop time indicator
+                        let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x);
+                        let drop_x = self.time_to_x(drop_time);
+                        if drop_x >= 0.0 && drop_x <= content_rect.width() {
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(content_rect.min.x + drop_x, layer_y),
+                                    egui::pos2(content_rect.min.x + drop_x, layer_y + LAYER_HEIGHT),
+                                ],
+                                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                            );
+                        }
+
+                        // Handle drop on mouse release
+                        if ui.input(|i| i.pointer.any_released()) && is_compatible {
+                            let layer_id = layer.id();
+                            let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
+
+                            // Get document dimensions for centering
+                            let doc = shared.action_executor.document();
+                            let center_x = doc.width / 2.0;
+                            let center_y = doc.height / 2.0;
+
+                            // Create clip instance centered on stage, at drop time
+                            let clip_instance = ClipInstance::new(dragging.clip_id)
+                                .with_timeline_start(drop_time)
+                                .with_position(center_x, center_y);
+
+                            // Create and queue action
+                            let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                layer_id,
+                                clip_instance,
+                            );
+                            shared.pending_actions.push(Box::new(action));
+
+                            // Clear drag state
+                            *shared.dragging_asset = None;
+                        }
+                    }
+                }
+            }
+        }
 
         // Register handler for pending view actions (two-phase dispatch)
         // Priority: Mouse-over (0-99) > Fallback Timeline(1001)

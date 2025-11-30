@@ -3,9 +3,40 @@
 /// Renders composited layers using Vello GPU renderer via egui callbacks.
 
 use eframe::egui;
-use super::{NodePath, PaneRenderer, SharedPaneState};
+use lightningbeam_core::action::Action;
+use lightningbeam_core::clip::ClipInstance;
+use lightningbeam_core::layer::{AnyLayer, AudioLayer, AudioLayerType, VideoLayer, VectorLayer};
+use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
 use vello::kurbo::Shape;
+
+/// Check if a clip type matches a layer type
+fn layer_matches_clip_type(layer: &AnyLayer, clip_type: DragClipType) -> bool {
+    match (layer, clip_type) {
+        (AnyLayer::Vector(_), DragClipType::Vector) => true,
+        (AnyLayer::Vector(_), DragClipType::Image) => true, // Images go on vector layers as shapes
+        (AnyLayer::Video(_), DragClipType::Video) => true,
+        (AnyLayer::Audio(audio), DragClipType::AudioSampled) => {
+            audio.audio_layer_type == AudioLayerType::Sampled
+        }
+        (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
+            audio.audio_layer_type == AudioLayerType::Midi
+        }
+        _ => false,
+    }
+}
+
+/// Create a new layer of the appropriate type for a clip
+fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> AnyLayer {
+    match clip_type {
+        DragClipType::Vector => AnyLayer::Vector(VectorLayer::new(name)),
+        DragClipType::Video => AnyLayer::Video(VideoLayer::new(name)),
+        DragClipType::AudioSampled => AnyLayer::Audio(AudioLayer::new_sampled(name)),
+        DragClipType::AudioMidi => AnyLayer::Audio(AudioLayer::new_midi(name)),
+        // Images are placed as shapes on vector layers, not their own layer type
+        DragClipType::Image => AnyLayer::Vector(VectorLayer::new(name)),
+    }
+}
 
 /// Shared Vello resources (created once, reused by all Stage panes)
 struct SharedVelloResources {
@@ -13,6 +44,8 @@ struct SharedVelloResources {
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Shared image cache for avoiding re-decoding images every frame
+    image_cache: Mutex<lightningbeam_core::renderer::ImageCache>,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -33,10 +66,10 @@ impl SharedVelloResources {
         let renderer = vello::Renderer::new(
             device,
             vello::RendererOptions {
-                surface_format: None,
                 use_cpu: false,
                 antialiasing_support: vello::AaSupport::all(),
                 num_init_threads: std::num::NonZeroUsize::new(1),
+                pipeline_cache: None,
             },
         ).map_err(|e| format!("Failed to create Vello renderer: {}", e))?;
 
@@ -82,13 +115,13 @@ impl SharedVelloResources {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm, // egui's target format
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -130,6 +163,7 @@ impl SharedVelloResources {
             blit_pipeline,
             blit_bind_group_layout,
             sampler,
+            image_cache: Mutex::new(lightningbeam_core::renderer::ImageCache::new()),
         })
     }
 }
@@ -283,7 +317,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             * Affine::scale(self.zoom as f64);
 
         // Render the document to the scene with camera transform
-        lightningbeam_core::renderer::render_document_with_transform(&self.document, &mut scene, camera_transform);
+        let mut image_cache = shared.image_cache.lock().unwrap();
+        lightningbeam_core::renderer::render_document_with_transform(&self.document, &mut scene, camera_transform, &mut image_cache);
+        drop(image_cache); // Explicitly release lock before other operations
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.drag_delta, self.active_layer_id) {
@@ -306,7 +342,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     let combined_transform = camera_transform * object_transform;
 
                                     // Render shape with semi-transparent fill (light blue, 40% opacity)
-                                    let alpha_color = Color::rgba8(100, 150, 255, 100);
+                                    let alpha_color = Color::from_rgba8(100, 150, 255, 100);
                                     scene.fill(
                                         Fill::NonZero,
                                         combined_transform,
@@ -339,7 +375,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 };
 
                                 // Draw preview outline
-                                let alpha_color = Color::rgba8(255, 150, 100, 150); // Orange, semi-transparent
+                                let alpha_color = Color::from_rgba8(255, 150, 100, 150); // Orange, semi-transparent
                                 let stroke_width = 2.0 / self.zoom.max(0.5) as f64;
                                 scene.stroke(
                                     &Stroke::new(stroke_width),
@@ -362,7 +398,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     use vello::peniko::{Color, Fill};
                     use vello::kurbo::{Circle, Rect as KurboRect, Shape as KurboShape, Stroke};
 
-                    let selection_color = Color::rgb8(0, 120, 255); // Blue
+                    let selection_color = Color::from_rgb8(0, 120, 255); // Blue
                     let stroke_width = 2.0 / self.zoom.max(0.5) as f64;
 
                     // 1. Draw selection outlines around selected objects
@@ -413,7 +449,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         scene.stroke(
                                             &Stroke::new(1.0),
                                             combined_transform,
-                                            Color::rgb8(255, 255, 255),
+                                            Color::from_rgb8(255, 255, 255),
                                             None,
                                             &corner_circle,
                                         );
@@ -444,7 +480,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 let combined_transform = camera_transform * clip_transform;
 
                                 // Draw selection outline with different color for clip instances
-                                let clip_selection_color = Color::rgb8(255, 120, 0); // Orange
+                                let clip_selection_color = Color::from_rgb8(255, 120, 0); // Orange
                                 scene.stroke(
                                     &Stroke::new(stroke_width),
                                     combined_transform,
@@ -476,7 +512,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     scene.stroke(
                                         &Stroke::new(1.0),
                                         combined_transform,
-                                        Color::rgb8(255, 255, 255),
+                                        Color::from_rgb8(255, 255, 255),
                                         None,
                                         &corner_circle,
                                     );
@@ -495,7 +531,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         );
 
                         // Semi-transparent fill
-                        let marquee_fill = Color::rgba8(0, 120, 255, 100);
+                        let marquee_fill = Color::from_rgba8(0, 120, 255, 100);
                         scene.fill(
                             Fill::NonZero,
                             camera_transform,
@@ -564,7 +600,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let preview_transform = camera_transform * Affine::translate((position.x, position.y));
 
                             // Use actual fill color (same as final shape)
-                            let fill_color = Color::rgba8(
+                            let fill_color = Color::from_rgba8(
                                 self.fill_color.r(),
                                 self.fill_color.g(),
                                 self.fill_color.b(),
@@ -622,7 +658,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let preview_transform = camera_transform * Affine::translate((position.x, position.y));
 
                             // Use actual fill color (same as final shape)
-                            let fill_color = Color::rgba8(
+                            let fill_color = Color::from_rgba8(
                                 self.fill_color.r(),
                                 self.fill_color.g(),
                                 self.fill_color.b(),
@@ -665,7 +701,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                         if length > 0.0 {
                             // Use actual stroke color for line preview
-                            let stroke_color = Color::rgba8(
+                            let stroke_color = Color::from_rgba8(
                                 self.stroke_color.r(),
                                 self.stroke_color.g(),
                                 self.stroke_color.b(),
@@ -698,7 +734,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let preview_transform = camera_transform * Affine::translate((center.x, center.y));
 
                             // Use actual fill color (same as final shape)
-                            let fill_color = Color::rgba8(
+                            let fill_color = Color::from_rgba8(
                                 self.fill_color.r(),
                                 self.fill_color.g(),
                                 self.fill_color.b(),
@@ -749,7 +785,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             // Draw the preview path with stroke
                             let stroke_width = (2.0 / self.zoom.max(0.5) as f64).max(1.0);
-                            let stroke_color = Color::rgb8(
+                            let stroke_color = Color::from_rgb8(
                                 self.stroke_color.r(),
                                 self.stroke_color.g(),
                                 self.stroke_color.b(),
@@ -783,7 +819,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             if let Some(object) = vector_layer.get_object(&object_id) {
                                 if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                                     let handle_size = (8.0 / self.zoom.max(0.5) as f64).max(6.0);
-                                    let handle_color = Color::rgb8(0, 120, 255); // Blue
+                                    let handle_color = Color::from_rgb8(0, 120, 255); // Blue
                                     let rotation_handle_offset = 20.0 / self.zoom.max(0.5) as f64;
 
                                     // Get shape's local bounding box
@@ -876,7 +912,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         scene.stroke(
                                             &Stroke::new(1.0),
                                             camera_transform,
-                                            Color::rgb8(255, 255, 255),
+                                            Color::from_rgb8(255, 255, 255),
                                             None,
                                             &handle_rect,
                                         );
@@ -906,7 +942,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         scene.stroke(
                                             &Stroke::new(1.0),
                                             camera_transform,
-                                            Color::rgb8(255, 255, 255),
+                                            Color::from_rgb8(255, 255, 255),
                                             None,
                                             &edge_circle,
                                         );
@@ -931,7 +967,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     scene.fill(
                                         Fill::NonZero,
                                         camera_transform,
-                                        Color::rgb8(50, 200, 50),
+                                        Color::from_rgb8(50, 200, 50),
                                         None,
                                         &rotation_circle,
                                     );
@@ -940,7 +976,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     scene.stroke(
                                         &Stroke::new(1.0),
                                         camera_transform,
-                                        Color::rgb8(255, 255, 255),
+                                        Color::from_rgb8(255, 255, 255),
                                         None,
                                         &rotation_circle,
                                     );
@@ -956,7 +992,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     scene.stroke(
                                         &Stroke::new(1.0),
                                         camera_transform,
-                                        Color::rgb8(50, 200, 50),
+                                        Color::from_rgb8(50, 200, 50),
                                         None,
                                         &line_path,
                                     );
@@ -985,7 +1021,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             if let Some(bbox) = combined_bbox {
                                 let handle_size = (8.0 / self.zoom.max(0.5) as f64).max(6.0);
-                                let handle_color = Color::rgb8(0, 120, 255);
+                                let handle_color = Color::from_rgb8(0, 120, 255);
                                 let rotation_handle_offset = 20.0 / self.zoom.max(0.5) as f64;
 
                                 scene.stroke(&Stroke::new(stroke_width), camera_transform, handle_color, None, &bbox);
@@ -1003,7 +1039,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         corner.x + handle_size / 2.0, corner.y + handle_size / 2.0,
                                     );
                                     scene.fill(Fill::NonZero, camera_transform, handle_color, None, &handle_rect);
-                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::rgb8(255, 255, 255), None, &handle_rect);
+                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &handle_rect);
                                 }
 
                                 let edges = [
@@ -1016,13 +1052,13 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 for edge in &edges {
                                     let edge_circle = Circle::new(*edge, handle_size / 2.0);
                                     scene.fill(Fill::NonZero, camera_transform, handle_color, None, &edge_circle);
-                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::rgb8(255, 255, 255), None, &edge_circle);
+                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &edge_circle);
                                 }
 
                                 let rotation_handle_pos = vello::kurbo::Point::new(bbox.center().x, bbox.y0 - rotation_handle_offset);
                                 let rotation_circle = Circle::new(rotation_handle_pos, handle_size / 2.0);
-                                scene.fill(Fill::NonZero, camera_transform, Color::rgb8(50, 200, 50), None, &rotation_circle);
-                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::rgb8(255, 255, 255), None, &rotation_circle);
+                                scene.fill(Fill::NonZero, camera_transform, Color::from_rgb8(50, 200, 50), None, &rotation_circle);
+                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &rotation_circle);
 
                                 let line_path = {
                                     let mut path = vello::kurbo::BezPath::new();
@@ -1030,7 +1066,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     path.line_to(vello::kurbo::Point::new(bbox.center().x, bbox.y0));
                                     path
                                 };
-                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::rgb8(50, 200, 50), None, &line_path);
+                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(50, 200, 50), None, &line_path);
                             }
                         }
                     }
@@ -1041,7 +1077,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Render scene to texture using shared renderer
         if let Some(texture_view) = &instance_resources.texture_view {
             let render_params = vello::RenderParams {
-                base_color: vello::peniko::Color::rgb8(45, 45, 48), // Dark background
+                base_color: vello::peniko::Color::from_rgb8(45, 45, 48), // Dark background
                 width,
                 height,
                 antialiasing_method: vello::AaConfig::Msaa16,
@@ -4019,6 +4055,134 @@ impl PaneRenderer for StagePane {
 
         // Handle input for pan/zoom and tool controls
         self.handle_input(ui, rect, shared);
+
+        // Handle asset drag-and-drop from Asset Library
+        if let Some(dragging) = shared.dragging_asset.clone() {
+            if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
+                // Check if pointer is over the stage
+                if rect.contains(pointer_pos) {
+                    // Visual feedback: draw ghost preview at cursor
+                    let preview_size = egui::vec2(60.0, 40.0);
+                    let preview_rect = egui::Rect::from_center_size(pointer_pos, preview_size);
+                    ui.painter().rect_filled(
+                        preview_rect,
+                        4.0,
+                        egui::Color32::from_rgba_unmultiplied(100, 150, 255, 100),
+                    );
+                    ui.painter().rect_stroke(
+                        preview_rect,
+                        4.0,
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                        egui::StrokeKind::Middle,
+                    );
+                    ui.painter().text(
+                        preview_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &dragging.name,
+                        egui::FontId::proportional(10.0),
+                        egui::Color32::WHITE,
+                    );
+
+                    // Handle drop on mouse release
+                    if ui.input(|i| i.pointer.any_released()) {
+                        // Convert screen position to world coordinates
+                        let canvas_pos = pointer_pos - rect.min;
+                        let world_pos = (canvas_pos - self.pan_offset) / self.zoom;
+
+                        // Use playhead time
+                        let drop_time = *shared.playback_time;
+
+                        // Find or create a compatible layer
+                        let document = shared.action_executor.document();
+                        let mut target_layer_id = None;
+
+                        // Check if active layer is compatible
+                        if let Some(active_id) = shared.active_layer_id {
+                            if let Some(layer) = document.get_layer(active_id) {
+                                if layer_matches_clip_type(layer, dragging.clip_type) {
+                                    target_layer_id = Some(*active_id);
+                                }
+                            }
+                        }
+
+                        // If no compatible active layer, we need to create a new layer
+                        if target_layer_id.is_none() {
+                            // Create new layer
+                            let layer_name = format!("{} Layer", match dragging.clip_type {
+                                DragClipType::Vector => "Vector",
+                                DragClipType::Video => "Video",
+                                DragClipType::AudioSampled => "Audio",
+                                DragClipType::AudioMidi => "MIDI",
+                                DragClipType::Image => "Image",
+                            });
+                            let new_layer = create_layer_for_clip_type(dragging.clip_type, &layer_name);
+
+                            // Create add layer action
+                            let mut add_layer_action = lightningbeam_core::actions::AddLayerAction::new(new_layer);
+
+                            // Execute immediately to get the layer ID
+                            add_layer_action.execute(shared.action_executor.document_mut());
+                            target_layer_id = add_layer_action.created_layer_id();
+
+                            // Update active layer to the new layer
+                            if let Some(layer_id) = target_layer_id {
+                                *shared.active_layer_id = Some(layer_id);
+                            }
+                        }
+
+                        // Add clip instance or shape to the target layer
+                        if let Some(layer_id) = target_layer_id {
+                            // For images, create a shape with image fill instead of a clip instance
+                            if dragging.clip_type == DragClipType::Image {
+                                // Get image dimensions (from the dragging info)
+                                let (width, height) = dragging.dimensions.unwrap_or((100.0, 100.0));
+
+                                // Create a rectangle path at the origin (position handled by transform)
+                                use kurbo::BezPath;
+                                let mut path = BezPath::new();
+                                path.move_to((0.0, 0.0));
+                                path.line_to((width, 0.0));
+                                path.line_to((width, height));
+                                path.line_to((0.0, height));
+                                path.close_path();
+
+                                // Create shape with image fill (references the ImageAsset)
+                                use lightningbeam_core::shape::Shape;
+                                let shape = Shape::new(path).with_image_fill(dragging.clip_id);
+
+                                // Create shape instance at drop position
+                                use lightningbeam_core::object::ShapeInstance;
+                                let shape_instance = ShapeInstance::new(shape.id)
+                                    .with_position(world_pos.x as f64, world_pos.y as f64);
+
+                                // Create and queue action
+                                let action = lightningbeam_core::actions::AddShapeAction::new(
+                                    layer_id,
+                                    shape,
+                                    shape_instance,
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            } else {
+                                // For clips, create a clip instance
+                                let clip_instance = ClipInstance::new(dragging.clip_id)
+                                    .with_timeline_start(drop_time)
+                                    .with_position(world_pos.x as f64, world_pos.y as f64);
+
+                                // Create and queue action
+                                let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                    layer_id,
+                                    clip_instance,
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            }
+                        }
+
+                        // Clear drag state
+                        *shared.dragging_asset = None;
+                    }
+                }
+            }
+        }
 
         // Register handler for pending view actions (two-phase dispatch)
         // Priority: Mouse-over (0-99) > Fallback Stage(1000) > Fallback Timeline(1001) etc.

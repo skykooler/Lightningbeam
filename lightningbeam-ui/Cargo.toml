@@ -7,13 +7,16 @@ members = [
 
 [workspace.dependencies]
 # UI Framework (using eframe for simplified integration)
-eframe = { version = "0.29", default-features = true, features = ["wgpu"] }
-egui_extras = { version = "0.29", features = ["image", "svg"] }
-egui-wgpu = "0.29"
+# Note: Upgraded from 0.29 to 0.31 to fix Linux IME/keyboard input issues
+# See: https://github.com/emilk/egui/pull/5198
+eframe = { version = "0.31", default-features = true, features = ["wgpu"] }
+egui_extras = { version = "0.31", features = ["image", "svg"] }
+egui-wgpu = "0.31"
 
 # GPU Rendering
-vello = "0.3"
-wgpu = "22"
+# vello 0.5 uses wgpu 24, matching eframe 0.31
+vello = "0.5"
+wgpu = "24"
 kurbo = { version = "0.11", features = ["serde"] }
 peniko = "0.5"
 

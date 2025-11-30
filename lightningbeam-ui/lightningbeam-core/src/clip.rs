@@ -15,6 +15,7 @@ use crate::layer::AnyLayer;
 use crate::layer_tree::LayerTree;
 use crate::object::Transform;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use uuid::Uuid;
 use vello::kurbo::{Rect, Affine, Shape as KurboShape};
 
@@ -155,6 +156,71 @@ impl VectorClip {
     /// Get the height of the content bounds at a specific time
     pub fn content_height(&self, document: &crate::document::Document, clip_time: f64) -> f64 {
         self.calculate_content_bounds(document, clip_time).height()
+    }
+}
+
+/// Image asset for static images
+///
+/// Images can be used as fill textures for shapes or (in the future)
+/// added to video tracks as still frames. Unlike clips, images don't
+/// have a duration or timeline properties.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageAsset {
+    /// Unique identifier
+    pub id: Uuid,
+
+    /// Asset name (usually derived from filename)
+    pub name: String,
+
+    /// Original file path
+    pub path: PathBuf,
+
+    /// Image width in pixels
+    pub width: u32,
+
+    /// Image height in pixels
+    pub height: u32,
+
+    /// Embedded image data (for project portability)
+    /// If None, the image will be loaded from path when needed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Vec<u8>>,
+}
+
+impl ImageAsset {
+    /// Create a new image asset
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            path: path.into(),
+            width,
+            height,
+            data: None,
+        }
+    }
+
+    /// Create with embedded data
+    pub fn with_data(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            path: path.into(),
+            width,
+            height,
+            data: Some(data),
+        }
     }
 }
 

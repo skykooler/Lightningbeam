@@ -3,28 +3,93 @@
 //! Renders documents to Vello scenes for GPU-accelerated display.
 
 use crate::animation::TransformProperty;
+use crate::clip::ImageAsset;
 use crate::document::Document;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
 use crate::object::ShapeInstance;
 use kurbo::{Affine, Shape};
+use std::collections::HashMap;
+use std::sync::Arc;
+use uuid::Uuid;
 use vello::kurbo::Rect;
-use vello::peniko::Fill;
+use vello::peniko::{Blob, Fill, Image, ImageFormat};
 use vello::Scene;
 
+/// Cache for decoded image data to avoid re-decoding every frame
+pub struct ImageCache {
+    cache: HashMap<Uuid, Arc<Image>>,
+}
+
+impl ImageCache {
+    /// Create a new empty image cache
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Get or decode an image, caching the result
+    pub fn get_or_decode(&mut self, asset: &ImageAsset) -> Option<Arc<Image>> {
+        if let Some(cached) = self.cache.get(&asset.id) {
+            return Some(Arc::clone(cached));
+        }
+
+        // Decode and cache
+        let image = decode_image_asset(asset)?;
+        let arc_image = Arc::new(image);
+        self.cache.insert(asset.id, Arc::clone(&arc_image));
+        Some(arc_image)
+    }
+
+    /// Clear cache entry when an image asset is deleted or modified
+    pub fn invalidate(&mut self, id: &Uuid) {
+        self.cache.remove(id);
+    }
+
+    /// Clear all cached images
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Decode an image asset to peniko Image
+fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
+    // Get the raw file data
+    let data = asset.data.as_ref()?;
+
+    // Decode using the image crate
+    let img = image::load_from_memory(data).ok()?;
+    let rgba = img.to_rgba8();
+
+    // Create peniko Image
+    Some(Image::new(
+        Blob::from(rgba.into_raw()),
+        ImageFormat::Rgba8,
+        asset.width,
+        asset.height,
+    ))
+}
+
 /// Render a document to a Vello scene
-pub fn render_document(document: &Document, scene: &mut Scene) {
-    render_document_with_transform(document, scene, Affine::IDENTITY);
+pub fn render_document(document: &Document, scene: &mut Scene, image_cache: &mut ImageCache) {
+    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache);
 }
 
 /// Render a document to a Vello scene with a base transform
 /// The base transform is composed with all object transforms (useful for camera zoom/pan)
-pub fn render_document_with_transform(document: &Document, scene: &mut Scene, base_transform: Affine) {
+pub fn render_document_with_transform(document: &Document, scene: &mut Scene, base_transform: Affine, image_cache: &mut ImageCache) {
     // 1. Draw background
     render_background(document, scene, base_transform);
 
     // 2. Recursively render the root graphics object at current time
     let time = document.current_time;
-    render_graphics_object(document, time, scene, base_transform);
+    render_graphics_object(document, time, scene, base_transform, image_cache);
 }
 
 /// Draw the document background
@@ -44,7 +109,7 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
 }
 
 /// Recursively render the root graphics object and its children
-fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, base_transform: Affine) {
+fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, base_transform: Affine, image_cache: &mut ImageCache) {
     // Check if any layers are soloed
     let any_soloed = document.visible_layers().any(|layer| layer.soloed());
 
@@ -56,19 +121,19 @@ fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, bas
         if any_soloed {
             // Only render soloed layers when solo is active
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache);
             }
         } else {
             // Render all visible layers when no solo is active
-            render_layer(document, time, layer, scene, base_transform, 1.0);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache);
         }
     }
 }
 
 /// Render a single layer
-fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64) {
+fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64, image_cache: &mut ImageCache) {
     match layer {
-        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity),
+        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache),
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
         }
@@ -87,6 +152,7 @@ fn render_clip_instance(
     scene: &mut Scene,
     base_transform: Affine,
     animation_data: &crate::animation::AnimationData,
+    image_cache: &mut ImageCache,
 ) {
     // Try to find the clip in the document's clip libraries
     // For now, only handle VectorClips (VideoClip and AudioClip rendering not yet implemented)
@@ -214,19 +280,19 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache);
     }
 }
 
 /// Render a vector layer with all its clip instances and shape instances
-fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64) {
+fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64, image_cache: &mut ImageCache) {
 
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
     // Render clip instances first (they appear under shape instances)
     for clip_instance in &layer.clip_instances {
-        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data);
+        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache);
     }
 
     // Render each shape instance in the layer
@@ -384,29 +450,51 @@ fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scen
         // layer_opacity already includes parent_opacity from render_vector_layer
         let final_opacity = (layer_opacity * opacity) as f32;
 
-        // Render fill if present
-        if let Some(fill_color) = &shape.fill_color {
-            // Apply opacity to color
-            let alpha = ((fill_color.a as f32 / 255.0) * final_opacity * 255.0) as u8;
-            let adjusted_color = crate::shape::ShapeColor::rgba(
-                fill_color.r,
-                fill_color.g,
-                fill_color.b,
-                alpha,
-            );
+        // Determine fill rule
+        let fill_rule = match shape.fill_rule {
+            crate::shape::FillRule::NonZero => Fill::NonZero,
+            crate::shape::FillRule::EvenOdd => Fill::EvenOdd,
+        };
 
-            let fill_rule = match shape.fill_rule {
-                crate::shape::FillRule::NonZero => Fill::NonZero,
-                crate::shape::FillRule::EvenOdd => Fill::EvenOdd,
-            };
+        // Render fill - prefer image fill over color fill
+        let mut filled = false;
 
-            scene.fill(
-                fill_rule,
-                affine,
-                adjusted_color.to_peniko(),
-                None,
-                &path,
-            );
+        // Check for image fill first
+        if let Some(image_asset_id) = shape.image_fill {
+            if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
+                if let Some(image) = image_cache.get_or_decode(image_asset) {
+                    // Apply opacity to image (clone is cheap - Image uses Arc<Blob> internally)
+                    let image_with_alpha = (*image).clone().with_alpha(final_opacity);
+
+                    // The image is rendered as a fill for the shape path
+                    // Since the shape path is a rectangle matching the image dimensions,
+                    // the image should fill the shape perfectly
+                    scene.fill(fill_rule, affine, &image_with_alpha, None, &path);
+                    filled = true;
+                }
+            }
+        }
+
+        // Fall back to color fill if no image fill (or image failed to load)
+        if !filled {
+            if let Some(fill_color) = &shape.fill_color {
+                // Apply opacity to color
+                let alpha = ((fill_color.a as f32 / 255.0) * final_opacity * 255.0) as u8;
+                let adjusted_color = crate::shape::ShapeColor::rgba(
+                    fill_color.r,
+                    fill_color.g,
+                    fill_color.b,
+                    alpha,
+                );
+
+                scene.fill(
+                    fill_rule,
+                    affine,
+                    adjusted_color.to_peniko(),
+                    None,
+                    &path,
+                );
+            }
         }
 
         // Render stroke if present
@@ -445,8 +533,9 @@ mod tests {
     fn test_render_empty_document() {
         let doc = Document::new("Test");
         let mut scene = Scene::new();
+        let mut image_cache = ImageCache::new();
 
-        render_document(&doc, &mut scene);
+        render_document(&doc, &mut scene, &mut image_cache);
         // Should render background without errors
     }
 
@@ -472,7 +561,8 @@ mod tests {
 
         // Render
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
         // Should render without errors
     }
 
@@ -514,7 +604,8 @@ mod tests {
 
         // Render should work without errors
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]
@@ -544,7 +635,8 @@ mod tests {
 
         // Render should work
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]
@@ -570,14 +662,15 @@ mod tests {
 
         // Render
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]
     fn test_hidden_layer_not_rendered() {
         let mut doc = Document::new("Test");
 
-        let mut layer1 = VectorLayer::new("Layer 1");
+        let layer1 = VectorLayer::new("Layer 1");
         let mut layer2 = VectorLayer::new("Layer 2");
 
         // Hide layer 2
@@ -591,7 +684,8 @@ mod tests {
 
         // Render
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]
@@ -621,7 +715,8 @@ mod tests {
 
         // Render
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]
@@ -659,7 +754,8 @@ mod tests {
 
         // Render
         let mut scene = Scene::new();
-        render_document(&doc, &mut scene);
+        let mut image_cache = ImageCache::new();
+        render_document(&doc, &mut scene, &mut image_cache);
     }
 
     #[test]

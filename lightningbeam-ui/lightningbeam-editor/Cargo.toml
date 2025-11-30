@@ -38,3 +38,6 @@ pollster = { workspace = true }
 lightningcss = "1.0.0-alpha.68"
 clap = { version = "4.5", features = ["derive"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Native file dialogs
+rfd = "0.15"

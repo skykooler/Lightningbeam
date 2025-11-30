@@ -9,6 +9,8 @@ use uuid::Uuid;
 mod panes;
 use panes::{PaneInstance, PaneRenderer, SharedPaneState};
 
+mod widgets;
+
 mod menu;
 use menu::{MenuAction, MenuSystem};
 
@@ -271,6 +273,21 @@ struct EditorApp {
     // Playback state (global for all panes)
     playback_time: f64, // Current playback position in seconds (persistent - save with document)
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
+    // Asset drag-and-drop state
+    dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
+    // Import dialog state
+    last_import_filter: ImportFilter, // Last used import filter (remembered across imports)
+}
+
+/// Import filter types for the file dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ImportFilter {
+    #[default]
+    All,
+    Images,
+    Audio,
+    Video,
+    Midi,
 }
 
 impl EditorApp {
@@ -345,6 +362,8 @@ impl EditorApp {
             audio_system,
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
+            dragging_asset: None, // No asset being dragged initially
+            last_import_filter: ImportFilter::default(), // Default to "All Supported"
         }
     }
 
@@ -413,8 +432,90 @@ impl EditorApp {
                 // TODO: Implement revert
             }
             MenuAction::Import => {
-                println!("Menu: Import");
-                // TODO: Implement import
+                use lightningbeam_core::file_types::*;
+                use rfd::FileDialog;
+
+                // Build file filter from extension constants
+                let all_extensions: Vec<&str> = all_supported_extensions();
+
+                // Build dialog with filters in order based on last used filter
+                // The first filter added is the default in most file dialogs
+                let mut dialog = FileDialog::new().set_title("Import Asset");
+
+                // Add filters in order, with the last-used filter first
+                match self.last_import_filter {
+                    ImportFilter::All => {
+                        dialog = dialog
+                            .add_filter("All Supported", &all_extensions)
+                            .add_filter("Images", IMAGE_EXTENSIONS)
+                            .add_filter("Audio", AUDIO_EXTENSIONS)
+                            .add_filter("Video", VIDEO_EXTENSIONS)
+                            .add_filter("MIDI", MIDI_EXTENSIONS);
+                    }
+                    ImportFilter::Images => {
+                        dialog = dialog
+                            .add_filter("Images", IMAGE_EXTENSIONS)
+                            .add_filter("All Supported", &all_extensions)
+                            .add_filter("Audio", AUDIO_EXTENSIONS)
+                            .add_filter("Video", VIDEO_EXTENSIONS)
+                            .add_filter("MIDI", MIDI_EXTENSIONS);
+                    }
+                    ImportFilter::Audio => {
+                        dialog = dialog
+                            .add_filter("Audio", AUDIO_EXTENSIONS)
+                            .add_filter("All Supported", &all_extensions)
+                            .add_filter("Images", IMAGE_EXTENSIONS)
+                            .add_filter("Video", VIDEO_EXTENSIONS)
+                            .add_filter("MIDI", MIDI_EXTENSIONS);
+                    }
+                    ImportFilter::Video => {
+                        dialog = dialog
+                            .add_filter("Video", VIDEO_EXTENSIONS)
+                            .add_filter("All Supported", &all_extensions)
+                            .add_filter("Images", IMAGE_EXTENSIONS)
+                            .add_filter("Audio", AUDIO_EXTENSIONS)
+                            .add_filter("MIDI", MIDI_EXTENSIONS);
+                    }
+                    ImportFilter::Midi => {
+                        dialog = dialog
+                            .add_filter("MIDI", MIDI_EXTENSIONS)
+                            .add_filter("All Supported", &all_extensions)
+                            .add_filter("Images", IMAGE_EXTENSIONS)
+                            .add_filter("Audio", AUDIO_EXTENSIONS)
+                            .add_filter("Video", VIDEO_EXTENSIONS);
+                    }
+                }
+
+                let file = dialog.pick_file();
+
+                if let Some(path) = file {
+                    // Get extension and detect file type
+                    let extension = path.extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+
+                    match get_file_type(extension) {
+                        Some(FileType::Image) => {
+                            self.last_import_filter = ImportFilter::Images;
+                            self.import_image(&path);
+                        }
+                        Some(FileType::Audio) => {
+                            self.last_import_filter = ImportFilter::Audio;
+                            self.import_audio(&path);
+                        }
+                        Some(FileType::Video) => {
+                            self.last_import_filter = ImportFilter::Video;
+                            self.import_video(&path);
+                        }
+                        Some(FileType::Midi) => {
+                            self.last_import_filter = ImportFilter::Midi;
+                            self.import_midi(&path);
+                        }
+                        None => {
+                            println!("Unsupported file type: {}", extension);
+                        }
+                    }
+                }
             }
             MenuAction::Export => {
                 println!("Menu: Export");
@@ -510,63 +611,46 @@ impl EditorApp {
                 // TODO: Implement add MIDI track
             }
             MenuAction::AddTestClip => {
-                // Require an active layer
-                if let Some(layer_id) = self.active_layer_id {
-                    // Create a test vector clip (5 second duration)
-                    use lightningbeam_core::clip::{VectorClip, ClipInstance};
-                    use lightningbeam_core::layer::{VectorLayer, AnyLayer};
-                    use lightningbeam_core::shape::{Shape, ShapeColor};
-                    use lightningbeam_core::object::ShapeInstance;
-                    use kurbo::{Circle, Rect, Shape as KurboShape};
+                // Create a test vector clip and add it to the library (not to timeline)
+                use lightningbeam_core::clip::VectorClip;
+                use lightningbeam_core::layer::{VectorLayer, AnyLayer};
+                use lightningbeam_core::shape::{Shape, ShapeColor};
+                use lightningbeam_core::object::ShapeInstance;
+                use kurbo::{Circle, Rect, Shape as KurboShape};
 
-                    let mut test_clip = VectorClip::new("Test Clip", 400.0, 400.0, 5.0);
+                // Generate unique name based on existing clip count
+                let clip_count = self.action_executor.document().vector_clips.len();
+                let clip_name = format!("Test Clip {}", clip_count + 1);
 
-                    // Create a layer with some shapes
-                    let mut layer = VectorLayer::new("Test Layer");
+                let mut test_clip = VectorClip::new(&clip_name, 400.0, 400.0, 5.0);
 
-                    // Create a red circle shape
-                    let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
-                    let mut circle_shape = Shape::new(circle_path);
-                    circle_shape.fill_color = Some(ShapeColor::rgb(255, 0, 0));
-                    let circle_id = circle_shape.id;
-                    layer.add_shape(circle_shape);
+                // Create a layer with some shapes
+                let mut layer = VectorLayer::new("Shapes");
 
-                    // Create a blue rectangle shape
-                    let rect_path = Rect::new(200.0, 50.0, 350.0, 150.0).to_path(0.1);
-                    let mut rect_shape = Shape::new(rect_path);
-                    rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
-                    let rect_id = rect_shape.id;
-                    layer.add_shape(rect_shape);
+                // Create a red circle shape
+                let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
+                let mut circle_shape = Shape::new(circle_path);
+                circle_shape.fill_color = Some(ShapeColor::rgb(255, 0, 0));
+                let circle_id = circle_shape.id;
+                layer.add_shape(circle_shape);
 
-                    // Add shape instances
-                    layer.shape_instances.push(ShapeInstance::new(circle_id));
-                    layer.shape_instances.push(ShapeInstance::new(rect_id));
+                // Create a blue rectangle shape
+                let rect_path = Rect::new(200.0, 50.0, 350.0, 150.0).to_path(0.1);
+                let mut rect_shape = Shape::new(rect_path);
+                rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
+                let rect_id = rect_shape.id;
+                layer.add_shape(rect_shape);
 
-                    // Add the layer to the clip
-                    test_clip.layers.add_root(AnyLayer::Vector(layer));
+                // Add shape instances
+                layer.shape_instances.push(ShapeInstance::new(circle_id));
+                layer.shape_instances.push(ShapeInstance::new(rect_id));
 
-                    // Add to document's clip library
-                    let clip_id = self.action_executor.document_mut().add_vector_clip(test_clip);
+                // Add the layer to the clip
+                test_clip.layers.add_root(AnyLayer::Vector(layer));
 
-                    // Create clip instance at current time
-                    let current_time = self.action_executor.document().current_time;
-                    let instance = ClipInstance::new(clip_id)
-                        .with_timeline_start(current_time)
-                        .with_name("Test Instance");
-
-                    // Add to layer (only vector layers can have clip instances)
-                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
-                        use lightningbeam_core::layer::AnyLayer;
-                        if let AnyLayer::Vector(vector_layer) = layer {
-                            vector_layer.clip_instances.push(instance);
-                            println!("Added test clip instance with red circle and blue rectangle at time {}", current_time);
-                        } else {
-                            println!("Can only add clip instances to vector layers");
-                        }
-                    }
-                } else {
-                    println!("No active layer selected");
-                }
+                // Add to document's clip library only (user drags from Asset Library to timeline)
+                let _clip_id = self.action_executor.document_mut().add_vector_clip(test_clip);
+                println!("Added '{}' to Asset Library (drag to timeline to use)", clip_name);
             }
             MenuAction::DeleteLayer => {
                 println!("Menu: Delete Layer");
@@ -666,6 +750,148 @@ impl EditorApp {
             }
         }
     }
+
+    /// Import an image file as an ImageAsset
+    fn import_image(&mut self, path: &std::path::Path) {
+        use lightningbeam_core::clip::ImageAsset;
+
+        // Get filename for asset name
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled Image")
+            .to_string();
+
+        // Load image to get dimensions
+        match image::open(path) {
+            Ok(img) => {
+                let (width, height) = (img.width(), img.height());
+
+                // Read raw file data for embedding
+                let data = match std::fs::read(path) {
+                    Ok(data) => Some(data),
+                    Err(e) => {
+                        eprintln!("Warning: Could not embed image data: {}", e);
+                        None
+                    }
+                };
+
+                // Create image asset
+                let mut asset = ImageAsset::new(&name, path, width, height);
+                asset.data = data;
+
+                // Add to document
+                let asset_id = self.action_executor.document_mut().add_image_asset(asset);
+                println!("Imported image '{}' ({}x{}) - ID: {}", name, width, height, asset_id);
+            }
+            Err(e) => {
+                eprintln!("Failed to load image '{}': {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Import an audio file via daw-backend
+    fn import_audio(&mut self, path: &std::path::Path) {
+        use daw_backend::io::audio_file::AudioFile;
+        use lightningbeam_core::clip::{AudioClip, AudioClipType};
+
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled Audio")
+            .to_string();
+
+        // Load audio file via daw-backend
+        match AudioFile::load(path) {
+            Ok(audio_file) => {
+                let duration = audio_file.frames as f64 / audio_file.sample_rate as f64;
+                let channels = audio_file.channels;
+                let sample_rate = audio_file.sample_rate;
+
+                // Add to audio engine pool if available
+                if let Some(ref mut audio_system) = self.audio_system {
+                    // Send audio data to the engine
+                    let path_str = path.to_string_lossy().to_string();
+                    audio_system.controller.add_audio_file(
+                        path_str.clone(),
+                        audio_file.data,
+                        channels,
+                        sample_rate,
+                    );
+
+                    // For now, use a placeholder pool index (the engine will assign the real one)
+                    // In a full implementation, we'd wait for the AudioFileAdded event
+                    let pool_index = self.action_executor.document().audio_clips.len();
+
+                    // Create audio clip in document
+                    let clip = AudioClip::new_sampled(&name, pool_index, duration);
+                    let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+                    println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {}",
+                        name, duration, channels, sample_rate, clip_id);
+                } else {
+                    eprintln!("Cannot import audio: audio engine not initialized");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to load audio '{}': {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Import a MIDI file via daw-backend
+    fn import_midi(&mut self, path: &std::path::Path) {
+        use lightningbeam_core::clip::{AudioClip, AudioClipType, MidiEvent};
+
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled MIDI")
+            .to_string();
+
+        // Load MIDI file via daw-backend
+        // Note: daw-backend's load_midi_file returns a MidiClip with events
+        match daw_backend::io::midi_file::load_midi_file(path, 0, 44100) {
+            Ok(midi_clip) => {
+                // Convert daw-backend MidiEvents to our MidiEvent type
+                let events: Vec<MidiEvent> = midi_clip.events.iter().map(|e| {
+                    MidiEvent::new(e.timestamp, e.status, e.data1, e.data2)
+                }).collect();
+
+                let duration = midi_clip.duration;
+
+                // Create MIDI audio clip in document
+                let clip = AudioClip::new_midi(&name, duration, events, false);
+                let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+                println!("Imported MIDI '{}' ({:.1}s, {} events) - ID: {}",
+                    name, duration, midi_clip.events.len(), clip_id);
+            }
+            Err(e) => {
+                eprintln!("Failed to load MIDI '{}': {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Import a video file (placeholder - decoder not yet ported)
+    fn import_video(&mut self, path: &std::path::Path) {
+        use lightningbeam_core::clip::VideoClip;
+
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Untitled Video")
+            .to_string();
+
+        // TODO: Use video decoder to get actual dimensions/duration
+        // For now, create a placeholder with default values
+        let clip = VideoClip::new(
+            &name,
+            path.to_string_lossy().to_string(),
+            1920.0,  // Default width (TODO: probe video)
+            1080.0,  // Default height (TODO: probe video)
+            0.0,     // Duration unknown (TODO: probe video)
+            30.0,    // Default frame rate (TODO: probe video)
+        );
+
+        let clip_id = self.action_executor.document_mut().add_video_clip(clip);
+        println!("Imported video '{}' (placeholder - dimensions/duration unknown) - ID: {}", name, clip_id);
+        println!("Note: Video decoder not yet ported. Video preview unavailable.");
+    }
 }
 
 impl eframe::App for EditorApp {
@@ -705,43 +931,6 @@ impl eframe::App for EditorApp {
         if self.is_playing {
             ctx.request_repaint();
         }
-
-        // Check keyboard shortcuts (works on all platforms)
-        ctx.input(|i| {
-            // Check menu shortcuts
-            if let Some(action) = MenuSystem::check_shortcuts(i) {
-                self.handle_menu_action(action);
-            }
-
-            // Check tool shortcuts (only if no modifiers are held)
-            if !i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && !i.modifiers.command {
-                use lightningbeam_core::tool::Tool;
-
-                if i.key_pressed(egui::Key::V) {
-                    self.selected_tool = Tool::Select;
-                } else if i.key_pressed(egui::Key::P) {
-                    self.selected_tool = Tool::Draw;
-                } else if i.key_pressed(egui::Key::Q) {
-                    self.selected_tool = Tool::Transform;
-                } else if i.key_pressed(egui::Key::R) {
-                    self.selected_tool = Tool::Rectangle;
-                } else if i.key_pressed(egui::Key::E) {
-                    self.selected_tool = Tool::Ellipse;
-                } else if i.key_pressed(egui::Key::B) {
-                    self.selected_tool = Tool::PaintBucket;
-                } else if i.key_pressed(egui::Key::I) {
-                    self.selected_tool = Tool::Eyedropper;
-                } else if i.key_pressed(egui::Key::L) {
-                    self.selected_tool = Tool::Line;
-                } else if i.key_pressed(egui::Key::G) {
-                    self.selected_tool = Tool::Polygon;
-                } else if i.key_pressed(egui::Key::A) {
-                    self.selected_tool = Tool::BezierEdit;
-                } else if i.key_pressed(egui::Key::T) {
-                    self.selected_tool = Tool::Text;
-                }
-            }
-        });
 
         // Top menu bar (egui-rendered on all platforms)
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -791,6 +980,7 @@ impl eframe::App for EditorApp {
                 audio_controller: self.audio_system.as_mut().map(|sys| &mut sys.controller),
                 playback_time: &mut self.playback_time,
                 is_playing: &mut self.is_playing,
+                dragging_asset: &mut self.dragging_asset,
             };
 
             render_layout_node(
@@ -861,6 +1051,46 @@ impl eframe::App for EditorApp {
         if let Some(action) = layout_action {
             self.apply_layout_action(action);
         }
+
+        // Check keyboard shortcuts AFTER UI is rendered
+        // This ensures text fields have had a chance to claim focus first
+        let wants_keyboard = ctx.wants_keyboard_input();
+
+        ctx.input(|i| {
+            // Check menu shortcuts (these use modifiers, so allow even when typing)
+            if let Some(action) = MenuSystem::check_shortcuts(i) {
+                self.handle_menu_action(action);
+            }
+
+            // Check tool shortcuts (only if no modifiers are held AND no text input is focused)
+            if !wants_keyboard && !i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && !i.modifiers.command {
+                use lightningbeam_core::tool::Tool;
+
+                if i.key_pressed(egui::Key::V) {
+                    self.selected_tool = Tool::Select;
+                } else if i.key_pressed(egui::Key::P) {
+                    self.selected_tool = Tool::Draw;
+                } else if i.key_pressed(egui::Key::Q) {
+                    self.selected_tool = Tool::Transform;
+                } else if i.key_pressed(egui::Key::R) {
+                    self.selected_tool = Tool::Rectangle;
+                } else if i.key_pressed(egui::Key::E) {
+                    self.selected_tool = Tool::Ellipse;
+                } else if i.key_pressed(egui::Key::B) {
+                    self.selected_tool = Tool::PaintBucket;
+                } else if i.key_pressed(egui::Key::I) {
+                    self.selected_tool = Tool::Eyedropper;
+                } else if i.key_pressed(egui::Key::L) {
+                    self.selected_tool = Tool::Line;
+                } else if i.key_pressed(egui::Key::G) {
+                    self.selected_tool = Tool::Polygon;
+                } else if i.key_pressed(egui::Key::A) {
+                    self.selected_tool = Tool::BezierEdit;
+                } else if i.key_pressed(egui::Key::T) {
+                    self.selected_tool = Tool::Text;
+                }
+            }
+        });
     }
 
 }
@@ -890,6 +1120,7 @@ struct RenderContext<'a> {
     audio_controller: Option<&'a mut daw_backend::EngineController>,
     playback_time: &'a mut f64,
     is_playing: &'a mut bool,
+    dragging_asset: &'a mut Option<panes::DraggingAsset>,
 }
 
 /// Recursively render a layout node with drag support
@@ -1202,6 +1433,7 @@ fn render_pane(
         rect,
         0.0,
         egui::Stroke::new(border_width, border_color),
+        egui::StrokeKind::Middle,
     );
 
     // Draw header separator line
@@ -1249,6 +1481,7 @@ fn render_pane(
             icon_button_rect,
             4.0,
             egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            egui::StrokeKind::Middle,
         );
     }
 
@@ -1352,6 +1585,7 @@ fn render_pane(
                 audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
+                dragging_asset: ctx.dragging_asset,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -1399,6 +1633,7 @@ fn render_pane(
                 audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
+                dragging_asset: ctx.dragging_asset,
             };
 
             // Render pane content (header was already rendered above)
@@ -1572,6 +1807,7 @@ fn render_toolbar(
                 button_rect,
                 4.0,
                 egui::Stroke::new(2.0, egui::Color32::from_gray(180)),
+                egui::StrokeKind::Middle,
             );
         }
 
@@ -1584,6 +1820,7 @@ fn render_toolbar(
                 button_rect,
                 4.0,
                 egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255)),
+                egui::StrokeKind::Middle,
             );
         }
 
@@ -1612,6 +1849,7 @@ fn pane_color(pane_type: PaneType) -> egui::Color32 {
         PaneType::PianoRoll => egui::Color32::from_rgb(55, 35, 45),
         PaneType::NodeEditor => egui::Color32::from_rgb(30, 45, 50),
         PaneType::PresetBrowser => egui::Color32::from_rgb(50, 45, 30),
+        PaneType::AssetLibrary => egui::Color32::from_rgb(45, 50, 35),
     }
 }
 

@@ -29,6 +29,8 @@ pub enum PaneType {
     NodeEditor,
     /// Preset/asset browser
     PresetBrowser,
+    /// Asset library for browsing clips
+    AssetLibrary,
 }
 
 impl PaneType {
@@ -43,6 +45,7 @@ impl PaneType {
             PaneType::PianoRoll => "Piano Roll",
             PaneType::NodeEditor => "Node Editor",
             PaneType::PresetBrowser => "Preset Browser",
+            PaneType::AssetLibrary => "Asset Library",
         }
     }
 
@@ -59,6 +62,7 @@ impl PaneType {
             PaneType::PianoRoll => "piano-roll.svg",
             PaneType::NodeEditor => "node-editor.svg",
             PaneType::PresetBrowser => "stage.svg", // TODO: needs own icon
+            PaneType::AssetLibrary => "stage.svg", // TODO: needs own icon
         }
     }
 
@@ -74,6 +78,7 @@ impl PaneType {
             "pianoroll" => Some(PaneType::PianoRoll),
             "nodeeditor" => Some(PaneType::NodeEditor),
             "presetbrowser" => Some(PaneType::PresetBrowser),
+            "assetlibrary" => Some(PaneType::AssetLibrary),
             _ => None,
         }
     }
@@ -89,6 +94,7 @@ impl PaneType {
             PaneType::NodeEditor,
             PaneType::PianoRoll,
             PaneType::PresetBrowser,
+            PaneType::AssetLibrary,
         ]
     }
 
@@ -103,6 +109,7 @@ impl PaneType {
             PaneType::PianoRoll => "pianoRoll",
             PaneType::NodeEditor => "nodeEditor",
             PaneType::PresetBrowser => "presetBrowser",
+            PaneType::AssetLibrary => "assetLibrary",
         }
     }
 }

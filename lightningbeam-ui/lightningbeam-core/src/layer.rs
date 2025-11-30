@@ -324,6 +324,21 @@ impl VectorLayer {
     }
 }
 
+/// Audio layer subtype - distinguishes sampled audio from MIDI
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioLayerType {
+    /// Sampled audio (WAV, MP3, etc.)
+    Sampled,
+    /// MIDI sequence
+    Midi,
+}
+
+impl Default for AudioLayerType {
+    fn default() -> Self {
+        AudioLayerType::Sampled
+    }
+}
+
 /// Audio layer containing audio clips
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AudioLayer {
@@ -333,6 +348,10 @@ pub struct AudioLayer {
     /// Clip instances (references to audio clips)
     /// AudioLayer can contain instances of AudioClips (sampled or MIDI)
     pub clip_instances: Vec<ClipInstance>,
+
+    /// Audio layer subtype (sampled vs MIDI)
+    #[serde(default)]
+    pub audio_layer_type: AudioLayerType,
 }
 
 impl LayerTrait for AudioLayer {
@@ -406,11 +425,26 @@ impl LayerTrait for AudioLayer {
 }
 
 impl AudioLayer {
-    /// Create a new audio layer
+    /// Create a new sampled audio layer
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             layer: Layer::new(LayerType::Audio, name),
             clip_instances: Vec::new(),
+            audio_layer_type: AudioLayerType::Sampled,
+        }
+    }
+
+    /// Create a new sampled audio layer (explicit)
+    pub fn new_sampled(name: impl Into<String>) -> Self {
+        Self::new(name)
+    }
+
+    /// Create a new MIDI layer
+    pub fn new_midi(name: impl Into<String>) -> Self {
+        Self {
+            layer: Layer::new(LayerType::Audio, name),
+            clip_instances: Vec::new(),
+            audio_layer_type: AudioLayerType::Midi,
         }
     }
 }

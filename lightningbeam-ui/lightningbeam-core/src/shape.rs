@@ -170,7 +170,7 @@ impl ShapeColor {
 
     /// Convert to peniko Color
     pub fn to_peniko(&self) -> Color {
-        Color::rgba8(self.r, self.g, self.b, self.a)
+        Color::from_rgba8(self.r, self.g, self.b, self.a)
     }
 
     /// Convert to peniko Brush
@@ -197,11 +197,13 @@ impl Default for ShapeColor {
 
 impl From<Color> for ShapeColor {
     fn from(color: Color) -> Self {
+        // peniko 0.4 uses components array [r, g, b, a] as floats 0.0-1.0
+        let components = color.components;
         Self {
-            r: color.r,
-            g: color.g,
-            b: color.b,
-            a: color.a,
+            r: (components[0] * 255.0) as u8,
+            g: (components[1] * 255.0) as u8,
+            b: (components[2] * 255.0) as u8,
+            a: (components[3] * 255.0) as u8,
         }
     }
 }
@@ -216,8 +218,13 @@ pub struct Shape {
     /// The shape animates between these by varying the shapeIndex property
     pub versions: Vec<ShapeVersion>,
 
-    /// Fill color
+    /// Fill color (used when image_fill is None)
     pub fill_color: Option<ShapeColor>,
+
+    /// Image fill - references an ImageAsset by UUID
+    /// When set, the image is rendered as the fill instead of fill_color
+    #[serde(default)]
+    pub image_fill: Option<Uuid>,
 
     /// Fill rule
     #[serde(default)]
@@ -237,6 +244,7 @@ impl Shape {
             id: Uuid::new_v4(),
             versions: vec![ShapeVersion::new(path, 0)],
             fill_color: Some(ShapeColor::rgb(0, 0, 0)),
+            image_fill: None,
             fill_rule: FillRule::NonZero,
             stroke_color: None,
             stroke_style: None,
@@ -249,10 +257,18 @@ impl Shape {
             id,
             versions: vec![ShapeVersion::new(path, 0)],
             fill_color: Some(ShapeColor::rgb(0, 0, 0)),
+            image_fill: None,
             fill_rule: FillRule::NonZero,
             stroke_color: None,
             stroke_style: None,
         }
+    }
+
+    /// Set image fill (references an ImageAsset by UUID)
+    pub fn with_image_fill(mut self, image_asset_id: Uuid) -> Self {
+        self.image_fill = Some(image_asset_id);
+        self.fill_color = None; // Image fill takes precedence
+        self
     }
 
     /// Add a new version for morphing

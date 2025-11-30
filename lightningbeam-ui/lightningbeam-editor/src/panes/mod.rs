@@ -5,6 +5,7 @@
 
 use eframe::egui;
 use lightningbeam_core::{pane::PaneType, tool::Tool};
+use uuid::Uuid;
 
 // Type alias for node paths (matches main.rs)
 pub type NodePath = Vec<usize>;
@@ -18,6 +19,37 @@ pub struct ViewActionHandler {
     pub zoom_center: egui::Vec2,
 }
 
+/// Clip type for drag-and-drop operations
+/// Distinguishes between different clip/layer type combinations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragClipType {
+    /// Vector animation clip
+    Vector,
+    /// Video clip
+    Video,
+    /// Sampled audio clip (WAV, MP3, etc.)
+    AudioSampled,
+    /// MIDI clip
+    AudioMidi,
+    /// Static image asset
+    Image,
+}
+
+/// Information about an asset being dragged from the Asset Library
+#[derive(Debug, Clone)]
+pub struct DraggingAsset {
+    /// The clip ID being dragged
+    pub clip_id: Uuid,
+    /// Type of clip (determines compatible layer types)
+    pub clip_type: DragClipType,
+    /// Display name
+    pub name: String,
+    /// Duration in seconds
+    pub duration: f64,
+    /// Dimensions (width, height) for vector/video clips, None for audio
+    pub dimensions: Option<(f64, f64)>,
+}
+
 pub mod toolbar;
 pub mod stage;
 pub mod timeline;
@@ -26,6 +58,7 @@ pub mod outliner;
 pub mod piano_roll;
 pub mod node_editor;
 pub mod preset_browser;
+pub mod asset_library;
 
 /// Which color mode is active for the eyedropper tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +111,8 @@ pub struct SharedPaneState<'a> {
     /// Global playback state
     pub playback_time: &'a mut f64,  // Current playback position in seconds
     pub is_playing: &'a mut bool,    // Whether playback is currently active
+    /// Asset being dragged from Asset Library (for cross-pane drag-and-drop)
+    pub dragging_asset: &'a mut Option<DraggingAsset>,
 }
 
 /// Trait for pane rendering
@@ -116,6 +151,7 @@ pub enum PaneInstance {
     PianoRoll(piano_roll::PianoRollPane),
     NodeEditor(node_editor::NodeEditorPane),
     PresetBrowser(preset_browser::PresetBrowserPane),
+    AssetLibrary(asset_library::AssetLibraryPane),
 }
 
 impl PaneInstance {
@@ -132,6 +168,9 @@ impl PaneInstance {
             PaneType::PresetBrowser => {
                 PaneInstance::PresetBrowser(preset_browser::PresetBrowserPane::new())
             }
+            PaneType::AssetLibrary => {
+                PaneInstance::AssetLibrary(asset_library::AssetLibraryPane::new())
+            }
         }
     }
 
@@ -146,6 +185,7 @@ impl PaneInstance {
             PaneInstance::PianoRoll(_) => PaneType::PianoRoll,
             PaneInstance::NodeEditor(_) => PaneType::NodeEditor,
             PaneInstance::PresetBrowser(_) => PaneType::PresetBrowser,
+            PaneInstance::AssetLibrary(_) => PaneType::AssetLibrary,
         }
     }
 }
@@ -161,6 +201,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::PianoRoll(p) => p.render_header(ui, shared),
             PaneInstance::NodeEditor(p) => p.render_header(ui, shared),
             PaneInstance::PresetBrowser(p) => p.render_header(ui, shared),
+            PaneInstance::AssetLibrary(p) => p.render_header(ui, shared),
         }
     }
 
@@ -180,6 +221,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::PianoRoll(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::NodeEditor(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::PresetBrowser(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::AssetLibrary(p) => p.render_content(ui, rect, path, shared),
         }
     }
 
@@ -193,6 +235,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::PianoRoll(p) => p.name(),
             PaneInstance::NodeEditor(p) => p.name(),
             PaneInstance::PresetBrowser(p) => p.name(),
+            PaneInstance::AssetLibrary(p) => p.name(),
         }
     }
 }
