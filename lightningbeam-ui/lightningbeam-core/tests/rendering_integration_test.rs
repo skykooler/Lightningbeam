@@ -7,7 +7,7 @@ use lightningbeam_core::clip::{ClipInstance, VectorClip};
 use lightningbeam_core::document::Document;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait, VectorLayer};
 use lightningbeam_core::object::ShapeInstance;
-use lightningbeam_core::renderer::{render_document, render_document_with_transform};
+use lightningbeam_core::renderer::{render_document, render_document_with_transform, ImageCache};
 use lightningbeam_core::shape::{Shape, ShapeColor};
 use vello::kurbo::{Affine, Circle, Shape as KurboShape};
 use vello::Scene;
@@ -53,28 +53,31 @@ fn setup_rendering_document() -> (Document, Vec<uuid::Uuid>) {
 fn test_render_empty_document() {
     let document = Document::new("Empty");
     let mut scene = Scene::new();
+    let mut image_cache = ImageCache::new();
 
     // Should not panic
-    render_document(&document, &mut scene);
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
 fn test_render_document_with_shapes() {
     let (document, _ids) = setup_rendering_document();
     let mut scene = Scene::new();
+    let mut image_cache = ImageCache::new();
 
     // Should render all 3 layers without error
-    render_document(&document, &mut scene);
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
 fn test_render_with_transform() {
     let (document, _ids) = setup_rendering_document();
     let mut scene = Scene::new();
+    let mut image_cache = ImageCache::new();
 
     // Render with zoom and pan
     let transform = Affine::translate((100.0, 50.0)) * Affine::scale(2.0);
-    render_document_with_transform(&document, &mut scene, transform);
+    render_document_with_transform(&document, &mut scene, transform, &mut image_cache);
 }
 
 #[test]
@@ -98,7 +101,8 @@ fn test_render_solo_single_layer() {
 
     // Render should work
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -121,7 +125,8 @@ fn test_render_solo_multiple_layers() {
     assert_eq!(layers_to_render.len(), 2);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -137,7 +142,8 @@ fn test_render_hidden_layer_not_rendered() {
     assert_eq!(document.visible_layers().count(), 2);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -161,7 +167,8 @@ fn test_render_with_layer_opacity() {
     assert_eq!(document.root.get_child(&ids[2]).unwrap().opacity(), 1.0);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -198,7 +205,8 @@ fn test_render_with_clip_instances() {
     document.set_time(2.0);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -223,7 +231,8 @@ fn test_render_clip_instance_outside_time_range() {
 
     // Clip shouldn't render (it hasn't started yet)
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -242,7 +251,8 @@ fn test_render_all_layers_hidden() {
 
     // Should still render (just background)
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -269,7 +279,8 @@ fn test_render_solo_hidden_layer_interaction() {
     assert_eq!(document.visible_layers().count(), 2);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
@@ -278,17 +289,19 @@ fn test_render_background_color() {
     document.background_color = ShapeColor::rgb(128, 128, 128);
 
     let mut scene = Scene::new();
-    render_document(&document, &mut scene);
+    let mut image_cache = ImageCache::new();
+    render_document(&document, &mut scene, &mut image_cache);
 }
 
 #[test]
 fn test_render_at_different_times() {
     let (mut document, _ids) = setup_rendering_document();
+    let mut image_cache = ImageCache::new();
 
     // Render at different times
     for time in [0.0, 0.5, 1.0, 2.5, 5.0, 10.0] {
         document.set_time(time);
         let mut scene = Scene::new();
-        render_document(&document, &mut scene);
+        render_document(&document, &mut scene, &mut image_cache);
     }
 }

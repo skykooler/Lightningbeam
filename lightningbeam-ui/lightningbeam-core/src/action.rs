@@ -9,8 +9,16 @@
 //! - `ActionExecutor`: Wraps the document and manages undo/redo stacks
 //! - Document mutations are only accessible via `pub(crate)` methods
 //! - External code gets read-only access via `ActionExecutor::document()`
+//!
+//! ## Memory Model
+//!
+//! The document is stored in an `Arc<Document>` for efficient cloning during
+//! GPU render callbacks. When mutation is needed, `Arc::make_mut()` provides
+//! copy-on-write semantics - if other Arc holders exist (e.g., in-flight render
+//! callbacks), the document is cloned before mutation, preserving their snapshot.
 
 use crate::document::Document;
+use std::sync::Arc;
 
 /// Action trait for undo/redo operations
 ///
@@ -31,9 +39,12 @@ pub trait Action: Send {
 ///
 /// This is the only way to get mutable access to the document, ensuring
 /// all mutations go through the action system.
+///
+/// The document is stored in `Arc<Document>` for efficient sharing with
+/// render callbacks. Use `document_arc()` for cheap cloning to GPU passes.
 pub struct ActionExecutor {
-    /// The document being edited
-    document: Document,
+    /// The document being edited (wrapped in Arc for cheap cloning)
+    document: Arc<Document>,
 
     /// Stack of executed actions (for undo)
     undo_stack: Vec<Box<dyn Action>>,
@@ -49,7 +60,7 @@ impl ActionExecutor {
     /// Create a new action executor with the given document
     pub fn new(document: Document) -> Self {
         Self {
-            document,
+            document: Arc::new(document),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_undo_depth: 100, // Default: keep last 100 actions
@@ -64,19 +75,33 @@ impl ActionExecutor {
         &self.document
     }
 
+    /// Get a cheap clone of the document Arc for render callbacks
+    ///
+    /// Use this when passing the document to GPU render passes or other
+    /// contexts that need to own a reference. Cloning Arc is just a pointer
+    /// copy + atomic increment, not a deep clone.
+    pub fn document_arc(&self) -> Arc<Document> {
+        Arc::clone(&self.document)
+    }
+
     /// Get mutable access to the document
+    ///
+    /// Uses copy-on-write semantics: if other Arc holders exist (e.g., in-flight
+    /// render callbacks), the document is cloned before mutation. Otherwise,
+    /// returns direct mutable access.
+    ///
     /// Note: This should only be used for live previews. Permanent changes
     /// should go through the execute() method to support undo/redo.
     pub fn document_mut(&mut self) -> &mut Document {
-        &mut self.document
+        Arc::make_mut(&mut self.document)
     }
 
     /// Execute an action and add it to the undo stack
     ///
     /// This clears the redo stack since we're creating a new timeline branch.
     pub fn execute(&mut self, mut action: Box<dyn Action>) {
-        // Apply the action
-        action.execute(&mut self.document);
+        // Apply the action (uses copy-on-write if other Arc holders exist)
+        action.execute(Arc::make_mut(&mut self.document));
 
         // Clear redo stack (new action invalidates redo history)
         self.redo_stack.clear();
@@ -95,8 +120,8 @@ impl ActionExecutor {
     /// Returns true if an action was undone, false if undo stack is empty.
     pub fn undo(&mut self) -> bool {
         if let Some(mut action) = self.undo_stack.pop() {
-            // Rollback the action
-            action.rollback(&mut self.document);
+            // Rollback the action (uses copy-on-write if other Arc holders exist)
+            action.rollback(Arc::make_mut(&mut self.document));
 
             // Move to redo stack
             self.redo_stack.push(action);
@@ -112,8 +137,8 @@ impl ActionExecutor {
     /// Returns true if an action was redone, false if redo stack is empty.
     pub fn redo(&mut self) -> bool {
         if let Some(mut action) = self.redo_stack.pop() {
-            // Re-execute the action
-            action.execute(&mut self.document);
+            // Re-execute the action (uses copy-on-write if other Arc holders exist)
+            action.execute(Arc::make_mut(&mut self.document));
 
             // Move back to undo stack
             self.undo_stack.push(action);

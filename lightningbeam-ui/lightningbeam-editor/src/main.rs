@@ -277,6 +277,11 @@ struct EditorApp {
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
     // Import dialog state
     last_import_filter: ImportFilter, // Last used import filter (remembered across imports)
+    // Tool-specific options (displayed in infopanel)
+    stroke_width: f64,               // Stroke width for drawing tools (default: 3.0)
+    fill_enabled: bool,              // Whether to fill shapes (default: true)
+    paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
+    polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
 }
 
 /// Import filter types for the file dialog
@@ -308,10 +313,11 @@ impl EditorApp {
         use lightningbeam_core::shape::{Shape, ShapeColor};
         use vello::kurbo::{Circle, Shape as KurboShape};
 
-        let circle = Circle::new((200.0, 150.0), 50.0);
+        // Create circle centered at origin, position via instance transform
+        let circle = Circle::new((0.0, 0.0), 50.0);
         let path = circle.to_path(0.1);
         let shape = Shape::new(path).with_fill(ShapeColor::rgb(100, 150, 250));
-        let object = ShapeInstance::new(shape.id);
+        let object = ShapeInstance::new(shape.id).with_position(200.0, 150.0);
 
         let mut vector_layer = VectorLayer::new("Layer 1");
         vector_layer.add_shape(shape);
@@ -364,6 +370,10 @@ impl EditorApp {
             is_playing: false,  // Start paused
             dragging_asset: None, // No asset being dragged initially
             last_import_filter: ImportFilter::default(), // Default to "All Supported"
+            stroke_width: 3.0,               // Default stroke width
+            fill_enabled: true,              // Default to filling shapes
+            paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
+            polygon_sides: 5,                // Default to pentagon
         }
     }
 
@@ -981,6 +991,10 @@ impl eframe::App for EditorApp {
                 playback_time: &mut self.playback_time,
                 is_playing: &mut self.is_playing,
                 dragging_asset: &mut self.dragging_asset,
+                stroke_width: &mut self.stroke_width,
+                fill_enabled: &mut self.fill_enabled,
+                paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
+                polygon_sides: &mut self.polygon_sides,
             };
 
             render_layout_node(
@@ -1121,6 +1135,11 @@ struct RenderContext<'a> {
     playback_time: &'a mut f64,
     is_playing: &'a mut bool,
     dragging_asset: &'a mut Option<panes::DraggingAsset>,
+    // Tool-specific options for infopanel
+    stroke_width: &'a mut f64,
+    fill_enabled: &'a mut bool,
+    paint_bucket_gap_tolerance: &'a mut f64,
+    polygon_sides: &'a mut u32,
 }
 
 /// Recursively render a layout node with drag support
@@ -1586,6 +1605,10 @@ fn render_pane(
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
                 dragging_asset: ctx.dragging_asset,
+                stroke_width: ctx.stroke_width,
+                fill_enabled: ctx.fill_enabled,
+                paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
+                polygon_sides: ctx.polygon_sides,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -1634,6 +1657,10 @@ fn render_pane(
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
                 dragging_asset: ctx.dragging_asset,
+                stroke_width: ctx.stroke_width,
+                fill_enabled: ctx.fill_enabled,
+                paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
+                polygon_sides: ctx.polygon_sides,
             };
 
             // Render pane content (header was already rendered above)

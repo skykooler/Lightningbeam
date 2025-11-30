@@ -113,6 +113,15 @@ pub struct SharedPaneState<'a> {
     pub is_playing: &'a mut bool,    // Whether playback is currently active
     /// Asset being dragged from Asset Library (for cross-pane drag-and-drop)
     pub dragging_asset: &'a mut Option<DraggingAsset>,
+    // Tool-specific options for infopanel
+    /// Stroke width for drawing tools (Draw, Rectangle, Ellipse, Line, Polygon)
+    pub stroke_width: &'a mut f64,
+    /// Whether to fill shapes when drawing (Rectangle, Ellipse, Polygon)
+    pub fill_enabled: &'a mut bool,
+    /// Fill gap tolerance for paint bucket tool
+    pub paint_bucket_gap_tolerance: &'a mut f64,
+    /// Number of sides for polygon tool
+    pub polygon_sides: &'a mut u32,
 }
 
 /// Trait for pane rendering

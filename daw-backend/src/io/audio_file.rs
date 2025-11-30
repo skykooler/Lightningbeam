@@ -136,25 +136,48 @@ impl AudioFile {
     /// Generate a waveform overview with the specified number of peaks
     /// This creates a downsampled representation suitable for timeline visualization
     pub fn generate_waveform_overview(&self, target_peaks: usize) -> Vec<WaveformPeak> {
+        self.generate_waveform_overview_range(0, self.frames as usize, target_peaks)
+    }
+
+    /// Generate a waveform overview for a specific range of frames
+    ///
+    /// # Arguments
+    /// * `start_frame` - Starting frame index (0-based)
+    /// * `end_frame` - Ending frame index (exclusive)
+    /// * `target_peaks` - Desired number of peaks to generate
+    pub fn generate_waveform_overview_range(
+        &self,
+        start_frame: usize,
+        end_frame: usize,
+        target_peaks: usize,
+    ) -> Vec<WaveformPeak> {
         if self.frames == 0 || target_peaks == 0 {
             return Vec::new();
         }
 
         let total_frames = self.frames as usize;
-        let frames_per_peak = (total_frames / target_peaks).max(1);
-        let actual_peaks = (total_frames + frames_per_peak - 1) / frames_per_peak;
+        let start_frame = start_frame.min(total_frames);
+        let end_frame = end_frame.min(total_frames);
+
+        if start_frame >= end_frame {
+            return Vec::new();
+        }
+
+        let range_frames = end_frame - start_frame;
+        let frames_per_peak = (range_frames / target_peaks).max(1);
+        let actual_peaks = (range_frames + frames_per_peak - 1) / frames_per_peak;
 
         let mut peaks = Vec::with_capacity(actual_peaks);
 
         for peak_idx in 0..actual_peaks {
-            let start_frame = peak_idx * frames_per_peak;
-            let end_frame = ((peak_idx + 1) * frames_per_peak).min(total_frames);
+            let peak_start = start_frame + peak_idx * frames_per_peak;
+            let peak_end = (start_frame + (peak_idx + 1) * frames_per_peak).min(end_frame);
 
             let mut min = 0.0f32;
             let mut max = 0.0f32;
 
             // Scan all samples in this window
-            for frame_idx in start_frame..end_frame {
+            for frame_idx in peak_start..peak_end {
                 // For multi-channel audio, combine all channels
                 for ch in 0..self.channels as usize {
                     let sample_idx = frame_idx * self.channels as usize + ch;

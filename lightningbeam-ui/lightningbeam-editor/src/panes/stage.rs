@@ -231,13 +231,14 @@ struct VelloCallback {
     pan_offset: egui::Vec2,
     zoom: f32,
     instance_id: u64,
-    document: lightningbeam_core::document::Document,
+    document: std::sync::Arc<lightningbeam_core::document::Document>,
     tool_state: lightningbeam_core::tool::ToolState,
     active_layer_id: Option<uuid::Uuid>,
     drag_delta: Option<vello::kurbo::Vec2>, // Delta for drag preview (world space)
     selection: lightningbeam_core::selection::Selection,
     fill_color: egui::Color32, // Current fill color for previews
     stroke_color: egui::Color32, // Current stroke color for previews
+    stroke_width: f64, // Current stroke width for previews
     selected_tool: lightningbeam_core::tool::Tool, // Current tool for rendering mode-specific UI
     eyedropper_request: Option<(egui::Pos2, super::ColorMode)>, // Pending eyedropper sample
     playback_time: f64, // Current playback time for animation evaluation
@@ -249,18 +250,19 @@ impl VelloCallback {
         pan_offset: egui::Vec2,
         zoom: f32,
         instance_id: u64,
-        document: lightningbeam_core::document::Document,
+        document: std::sync::Arc<lightningbeam_core::document::Document>,
         tool_state: lightningbeam_core::tool::ToolState,
         active_layer_id: Option<uuid::Uuid>,
         drag_delta: Option<vello::kurbo::Vec2>,
         selection: lightningbeam_core::selection::Selection,
         fill_color: egui::Color32,
         stroke_color: egui::Color32,
+        stroke_width: f64,
         selected_tool: lightningbeam_core::tool::Tool,
         eyedropper_request: Option<(egui::Pos2, super::ColorMode)>,
         playback_time: f64,
     ) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, selected_tool, eyedropper_request, playback_time }
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time }
     }
 }
 
@@ -331,14 +333,44 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // Render each object at its preview position (original + delta)
                         for (object_id, original_pos) in original_positions {
                             // Try shape instance first
-                            if let Some(_object) = vector_layer.get_object(object_id) {
-                                if let Some(shape) = vector_layer.get_shape(&_object.shape_id) {
+                            if let Some(object) = vector_layer.get_object(object_id) {
+                                if let Some(shape) = vector_layer.get_shape(&object.shape_id) {
                                     // New position = original + delta
                                     let new_x = original_pos.x + delta.x;
                                     let new_y = original_pos.y + delta.y;
 
-                                    // Build transform for preview position
-                                    let object_transform = Affine::translate((new_x, new_y));
+                                    // Build skew transform around shape center (matching renderer.rs)
+                                    let path = shape.path();
+                                    let skew_transform = if object.transform.skew_x != 0.0 || object.transform.skew_y != 0.0 {
+                                        let bbox = path.bounding_box();
+                                        let center_x = (bbox.x0 + bbox.x1) / 2.0;
+                                        let center_y = (bbox.y0 + bbox.y1) / 2.0;
+
+                                        let skew_x_affine = if object.transform.skew_x != 0.0 {
+                                            Affine::skew(object.transform.skew_x.to_radians().tan(), 0.0)
+                                        } else {
+                                            Affine::IDENTITY
+                                        };
+
+                                        let skew_y_affine = if object.transform.skew_y != 0.0 {
+                                            Affine::skew(0.0, object.transform.skew_y.to_radians().tan())
+                                        } else {
+                                            Affine::IDENTITY
+                                        };
+
+                                        Affine::translate((center_x, center_y))
+                                            * skew_x_affine
+                                            * skew_y_affine
+                                            * Affine::translate((-center_x, -center_y))
+                                    } else {
+                                        Affine::IDENTITY
+                                    };
+
+                                    // Build full transform: translate * rotate * scale * skew
+                                    let object_transform = Affine::translate((new_x, new_y))
+                                        * Affine::rotate(object.transform.rotation.to_radians())
+                                        * Affine::scale_non_uniform(object.transform.scale_x, object.transform.scale_y)
+                                        * skew_transform;
                                     let combined_transform = camera_transform * object_transform;
 
                                     // Render shape with semi-transparent fill (light blue, 40% opacity)
@@ -348,7 +380,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         combined_transform,
                                         &Brush::Solid(alpha_color),
                                         None,
-                                        shape.path(),
+                                        path,
                                     );
                                 }
                             }
@@ -783,8 +815,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 preview_path.line_to(*point);
                             }
 
-                            // Draw the preview path with stroke
-                            let stroke_width = (2.0 / self.zoom.max(0.5) as f64).max(1.0);
+                            // Draw the preview path with stroke using configured stroke width
                             let stroke_color = Color::from_rgb8(
                                 self.stroke_color.r(),
                                 self.stroke_color.g(),
@@ -792,7 +823,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             );
 
                             scene.stroke(
-                                &Stroke::new(stroke_width),
+                                &Stroke::new(self.stroke_width),
                                 camera_transform,
                                 stroke_color,
                                 None,
@@ -1636,8 +1667,8 @@ impl StagePane {
         // Mouse up: create the rectangle shape
         if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingRectangle { .. })) {
             if let ToolState::CreatingRectangle { start_point, current_point, centered, constrain_square } = shared.tool_state.clone() {
-                // Calculate rectangle bounds based on mode
-                let (width, height, position) = if centered {
+                // Calculate rectangle bounds and center position based on mode
+                let (width, height, center) = if centered {
                     // Centered mode: start_point is center
                     let dx = current_point.x - start_point.x;
                     let dy = current_point.y - start_point.y;
@@ -1649,8 +1680,8 @@ impl StagePane {
                         (dx.abs() * 2.0, dy.abs() * 2.0)
                     };
 
-                    let pos = Point::new(start_point.x - w / 2.0, start_point.y - h / 2.0);
-                    (w, h, pos)
+                    // start_point is already the center
+                    (w, h, start_point)
                 } else {
                     // Corner mode: start_point is corner
                     let mut min_x = start_point.x.min(current_point.x);
@@ -1676,21 +1707,35 @@ impl StagePane {
                         }
                     }
 
-                    (max_x - min_x, max_y - min_y, Point::new(min_x, min_y))
+                    // Return width, height, and center position
+                    let center_x = (min_x + max_x) / 2.0;
+                    let center_y = (min_y + max_y) / 2.0;
+                    (max_x - min_x, max_y - min_y, Point::new(center_x, center_y))
                 };
 
                 // Only create shape if rectangle has non-zero size
                 if width > 1.0 && height > 1.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor};
+                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
                     use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with rectangle path (built from lines)
+                    // Create shape with rectangle path centered at origin
                     let path = Self::create_rectangle_path(width, height);
-                    let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    let mut shape = Shape::new(path);
 
-                    // Create object at the calculated position
-                    let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
+                    // Apply fill if enabled
+                    if *shared.fill_enabled {
+                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    }
+
+                    // Apply stroke with configured width
+                    shape = shape.with_stroke(
+                        ShapeColor::from_egui(*shared.stroke_color),
+                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
+                    );
+
+                    // Create object at the center position
+                    let object = ShapeInstance::new(shape.id).with_position(center.x, center.y);
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
@@ -1798,13 +1843,24 @@ impl StagePane {
 
                 // Only create shape if ellipse has non-zero size
                 if rx > 1.0 && ry > 1.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor};
+                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
                     use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Create shape with ellipse path (built from bezier curves)
                     let path = Self::create_ellipse_path(rx, ry);
-                    let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    let mut shape = Shape::new(path);
+
+                    // Apply fill if enabled
+                    if *shared.fill_enabled {
+                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    }
+
+                    // Apply stroke with configured width
+                    shape = shape.with_stroke(
+                        ShapeColor::from_egui(*shared.stroke_color),
+                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
+                    );
 
                     // Create object at the calculated position
                     let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
@@ -1883,7 +1939,7 @@ impl StagePane {
                     use lightningbeam_core::object::ShapeInstance;
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with line path
+                    // Create shape with line path centered at origin
                     let path = Self::create_line_path(dx, dy);
 
                     // Lines should have stroke by default, not fill
@@ -1891,13 +1947,15 @@ impl StagePane {
                         .with_stroke(
                             ShapeColor::from_egui(*shared.stroke_color),
                             StrokeStyle {
-                                width: 2.0,
+                                width: *shared.stroke_width,
                                 ..Default::default()
                             }
                         );
 
-                    // Create object at the start point
-                    let object = ShapeInstance::new(shape.id).with_position(start_point.x, start_point.y);
+                    // Create object at the center of the line
+                    let center_x = (start_point.x + current_point.x) / 2.0;
+                    let center_y = (start_point.y + current_point.y) / 2.0;
+                    let object = ShapeInstance::new(shape.id).with_position(center_x, center_y);
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
@@ -1977,7 +2035,15 @@ impl StagePane {
 
                     // Create shape with polygon path
                     let path = Self::create_polygon_path(num_sides, radius);
-                    let shape = Shape::new(path).with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    use lightningbeam_core::shape::StrokeStyle;
+                    let mut shape = Shape::new(path);
+                    if *shared.fill_enabled {
+                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
+                    }
+                    shape = shape.with_stroke(
+                        ShapeColor::from_egui(*shared.stroke_color),
+                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
+                    );
 
                     // Create object at the center point
                     let object = ShapeInstance::new(shape.id).with_position(center.x, center.y);
@@ -2006,23 +2072,26 @@ impl StagePane {
         }
     }
 
-    /// Create a rectangle path from lines (easier for curve editing later)
+    /// Create a rectangle path centered at origin (easier for curve editing later)
     fn create_rectangle_path(width: f64, height: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
 
+        let half_w = width / 2.0;
+        let half_h = height / 2.0;
+
         let mut path = BezPath::new();
 
-        // Start at top-left
-        path.move_to(Point::new(0.0, 0.0));
+        // Start at top-left (centered at origin)
+        path.move_to(Point::new(-half_w, -half_h));
 
         // Top-right
-        path.line_to(Point::new(width, 0.0));
+        path.line_to(Point::new(half_w, -half_h));
 
         // Bottom-right
-        path.line_to(Point::new(width, height));
+        path.line_to(Point::new(half_w, half_h));
 
         // Bottom-left
-        path.line_to(Point::new(0.0, height));
+        path.line_to(Point::new(-half_w, half_h));
 
         // Close path (back to top-left)
         path.close_path();
@@ -2080,17 +2149,18 @@ impl StagePane {
         path
     }
 
-    /// Create a line path from start to end point
+    /// Create a line path centered at origin
     fn create_line_path(dx: f64, dy: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
 
         let mut path = BezPath::new();
 
-        // Start at origin (object position will be the start point)
-        path.move_to(Point::new(0.0, 0.0));
+        // Line goes from -half to +half so it's centered at origin
+        let half_dx = dx / 2.0;
+        let half_dy = dy / 2.0;
 
-        // Line to end point
-        path.line_to(Point::new(dx, dy));
+        path.move_to(Point::new(-half_dx, -half_dy));
+        path.line_to(Point::new(half_dx, half_dy));
 
         path
     }
@@ -2238,26 +2308,29 @@ impl StagePane {
 
                     // Only create shape if path is not empty
                     if !path.is_empty() {
-                        // Calculate bounding box to position the object
+                        // Calculate bounding box center for object position
                         let bbox = path.bounding_box();
-                        let position = Point::new(bbox.x0, bbox.y0);
+                        let center_x = (bbox.x0 + bbox.x1) / 2.0;
+                        let center_y = (bbox.y0 + bbox.y1) / 2.0;
 
-                        // Translate path to be relative to position (0,0 at top-left of bbox)
+                        // Translate path so its center is at origin (0,0)
                         use vello::kurbo::Affine;
-                        let transform = Affine::translate((-bbox.x0, -bbox.y0));
+                        let transform = Affine::translate((-center_x, -center_y));
                         let translated_path = transform * path;
 
-                        // Create shape with both fill and stroke
+                        // Create shape with fill (if enabled) and stroke
                         use lightningbeam_core::shape::StrokeStyle;
-                        let shape = Shape::new(translated_path)
-                            .with_fill(ShapeColor::from_egui(*shared.fill_color))
-                            .with_stroke(
-                                ShapeColor::from_egui(*shared.stroke_color),
-                                StrokeStyle::default(),
-                            );
+                        let mut shape = Shape::new(translated_path);
+                        if *shared.fill_enabled {
+                            shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
+                        }
+                        shape = shape.with_stroke(
+                            ShapeColor::from_egui(*shared.stroke_color),
+                            StrokeStyle { width: *shared.stroke_width, ..Default::default() }
+                        );
 
-                        // Create object at the calculated position
-                        let object = ShapeInstance::new(shape.id).with_position(position.x, position.y);
+                        // Create object at the center position
+                        let object = ShapeInstance::new(shape.id).with_position(center_x, center_y);
 
                         // Create and execute action immediately
                         let action = AddShapeAction::new(active_layer_id, shape, object);
@@ -4257,18 +4330,20 @@ impl PaneRenderer for StagePane {
         };
 
         // Use egui's custom painting callback for Vello
+        // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback::new(
             rect,
             self.pan_offset,
             self.zoom,
             self.instance_id,
-            shared.action_executor.document().clone(),
+            shared.action_executor.document_arc(),
             shared.tool_state.clone(),
             *shared.active_layer_id,
             drag_delta,
             shared.selection.clone(),
             *shared.fill_color,
             *shared.stroke_color,
+            *shared.stroke_width,
             *shared.selected_tool,
             self.pending_eyedropper_sample,
             *shared.playback_time,

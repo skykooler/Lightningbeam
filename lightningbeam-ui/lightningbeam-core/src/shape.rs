@@ -144,7 +144,7 @@ impl StrokeStyle {
 }
 
 /// Serializable color representation
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShapeColor {
     pub r: u8,
     pub g: u8,
@@ -238,12 +238,12 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// Create a new shape with a single path
+    /// Create a new shape with a single path (no fill or stroke by default)
     pub fn new(path: BezPath) -> Self {
         Self {
             id: Uuid::new_v4(),
             versions: vec![ShapeVersion::new(path, 0)],
-            fill_color: Some(ShapeColor::rgb(0, 0, 0)),
+            fill_color: None,
             image_fill: None,
             fill_rule: FillRule::NonZero,
             stroke_color: None,
@@ -251,12 +251,12 @@ impl Shape {
         }
     }
 
-    /// Create a new shape with a specific ID
+    /// Create a new shape with a specific ID (no fill or stroke by default)
     pub fn with_id(id: Uuid, path: BezPath) -> Self {
         Self {
             id,
             versions: vec![ShapeVersion::new(path, 0)],
-            fill_color: Some(ShapeColor::rgb(0, 0, 0)),
+            fill_color: None,
             image_fill: None,
             fill_rule: FillRule::NonZero,
             stroke_color: None,
