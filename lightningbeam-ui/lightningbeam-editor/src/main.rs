@@ -1,4 +1,5 @@
 use eframe::egui;
+use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
 use lightningbeam_core::tool::Tool;
@@ -16,6 +17,8 @@ use menu::{MenuAction, MenuSystem};
 
 mod theme;
 use theme::{Theme, ThemeMode};
+
+mod default_instrument;
 
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
@@ -270,6 +273,9 @@ struct EditorApp {
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
     // Audio engine integration
     audio_system: Option<daw_backend::AudioSystem>, // Audio system (must be kept alive for stream)
+    // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
+    layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
+    track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
     // Playback state (global for all panes)
     playback_time: f64, // Current playback position in seconds (persistent - save with document)
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
@@ -366,6 +372,8 @@ impl EditorApp {
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
             audio_system,
+            layer_to_track_map: HashMap::new(),
+            track_to_layer_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
             dragging_asset: None, // No asset being dragged initially
@@ -374,6 +382,61 @@ impl EditorApp {
             fill_enabled: true,              // Default to filling shapes
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
+        }
+    }
+
+    /// Synchronize all existing MIDI layers in the document with daw-backend tracks
+    ///
+    /// This function should be called:
+    /// - After loading a document from file
+    /// - After creating a new document with pre-existing MIDI layers
+    ///
+    /// For each MIDI audio layer:
+    /// 1. Creates a daw-backend MIDI track
+    /// 2. Loads the default instrument
+    /// 3. Stores the bidirectional mapping
+    /// 4. Syncs any existing clips on the layer
+    fn sync_midi_layers_to_backend(&mut self) {
+        use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
+
+        // Iterate through all layers in the document
+        for layer in &self.action_executor.document().root.children {
+            // Only process Audio layers with MIDI type
+            if let AnyLayer::Audio(audio_layer) = layer {
+                if audio_layer.audio_layer_type == AudioLayerType::Midi {
+                    let layer_id = audio_layer.layer.id;
+                    let layer_name = &audio_layer.layer.name;
+
+                    // Skip if already mapped (shouldn't happen, but be defensive)
+                    if self.layer_to_track_map.contains_key(&layer_id) {
+                        continue;
+                    }
+
+                    // Create daw-backend MIDI track
+                    if let Some(ref mut audio_system) = self.audio_system {
+                        match audio_system.controller.create_midi_track_sync(layer_name.clone()) {
+                            Ok(track_id) => {
+                                // Store bidirectional mapping
+                                self.layer_to_track_map.insert(layer_id, track_id);
+                                self.track_to_layer_map.insert(track_id, layer_id);
+
+                                // Load default instrument
+                                if let Err(e) = default_instrument::load_default_instrument(&mut audio_system.controller, track_id) {
+                                    eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
+                                } else {
+                                    println!("✅ Synced MIDI layer '{}' to backend (TrackId: {})", layer_name, track_id);
+                                }
+
+                                // TODO: Sync any existing clips on this layer to the backend
+                                // This will be implemented when we add clip synchronization
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️  Failed to create daw-backend track for MIDI layer '{}': {}", layer_name, e);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -617,8 +680,45 @@ impl EditorApp {
                 // TODO: Implement add audio track
             }
             MenuAction::AddMidiTrack => {
-                println!("Menu: Add MIDI Track");
-                // TODO: Implement add MIDI track
+                // Create a new MIDI audio layer with a default name
+                let layer_count = self.action_executor.document().root.children.len();
+                let layer_name = format!("MIDI Track {}", layer_count + 1);
+
+                // Create MIDI layer in document
+                let midi_layer = AudioLayer::new_midi(layer_name.clone());
+                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(midi_layer));
+                self.action_executor.execute(Box::new(action));
+
+                // Get the newly created layer ID
+                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                    let layer_id = last_layer.id();
+                    self.active_layer_id = Some(layer_id);
+
+                    // Create corresponding daw-backend MIDI track
+                    if let Some(ref mut audio_system) = self.audio_system {
+                        match audio_system.controller.create_midi_track_sync(layer_name.clone()) {
+                            Ok(track_id) => {
+                                // Store bidirectional mapping
+                                self.layer_to_track_map.insert(layer_id, track_id);
+                                self.track_to_layer_map.insert(track_id, layer_id);
+
+                                // Load default instrument into the track
+                                if let Err(e) = default_instrument::load_default_instrument(&mut audio_system.controller, track_id) {
+                                    eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
+                                } else {
+                                    println!("✅ Created {} (backend TrackId: {}, instrument: {})",
+                                             layer_name, track_id, default_instrument::default_instrument_name());
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️  Failed to create daw-backend MIDI track for {}: {}", layer_name, e);
+                                eprintln!("   Layer created but will be silent until backend track is available");
+                            }
+                        }
+                    } else {
+                        println!("⚠️  Audio engine not initialized - {} created but will be silent", layer_name);
+                    }
+                }
             }
             MenuAction::AddTestClip => {
                 // Create a test vector clip and add it to the library (not to timeline)
@@ -866,11 +966,17 @@ impl EditorApp {
 
                 let duration = midi_clip.duration;
 
-                // Create MIDI audio clip in document
+                // Create MIDI audio clip in document library
                 let clip = AudioClip::new_midi(&name, duration, events, false);
                 let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
-                println!("Imported MIDI '{}' ({:.1}s, {} events) - ID: {}",
+                println!("Imported MIDI '{}' ({:.1}s, {} events) to library - ID: {}",
                     name, duration, midi_clip.events.len(), clip_id);
+
+                // Add to daw-backend MIDI clip pool (for playback when placed on timeline)
+                if let Some(ref mut audio_system) = self.audio_system {
+                    audio_system.controller.add_midi_clip_to_pool(midi_clip);
+                    println!("✅ Added MIDI clip to backend pool");
+                }
             }
             Err(e) => {
                 eprintln!("Failed to load MIDI '{}': {}", path.display(), e);
@@ -995,6 +1101,7 @@ impl eframe::App for EditorApp {
                 fill_enabled: &mut self.fill_enabled,
                 paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
                 polygon_sides: &mut self.polygon_sides,
+                layer_to_track_map: &self.layer_to_track_map,
             };
 
             render_layout_node(
@@ -1140,6 +1247,8 @@ struct RenderContext<'a> {
     fill_enabled: &'a mut bool,
     paint_bucket_gap_tolerance: &'a mut f64,
     polygon_sides: &'a mut u32,
+    /// Mapping from Document layer UUIDs to daw-backend TrackIds
+    layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
 }
 
 /// Recursively render a layout node with drag support
@@ -1602,6 +1711,7 @@ fn render_pane(
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
                 audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
                 dragging_asset: ctx.dragging_asset,
@@ -1654,6 +1764,7 @@ fn render_pane(
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
                 audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
                 dragging_asset: ctx.dragging_asset,
@@ -1874,6 +1985,7 @@ fn pane_color(pane_type: PaneType) -> egui::Color32 {
         PaneType::Infopanel => egui::Color32::from_rgb(30, 50, 40),
         PaneType::Outliner => egui::Color32::from_rgb(40, 50, 30),
         PaneType::PianoRoll => egui::Color32::from_rgb(55, 35, 45),
+        PaneType::VirtualPiano => egui::Color32::from_rgb(45, 35, 55),
         PaneType::NodeEditor => egui::Color32::from_rgb(30, 45, 50),
         PaneType::PresetBrowser => egui::Color32::from_rgb(50, 45, 30),
         PaneType::AssetLibrary => egui::Color32::from_rgb(45, 50, 35),

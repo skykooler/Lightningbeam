@@ -67,6 +67,8 @@ pub enum Command {
     // MIDI commands
     /// Create a new MIDI track with a name
     CreateMidiTrack(String),
+    /// Add a MIDI clip to the pool without placing it on a track
+    AddMidiClipToPool(MidiClip),
     /// Create a new MIDI clip on a track (track_id, start_time, duration)
     CreateMidiClip(TrackId, f64, f64),
     /// Add a MIDI note to a clip (track_id, clip_id, time_offset, note, velocity, duration)

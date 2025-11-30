@@ -25,6 +25,8 @@ pub enum PaneType {
     Outliner,
     /// MIDI piano roll editor
     PianoRoll,
+    /// Virtual piano keyboard for live MIDI input
+    VirtualPiano,
     /// Node-based editor
     NodeEditor,
     /// Preset/asset browser
@@ -43,6 +45,7 @@ impl PaneType {
             PaneType::Infopanel => "Info Panel",
             PaneType::Outliner => "Outliner",
             PaneType::PianoRoll => "Piano Roll",
+            PaneType::VirtualPiano => "Virtual Piano",
             PaneType::NodeEditor => "Node Editor",
             PaneType::PresetBrowser => "Preset Browser",
             PaneType::AssetLibrary => "Asset Library",
@@ -60,6 +63,7 @@ impl PaneType {
             PaneType::Infopanel => "infopanel.svg",
             PaneType::Outliner => "stage.svg", // TODO: needs own icon
             PaneType::PianoRoll => "piano-roll.svg",
+            PaneType::VirtualPiano => "piano.svg",
             PaneType::NodeEditor => "node-editor.svg",
             PaneType::PresetBrowser => "stage.svg", // TODO: needs own icon
             PaneType::AssetLibrary => "stage.svg", // TODO: needs own icon
@@ -76,6 +80,7 @@ impl PaneType {
             "infopanel" => Some(PaneType::Infopanel),
             "outlineer" | "outliner" => Some(PaneType::Outliner),
             "pianoroll" => Some(PaneType::PianoRoll),
+            "virtualpiano" => Some(PaneType::VirtualPiano),
             "nodeeditor" => Some(PaneType::NodeEditor),
             "presetbrowser" => Some(PaneType::PresetBrowser),
             "assetlibrary" => Some(PaneType::AssetLibrary),
@@ -93,6 +98,7 @@ impl PaneType {
             PaneType::Outliner,
             PaneType::NodeEditor,
             PaneType::PianoRoll,
+            PaneType::VirtualPiano,
             PaneType::PresetBrowser,
             PaneType::AssetLibrary,
         ]
@@ -107,6 +113,7 @@ impl PaneType {
             PaneType::Infopanel => "infopanel",
             PaneType::Outliner => "outlineer",  // JSON uses outlineer
             PaneType::PianoRoll => "pianoRoll",
+            PaneType::VirtualPiano => "virtualPiano",
             PaneType::NodeEditor => "nodeEditor",
             PaneType::PresetBrowser => "presetBrowser",
             PaneType::AssetLibrary => "assetLibrary",

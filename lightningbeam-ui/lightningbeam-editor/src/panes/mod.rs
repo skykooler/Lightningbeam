@@ -56,6 +56,7 @@ pub mod timeline;
 pub mod infopanel;
 pub mod outliner;
 pub mod piano_roll;
+pub mod virtual_piano;
 pub mod node_editor;
 pub mod preset_browser;
 pub mod asset_library;
@@ -108,6 +109,8 @@ pub struct SharedPaneState<'a> {
     pub schneider_max_error: &'a mut f64,
     /// Audio engine controller for playback control
     pub audio_controller: Option<&'a mut daw_backend::EngineController>,
+    /// Mapping from Document layer UUIDs to daw-backend TrackIds
+    pub layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Global playback state
     pub playback_time: &'a mut f64,  // Current playback position in seconds
     pub is_playing: &'a mut bool,    // Whether playback is currently active
@@ -158,6 +161,7 @@ pub enum PaneInstance {
     Infopanel(infopanel::InfopanelPane),
     Outliner(outliner::OutlinerPane),
     PianoRoll(piano_roll::PianoRollPane),
+    VirtualPiano(virtual_piano::VirtualPianoPane),
     NodeEditor(node_editor::NodeEditorPane),
     PresetBrowser(preset_browser::PresetBrowserPane),
     AssetLibrary(asset_library::AssetLibraryPane),
@@ -173,6 +177,7 @@ impl PaneInstance {
             PaneType::Infopanel => PaneInstance::Infopanel(infopanel::InfopanelPane::new()),
             PaneType::Outliner => PaneInstance::Outliner(outliner::OutlinerPane::new()),
             PaneType::PianoRoll => PaneInstance::PianoRoll(piano_roll::PianoRollPane::new()),
+            PaneType::VirtualPiano => PaneInstance::VirtualPiano(virtual_piano::VirtualPianoPane::new()),
             PaneType::NodeEditor => PaneInstance::NodeEditor(node_editor::NodeEditorPane::new()),
             PaneType::PresetBrowser => {
                 PaneInstance::PresetBrowser(preset_browser::PresetBrowserPane::new())
@@ -192,6 +197,7 @@ impl PaneInstance {
             PaneInstance::Infopanel(_) => PaneType::Infopanel,
             PaneInstance::Outliner(_) => PaneType::Outliner,
             PaneInstance::PianoRoll(_) => PaneType::PianoRoll,
+            PaneInstance::VirtualPiano(_) => PaneType::VirtualPiano,
             PaneInstance::NodeEditor(_) => PaneType::NodeEditor,
             PaneInstance::PresetBrowser(_) => PaneType::PresetBrowser,
             PaneInstance::AssetLibrary(_) => PaneType::AssetLibrary,
@@ -208,6 +214,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::Infopanel(p) => p.render_header(ui, shared),
             PaneInstance::Outliner(p) => p.render_header(ui, shared),
             PaneInstance::PianoRoll(p) => p.render_header(ui, shared),
+            PaneInstance::VirtualPiano(p) => p.render_header(ui, shared),
             PaneInstance::NodeEditor(p) => p.render_header(ui, shared),
             PaneInstance::PresetBrowser(p) => p.render_header(ui, shared),
             PaneInstance::AssetLibrary(p) => p.render_header(ui, shared),
@@ -228,6 +235,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::Infopanel(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::Outliner(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::PianoRoll(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::VirtualPiano(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::NodeEditor(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::PresetBrowser(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::AssetLibrary(p) => p.render_content(ui, rect, path, shared),
@@ -242,6 +250,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::Infopanel(p) => p.name(),
             PaneInstance::Outliner(p) => p.name(),
             PaneInstance::PianoRoll(p) => p.name(),
+            PaneInstance::VirtualPiano(p) => p.name(),
             PaneInstance::NodeEditor(p) => p.name(),
             PaneInstance::PresetBrowser(p) => p.name(),
             PaneInstance::AssetLibrary(p) => p.name(),

@@ -534,6 +534,10 @@ impl Engine {
                 // Notify UI about the new MIDI track
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
+            Command::AddMidiClipToPool(clip) => {
+                // Add the clip to the pool without placing it on any track
+                self.project.midi_clip_pool.add_existing_clip(clip);
+            }
             Command::CreateMidiClip(track_id, start_time, duration) => {
                 // Get the next MIDI clip ID from the atomic counter
                 let clip_id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
@@ -2081,6 +2085,12 @@ impl EngineController {
     /// Create a new MIDI track
     pub fn create_midi_track(&mut self, name: String) {
         let _ = self.command_tx.push(Command::CreateMidiTrack(name));
+    }
+
+    /// Add a MIDI clip to the pool without placing it on any track
+    /// This is useful for importing MIDI files into a clip library
+    pub fn add_midi_clip_to_pool(&mut self, clip: MidiClip) {
+        let _ = self.command_tx.push(Command::AddMidiClipToPool(clip));
     }
 
     /// Create a new audio track synchronously (waits for creation to complete)
