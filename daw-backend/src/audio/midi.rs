@@ -73,7 +73,7 @@ pub type MidiClipInstanceId = u32;
 ///
 /// This represents the content data stored in the MidiClipPool.
 /// Events have timestamps relative to the start of the clip (0.0 = clip beginning).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MidiClip {
     pub id: MidiClipId,
     pub events: Vec<MidiEvent>,
@@ -132,7 +132,7 @@ impl MidiClip {
 /// ## Looping
 /// If `external_duration` is greater than `internal_end - internal_start`,
 /// the instance will seamlessly loop back to `internal_start` when it reaches `internal_end`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MidiClipInstance {
     pub id: MidiClipInstanceId,
     pub clip_id: MidiClipId,  // Reference to MidiClip in pool

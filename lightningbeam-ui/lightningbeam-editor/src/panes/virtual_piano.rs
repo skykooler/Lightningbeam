@@ -358,7 +358,8 @@ impl VirtualPianoPane {
         if let Some(active_layer_id) = *shared.active_layer_id {
             // Look up daw-backend track ID from layer ID
             if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
-                if let Some(ref mut controller) = shared.audio_controller {
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     controller.send_midi_note_on(track_id, note, velocity);
                 }
             }
@@ -380,7 +381,8 @@ impl VirtualPianoPane {
 
         if let Some(active_layer_id) = *shared.active_layer_id {
             if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
-                if let Some(ref mut controller) = shared.audio_controller {
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     controller.send_midi_note_off(track_id, note);
                 }
             }
@@ -560,7 +562,8 @@ impl VirtualPianoPane {
             self.pressed_notes.remove(&note);
             if let Some(active_layer_id) = *shared.active_layer_id {
                 if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
-                    if let Some(ref mut controller) = shared.audio_controller {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.send_midi_note_off(track_id, note);
                     }
                 }
@@ -573,7 +576,8 @@ impl VirtualPianoPane {
             self.pressed_notes.remove(note);
             if let Some(active_layer_id) = *shared.active_layer_id {
                 if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
-                    if let Some(ref mut controller) = shared.audio_controller {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.send_midi_note_off(track_id, *note);
                     }
                 }

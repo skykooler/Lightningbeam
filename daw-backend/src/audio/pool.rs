@@ -59,6 +59,9 @@ pub struct AudioFile {
     pub channels: u32,
     pub sample_rate: u32,
     pub frames: u64,
+    /// Original file format (mp3, ogg, wav, flac, etc.)
+    /// Used to determine if we should preserve lossy encoding during save
+    pub original_format: Option<String>,
 }
 
 impl AudioFile {
@@ -71,6 +74,20 @@ impl AudioFile {
             channels,
             sample_rate,
             frames,
+            original_format: None,
+        }
+    }
+
+    /// Create a new AudioFile with original format information
+    pub fn with_format(path: PathBuf, data: Vec<f32>, channels: u32, sample_rate: u32, original_format: Option<String>) -> Self {
+        let frames = (data.len() / channels as usize) as u64;
+        Self {
+            path,
+            data,
+            channels,
+            sample_rate,
+            frames,
+            original_format,
         }
     }
 
@@ -452,7 +469,27 @@ impl AudioClipPool {
     fn embed_from_memory(audio_file: &AudioFile) -> EmbeddedAudioData {
         use base64::{Engine as _, engine::general_purpose};
 
-        // Convert the f32 interleaved samples to WAV format bytes
+        // Check if this is a lossy format that should be preserved
+        let is_lossy = audio_file.original_format.as_ref().map_or(false, |fmt| {
+            let fmt_lower = fmt.to_lowercase();
+            fmt_lower == "mp3" || fmt_lower == "ogg" || fmt_lower == "aac"
+                || fmt_lower == "m4a" || fmt_lower == "opus"
+        });
+
+        if is_lossy {
+            // For lossy formats, read the original file bytes (if it still exists)
+            if let Ok(original_bytes) = std::fs::read(&audio_file.path) {
+                let data_base64 = general_purpose::STANDARD.encode(&original_bytes);
+                return EmbeddedAudioData {
+                    data_base64,
+                    format: audio_file.original_format.clone().unwrap_or_else(|| "mp3".to_string()),
+                };
+            }
+            // If we can't read the original file, fall through to WAV conversion
+        }
+
+        // For lossless/PCM or if we couldn't read the original lossy file,
+        // convert the f32 interleaved samples to WAV format bytes
         let wav_data = Self::encode_wav(
             &audio_file.data,
             audio_file.channels,
@@ -672,11 +709,17 @@ impl AudioClipPool {
             }
         }
 
-        let audio_file = AudioFile::new(
+        // Detect original format from file extension
+        let original_format = file_path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|s| s.to_lowercase());
+
+        let audio_file = AudioFile::with_format(
             file_path.to_path_buf(),
             samples,
             channels,
             sample_rate,
+            original_format,
         );
 
         if pool_index >= self.files.len() {

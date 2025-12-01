@@ -107,8 +107,8 @@ pub struct SharedPaneState<'a> {
     pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     pub rdp_tolerance: &'a mut f64,
     pub schneider_max_error: &'a mut f64,
-    /// Audio engine controller for playback control
-    pub audio_controller: Option<&'a mut daw_backend::EngineController>,
+    /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
+    pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
     pub layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Global playback state

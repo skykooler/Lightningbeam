@@ -29,3 +29,4 @@ pub mod intersection_graph;
 pub mod segment_builder;
 pub mod planar_graph;
 pub mod file_types;
+pub mod file_io;

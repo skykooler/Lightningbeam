@@ -1126,8 +1126,9 @@ impl AssetLibraryPane {
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
                                     if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        if let Some(audio_controller) = shared.audio_controller.as_mut() {
-                                            audio_controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
+                                        if let Some(controller_arc) = shared.audio_controller {
+                                            let mut controller = controller_arc.lock().unwrap();
+                                            controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
                                                 .ok()
                                                 .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
                                         } else {
@@ -1397,8 +1398,9 @@ impl AssetLibraryPane {
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
                                     if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        if let Some(audio_controller) = shared.audio_controller.as_mut() {
-                                            audio_controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
+                                        if let Some(controller_arc) = shared.audio_controller {
+                                            let mut controller = controller_arc.lock().unwrap();
+                                            controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
                                                 .ok()
                                                 .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
                                         } else {

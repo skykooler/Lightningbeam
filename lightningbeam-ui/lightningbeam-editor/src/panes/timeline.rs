@@ -975,7 +975,7 @@ impl TimelinePane {
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         playback_time: &mut f64,
         is_playing: &mut bool,
-        audio_controller: Option<&mut daw_backend::EngineController>,
+        audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     ) {
         // Don't allocate the header area for input - let widgets handle it directly
         // Only allocate content area (ruler + layers) with click and drag
@@ -1382,7 +1382,8 @@ impl TimelinePane {
         else if !response.dragged() && self.is_scrubbing {
             self.is_scrubbing = false;
             // Seek the audio engine to the new position
-            if let Some(controller) = audio_controller {
+            if let Some(controller_arc) = audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
                 controller.seek(*playback_time);
             }
         }
@@ -1492,7 +1493,8 @@ impl PaneRenderer for TimelinePane {
                 // Go to start
                 if ui.add_sized(button_size, egui::Button::new("|◀")).clicked() {
                     *shared.playback_time = 0.0;
-                    if let Some(controller) = shared.audio_controller.as_mut() {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.seek(0.0);
                     }
                 }
@@ -1500,7 +1502,8 @@ impl PaneRenderer for TimelinePane {
                 // Rewind (step backward)
                 if ui.add_sized(button_size, egui::Button::new("◀◀")).clicked() {
                     *shared.playback_time = (*shared.playback_time - 0.1).max(0.0);
-                    if let Some(controller) = shared.audio_controller.as_mut() {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.seek(*shared.playback_time);
                     }
                 }
@@ -1512,7 +1515,8 @@ impl PaneRenderer for TimelinePane {
                     println!("🔘 Play/Pause button clicked! is_playing = {}", *shared.is_playing);
 
                     // Send play/pause command to audio engine
-                    if let Some(controller) = shared.audio_controller.as_mut() {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         if *shared.is_playing {
                             controller.play();
                             println!("▶ Started playback");
@@ -1528,7 +1532,8 @@ impl PaneRenderer for TimelinePane {
                 // Fast forward (step forward)
                 if ui.add_sized(button_size, egui::Button::new("▶▶")).clicked() {
                     *shared.playback_time = (*shared.playback_time + 0.1).min(self.duration);
-                    if let Some(controller) = shared.audio_controller.as_mut() {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.seek(*shared.playback_time);
                     }
                 }
@@ -1536,7 +1541,8 @@ impl PaneRenderer for TimelinePane {
                 // Go to end
                 if ui.add_sized(button_size, egui::Button::new("▶|")).clicked() {
                     *shared.playback_time = self.duration;
-                    if let Some(controller) = shared.audio_controller.as_mut() {
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
                         controller.seek(self.duration);
                     }
                 }
@@ -1690,7 +1696,7 @@ impl PaneRenderer for TimelinePane {
             shared.pending_actions,
             shared.playback_time,
             shared.is_playing,
-            shared.audio_controller.as_mut().map(|c| &mut **c),
+            shared.audio_controller,
         );
 
         // Handle asset drag-and-drop from Asset Library

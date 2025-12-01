@@ -272,6 +272,10 @@ pub enum Query {
     AddMidiClipInstanceSync(TrackId, crate::audio::midi::MidiClipInstance),
     /// Add an audio clip to a track synchronously (track_id, pool_index, start_time, duration, offset) - returns instance ID
     AddAudioClipSync(TrackId, usize, f64, f64, f64),
+    /// Get a clone of the current project for serialization
+    GetProject,
+    /// Set the project (replaces current project state)
+    SetProject(Box<crate::audio::project::Project>),
 }
 
 /// Oscilloscope data from a node
@@ -335,4 +339,8 @@ pub enum QueryResponse {
     MidiClipInstanceAdded(Result<MidiClipInstanceId, String>),
     /// Audio clip instance added (returns instance ID)
     AudioClipInstanceAdded(Result<AudioClipInstanceId, String>),
+    /// Project retrieved
+    ProjectRetrieved(Result<Box<crate::audio::project::Project>, String>),
+    /// Project set
+    ProjectSet(Result<(), String>),
 }

@@ -5,6 +5,7 @@
 
 use crate::clip::{AudioClip, ImageAsset, VideoClip, VectorClip};
 use crate::layer::AnyLayer;
+use crate::layout::LayoutNode;
 use crate::shape::ShapeColor;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,6 +107,14 @@ pub struct Document {
     /// Image asset library - static images for fill textures
     pub image_assets: HashMap<Uuid, ImageAsset>,
 
+    /// Current UI layout state (serialized for save/load)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_layout: Option<LayoutNode>,
+
+    /// Name of base layout this was derived from (for reference only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_layout_base: Option<String>,
+
     /// Current playback time in seconds
     #[serde(skip)]
     pub current_time: f64,
@@ -126,6 +135,8 @@ impl Default for Document {
             video_clips: HashMap::new(),
             audio_clips: HashMap::new(),
             image_assets: HashMap::new(),
+            ui_layout: None,
+            ui_layout_base: None,
             current_time: 0.0,
         }
     }

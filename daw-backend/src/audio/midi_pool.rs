@@ -1,8 +1,10 @@
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use super::midi::{MidiClip, MidiClipId, MidiEvent};
 
 /// Pool for storing MIDI clip content
 /// Similar to AudioClipPool but for MIDI data
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MidiClipPool {
     clips: HashMap<MidiClipId, MidiClip>,
     next_id: MidiClipId,

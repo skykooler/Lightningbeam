@@ -245,6 +245,164 @@ impl ToolIconCache {
     }
 }
 
+/// Command sent to file operations worker thread
+enum FileCommand {
+    Save {
+        path: std::path::PathBuf,
+        document: lightningbeam_core::document::Document,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    },
+    Load {
+        path: std::path::PathBuf,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    },
+}
+
+/// Progress updates from file operations worker
+enum FileProgress {
+    SerializingAudioPool,
+    EncodingAudio { current: usize, total: usize },
+    WritingZip,
+    LoadingProject,
+    DecodingAudio { current: usize, total: usize },
+    Complete(Result<lightningbeam_core::file_io::LoadedProject, String>), // For loading
+    Error(String),
+    Done,
+}
+
+/// Active file operation state
+enum FileOperation {
+    Saving {
+        path: std::path::PathBuf,
+        progress_rx: std::sync::mpsc::Receiver<FileProgress>,
+    },
+    Loading {
+        path: std::path::PathBuf,
+        progress_rx: std::sync::mpsc::Receiver<FileProgress>,
+    },
+}
+
+/// Worker thread for file operations (save/load)
+struct FileOperationsWorker {
+    command_rx: std::sync::mpsc::Receiver<FileCommand>,
+    audio_controller: std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>,
+}
+
+impl FileOperationsWorker {
+    /// Create a new worker and spawn it on a background thread
+    fn spawn(audio_controller: std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>)
+        -> std::sync::mpsc::Sender<FileCommand>
+    {
+        let (command_tx, command_rx) = std::sync::mpsc::channel();
+
+        let worker = FileOperationsWorker {
+            command_rx,
+            audio_controller,
+        };
+
+        std::thread::spawn(move || {
+            worker.run();
+        });
+
+        command_tx
+    }
+
+    /// Main worker loop - processes file commands
+    fn run(self) {
+        while let Ok(command) = self.command_rx.recv() {
+            match command {
+                FileCommand::Save { path, document, progress_tx } => {
+                    self.handle_save(path, document, progress_tx);
+                }
+                FileCommand::Load { path, progress_tx } => {
+                    self.handle_load(path, progress_tx);
+                }
+            }
+        }
+    }
+
+    /// Handle save command
+    fn handle_save(
+        &self,
+        path: std::path::PathBuf,
+        document: lightningbeam_core::document::Document,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    ) {
+        use lightningbeam_core::file_io::{save_beam, SaveSettings};
+
+        // Step 1: Serialize audio pool
+        let _ = progress_tx.send(FileProgress::SerializingAudioPool);
+
+        let audio_pool_entries = {
+            let mut controller = self.audio_controller.lock().unwrap();
+            match controller.serialize_audio_pool(&path) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    let _ = progress_tx.send(FileProgress::Error(format!("Failed to serialize audio pool: {}", e)));
+                    return;
+                }
+            }
+        };
+
+        // Step 2: Get project
+        let mut audio_project = {
+            let mut controller = self.audio_controller.lock().unwrap();
+            match controller.get_project() {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = progress_tx.send(FileProgress::Error(format!("Failed to get project: {}", e)));
+                    return;
+                }
+            }
+        };
+
+        // Step 3: Save to file
+        let _ = progress_tx.send(FileProgress::WritingZip);
+
+        let settings = SaveSettings::default();
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, &settings) {
+            Ok(()) => {
+                println!("✅ Saved to: {}", path.display());
+                let _ = progress_tx.send(FileProgress::Done);
+            }
+            Err(e) => {
+                let _ = progress_tx.send(FileProgress::Error(format!("Save failed: {}", e)));
+            }
+        }
+    }
+
+    /// Handle load command
+    fn handle_load(
+        &self,
+        path: std::path::PathBuf,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    ) {
+        use lightningbeam_core::file_io::load_beam;
+
+        // Step 1: Load from file
+        let _ = progress_tx.send(FileProgress::LoadingProject);
+
+        let loaded_project = match load_beam(&path) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = progress_tx.send(FileProgress::Error(format!("Load failed: {}", e)));
+                return;
+            }
+        };
+
+        // Check for missing files
+        if !loaded_project.missing_files.is_empty() {
+            eprintln!("⚠️ {} missing files", loaded_project.missing_files.len());
+            for missing in &loaded_project.missing_files {
+                eprintln!("   - {}", missing.original_path.display());
+            }
+        }
+
+        // Send the loaded project back to UI thread for processing
+        let _ = progress_tx.send(FileProgress::Complete(Ok(loaded_project)));
+    }
+}
+
 struct EditorApp {
     layouts: Vec<LayoutDefinition>,
     current_layout_index: usize,
@@ -272,7 +430,11 @@ struct EditorApp {
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
     // Audio engine integration
-    audio_system: Option<daw_backend::AudioSystem>, // Audio system (must be kept alive for stream)
+    audio_stream: Option<cpal::Stream>, // Audio stream (must be kept alive)
+    audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>, // Shared audio controller
+    audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
+    audio_sample_rate: u32, // Audio sample rate
+    audio_channels: u32, // Audio channel count
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
@@ -293,6 +455,13 @@ struct EditorApp {
     /// Prevents repeated backend queries for the same MIDI clip
     /// Format: (timestamp, note_number, is_note_on)
     midi_event_cache: HashMap<u32, Vec<(f64, u8, bool)>>,
+    /// Current file path (None if not yet saved)
+    current_file_path: Option<std::path::PathBuf>,
+
+    /// File operations worker command sender
+    file_command_tx: std::sync::mpsc::Sender<FileCommand>,
+    /// Current file operation in progress (if any)
+    file_operation: Option<FileOperation>,
 }
 
 /// Import filter types for the file dialog
@@ -338,18 +507,35 @@ impl EditorApp {
         // Wrap document in ActionExecutor
         let action_executor = lightningbeam_core::action::ActionExecutor::new(document);
 
-        // Initialize audio system (keep the whole system to maintain the audio stream)
-        let audio_system = match daw_backend::AudioSystem::new(None, 256) {
-            Ok(audio_system) => {
-                println!("✅ Audio engine initialized successfully");
-                Some(audio_system)
-            }
-            Err(e) => {
-                eprintln!("❌ Failed to initialize audio engine: {}", e);
-                eprintln!("   Playback will be disabled");
-                None
-            }
-        };
+        // Initialize audio system and destructure it for sharing
+        let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx) =
+            match daw_backend::AudioSystem::new(None, 256) {
+                Ok(audio_system) => {
+                    println!("✅ Audio engine initialized successfully");
+
+                    // Extract components
+                    let stream = audio_system.stream;
+                    let sample_rate = audio_system.sample_rate;
+                    let channels = audio_system.channels;
+                    let event_rx = audio_system.event_rx;
+
+                    // Wrap controller in Arc<Mutex<>> for sharing with worker thread
+                    let controller = std::sync::Arc::new(std::sync::Mutex::new(audio_system.controller));
+
+                    // Spawn file operations worker
+                    let file_command_tx = FileOperationsWorker::spawn(controller.clone());
+
+                    (Some(stream), Some(controller), event_rx, sample_rate, channels, file_command_tx)
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to initialize audio engine: {}", e);
+                    eprintln!("   Playback will be disabled");
+
+                    // Create a dummy channel for file operations (won't be used)
+                    let (tx, _rx) = std::sync::mpsc::channel();
+                    (None, None, None, 48000, 2, tx)
+                }
+            };
 
         Self {
             layouts,
@@ -376,7 +562,11 @@ impl EditorApp {
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
-            audio_system,
+            audio_stream,
+            audio_controller,
+            audio_event_rx,
+            audio_sample_rate,
+            audio_channels,
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
@@ -388,6 +578,9 @@ impl EditorApp {
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
+            current_file_path: None, // No file loaded initially
+            file_command_tx,
+            file_operation: None, // No file operation in progress initially
         }
     }
 
@@ -419,15 +612,16 @@ impl EditorApp {
                     }
 
                     // Create daw-backend MIDI track
-                    if let Some(ref mut audio_system) = self.audio_system {
-                        match audio_system.controller.create_midi_track_sync(layer_name.clone()) {
+                    if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                        match controller.create_midi_track_sync(layer_name.clone()) {
                             Ok(track_id) => {
                                 // Store bidirectional mapping
                                 self.layer_to_track_map.insert(layer_id, track_id);
                                 self.track_to_layer_map.insert(track_id, layer_id);
 
                                 // Load default instrument
-                                if let Err(e) = default_instrument::load_default_instrument(&mut audio_system.controller, track_id) {
+                                if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
                                     eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
                                 } else {
                                     println!("✅ Synced MIDI layer '{}' to backend (TrackId: {})", layer_name, track_id);
@@ -449,6 +643,9 @@ impl EditorApp {
     fn switch_layout(&mut self, index: usize) {
         self.current_layout_index = index;
         self.current_layout = self.layouts[index].layout.clone();
+
+        // Clear pane instances so they rebuild with new layout
+        self.pane_instances.clear();
     }
 
     fn current_layout_def(&self) -> &LayoutDefinition {
@@ -488,23 +685,85 @@ impl EditorApp {
             // File menu
             MenuAction::NewFile => {
                 println!("Menu: New File");
-                // TODO: Implement new file
+                // TODO: Prompt to save current file if modified
+
+                // Create new document
+                let mut document = lightningbeam_core::document::Document::with_size("Untitled Animation", 1920.0, 1080.0)
+                    .with_duration(10.0)
+                    .with_framerate(60.0);
+
+                // Add default layer
+                use lightningbeam_core::layer::{AnyLayer, VectorLayer};
+                let vector_layer = VectorLayer::new("Layer 1");
+                let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
+
+                // Replace action executor with new document
+                self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
+                self.active_layer_id = Some(layer_id);
+
+                // Reset audio project (send command to create new empty project)
+                // TODO: Add ResetProject command to EngineController
+                self.layer_to_track_map.clear();
+                self.track_to_layer_map.clear();
+
+                // Clear file path
+                self.current_file_path = None;
+                println!("Created new file");
             }
             MenuAction::NewWindow => {
                 println!("Menu: New Window");
-                // TODO: Implement new window
+                // TODO: Implement new window (requires multi-window support)
             }
             MenuAction::Save => {
-                println!("Menu: Save");
-                // TODO: Implement save
+                use rfd::FileDialog;
+
+                if let Some(path) = &self.current_file_path {
+                    // Save to existing path
+                    self.save_to_file(path.clone());
+                } else {
+                    // No current path, fall through to Save As
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("Lightningbeam Project", &["beam"])
+                        .set_file_name("Untitled.beam")
+                        .save_file()
+                    {
+                        self.save_to_file(path);
+                    }
+                }
             }
             MenuAction::SaveAs => {
-                println!("Menu: Save As");
-                // TODO: Implement save as
+                use rfd::FileDialog;
+
+                let dialog = FileDialog::new()
+                    .add_filter("Lightningbeam Project", &["beam"])
+                    .set_file_name("Untitled.beam");
+
+                // Set initial directory if we have a current file
+                let dialog = if let Some(current_path) = &self.current_file_path {
+                    if let Some(parent) = current_path.parent() {
+                        dialog.set_directory(parent)
+                    } else {
+                        dialog
+                    }
+                } else {
+                    dialog
+                };
+
+                if let Some(path) = dialog.save_file() {
+                    self.save_to_file(path);
+                }
             }
             MenuAction::OpenFile => {
-                println!("Menu: Open File");
-                // TODO: Implement open file
+                use rfd::FileDialog;
+
+                // TODO: Prompt to save current file if modified
+
+                if let Some(path) = FileDialog::new()
+                    .add_filter("Lightningbeam Project", &["beam"])
+                    .pick_file()
+                {
+                    self.load_from_file(path);
+                }
             }
             MenuAction::Revert => {
                 println!("Menu: Revert");
@@ -607,9 +866,10 @@ impl EditorApp {
 
             // Edit menu
             MenuAction::Undo => {
-                if let Some(ref mut audio_system) = self.audio_system {
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
-                        audio_controller: Some(&mut audio_system.controller),
+                        audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                     };
 
@@ -627,9 +887,10 @@ impl EditorApp {
                 }
             }
             MenuAction::Redo => {
-                if let Some(ref mut audio_system) = self.audio_system {
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
-                        audio_controller: Some(&mut audio_system.controller),
+                        audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                     };
 
@@ -727,15 +988,16 @@ impl EditorApp {
                     self.active_layer_id = Some(layer_id);
 
                     // Create corresponding daw-backend MIDI track
-                    if let Some(ref mut audio_system) = self.audio_system {
-                        match audio_system.controller.create_midi_track_sync(layer_name.clone()) {
+                    if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                        match controller.create_midi_track_sync(layer_name.clone()) {
                             Ok(track_id) => {
                                 // Store bidirectional mapping
                                 self.layer_to_track_map.insert(layer_id, track_id);
                                 self.track_to_layer_map.insert(track_id, layer_id);
 
                                 // Load default instrument into the track
-                                if let Err(e) = default_instrument::load_default_instrument(&mut audio_system.controller, track_id) {
+                                if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
                                     eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
                                 } else {
                                     println!("✅ Created {} (backend TrackId: {}, instrument: {})",
@@ -893,6 +1155,170 @@ impl EditorApp {
         }
     }
 
+    /// Prepare document for saving by storing current UI layout
+    fn prepare_document_for_save(&mut self) {
+        let doc = self.action_executor.document_mut();
+
+        // Store current layout state
+        doc.ui_layout = Some(self.current_layout.clone());
+
+        // Store base layout name for reference
+        if self.current_layout_index < self.layouts.len() {
+            doc.ui_layout_base = Some(self.layouts[self.current_layout_index].name.clone());
+        }
+    }
+
+    /// Save the current document to a .beam file
+    fn save_to_file(&mut self, path: std::path::PathBuf) {
+        println!("Saving to: {}", path.display());
+
+        if self.audio_controller.is_none() {
+            eprintln!("❌ Audio system not initialized");
+            return;
+        }
+
+        // Prepare document for save (including layout)
+        self.prepare_document_for_save();
+
+        // Create progress channel
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+
+        // Clone document for background thread
+        let document = self.action_executor.document().clone();
+
+        // Send save command to worker thread
+        let command = FileCommand::Save {
+            path: path.clone(),
+            document,
+            progress_tx,
+        };
+
+        if let Err(e) = self.file_command_tx.send(command) {
+            eprintln!("❌ Failed to send save command: {}", e);
+            return;
+        }
+
+        // Store operation state
+        self.file_operation = Some(FileOperation::Saving {
+            path,
+            progress_rx,
+        });
+    }
+
+    /// Load a document from a .beam file
+    fn load_from_file(&mut self, path: std::path::PathBuf) {
+        println!("Loading from: {}", path.display());
+
+        if self.audio_controller.is_none() {
+            eprintln!("❌ Audio system not initialized");
+            return;
+        }
+
+        // Create progress channel
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+
+        // Send load command to worker thread
+        let command = FileCommand::Load {
+            path: path.clone(),
+            progress_tx,
+        };
+
+        if let Err(e) = self.file_command_tx.send(command) {
+            eprintln!("❌ Failed to send load command: {}", e);
+            return;
+        }
+
+        // Store operation state
+        self.file_operation = Some(FileOperation::Loading {
+            path,
+            progress_rx,
+        });
+    }
+
+    /// Restore UI layout from loaded document
+    fn restore_layout_from_document(&mut self) {
+        let doc = self.action_executor.document();
+
+        // Restore saved layout if present
+        if let Some(saved_layout) = &doc.ui_layout {
+            self.current_layout = saved_layout.clone();
+
+            // Try to find matching base layout by name
+            if let Some(base_name) = &doc.ui_layout_base {
+                if let Some(index) = self.layouts.iter().position(|l| &l.name == base_name) {
+                    self.current_layout_index = index;
+                } else {
+                    // Base layout not found (maybe renamed/removed), default to first
+                    self.current_layout_index = 0;
+                }
+            }
+
+            println!("✅ Restored UI layout from save file");
+        } else {
+            // No saved layout (old file format or new project)
+            // Keep the default (first layout)
+            self.current_layout_index = 0;
+            self.current_layout = self.layouts[0].layout.clone();
+            println!("ℹ️  No saved layout found, using default");
+        }
+
+        // Clear existing pane instances so they rebuild with new layout
+        self.pane_instances.clear();
+    }
+
+    /// Apply loaded project data (called after successful load in background)
+    fn apply_loaded_project(&mut self, loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
+        use lightningbeam_core::action::ActionExecutor;
+
+        // Check for missing files
+        if !loaded_project.missing_files.is_empty() {
+            eprintln!("⚠️ {} missing files", loaded_project.missing_files.len());
+            for missing in &loaded_project.missing_files {
+                eprintln!("   - {}", missing.original_path.display());
+            }
+            // TODO Phase 5: Show recovery dialog
+        }
+
+        // Replace document
+        self.action_executor = ActionExecutor::new(loaded_project.document);
+
+        // Restore UI layout from loaded document
+        self.restore_layout_from_document();
+
+        // Set project in audio engine via query
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            if let Err(e) = controller.set_project(loaded_project.audio_project) {
+                eprintln!("❌ Failed to set project: {}", e);
+                return;
+            }
+
+            // Load audio pool
+            if let Err(e) = controller.load_audio_pool(
+                loaded_project.audio_pool_entries,
+                &path,
+            ) {
+                eprintln!("❌ Failed to load audio pool: {}", e);
+                return;
+            }
+        }
+
+        // Reset state
+        self.layer_to_track_map.clear();
+        self.track_to_layer_map.clear();
+        self.sync_midi_layers_to_backend();
+        self.playback_time = 0.0;
+        self.is_playing = false;
+        self.current_file_path = Some(path.clone());
+
+        // Set active layer
+        if let Some(first) = self.action_executor.document().root.children.first() {
+            self.active_layer_id = Some(first.id());
+        }
+
+        println!("✅ Loaded from: {}", path.display());
+    }
+
     /// Import an image file as an ImageAsset
     fn import_image(&mut self, path: &std::path::Path) {
         use lightningbeam_core::clip::ImageAsset;
@@ -949,10 +1375,11 @@ impl EditorApp {
                 let sample_rate = audio_file.sample_rate;
 
                 // Add to audio engine pool if available
-                if let Some(ref mut audio_system) = self.audio_system {
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     // Send audio data to the engine
                     let path_str = path.to_string_lossy().to_string();
-                    audio_system.controller.add_audio_file(
+                    controller.add_audio_file(
                         path_str.clone(),
                         audio_file.data,
                         channels,
@@ -1011,8 +1438,9 @@ impl EditorApp {
                 let note_event_count = processed_events.len();
 
                 // Add to backend MIDI clip pool FIRST and get the backend clip ID
-                if let Some(ref mut audio_system) = self.audio_system {
-                    audio_system.controller.add_midi_clip_to_pool(midi_clip.clone());
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.add_midi_clip_to_pool(midi_clip.clone());
                     let backend_clip_id = midi_clip.id; // The backend clip ID
 
                     // Cache MIDI events in frontend for rendering (thumbnails & timeline piano roll)
@@ -1076,10 +1504,104 @@ impl eframe::App for EditorApp {
             }
         }
 
+        // Handle file operation progress
+        if let Some(ref mut operation) = self.file_operation {
+            // Set wait cursor
+            ctx.set_cursor_icon(egui::CursorIcon::Progress);
+
+            // Poll for progress updates
+            let mut operation_complete = false;
+            let mut loaded_project_data: Option<(lightningbeam_core::file_io::LoadedProject, std::path::PathBuf)> = None;
+
+            match operation {
+                FileOperation::Saving { ref mut progress_rx, ref path } => {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        match progress {
+                            FileProgress::Done => {
+                                println!("✅ Save complete!");
+                                self.current_file_path = Some(path.clone());
+                                operation_complete = true;
+                            }
+                            FileProgress::Error(e) => {
+                                eprintln!("❌ Save error: {}", e);
+                                operation_complete = true;
+                            }
+                            _ => {
+                                // Other progress states - just keep going
+                            }
+                        }
+                    }
+
+                    // Render progress dialog
+                    egui::Window::new("Saving Project")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add(egui::Spinner::new());
+                                ui.add_space(8.0);
+                                ui.label("Saving project...");
+                                ui.label(format!("Path: {}", path.display()));
+                            });
+                        });
+                }
+                FileOperation::Loading { ref mut progress_rx, ref path } => {
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        match progress {
+                            FileProgress::Complete(Ok(loaded_project)) => {
+                                println!("✅ Load complete!");
+                                // Store data to apply after dialog closes
+                                loaded_project_data = Some((loaded_project, path.clone()));
+                                operation_complete = true;
+                            }
+                            FileProgress::Complete(Err(e)) => {
+                                eprintln!("❌ Load error: {}", e);
+                                operation_complete = true;
+                            }
+                            FileProgress::Error(e) => {
+                                eprintln!("❌ Load error: {}", e);
+                                operation_complete = true;
+                            }
+                            _ => {
+                                // Other progress states - just keep going
+                            }
+                        }
+                    }
+
+                    // Render progress dialog
+                    egui::Window::new("Loading Project")
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add(egui::Spinner::new());
+                                ui.add_space(8.0);
+                                ui.label("Loading project...");
+                                ui.label(format!("Path: {}", path.display()));
+                            });
+                        });
+                }
+            }
+
+            // Clear operation if complete
+            if operation_complete {
+                self.file_operation = None;
+            }
+
+            // Apply loaded project data if available
+            if let Some((loaded_project, path)) = loaded_project_data {
+                self.apply_loaded_project(loaded_project, path);
+            }
+
+            // Request repaint to keep updating progress
+            ctx.request_repaint();
+        }
+
         // Poll audio events from the audio engine
-        if let Some(audio_system) = &mut self.audio_system {
-            if let Some(event_rx) = &mut audio_system.event_rx {
-                while let Ok(event) = event_rx.pop() {
+        if let Some(event_rx) = &mut self.audio_event_rx {
+            while let Ok(event) = event_rx.pop() {
                     use daw_backend::AudioEvent;
                     match event {
                         AudioEvent::PlaybackPosition(time) => {
@@ -1091,7 +1613,6 @@ impl eframe::App for EditorApp {
                         _ => {} // Ignore other events for now
                     }
                 }
-            }
         }
 
         // Request continuous repaints when playing to update time display
@@ -1144,7 +1665,7 @@ impl eframe::App for EditorApp {
                 draw_simplify_mode: &mut self.draw_simplify_mode,
                 rdp_tolerance: &mut self.rdp_tolerance,
                 schneider_max_error: &mut self.schneider_max_error,
-                audio_controller: self.audio_system.as_mut().map(|sys| &mut sys.controller),
+                audio_controller: self.audio_controller.as_ref(),
                 playback_time: &mut self.playback_time,
                 is_playing: &mut self.is_playing,
                 dragging_asset: &mut self.dragging_asset,
@@ -1189,9 +1710,10 @@ impl eframe::App for EditorApp {
             // Execute all pending actions (two-phase dispatch)
             for action in pending_actions {
                 // Create backend context for actions that need backend sync
-                if let Some(ref mut audio_system) = self.audio_system {
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
-                        audio_controller: Some(&mut audio_system.controller),
+                        audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                     };
 
@@ -1308,7 +1830,7 @@ struct RenderContext<'a> {
     draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     rdp_tolerance: &'a mut f64,
     schneider_max_error: &'a mut f64,
-    audio_controller: Option<&'a mut daw_backend::EngineController>,
+    audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     playback_time: &'a mut f64,
     is_playing: &'a mut bool,
     dragging_asset: &'a mut Option<panes::DraggingAsset>,
@@ -1782,7 +2304,7 @@ fn render_pane(
                 draw_simplify_mode: ctx.draw_simplify_mode,
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
-                audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                audio_controller: ctx.audio_controller,
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
@@ -1836,7 +2358,7 @@ fn render_pane(
                 draw_simplify_mode: ctx.draw_simplify_mode,
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
-                audio_controller: ctx.audio_controller.as_mut().map(|c| &mut **c),
+                audio_controller: ctx.audio_controller,
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,

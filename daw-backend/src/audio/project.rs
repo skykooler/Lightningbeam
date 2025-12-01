@@ -4,6 +4,7 @@ use super::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, Mi
 use super::midi_pool::MidiClipPool;
 use super::pool::AudioClipPool;
 use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
 /// Project manages the hierarchical track structure and clip pools
@@ -13,6 +14,7 @@ use std::collections::HashMap;
 ///
 /// Clip content is stored in pools (MidiClipPool), while tracks store
 /// clip instances that reference the pool content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     tracks: HashMap<TrackId, TrackNode>,
     next_track_id: TrackId,
@@ -514,6 +516,47 @@ impl Project {
             let event = MidiEvent::note_off(0.0, 0, note, 0);
             track.queue_live_midi(event);
         }
+    }
+
+    /// Prepare all tracks for serialization by saving their audio graphs as presets
+    pub fn prepare_for_save(&mut self) {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(audio_track) => {
+                    audio_track.prepare_for_save();
+                }
+                TrackNode::Midi(midi_track) => {
+                    midi_track.prepare_for_save();
+                }
+                TrackNode::Group(_) => {
+                    // Groups don't have audio graphs
+                }
+            }
+        }
+    }
+
+    /// Rebuild all audio graphs from presets after deserialization
+    ///
+    /// This should be called after deserializing a Project to reconstruct
+    /// the AudioGraph instances from their stored presets.
+    ///
+    /// # Arguments
+    /// * `buffer_size` - Buffer size for audio processing (typically 8192)
+    pub fn rebuild_audio_graphs(&mut self, buffer_size: usize) -> Result<(), String> {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(audio_track) => {
+                    audio_track.rebuild_audio_graph(self.sample_rate, buffer_size)?;
+                }
+                TrackNode::Midi(midi_track) => {
+                    midi_track.rebuild_audio_graph(self.sample_rate, buffer_size)?;
+                }
+                TrackNode::Group(_) => {
+                    // Groups don't have audio graphs
+                }
+            }
+        }
+        Ok(())
     }
 }
 

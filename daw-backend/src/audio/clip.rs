@@ -1,3 +1,5 @@
+use serde::{Serialize, Deserialize};
+
 /// Audio clip instance ID type
 pub type AudioClipInstanceId = u32;
 
@@ -16,7 +18,7 @@ pub type ClipId = AudioClipInstanceId;
 /// ## Looping
 /// If `external_duration` is greater than `internal_end - internal_start`,
 /// the clip will seamlessly loop back to `internal_start` when it reaches `internal_end`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioClipInstance {
     pub id: AudioClipInstanceId,
     pub audio_pool_index: usize,

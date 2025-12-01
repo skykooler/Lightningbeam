@@ -483,12 +483,19 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
             Command::AddAudioFile(path, data, channels, sample_rate) => {
+                // Detect original format from file extension
+                let path_buf = std::path::PathBuf::from(path.clone());
+                let original_format = path_buf.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|s| s.to_lowercase());
+
                 // Create AudioFile and add to pool
-                let audio_file = crate::audio::pool::AudioFile::new(
-                    std::path::PathBuf::from(path.clone()),
+                let audio_file = crate::audio::pool::AudioFile::with_format(
+                    path_buf,
                     data,
                     channels,
                     sample_rate,
+                    original_format,
                 );
                 let pool_index = self.audio_pool.add_file(audio_file);
                 // Notify UI about the new audio file
@@ -1730,6 +1737,22 @@ impl Engine {
                     Err(e) => QueryResponse::AudioClipInstanceAdded(Err(e.to_string())),
                 }
             }
+            Query::GetProject => {
+                // Clone the entire project for serialization
+                QueryResponse::ProjectRetrieved(Ok(Box::new(self.project.clone())))
+            }
+            Query::SetProject(new_project) => {
+                // Replace the current project with the new one
+                // Need to rebuild audio graphs with current sample_rate and buffer_size
+                let mut project = *new_project;
+                match project.rebuild_audio_graphs(self.buffer_pool.buffer_size()) {
+                    Ok(()) => {
+                        self.project = project;
+                        QueryResponse::ProjectSet(Ok(()))
+                    }
+                    Err(e) => QueryResponse::ProjectSet(Err(format!("Failed to rebuild audio graphs: {}", e))),
+                }
+            }
         };
 
         // Send response back
@@ -1850,11 +1873,13 @@ impl Engine {
                               frames_recorded, temp_file_path, waveform.len(), audio_data.len());
 
                     // Add to pool using the in-memory audio data (no file loading needed!)
-                    let pool_file = crate::audio::pool::AudioFile::new(
+                    // Recorded audio is always WAV format
+                    let pool_file = crate::audio::pool::AudioFile::with_format(
                         temp_file_path.clone(),
                         audio_data,
                         channels,
                         sample_rate,
+                        Some("wav".to_string()),
                     );
                     let pool_index = self.audio_pool.add_file(pool_file);
                     eprintln!("[STOP_RECORDING] Added to pool at index {}", pool_index);
@@ -2740,5 +2765,47 @@ impl EngineController {
         }
 
         Err("Export timeout".to_string())
+    }
+
+    /// Get a clone of the current project for serialization
+    pub fn get_project(&mut self) -> Result<crate::audio::project::Project, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::GetProject) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::ProjectRetrieved(result)) = self.query_response_rx.pop() {
+                return result.map(|boxed| *boxed);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Set the project (replaces current project state)
+    pub fn set_project(&mut self, project: crate::audio::project::Project) -> Result<(), String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(Query::SetProject(Box::new(project))) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10); // Longer timeout for loading project
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::ProjectSet(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        Err("Query timeout".to_string())
     }
 }

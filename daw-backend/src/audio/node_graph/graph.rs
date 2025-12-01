@@ -22,6 +22,16 @@ pub struct GraphNode {
     pub midi_output_buffers: Vec<Vec<MidiEvent>>,
 }
 
+impl std::fmt::Debug for GraphNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphNode")
+            .field("node", &"<AudioNode>")
+            .field("output_buffers_len", &self.output_buffers.len())
+            .field("midi_output_buffers_len", &self.midi_output_buffers.len())
+            .finish()
+    }
+}
+
 impl GraphNode {
     pub fn new(node: Box<dyn AudioNode>, buffer_size: usize) -> Self {
         let outputs = node.outputs();
@@ -57,6 +67,7 @@ impl GraphNode {
 }
 
 /// Audio processing graph for instruments/effects
+#[derive(Debug)]
 pub struct AudioGraph {
     /// The audio graph (StableGraph allows node removal without index invalidation)
     graph: StableGraph<GraphNode, Connection>,

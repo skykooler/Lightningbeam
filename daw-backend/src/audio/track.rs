@@ -4,11 +4,18 @@ use super::midi::{MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::node_graph::AudioGraph;
 use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
+use super::node_graph::preset::GraphPreset;
 use super::pool::AudioClipPool;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
 /// Track ID type
 pub type TrackId = u32;
+
+/// Default function for creating empty AudioGraph during deserialization
+fn default_audio_graph() -> AudioGraph {
+    AudioGraph::new(48000, 8192)
+}
 
 /// Type alias for backwards compatibility
 pub type Track = AudioTrack;
@@ -59,6 +66,7 @@ impl RenderContext {
 }
 
 /// Node in the track hierarchy - can be an audio track, MIDI track, or a metatrack
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TrackNode {
     Audio(AudioTrack),
     Midi(MidiTrack),
@@ -145,6 +153,7 @@ impl TrackNode {
 }
 
 /// Metatrack that contains other tracks with time transformation capabilities
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metatrack {
     pub id: TrackId,
     pub name: String,
@@ -301,12 +310,21 @@ impl Metatrack {
 }
 
 /// MIDI track with MIDI clip instances and a node-based instrument
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MidiTrack {
     pub id: TrackId,
     pub name: String,
     /// Clip instances placed on this track (reference clips in the MidiClipPool)
     pub clip_instances: Vec<MidiClipInstance>,
+
+    /// Serialized instrument graph (used for save/load)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instrument_graph_preset: Option<GraphPreset>,
+
+    /// Runtime instrument graph (rebuilt from preset on load)
+    #[serde(skip, default = "default_audio_graph")]
     pub instrument_graph: AudioGraph,
+
     pub volume: f32,
     pub muted: bool,
     pub solo: bool,
@@ -314,7 +332,26 @@ pub struct MidiTrack {
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
     /// Queue for live MIDI input (virtual keyboard, MIDI controllers)
+    #[serde(skip)]
     live_midi_queue: Vec<MidiEvent>,
+}
+
+impl Clone for MidiTrack {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            name: self.name.clone(),
+            clip_instances: self.clip_instances.clone(),
+            instrument_graph_preset: self.instrument_graph_preset.clone(),
+            instrument_graph: default_audio_graph(), // Create fresh graph, not cloned
+            volume: self.volume,
+            muted: self.muted,
+            solo: self.solo,
+            automation_lanes: self.automation_lanes.clone(),
+            next_automation_id: self.next_automation_id,
+            live_midi_queue: Vec::new(), // Don't clone live MIDI queue
+        }
+    }
 }
 
 impl MidiTrack {
@@ -327,6 +364,7 @@ impl MidiTrack {
             id,
             name,
             clip_instances: Vec::new(),
+            instrument_graph_preset: None,
             instrument_graph: AudioGraph::new(sample_rate, default_buffer_size),
             volume: 1.0,
             muted: false,
@@ -335,6 +373,22 @@ impl MidiTrack {
             next_automation_id: 0,
             live_midi_queue: Vec::new(),
         }
+    }
+
+    /// Prepare for serialization by saving the instrument graph as a preset
+    pub fn prepare_for_save(&mut self) {
+        self.instrument_graph_preset = Some(self.instrument_graph.to_preset("Instrument Graph"));
+    }
+
+    /// Rebuild the instrument graph from preset after deserialization
+    pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
+        if let Some(preset) = &self.instrument_graph_preset {
+            self.instrument_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+        } else {
+            // No preset - create default graph
+            self.instrument_graph = AudioGraph::new(sample_rate, buffer_size);
+        }
+        Ok(())
     }
 
     /// Add an automation lane to this track
@@ -504,6 +558,7 @@ impl MidiTrack {
 }
 
 /// Audio track with audio clip instances
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AudioTrack {
     pub id: TrackId,
     pub name: String,
@@ -515,8 +570,31 @@ pub struct AudioTrack {
     /// Automation lanes for this track
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
-    /// Effects processing graph for this audio track
+
+    /// Serialized effects graph (used for save/load)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effects_graph_preset: Option<GraphPreset>,
+
+    /// Runtime effects processing graph (rebuilt from preset on load)
+    #[serde(skip, default = "default_audio_graph")]
     pub effects_graph: AudioGraph,
+}
+
+impl Clone for AudioTrack {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            name: self.name.clone(),
+            clips: self.clips.clone(),
+            volume: self.volume,
+            muted: self.muted,
+            solo: self.solo,
+            automation_lanes: self.automation_lanes.clone(),
+            next_automation_id: self.next_automation_id,
+            effects_graph_preset: self.effects_graph_preset.clone(),
+            effects_graph: default_audio_graph(), // Create fresh graph, not cloned
+        }
+    }
 }
 
 impl AudioTrack {
@@ -555,8 +633,25 @@ impl AudioTrack {
             solo: false,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
+            effects_graph_preset: None,
             effects_graph,
         }
+    }
+
+    /// Prepare for serialization by saving the effects graph as a preset
+    pub fn prepare_for_save(&mut self) {
+        self.effects_graph_preset = Some(self.effects_graph.to_preset("Effects Graph"));
+    }
+
+    /// Rebuild the effects graph from preset after deserialization
+    pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
+        if let Some(preset) = &self.effects_graph_preset {
+            self.effects_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+        } else {
+            // No preset - create default graph
+            self.effects_graph = AudioGraph::new(sample_rate, buffer_size);
+        }
+        Ok(())
     }
 
     /// Add an automation lane to this track
