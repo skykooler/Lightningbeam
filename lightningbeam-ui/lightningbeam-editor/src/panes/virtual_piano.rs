@@ -29,6 +29,10 @@ pub struct VirtualPianoPane {
     keyboard_map: HashMap<String, u8>,
     /// Reverse mapping for displaying labels (MIDI note -> key label)
     note_to_key_map: HashMap<u8, String>,
+    /// Sustain pedal state (Tab key toggles)
+    sustain_active: bool,
+    /// Notes being held by sustain pedal (not by active key/mouse press)
+    sustained_notes: HashSet<u8>,
 }
 
 impl Default for VirtualPianoPane {
@@ -77,6 +81,8 @@ impl VirtualPianoPane {
             keyboard_velocity: 100, // Default MIDI velocity
             keyboard_map,
             note_to_key_map,
+            sustain_active: false,
+            sustained_notes: HashSet::new(),
         }
     }
 
@@ -235,7 +241,11 @@ impl VirtualPianoPane {
             if !black_key_interacted {
                 // Mouse down starts note (detect primary button pressed on this key)
                 if pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
-                    self.send_note_on(note, 100, shared);
+                    // Calculate velocity based on mouse Y position
+                    let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
+                    let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
+
+                    self.send_note_on(note, velocity, shared);
                     self.dragging_note = Some(note);
                 }
 
@@ -254,8 +264,11 @@ impl VirtualPianoPane {
                         if let Some(prev_note) = self.dragging_note {
                             self.send_note_off(prev_note, shared);
                         }
-                        // Start new note
-                        self.send_note_on(note, 100, shared);
+                        // Start new note with velocity from mouse position
+                        let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
+                        let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
+
+                        self.send_note_on(note, velocity, shared);
                         self.dragging_note = Some(note);
                     }
                 }
@@ -304,7 +317,11 @@ impl VirtualPianoPane {
 
             // Mouse down starts note
             if pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
-                self.send_note_on(note, 100, shared);
+                // Calculate velocity based on mouse Y position
+                let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
+                let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
+
+                self.send_note_on(note, velocity, shared);
                 self.dragging_note = Some(note);
             }
 
@@ -322,7 +339,11 @@ impl VirtualPianoPane {
                     if let Some(prev_note) = self.dragging_note {
                         self.send_note_off(prev_note, shared);
                     }
-                    self.send_note_on(note, 100, shared);
+                    // Start new note with velocity from mouse position
+                    let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
+                    let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
+
+                    self.send_note_on(note, velocity, shared);
                     self.dragging_note = Some(note);
                 }
             }
@@ -344,9 +365,18 @@ impl VirtualPianoPane {
         }
     }
 
-    /// Send note-off event to daw-backend
+    /// Send note-off event to daw-backend (or add to sustain if active)
     fn send_note_off(&mut self, note: u8, shared: &mut SharedPaneState) {
+        // If sustain is active, move note to sustained set instead of releasing
+        if self.sustain_active {
+            self.sustained_notes.insert(note);
+            // Keep note in pressed_notes for visual feedback
+            return;
+        }
+
+        // Normal release: remove from all note sets
         self.pressed_notes.remove(&note);
+        self.sustained_notes.remove(&note);
 
         if let Some(active_layer_id) = *shared.active_layer_id {
             if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
@@ -355,6 +385,65 @@ impl VirtualPianoPane {
                 }
             }
         }
+    }
+
+    /// Release sustain pedal - stop all sustained notes that aren't currently being held
+    fn release_sustain(&mut self, shared: &mut SharedPaneState) {
+        self.sustain_active = false;
+
+        // Collect currently active notes (keyboard + mouse)
+        let mut currently_playing = HashSet::new();
+
+        // Add notes from keyboard
+        for &note in self.active_key_presses.values() {
+            currently_playing.insert(note);
+        }
+
+        // Add note from mouse drag
+        if let Some(note) = self.dragging_note {
+            currently_playing.insert(note);
+        }
+
+        // Release sustained notes that aren't currently being played
+        let notes_to_release: Vec<u8> = self.sustained_notes
+            .iter()
+            .filter(|&&note| !currently_playing.contains(&note))
+            .copied()
+            .collect();
+
+        for note in notes_to_release {
+            self.send_note_off(note, shared);
+        }
+
+        self.sustained_notes.clear();
+    }
+
+    /// Calculate MIDI velocity based on mouse Y position within key
+    ///
+    /// - Top of key: velocity 1
+    /// - Top 75% of key: Linear scaling from velocity 1 to 127
+    /// - Bottom 25% of key: Full velocity (127)
+    ///
+    /// # Arguments
+    /// * `mouse_y` - Y coordinate of mouse cursor
+    /// * `key_rect` - Rectangle bounds of the key
+    ///
+    /// # Returns
+    /// MIDI velocity value clamped to range [1, 127]
+    fn calculate_velocity_from_mouse_y(&self, mouse_y: f32, key_rect: egui::Rect) -> u8 {
+        // Calculate relative position (0.0 at top, 1.0 at bottom)
+        let key_height = key_rect.height();
+        let relative_y = (mouse_y - key_rect.min.y) / key_height;
+        let relative_y = relative_y.clamp(0.0, 1.0);
+
+        // Bottom 25% of key = full velocity
+        if relative_y >= 0.75 {
+            return 127;
+        }
+
+        // Top 75% = linear scale from 1 to 127
+        let velocity = 1.0 + (relative_y / 0.75) * 126.0;
+        velocity.round().clamp(1.0, 127.0) as u8
     }
 
     /// Process keyboard input for virtual piano
@@ -395,6 +484,16 @@ impl VirtualPianoPane {
             }
             if i.key_pressed(egui::Key::V) {
                 self.keyboard_velocity = self.keyboard_velocity.saturating_add(10).min(127);
+                consumed = true;
+            }
+
+            // Handle sustain pedal (Tab key)
+            if i.key_pressed(egui::Key::Tab) {
+                self.sustain_active = true;
+                consumed = true;
+            }
+            if i.key_released(egui::Key::Tab) {
+                self.release_sustain(shared);
                 consumed = true;
             }
 
@@ -457,9 +556,31 @@ impl VirtualPianoPane {
     fn release_all_keyboard_notes(&mut self, shared: &mut SharedPaneState) {
         let notes_to_release: Vec<u8> = self.active_key_presses.values().copied().collect();
         for note in notes_to_release {
-            self.send_note_off(note, shared);
+            // Force release, bypassing sustain
+            self.pressed_notes.remove(&note);
+            if let Some(active_layer_id) = *shared.active_layer_id {
+                if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
+                    if let Some(ref mut controller) = shared.audio_controller {
+                        controller.send_midi_note_off(track_id, note);
+                    }
+                }
+            }
         }
         self.active_key_presses.clear();
+
+        // Also release all sustained notes
+        for note in &self.sustained_notes {
+            self.pressed_notes.remove(note);
+            if let Some(active_layer_id) = *shared.active_layer_id {
+                if let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) {
+                    if let Some(ref mut controller) = shared.audio_controller {
+                        controller.send_midi_note_off(track_id, *note);
+                    }
+                }
+            }
+        }
+        self.sustained_notes.clear();
+        self.sustain_active = false;
     }
 
     /// Render keyboard letter labels on piano keys
@@ -585,6 +706,21 @@ impl PaneRenderer for VirtualPianoPane {
             ui.label(format!("{}", self.keyboard_velocity));
             if ui.button("+").clicked() {
                 self.keyboard_velocity = self.keyboard_velocity.saturating_add(10).min(127);
+            }
+
+            ui.separator();
+
+            // Sustain pedal indicator
+            ui.label("Sustain:");
+            let sustain_text = if self.sustain_active {
+                egui::RichText::new("ON").color(egui::Color32::from_rgb(100, 200, 100))
+            } else {
+                egui::RichText::new("OFF").color(egui::Color32::GRAY)
+            };
+            ui.label(sustain_text);
+
+            if !self.sustained_notes.is_empty() {
+                ui.label(format!("({} notes)", self.sustained_notes.len()));
             }
         });
 

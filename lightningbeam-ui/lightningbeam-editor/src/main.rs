@@ -1178,9 +1178,13 @@ impl eframe::App for EditorApp {
         let wants_keyboard = ctx.wants_keyboard_input();
 
         ctx.input(|i| {
-            // Check menu shortcuts (these use modifiers, so allow even when typing)
+            // Check menu shortcuts that use modifiers (Cmd+S, etc.) - allow even when typing
+            // But skip shortcuts without modifiers when keyboard input is claimed (e.g., virtual piano)
             if let Some(action) = MenuSystem::check_shortcuts(i) {
-                self.handle_menu_action(action);
+                // Only trigger if keyboard isn't claimed OR the shortcut uses modifiers
+                if !wants_keyboard || i.modifiers.ctrl || i.modifiers.command || i.modifiers.alt || i.modifiers.shift {
+                    self.handle_menu_action(action);
+                }
             }
 
             // Check tool shortcuts (only if no modifiers are held AND no text input is focused)
