@@ -347,6 +347,115 @@ impl TimelinePane {
         }
     }
 
+    /// Render mini piano roll visualization for MIDI clips on timeline
+    /// Shows notes modulo 12 (one octave) matching the JavaScript reference implementation
+    #[allow(clippy::too_many_arguments)]
+    fn render_midi_piano_roll(
+        painter: &egui::Painter,
+        clip_rect: egui::Rect,
+        rect_min_x: f32, // Timeline panel left edge (for proper viewport-relative positioning)
+        events: &[(f64, u8, bool)], // (timestamp, note_number, is_note_on)
+        trim_start: f64,
+        visible_duration: f64,
+        timeline_start: f64,
+        viewport_start_time: f64,
+        pixels_per_second: f32,
+        theme: &crate::theme::Theme,
+        ctx: &egui::Context,
+    ) {
+        let clip_height = clip_rect.height();
+        let note_height = clip_height / 12.0; // 12 semitones per octave
+
+        // Get note color from theme CSS (fallback to black)
+        let note_style = theme.style(".timeline-midi-note", ctx);
+        let note_color = note_style.background_color.unwrap_or(egui::Color32::BLACK);
+
+        // Build a map of active notes (note_number -> note_on_timestamp)
+        // to calculate durations when we encounter note-offs
+        let mut active_notes: std::collections::HashMap<u8, f64> = std::collections::HashMap::new();
+        let mut note_rectangles: Vec<(egui::Rect, u8)> = Vec::new();
+
+        // First pass: pair note-ons with note-offs to calculate durations
+        for &(timestamp, note_number, is_note_on) in events {
+            if is_note_on {
+                // Store note-on timestamp
+                active_notes.insert(note_number, timestamp);
+            } else {
+                // Note-off: find matching note-on and calculate duration
+                if let Some(&note_on_time) = active_notes.get(&note_number) {
+                    let duration = timestamp - note_on_time;
+
+                    // Skip notes outside visible trim range
+                    if note_on_time < trim_start || note_on_time > trim_start + visible_duration {
+                        active_notes.remove(&note_number);
+                        continue;
+                    }
+
+                    // Calculate X position and width
+                    // Convert note position to absolute timeline position
+                    let note_timeline_pos = timeline_start + (note_on_time - trim_start);
+                    // Convert to screen X using same formula as clip positioning (time_to_x)
+                    let note_x = rect_min_x + ((note_timeline_pos - viewport_start_time) * pixels_per_second as f64) as f32;
+
+                    // Calculate note width from duration (minimum 2px for visibility)
+                    let note_width = (duration as f32 * pixels_per_second).max(2.0);
+
+                    // Calculate Y position (modulo 12 for octave wrapping)
+                    let pitch_class = note_number % 12;
+                    let note_y = clip_rect.min.y + ((11 - pitch_class) as f32 * note_height);
+
+                    let note_rect = egui::Rect::from_min_size(
+                        egui::pos2(note_x, note_y),
+                        egui::vec2(note_width, note_height - 1.0), // -1 for spacing between notes
+                    );
+
+                    // Store for rendering (only if visible)
+                    if note_rect.right() >= clip_rect.left() && note_rect.left() <= clip_rect.right() {
+                        note_rectangles.push((note_rect, note_number));
+                    }
+
+                    active_notes.remove(&note_number);
+                }
+            }
+        }
+
+        // Handle any notes that didn't get a note-off (still active at end of clip)
+        for (&note_number, &note_on_time) in &active_notes {
+            // Skip notes outside visible trim range
+            if note_on_time < trim_start || note_on_time > trim_start + visible_duration {
+                continue;
+            }
+
+            // Use a default duration (extend to end of visible area or 0.5 seconds, whichever is shorter)
+            let max_end_time = (trim_start + visible_duration).min(note_on_time + 0.5);
+            let duration = max_end_time - note_on_time;
+
+            // Convert note position to absolute timeline position
+            let note_timeline_pos = timeline_start + (note_on_time - trim_start);
+            // Convert to screen X using same formula as clip positioning (time_to_x)
+            let note_x = rect_min_x + ((note_timeline_pos - viewport_start_time) * pixels_per_second as f64) as f32;
+
+            let note_width = (duration as f32 * pixels_per_second).max(2.0);
+
+            let pitch_class = note_number % 12;
+            let note_y = clip_rect.min.y + ((11 - pitch_class) as f32 * note_height);
+
+            let note_rect = egui::Rect::from_min_size(
+                egui::pos2(note_x, note_y),
+                egui::vec2(note_width, note_height - 1.0),
+            );
+
+            if note_rect.right() >= clip_rect.left() && note_rect.left() <= clip_rect.right() {
+                note_rectangles.push((note_rect, note_number));
+            }
+        }
+
+        // Second pass: render all note rectangles
+        for (note_rect, _note_number) in note_rectangles {
+            painter.rect_filled(note_rect, 1.0, note_color);
+        }
+    }
+
     /// Render layer header column (left side with track names and controls)
     fn render_layer_headers(
         &mut self,
@@ -625,6 +734,7 @@ impl TimelinePane {
         document: &lightningbeam_core::document::Document,
         active_layer_id: &Option<uuid::Uuid>,
         selection: &lightningbeam_core::selection::Selection,
+        midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
     ) {
         let painter = ui.painter();
 
@@ -789,6 +899,29 @@ impl TimelinePane {
                             3.0, // Rounded corners
                             clip_color,
                         );
+
+                        // MIDI VISUALIZATION: Draw piano roll overlay for MIDI clips
+                        if let lightningbeam_core::layer::AnyLayer::Audio(_) = layer {
+                            if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
+                                if let lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } = &clip.clip_type {
+                                    if let Some(events) = midi_event_cache.get(midi_clip_id) {
+                                        Self::render_midi_piano_roll(
+                                            painter,
+                                            clip_rect,
+                                            rect.min.x, // Pass timeline panel left edge for proper positioning
+                                            events,
+                                            clip_instance.trim_start,
+                                            instance_duration,
+                                            instance_start,
+                                            self.viewport_start_time,
+                                            self.pixels_per_second,
+                                            theme,
+                                            ui.ctx(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
 
                         // Draw border only if selected (brighter version of clip color)
                         if selection.contains_clip_instance(&clip_instance.id) {
@@ -1534,7 +1667,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection);
+        self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

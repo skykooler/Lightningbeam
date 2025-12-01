@@ -18,12 +18,34 @@
 //! callbacks), the document is cloned before mutation, preserving their snapshot.
 
 use crate::document::Document;
+use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
+
+/// Backend context for actions that need to interact with external systems
+///
+/// This bundles all backend references (audio, future video) that actions
+/// may need to synchronize state with external systems beyond the document.
+pub struct BackendContext<'a> {
+    /// Audio engine controller (optional - may not be initialized)
+    pub audio_controller: Option<&'a mut daw_backend::EngineController>,
+
+    /// Mapping from document layer UUIDs to backend track IDs
+    pub layer_to_track_map: &'a HashMap<Uuid, daw_backend::TrackId>,
+
+    // Future: pub video_controller: Option<&'a mut VideoController>,
+}
 
 /// Action trait for undo/redo operations
 ///
 /// Each action must be able to execute (apply changes) and rollback (undo changes).
 /// Actions are stored in the undo stack and can be re-executed from the redo stack.
+///
+/// ## Backend Integration
+///
+/// Actions can optionally implement backend synchronization via `execute_backend()`
+/// and `rollback_backend()`. Default implementations do nothing, so actions that
+/// only affect the document (vector graphics) don't need to implement these.
 pub trait Action: Send {
     /// Apply this action to the document
     fn execute(&mut self, document: &mut Document);
@@ -33,6 +55,33 @@ pub trait Action: Send {
 
     /// Get a human-readable description of this action (for UI display)
     fn description(&self) -> String;
+
+    /// Execute backend operations after document changes
+    ///
+    /// Called AFTER execute() succeeds. If this returns an error, execute()
+    /// will be automatically rolled back to maintain atomicity.
+    ///
+    /// # Arguments
+    /// * `backend` - Backend context with audio/video controllers
+    /// * `document` - Read-only document access for looking up clip data
+    ///
+    /// Default: No backend operations
+    fn execute_backend(&mut self, _backend: &mut BackendContext, _document: &Document) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Rollback backend operations during undo
+    ///
+    /// Called BEFORE rollback() to undo backend changes in reverse order.
+    ///
+    /// # Arguments
+    /// * `backend` - Backend context with audio/video controllers
+    /// * `document` - Read-only document access (if needed)
+    ///
+    /// Default: No backend operations
+    fn rollback_backend(&mut self, _backend: &mut BackendContext, _document: &Document) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Action executor that wraps the document and manages undo/redo
@@ -193,6 +242,104 @@ impl ActionExecutor {
         if self.undo_stack.len() > depth {
             let remove_count = self.undo_stack.len() - depth;
             self.undo_stack.drain(0..remove_count);
+        }
+    }
+
+    /// Execute an action with backend synchronization
+    ///
+    /// This performs atomic execution: if backend operations fail, the document
+    /// changes are automatically rolled back to maintain consistency.
+    ///
+    /// # Arguments
+    /// * `action` - The action to execute
+    /// * `backend` - Backend context for audio/video operations
+    ///
+    /// # Returns
+    /// * `Ok(())` if both document and backend operations succeeded
+    /// * `Err(msg)` if backend failed (document changes are rolled back)
+    pub fn execute_with_backend(
+        &mut self,
+        mut action: Box<dyn Action>,
+        backend: &mut BackendContext,
+    ) -> Result<(), String> {
+        // 1. Execute document changes
+        action.execute(Arc::make_mut(&mut self.document));
+
+        // 2. Execute backend changes (pass document for reading clip data)
+        if let Err(e) = action.execute_backend(backend, &self.document) {
+            // ATOMIC ROLLBACK: Backend failed → undo document
+            action.rollback(Arc::make_mut(&mut self.document));
+            return Err(e);
+        }
+
+        // 3. Push to undo stack (both succeeded)
+        self.redo_stack.clear();
+        self.undo_stack.push(action);
+
+        // Limit undo stack size
+        if self.undo_stack.len() > self.max_undo_depth {
+            self.undo_stack.remove(0);
+        }
+
+        Ok(())
+    }
+
+    /// Undo the last action with backend synchronization
+    ///
+    /// Rollback happens in reverse order: backend first, then document.
+    ///
+    /// # Arguments
+    /// * `backend` - Backend context for audio/video operations
+    ///
+    /// # Returns
+    /// * `Ok(true)` if an action was undone
+    /// * `Ok(false)` if undo stack is empty
+    /// * `Err(msg)` if backend rollback failed
+    pub fn undo_with_backend(&mut self, backend: &mut BackendContext) -> Result<bool, String> {
+        if let Some(mut action) = self.undo_stack.pop() {
+            // Rollback in REVERSE order: backend first, then document
+            action.rollback_backend(backend, &self.document)?;
+            action.rollback(Arc::make_mut(&mut self.document));
+
+            // Move to redo stack
+            self.redo_stack.push(action);
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Redo the last undone action with backend synchronization
+    ///
+    /// Re-execution happens in normal order: document first, then backend.
+    ///
+    /// # Arguments
+    /// * `backend` - Backend context for audio/video operations
+    ///
+    /// # Returns
+    /// * `Ok(true)` if an action was redone
+    /// * `Ok(false)` if redo stack is empty
+    /// * `Err(msg)` if backend execution failed
+    pub fn redo_with_backend(&mut self, backend: &mut BackendContext) -> Result<bool, String> {
+        if let Some(mut action) = self.redo_stack.pop() {
+            // Re-execute in same order: document first, then backend
+            action.execute(Arc::make_mut(&mut self.document));
+
+            if let Err(e) = action.execute_backend(backend, &self.document) {
+                // Rollback document if backend fails
+                action.rollback(Arc::make_mut(&mut self.document));
+                // Put action back on redo stack
+                self.redo_stack.push(action);
+                return Err(e);
+            }
+
+            // Move back to undo stack
+            self.undo_stack.push(action);
+
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 }

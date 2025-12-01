@@ -13,8 +13,8 @@ pub mod tui;
 
 // Re-export commonly used types
 pub use audio::{
-    AudioPool, AudioTrack, AutomationLane, AutomationLaneId, AutomationPoint, BufferPool, Clip, ClipId, CurveType, Engine, EngineController,
-    Metatrack, MidiClip, MidiClipId, MidiEvent, MidiTrack, ParameterId, PoolAudioFile, Project, RecordingState, RenderContext, Track, TrackId,
+    AudioClipInstanceId, AudioPool, AudioTrack, AutomationLane, AutomationLaneId, AutomationPoint, BufferPool, Clip, ClipId, CurveType, Engine, EngineController,
+    Metatrack, MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent, MidiTrack, ParameterId, PoolAudioFile, Project, RecordingState, RenderContext, Track, TrackId,
     TrackNode,
 };
 pub use audio::node_graph::{GraphPreset, AudioGraph, PresetMetadata, SerializedConnection, SerializedNode};

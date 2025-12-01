@@ -125,6 +125,8 @@ pub struct SharedPaneState<'a> {
     pub paint_bucket_gap_tolerance: &'a mut f64,
     /// Number of sides for polygon tool
     pub polygon_sides: &'a mut u32,
+    /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
+    pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
 }
 
 /// Trait for pane rendering

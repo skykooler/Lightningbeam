@@ -1,7 +1,7 @@
 use crate::audio::buffer_pool::BufferPool;
-use crate::audio::clip::{AudioClipInstance, ClipId};
+use crate::audio::clip::{AudioClipInstance, AudioClipInstanceId, ClipId};
 use crate::audio::metronome::Metronome;
-use crate::audio::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiEvent};
+use crate::audio::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use crate::audio::node_graph::{nodes::*, AudioGraph};
 use crate::audio::pool::AudioClipPool;
 use crate::audio::project::Project;
@@ -610,6 +610,14 @@ impl Engine {
                     // Sort events by timestamp (using partial_cmp for f64)
                     clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                 }
+            }
+            Command::RemoveMidiClip(track_id, instance_id) => {
+                // Remove a MIDI clip instance from a track (for undo/redo support)
+                let _ = self.project.remove_midi_clip(track_id, instance_id);
+            }
+            Command::RemoveAudioClip(track_id, instance_id) => {
+                // Remove an audio clip instance from a track (for undo/redo support)
+                let _ = self.project.remove_audio_clip(track_id, instance_id);
             }
             Command::RequestBufferPoolStats => {
                 // Send buffer pool statistics back to UI
@@ -1683,6 +1691,45 @@ impl Engine {
                     Err(e) => QueryResponse::AudioExported(Err(e)),
                 }
             }
+            Query::AddMidiClipSync(track_id, clip, start_time) => {
+                // Add MIDI clip to track and return the instance ID
+                match self.project.add_midi_clip_at(track_id, clip, start_time) {
+                    Ok(instance_id) => QueryResponse::MidiClipInstanceAdded(Ok(instance_id)),
+                    Err(e) => QueryResponse::MidiClipInstanceAdded(Err(e.to_string())),
+                }
+            }
+            Query::AddMidiClipInstanceSync(track_id, mut instance) => {
+                // Add MIDI clip instance to track (clip must already be in pool)
+                // Assign instance ID
+                let instance_id = self.project.next_midi_clip_instance_id();
+                instance.id = instance_id;
+
+                match self.project.add_midi_clip_instance(track_id, instance) {
+                    Ok(_) => QueryResponse::MidiClipInstanceAdded(Ok(instance_id)),
+                    Err(e) => QueryResponse::MidiClipInstanceAdded(Err(e.to_string())),
+                }
+            }
+            Query::AddAudioClipSync(track_id, pool_index, start_time, duration, offset) => {
+                // Add audio clip to track and return the instance ID
+                // Create audio clip instance
+                let instance_id = self.next_clip_id;
+                self.next_clip_id += 1;
+
+                let clip = AudioClipInstance {
+                    id: instance_id,
+                    audio_pool_index: pool_index,
+                    internal_start: offset,
+                    internal_end: offset + duration,
+                    external_start: start_time,
+                    external_duration: duration,
+                    gain: 1.0,
+                };
+
+                match self.project.add_clip(track_id, clip) {
+                    Ok(instance_id) => QueryResponse::AudioClipInstanceAdded(Ok(instance_id)),
+                    Err(e) => QueryResponse::AudioClipInstanceAdded(Err(e.to_string())),
+                }
+            }
         };
 
         // Send response back
@@ -2156,6 +2203,16 @@ impl EngineController {
         let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
+    /// Remove a MIDI clip instance from a track (for undo/redo support)
+    pub fn remove_midi_clip(&mut self, track_id: TrackId, instance_id: MidiClipInstanceId) {
+        let _ = self.command_tx.push(Command::RemoveMidiClip(track_id, instance_id));
+    }
+
+    /// Remove an audio clip instance from a track (for undo/redo support)
+    pub fn remove_audio_clip(&mut self, track_id: TrackId, instance_id: AudioClipInstanceId) {
+        let _ = self.command_tx.push(Command::RemoveAudioClip(track_id, instance_id));
+    }
+
     /// Request buffer pool statistics
     /// The statistics will be sent via an AudioEvent::BufferPoolStats event
     pub fn request_buffer_pool_stats(&mut self) {
@@ -2358,6 +2415,30 @@ impl EngineController {
     /// Remove a layer from a MultiSampler node
     pub fn multi_sampler_remove_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize) {
         let _ = self.command_tx.push(Command::MultiSamplerRemoveLayer(track_id, node_id, layer_index));
+    }
+
+    /// Send a synchronous query and wait for the response
+    /// This blocks until the audio thread processes the query
+    /// Generic method that works with any Query/QueryResponse pair
+    pub fn send_query(&mut self, query: Query) -> Result<QueryResponse, String> {
+        // Send query
+        if let Err(_) = self.query_tx.push(query) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        // Wait for response (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+
+        while start.elapsed() < timeout {
+            if let Ok(response) = self.query_response_rx.pop() {
+                return Ok(response);
+            }
+            // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        Err("Query timeout".to_string())
     }
 
     /// Send a synchronous query and wait for the response

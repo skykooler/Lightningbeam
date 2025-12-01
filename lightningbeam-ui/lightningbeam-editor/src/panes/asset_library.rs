@@ -1172,23 +1172,15 @@ impl AssetLibraryPane {
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }
                                             }
-                                            AudioClipType::Midi { events, .. } => {
-                                                let note_color = egui::Color32::from_rgb(100, 150, 255);
-                                                // Convert MIDI events to (timestamp, note, is_note_on) tuples
-                                                // Note on: 0x90-0x9F, Note off: 0x80-0x8F
-                                                let midi_events: Vec<(f64, u8, bool)> = events.iter()
-                                                    .filter_map(|e| {
-                                                        let msg_type = e.status & 0xF0;
-                                                        let is_note_on = msg_type == 0x90 && e.data2 > 0;
-                                                        let is_note_off = msg_type == 0x80 || (msg_type == 0x90 && e.data2 == 0);
-                                                        if is_note_on || is_note_off {
-                                                            Some((e.timestamp, e.data1, is_note_on))
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                                    .collect();
-                                                Some(generate_midi_thumbnail(&midi_events, clip.duration, bg_color, note_color))
+                                            AudioClipType::Midi { midi_clip_id } => {
+                                                let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                                                let note_color = egui::Color32::from_rgb(100, 200, 100);
+
+                                                if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
+                                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                                } else {
+                                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                                }
                                             }
                                         }
                                     } else {
@@ -1449,21 +1441,15 @@ impl AssetLibraryPane {
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }
                                             }
-                                            AudioClipType::Midi { events, .. } => {
-                                                let note_color = egui::Color32::from_rgb(100, 150, 255);
-                                                let midi_events: Vec<(f64, u8, bool)> = events.iter()
-                                                    .filter_map(|e| {
-                                                        let msg_type = e.status & 0xF0;
-                                                        let is_note_on = msg_type == 0x90 && e.data2 > 0;
-                                                        let is_note_off = msg_type == 0x80 || (msg_type == 0x90 && e.data2 == 0);
-                                                        if is_note_on || is_note_off {
-                                                            Some((e.timestamp, e.data1, is_note_on))
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                                    .collect();
-                                                Some(generate_midi_thumbnail(&midi_events, clip.duration, bg_color, note_color))
+                                            AudioClipType::Midi { midi_clip_id } => {
+                                                let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                                                let note_color = egui::Color32::from_rgb(100, 200, 100);
+
+                                                if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
+                                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                                } else {
+                                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                                }
                                             }
                                         }
                                     } else {

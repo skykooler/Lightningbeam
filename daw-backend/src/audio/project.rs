@@ -1,5 +1,5 @@
 use super::buffer_pool::BufferPool;
-use super::clip::Clip;
+use super::clip::{AudioClipInstanceId, Clip};
 use super::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::pool::AudioClipPool;
@@ -242,10 +242,11 @@ impl Project {
     }
 
     /// Add a clip to an audio track
-    pub fn add_clip(&mut self, track_id: TrackId, clip: Clip) -> Result<(), &'static str> {
+    pub fn add_clip(&mut self, track_id: TrackId, clip: Clip) -> Result<AudioClipInstanceId, &'static str> {
         if let Some(TrackNode::Audio(track)) = self.tracks.get_mut(&track_id) {
+            let instance_id = clip.id;
             track.add_clip(clip);
-            Ok(())
+            Ok(instance_id)
         } else {
             Err("Track not found or is not an audio track")
         }
@@ -302,12 +303,12 @@ impl Project {
     }
 
     /// Legacy method for backwards compatibility - creates clip and instance from old MidiClip format
-    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<(), &'static str> {
+    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<MidiClipInstanceId, &'static str> {
         self.add_midi_clip_at(track_id, clip, 0.0)
     }
 
     /// Add a MIDI clip to the pool and create an instance at the given timeline position
-    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) -> Result<(), &'static str> {
+    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) -> Result<MidiClipInstanceId, &'static str> {
         // Add the clip to the pool (it already has events and duration)
         let duration = clip.duration;
         let clip_id = clip.id;
@@ -317,7 +318,28 @@ impl Project {
         let instance_id = self.next_midi_clip_instance_id();
         let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, start_time);
 
-        self.add_midi_clip_instance(track_id, instance)
+        self.add_midi_clip_instance(track_id, instance)?;
+        Ok(instance_id)
+    }
+
+    /// Remove a MIDI clip instance from a track (for undo/redo support)
+    pub fn remove_midi_clip(&mut self, track_id: TrackId, instance_id: MidiClipInstanceId) -> Result<(), &'static str> {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.remove_midi_clip_instance(instance_id);
+            Ok(())
+        } else {
+            Err("Track not found")
+        }
+    }
+
+    /// Remove an audio clip instance from a track (for undo/redo support)
+    pub fn remove_audio_clip(&mut self, track_id: TrackId, instance_id: AudioClipInstanceId) -> Result<(), &'static str> {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.remove_audio_clip_instance(instance_id);
+            Ok(())
+        } else {
+            Err("Track not found")
+        }
     }
 
     /// Render all root tracks into the output buffer

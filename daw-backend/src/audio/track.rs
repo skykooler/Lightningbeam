@@ -1,6 +1,6 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
-use super::clip::AudioClipInstance;
-use super::midi::{MidiClipInstance, MidiEvent};
+use super::clip::{AudioClipInstance, AudioClipInstanceId};
+use super::midi::{MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::node_graph::AudioGraph;
 use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
@@ -126,6 +126,20 @@ impl TrackNode {
             TrackNode::Audio(track) => track.set_solo(solo),
             TrackNode::Midi(track) => track.set_solo(solo),
             TrackNode::Group(group) => group.set_solo(solo),
+        }
+    }
+
+    /// Remove a MIDI clip instance (only works on MIDI tracks)
+    pub fn remove_midi_clip_instance(&mut self, instance_id: MidiClipInstanceId) {
+        if let TrackNode::Midi(track) = self {
+            track.remove_midi_clip_instance(instance_id);
+        }
+    }
+
+    /// Remove an audio clip instance (only works on audio tracks)
+    pub fn remove_audio_clip_instance(&mut self, instance_id: AudioClipInstanceId) {
+        if let TrackNode::Audio(track) = self {
+            track.remove_audio_clip_instance(instance_id);
         }
     }
 }
@@ -353,6 +367,11 @@ impl MidiTrack {
         self.clip_instances.push(instance);
     }
 
+    /// Remove a MIDI clip instance from this track by instance ID (for undo/redo support)
+    pub fn remove_midi_clip_instance(&mut self, instance_id: MidiClipInstanceId) {
+        self.clip_instances.retain(|instance| instance.id != instance_id);
+    }
+
     /// Set track volume
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.max(0.0);
@@ -568,6 +587,11 @@ impl AudioTrack {
     /// Add an audio clip instance to this track
     pub fn add_clip(&mut self, clip: AudioClipInstance) {
         self.clips.push(clip);
+    }
+
+    /// Remove an audio clip instance from this track by instance ID (for undo/redo support)
+    pub fn remove_audio_clip_instance(&mut self, instance_id: AudioClipInstanceId) {
+        self.clips.retain(|instance| instance.id != instance_id);
     }
 
     /// Set track volume (0.0 = silence, 1.0 = unity gain, >1.0 = amplification)

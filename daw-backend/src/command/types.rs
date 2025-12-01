@@ -1,6 +1,6 @@
 use crate::audio::{
-    AutomationLaneId, ClipId, CurveType, MidiClip, MidiClipId, ParameterId,
-    TrackId,
+    AudioClipInstanceId, AutomationLaneId, ClipId, CurveType, MidiClip, MidiClipId,
+    MidiClipInstanceId, ParameterId, TrackId,
 };
 use crate::audio::buffer_pool::BufferPoolStats;
 use crate::audio::node_graph::nodes::LoopMode;
@@ -78,6 +78,10 @@ pub enum Command {
     /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
     /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
     UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),
+    /// Remove a MIDI clip instance from a track (track_id, instance_id) - for undo/redo support
+    RemoveMidiClip(TrackId, MidiClipInstanceId),
+    /// Remove an audio clip instance from a track (track_id, instance_id) - for undo/redo support
+    RemoveAudioClip(TrackId, AudioClipInstanceId),
 
     // Diagnostics commands
     /// Request buffer pool statistics
@@ -261,6 +265,13 @@ pub enum Query {
     GetPoolFileInfo(usize),
     /// Export audio to file (settings, output_path)
     ExportAudio(crate::audio::ExportSettings, std::path::PathBuf),
+    /// Add a MIDI clip to a track synchronously (track_id, clip, start_time) - returns instance ID
+    AddMidiClipSync(TrackId, crate::audio::midi::MidiClip, f64),
+    /// Add a MIDI clip instance to a track synchronously (track_id, instance) - returns instance ID
+    /// The clip must already exist in the MidiClipPool
+    AddMidiClipInstanceSync(TrackId, crate::audio::midi::MidiClipInstance),
+    /// Add an audio clip to a track synchronously (track_id, pool_index, start_time, duration, offset) - returns instance ID
+    AddAudioClipSync(TrackId, usize, f64, f64, f64),
 }
 
 /// Oscilloscope data from a node
@@ -320,4 +331,8 @@ pub enum QueryResponse {
     PoolFileInfo(Result<(f64, u32, u32), String>),
     /// Audio exported
     AudioExported(Result<(), String>),
+    /// MIDI clip instance added (returns instance ID)
+    MidiClipInstanceAdded(Result<MidiClipInstanceId, String>),
+    /// Audio clip instance added (returns instance ID)
+    AudioClipInstanceAdded(Result<AudioClipInstanceId, String>),
 }

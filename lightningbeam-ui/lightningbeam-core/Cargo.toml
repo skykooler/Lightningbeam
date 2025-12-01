@@ -19,3 +19,6 @@ image = { workspace = true }
 
 # Unique identifiers
 uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Audio backend
+daw-backend = { path = "../../daw-backend" }

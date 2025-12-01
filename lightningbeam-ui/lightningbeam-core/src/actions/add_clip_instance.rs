@@ -2,7 +2,7 @@
 //!
 //! Handles adding a clip instance to a layer.
 
-use crate::action::Action;
+use crate::action::{Action, BackendContext};
 use crate::clip::ClipInstance;
 use crate::document::Document;
 use crate::layer::AnyLayer;
@@ -18,6 +18,15 @@ pub struct AddClipInstanceAction {
 
     /// Whether the action has been executed (for rollback)
     executed: bool,
+
+    /// Backend track ID (stored during execute_backend for undo)
+    backend_track_id: Option<daw_backend::TrackId>,
+
+    /// Backend MIDI clip instance ID (stored during execute_backend for undo)
+    backend_midi_instance_id: Option<daw_backend::MidiClipInstanceId>,
+
+    /// Backend audio clip instance ID (stored during execute_backend for undo)
+    backend_audio_instance_id: Option<daw_backend::AudioClipInstanceId>,
 }
 
 impl AddClipInstanceAction {
@@ -32,6 +41,9 @@ impl AddClipInstanceAction {
             layer_id,
             clip_instance,
             executed: false,
+            backend_track_id: None,
+            backend_midi_instance_id: None,
+            backend_audio_instance_id: None,
         }
     }
 
@@ -95,6 +107,109 @@ impl Action for AddClipInstanceAction {
 
     fn description(&self) -> String {
         "Add clip instance".to_string()
+    }
+
+    fn execute_backend(&mut self, backend: &mut BackendContext, document: &Document) -> Result<(), String> {
+        // Only sync audio clips to the backend
+        // Look up the clip from the document
+        let clip = document
+            .get_audio_clip(&self.clip_instance.clip_id)
+            .ok_or_else(|| "Audio clip not found".to_string())?;
+
+        // Look up backend track ID from layer mapping
+        let backend_track_id = backend
+            .layer_to_track_map
+            .get(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not mapped to backend track", self.layer_id))?;
+
+        // Get audio controller
+        let controller = backend
+            .audio_controller
+            .as_mut()
+            .ok_or_else(|| "Audio controller not available".to_string())?;
+
+        // Handle different clip types
+        use crate::clip::AudioClipType;
+        match &clip.clip_type {
+            AudioClipType::Midi { midi_clip_id } => {
+                // Create a MIDI clip instance referencing the existing clip in the backend pool
+                // No need to add to pool again - it was added during MIDI import
+                use daw_backend::command::{Query, QueryResponse};
+
+                // Calculate internal start/end from trim parameters
+                let internal_start = self.clip_instance.trim_start;
+                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
+                let external_start = self.clip_instance.timeline_start;
+
+                // Calculate external duration (for looping if timeline_duration is set)
+                let external_duration = self.clip_instance.timeline_duration
+                    .unwrap_or(internal_end - internal_start);
+
+                // Create MidiClipInstance
+                let instance = daw_backend::MidiClipInstance::new(
+                    0, // Instance ID will be assigned by backend
+                    *midi_clip_id,
+                    internal_start,
+                    internal_end,
+                    external_start,
+                    external_duration,
+                );
+
+                // Send query to add instance and get instance ID
+                let query = Query::AddMidiClipInstanceSync(*backend_track_id, instance);
+
+                match controller.send_query(query)? {
+                    QueryResponse::MidiClipInstanceAdded(Ok(instance_id)) => {
+                        self.backend_track_id = Some(*backend_track_id);
+                        self.backend_midi_instance_id = Some(instance_id);
+                        Ok(())
+                    }
+                    QueryResponse::MidiClipInstanceAdded(Err(e)) => Err(e),
+                    _ => Err("Unexpected query response".to_string()),
+                }
+            }
+            AudioClipType::Sampled { audio_pool_index } => {
+                // For sampled audio, send AddAudioClipSync query
+                use daw_backend::command::{Query, QueryResponse};
+
+                let duration = clip.duration;
+                let start_time = self.clip_instance.timeline_start;
+                let offset = self.clip_instance.trim_start;
+
+                let query =
+                    Query::AddAudioClipSync(*backend_track_id, *audio_pool_index, start_time, duration, offset);
+
+                match controller.send_query(query)? {
+                    QueryResponse::AudioClipInstanceAdded(Ok(instance_id)) => {
+                        self.backend_track_id = Some(*backend_track_id);
+                        self.backend_audio_instance_id = Some(instance_id);
+                        Ok(())
+                    }
+                    QueryResponse::AudioClipInstanceAdded(Err(e)) => Err(e),
+                    _ => Err("Unexpected query response".to_string()),
+                }
+            }
+        }
+    }
+
+    fn rollback_backend(&mut self, backend: &mut BackendContext, _document: &Document) -> Result<(), String> {
+        // Remove clip from backend if it was added
+        if let (Some(track_id), Some(controller)) =
+            (self.backend_track_id, backend.audio_controller.as_mut())
+        {
+            if let Some(midi_instance_id) = self.backend_midi_instance_id {
+                controller.remove_midi_clip(track_id, midi_instance_id);
+            } else if let Some(audio_instance_id) = self.backend_audio_instance_id {
+                controller.remove_audio_clip(track_id, audio_instance_id);
+            }
+
+            // Clear stored IDs
+            self.backend_track_id = None;
+            self.backend_midi_instance_id = None;
+            self.backend_audio_instance_id = None;
+        }
+
+        Ok(())
     }
 }
 

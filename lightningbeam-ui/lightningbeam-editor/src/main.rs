@@ -288,6 +288,11 @@ struct EditorApp {
     fill_enabled: bool,              // Whether to fill shapes (default: true)
     paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
     polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
+
+    /// Cache for MIDI event data (keyed by backend midi_clip_id)
+    /// Prevents repeated backend queries for the same MIDI clip
+    /// Format: (timestamp, note_number, is_note_on)
+    midi_event_cache: HashMap<u32, Vec<(f64, u8, bool)>>,
 }
 
 /// Import filter types for the file dialog
@@ -382,6 +387,7 @@ impl EditorApp {
             fill_enabled: true,              // Default to filling shapes
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
+            midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
         }
     }
 
@@ -601,17 +607,43 @@ impl EditorApp {
 
             // Edit menu
             MenuAction::Undo => {
-                if self.action_executor.undo() {
-                    println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default());
+                if let Some(ref mut audio_system) = self.audio_system {
+                    let mut backend_context = lightningbeam_core::action::BackendContext {
+                        audio_controller: Some(&mut audio_system.controller),
+                        layer_to_track_map: &self.layer_to_track_map,
+                    };
+
+                    match self.action_executor.undo_with_backend(&mut backend_context) {
+                        Ok(true) => println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default()),
+                        Ok(false) => println!("Nothing to undo"),
+                        Err(e) => eprintln!("Undo failed: {}", e),
+                    }
                 } else {
-                    println!("Nothing to undo");
+                    if self.action_executor.undo() {
+                        println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default());
+                    } else {
+                        println!("Nothing to undo");
+                    }
                 }
             }
             MenuAction::Redo => {
-                if self.action_executor.redo() {
-                    println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default());
+                if let Some(ref mut audio_system) = self.audio_system {
+                    let mut backend_context = lightningbeam_core::action::BackendContext {
+                        audio_controller: Some(&mut audio_system.controller),
+                        layer_to_track_map: &self.layer_to_track_map,
+                    };
+
+                    match self.action_executor.redo_with_backend(&mut backend_context) {
+                        Ok(true) => println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default()),
+                        Ok(false) => println!("Nothing to redo"),
+                        Err(e) => eprintln!("Redo failed: {}", e),
+                    }
                 } else {
-                    println!("Nothing to redo");
+                    if self.action_executor.redo() {
+                        println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default());
+                    } else {
+                        println!("Nothing to redo");
+                    }
                 }
             }
             MenuAction::Cut => {
@@ -948,7 +980,7 @@ impl EditorApp {
 
     /// Import a MIDI file via daw-backend
     fn import_midi(&mut self, path: &std::path::Path) {
-        use lightningbeam_core::clip::{AudioClip, AudioClipType, MidiEvent};
+        use lightningbeam_core::clip::AudioClip;
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -956,26 +988,45 @@ impl EditorApp {
             .to_string();
 
         // Load MIDI file via daw-backend
-        // Note: daw-backend's load_midi_file returns a MidiClip with events
         match daw_backend::io::midi_file::load_midi_file(path, 0, 44100) {
             Ok(midi_clip) => {
-                // Convert daw-backend MidiEvents to our MidiEvent type
-                let events: Vec<MidiEvent> = midi_clip.events.iter().map(|e| {
-                    MidiEvent::new(e.timestamp, e.status, e.data1, e.data2)
-                }).collect();
-
                 let duration = midi_clip.duration;
+                let event_count = midi_clip.events.len();
 
-                // Create MIDI audio clip in document library
-                let clip = AudioClip::new_midi(&name, duration, events, false);
-                let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
-                println!("Imported MIDI '{}' ({:.1}s, {} events) to library - ID: {}",
-                    name, duration, midi_clip.events.len(), clip_id);
+                // Process MIDI events to cache format: (timestamp, note_number, is_note_on)
+                // Filter to note events only (status 0x90 = note-on, 0x80 = note-off)
+                let processed_events: Vec<(f64, u8, bool)> = midi_clip.events.iter()
+                    .filter_map(|event| {
+                        let status_type = event.status & 0xF0;
+                        if status_type == 0x90 || status_type == 0x80 {
+                            // Note-on is 0x90 with velocity > 0, Note-off is 0x80 or velocity = 0
+                            let is_note_on = status_type == 0x90 && event.data2 > 0;
+                            Some((event.timestamp, event.data1, is_note_on))
+                        } else {
+                            None // Ignore non-note events (CC, pitch bend, etc.)
+                        }
+                    })
+                    .collect();
 
-                // Add to daw-backend MIDI clip pool (for playback when placed on timeline)
+                let note_event_count = processed_events.len();
+
+                // Add to backend MIDI clip pool FIRST and get the backend clip ID
                 if let Some(ref mut audio_system) = self.audio_system {
-                    audio_system.controller.add_midi_clip_to_pool(midi_clip);
-                    println!("✅ Added MIDI clip to backend pool");
+                    audio_system.controller.add_midi_clip_to_pool(midi_clip.clone());
+                    let backend_clip_id = midi_clip.id; // The backend clip ID
+
+                    // Cache MIDI events in frontend for rendering (thumbnails & timeline piano roll)
+                    self.midi_event_cache.insert(backend_clip_id, processed_events);
+
+                    // Create frontend MIDI clip referencing the backend pool
+                    let clip = AudioClip::new_midi(&name, backend_clip_id, duration);
+                    let frontend_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+
+                    println!("Imported MIDI '{}' ({:.1}s, {} total events, {} note events) - Frontend ID: {}, Backend ID: {}",
+                        name, duration, event_count, note_event_count, frontend_clip_id, backend_clip_id);
+                    println!("✅ Added MIDI clip to backend pool and cached {} note events", note_event_count);
+                } else {
+                    eprintln!("⚠️  Cannot import MIDI: audio system not available");
                 }
             }
             Err(e) => {
@@ -1102,6 +1153,7 @@ impl eframe::App for EditorApp {
                 paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
                 polygon_sides: &mut self.polygon_sides,
                 layer_to_track_map: &self.layer_to_track_map,
+                midi_event_cache: &self.midi_event_cache,
             };
 
             render_layout_node(
@@ -1136,7 +1188,21 @@ impl eframe::App for EditorApp {
 
             // Execute all pending actions (two-phase dispatch)
             for action in pending_actions {
-                self.action_executor.execute(action);
+                // Create backend context for actions that need backend sync
+                if let Some(ref mut audio_system) = self.audio_system {
+                    let mut backend_context = lightningbeam_core::action::BackendContext {
+                        audio_controller: Some(&mut audio_system.controller),
+                        layer_to_track_map: &self.layer_to_track_map,
+                    };
+
+                    // Execute action with backend synchronization
+                    if let Err(e) = self.action_executor.execute_with_backend(action, &mut backend_context) {
+                        eprintln!("Action execution failed: {}", e);
+                    }
+                } else {
+                    // No audio system available, execute without backend
+                    self.action_executor.execute(action);
+                }
             }
 
             // Set cursor based on hover state
@@ -1253,6 +1319,8 @@ struct RenderContext<'a> {
     polygon_sides: &'a mut u32,
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
     layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
+    /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
+    midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
 }
 
 /// Recursively render a layout node with drag support
@@ -1723,6 +1791,7 @@ fn render_pane(
                 fill_enabled: ctx.fill_enabled,
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
+                midi_event_cache: ctx.midi_event_cache,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -1776,6 +1845,7 @@ fn render_pane(
                 fill_enabled: ctx.fill_enabled,
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
+                midi_event_cache: ctx.midi_event_cache,
             };
 
             // Render pane content (header was already rendered above)

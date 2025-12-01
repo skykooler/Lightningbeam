@@ -332,12 +332,12 @@ pub enum AudioClipType {
     },
     /// MIDI sequence
     ///
-    /// Compatible with daw-backend's MidiClip structure.
+    /// References MIDI data in the backend's MidiClipPool.
+    /// The clip content is stored in daw-backend, not duplicated here.
     Midi {
-        /// MIDI events with timestamps
-        events: Vec<MidiEvent>,
-        /// Whether the clip loops
-        loop_enabled: bool,
+        /// Backend MIDI clip ID (references MidiClip in backend pool)
+        /// This allows sharing MIDI data between multiple clip instances
+        midi_clip_id: u32,
     },
 }
 
@@ -379,20 +379,21 @@ impl AudioClip {
     }
 
     /// Create a new MIDI clip
+    ///
+    /// # Arguments
+    /// * `name` - Clip name
+    /// * `midi_clip_id` - Backend MIDI clip ID (from daw-backend MidiClipPool)
+    /// * `duration` - Clip duration
     pub fn new_midi(
         name: impl Into<String>,
+        midi_clip_id: u32,
         duration: f64,
-        events: Vec<MidiEvent>,
-        loop_enabled: bool,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
             duration,
-            clip_type: AudioClipType::Midi {
-                events,
-                loop_enabled,
-            },
+            clip_type: AudioClipType::Midi { midi_clip_id },
         }
     }
 
@@ -404,10 +405,10 @@ impl AudioClip {
         }
     }
 
-    /// Get MIDI events if this is a MIDI clip
-    pub fn midi_events(&self) -> Option<&[MidiEvent]> {
+    /// Get backend MIDI clip ID if this is a MIDI clip
+    pub fn midi_clip_id(&self) -> Option<u32> {
         match &self.clip_type {
-            AudioClipType::Midi { events, .. } => Some(events),
+            AudioClipType::Midi { midi_clip_id } => Some(*midi_clip_id),
             _ => None,
         }
     }
