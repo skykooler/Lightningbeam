@@ -127,6 +127,8 @@ pub struct SharedPaneState<'a> {
     pub polygon_sides: &'a mut u32,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
     pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
+    /// Cache of waveform data for rendering (keyed by audio_pool_index)
+    pub waveform_cache: &'a std::collections::HashMap<usize, Vec<daw_backend::WaveformPeak>>,
 }
 
 /// Trait for pane rendering

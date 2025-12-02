@@ -14,7 +14,7 @@ use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
 const LAYER_HEADER_WIDTH: f32 = 200.0;
-const MIN_PIXELS_PER_SECOND: f32 = 20.0;
+const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
 
@@ -456,6 +456,135 @@ impl TimelinePane {
         }
     }
 
+    /// Render waveform visualization for audio clips on timeline
+    /// Uses peak-based rendering: each waveform sample has a fixed pixel width that scales with zoom
+    #[allow(clippy::too_many_arguments)]
+    fn render_audio_waveform(
+        painter: &egui::Painter,
+        clip_rect: egui::Rect,
+        clip_start_x: f32, // Absolute screen x where clip starts (can be offscreen)
+        clip_bg_color: egui::Color32, // Background color of the clip
+        waveform: &[daw_backend::WaveformPeak],
+        clip_duration: f64,
+        pixels_per_second: f32,
+        trim_start: f64,
+        theme: &crate::theme::Theme,
+        ctx: &egui::Context,
+    ) {
+        if waveform.is_empty() {
+            return;
+        }
+
+        let clip_height = clip_rect.height();
+        let center_y = clip_rect.center().y;
+
+        // Calculate waveform color: lighten the clip background color
+        // Blend clip background with white (70% white + 30% clip color) for subtle tint
+        // Use full opacity to prevent overlapping lines from blending lighter when zoomed out
+        let r = ((255.0 * 0.7) + (clip_bg_color.r() as f32 * 0.3)) as u8;
+        let g = ((255.0 * 0.7) + (clip_bg_color.g() as f32 * 0.3)) as u8;
+        let b = ((255.0 * 0.7) + (clip_bg_color.b() as f32 * 0.3)) as u8;
+        let waveform_color = egui::Color32::from_rgb(r, g, b);
+
+        // Calculate how wide each peak should be at current zoom (mirrors JavaScript)
+        // fullSourceWidth = sourceDuration * pixelsPerSecond
+        // pixelsPerPeak = fullSourceWidth / waveformData.length
+        let full_source_width = clip_duration * pixels_per_second as f64;
+        let pixels_per_peak = full_source_width / waveform.len() as f64;
+
+        // Calculate which peak corresponds to the clip's offset (trimmed left edge)
+        let offset_peak_index = ((trim_start / clip_duration) * waveform.len() as f64).floor() as usize;
+        let offset_peak_index = offset_peak_index.min(waveform.len().saturating_sub(1));
+
+        // Calculate visible peak range
+        // firstVisiblePeak = max(offsetPeakIndex, floor((visibleStart - startX) / pixelsPerPeak) + offsetPeakIndex)
+        let visible_start = clip_rect.min.x;
+        let visible_end = clip_rect.max.x;
+
+        let first_visible_peak_from_viewport = if pixels_per_peak > 0.0 {
+            (((visible_start - clip_start_x) as f64 / pixels_per_peak).floor() as isize + offset_peak_index as isize).max(0)
+        } else {
+            offset_peak_index as isize
+        };
+        let first_visible_peak = (first_visible_peak_from_viewport as usize).max(offset_peak_index);
+
+        let last_visible_peak_from_viewport = if pixels_per_peak > 0.0 {
+            ((visible_end - clip_start_x) as f64 / pixels_per_peak).ceil() as isize + offset_peak_index as isize
+        } else {
+            offset_peak_index as isize
+        };
+        let last_visible_peak = (last_visible_peak_from_viewport as usize)
+            .min(waveform.len().saturating_sub(1));
+
+        if first_visible_peak > last_visible_peak || first_visible_peak >= waveform.len() {
+            return;
+        }
+
+        println!("\n🎵 WAVEFORM RENDER:");
+        println!("  Waveform total peaks: {}", waveform.len());
+        println!("  Clip duration: {:.2}s", clip_duration);
+        println!("  Pixels per second: {}", pixels_per_second);
+        println!("  Pixels per peak: {:.4}", pixels_per_peak);
+        println!("  Trim start: {:.2}s", trim_start);
+        println!("  Offset peak index: {}", offset_peak_index);
+        println!("  Clip start X: {:.1}", clip_start_x);
+        println!("  Clip rect: x=[{:.1}, {:.1}], y=[{:.1}, {:.1}]",
+                 clip_rect.min.x, clip_rect.max.x, clip_rect.min.y, clip_rect.max.y);
+        println!("  Visible start: {:.1}, end: {:.1}", visible_start, visible_end);
+        println!("  First visible peak: {} (time: {:.2}s)",
+                 first_visible_peak, first_visible_peak as f64 * clip_duration / waveform.len() as f64);
+        println!("  Last visible peak: {} (time: {:.2}s)",
+                 last_visible_peak, last_visible_peak as f64 * clip_duration / waveform.len() as f64);
+        println!("  Peak range size: {}", last_visible_peak - first_visible_peak + 1);
+
+        // Draw waveform as vertical lines from min to max
+        // Line width scales with zoom to avoid gaps between peaks
+        let line_width = if pixels_per_peak > 1.0 {
+            pixels_per_peak.ceil() as f32
+        } else {
+            1.0
+        };
+
+        let mut peaks_drawn = 0;
+        let mut lines = Vec::new();
+
+        for i in first_visible_peak..=last_visible_peak {
+            if i >= waveform.len() {
+                break;
+            }
+
+            let peak_x = clip_start_x + ((i as isize - offset_peak_index as isize) as f64 * pixels_per_peak) as f32;
+            let peak = &waveform[i];
+
+            // Calculate Y positions for min and max
+            let max_y = center_y + (peak.max * clip_height * 0.45);
+            let min_y = center_y + (peak.min * clip_height * 0.45);
+
+            if peaks_drawn < 3 {
+                println!("  PEAK[{}]: x={:.1}, min={:.3} (y={:.1}), max={:.3} (y={:.1})",
+                         i, peak_x, peak.min, min_y, peak.max, max_y);
+            }
+
+            // Draw vertical line from min to max
+            lines.push((
+                egui::pos2(peak_x, max_y),
+                egui::pos2(peak_x, min_y),
+            ));
+
+            peaks_drawn += 1;
+        }
+
+        println!("  Peaks drawn: {}, line width: {:.1}px", peaks_drawn, line_width);
+
+        // Draw all lines with clipping
+        for (start, end) in lines {
+            painter.with_clip_rect(clip_rect).line_segment(
+                [start, end],
+                egui::Stroke::new(line_width, waveform_color),
+            );
+        }
+    }
+
     /// Render layer header column (left side with track names and controls)
     fn render_layer_headers(
         &mut self,
@@ -514,9 +643,14 @@ impl TimelinePane {
             let layer_data = layer.layer();
             let layer_name = &layer_data.name;
             let (layer_type, type_color) = match layer {
-                lightningbeam_core::layer::AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(100, 150, 255)), // Blue
-                lightningbeam_core::layer::AnyLayer::Audio(_) => ("Audio", egui::Color32::from_rgb(100, 255, 150)), // Green
-                lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(255, 150, 100)), // Orange
+                lightningbeam_core::layer::AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)), // Orange
+                lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
+                    match audio_layer.audio_layer_type {
+                        lightningbeam_core::layer::AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)), // Green
+                        lightningbeam_core::layer::AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)), // Blue
+                    }
+                }
+                lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(255, 150, 100)), // Orange/Red
             };
 
             // Color indicator bar on the left edge
@@ -735,6 +869,7 @@ impl TimelinePane {
         active_layer_id: &Option<uuid::Uuid>,
         selection: &lightningbeam_core::selection::Selection,
         midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
+        waveform_cache: &std::collections::HashMap<usize, Vec<daw_backend::WaveformPeak>>,
     ) {
         let painter = ui.painter();
 
@@ -875,16 +1010,24 @@ impl TimelinePane {
                         // Choose color based on layer type
                         let (clip_color, bright_color) = match layer {
                             lightningbeam_core::layer::AnyLayer::Vector(_) => (
-                                egui::Color32::from_rgb(100, 150, 255), // Blue
-                                egui::Color32::from_rgb(150, 200, 255), // Bright blue
+                                egui::Color32::from_rgb(220, 150, 80), // Orange
+                                egui::Color32::from_rgb(255, 210, 150), // Bright orange
                             ),
-                            lightningbeam_core::layer::AnyLayer::Audio(_) => (
-                                egui::Color32::from_rgb(100, 255, 150), // Green
-                                egui::Color32::from_rgb(150, 255, 200), // Bright green
-                            ),
+                            lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
+                                match audio_layer.audio_layer_type {
+                                    lightningbeam_core::layer::AudioLayerType::Midi => (
+                                        egui::Color32::from_rgb(100, 200, 150), // Green
+                                        egui::Color32::from_rgb(150, 255, 200), // Bright green
+                                    ),
+                                    lightningbeam_core::layer::AudioLayerType::Sampled => (
+                                        egui::Color32::from_rgb(80, 150, 220), // Blue
+                                        egui::Color32::from_rgb(150, 210, 255), // Bright blue
+                                    ),
+                                }
+                            }
                             lightningbeam_core::layer::AnyLayer::Video(_) => (
-                                egui::Color32::from_rgb(255, 150, 100), // Orange
-                                egui::Color32::from_rgb(255, 200, 150), // Bright orange
+                                egui::Color32::from_rgb(255, 150, 100), // Orange/Red
+                                egui::Color32::from_rgb(255, 200, 150), // Bright orange/red
                             ),
                         };
 
@@ -900,24 +1043,47 @@ impl TimelinePane {
                             clip_color,
                         );
 
-                        // MIDI VISUALIZATION: Draw piano roll overlay for MIDI clips
+                        // AUDIO VISUALIZATION: Draw piano roll or waveform overlay
                         if let lightningbeam_core::layer::AnyLayer::Audio(_) = layer {
                             if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
-                                if let lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } = &clip.clip_type {
-                                    if let Some(events) = midi_event_cache.get(midi_clip_id) {
-                                        Self::render_midi_piano_roll(
-                                            painter,
-                                            clip_rect,
-                                            rect.min.x, // Pass timeline panel left edge for proper positioning
-                                            events,
-                                            clip_instance.trim_start,
-                                            instance_duration,
-                                            instance_start,
-                                            self.viewport_start_time,
-                                            self.pixels_per_second,
-                                            theme,
-                                            ui.ctx(),
-                                        );
+                                match &clip.clip_type {
+                                    // MIDI: Draw piano roll
+                                    lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } => {
+                                        if let Some(events) = midi_event_cache.get(midi_clip_id) {
+                                            Self::render_midi_piano_roll(
+                                                painter,
+                                                clip_rect,
+                                                rect.min.x, // Pass timeline panel left edge for proper positioning
+                                                events,
+                                                clip_instance.trim_start,
+                                                instance_duration,
+                                                instance_start,
+                                                self.viewport_start_time,
+                                                self.pixels_per_second,
+                                                theme,
+                                                ui.ctx(),
+                                            );
+                                        }
+                                    }
+                                    // Sampled Audio: Draw waveform
+                                    lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
+                                        if let Some(waveform) = waveform_cache.get(audio_pool_index) {
+                                            // Calculate absolute screen x where clip starts (can be offscreen)
+                                            let clip_start_x = rect.min.x + start_x;
+
+                                            Self::render_audio_waveform(
+                                                painter,
+                                                clip_rect,
+                                                clip_start_x,
+                                                clip_color, // Pass clip background color for tinting
+                                                waveform,
+                                                clip.duration,
+                                                self.pixels_per_second,
+                                                clip_instance.trim_start,
+                                                theme,
+                                                ui.ctx(),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1673,7 +1839,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache);
+        self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.waveform_cache);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

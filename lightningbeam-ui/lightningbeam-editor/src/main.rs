@@ -330,8 +330,12 @@ impl FileOperationsWorker {
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
 
+        let save_start = std::time::Instant::now();
+        eprintln!("📊 [SAVE] Starting save operation...");
+
         // Step 1: Serialize audio pool
         let _ = progress_tx.send(FileProgress::SerializingAudioPool);
+        let step1_start = std::time::Instant::now();
 
         let audio_pool_entries = {
             let mut controller = self.audio_controller.lock().unwrap();
@@ -343,8 +347,10 @@ impl FileOperationsWorker {
                 }
             }
         };
+        eprintln!("📊 [SAVE] Step 1: Serialize audio pool took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 2: Get project
+        let step2_start = std::time::Instant::now();
         let mut audio_project = {
             let mut controller = self.audio_controller.lock().unwrap();
             match controller.get_project() {
@@ -355,13 +361,17 @@ impl FileOperationsWorker {
                 }
             }
         };
+        eprintln!("📊 [SAVE] Step 2: Get audio project took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 3: Save to file
         let _ = progress_tx.send(FileProgress::WritingZip);
+        let step3_start = std::time::Instant::now();
 
         let settings = SaveSettings::default();
         match save_beam(&path, &document, &mut audio_project, audio_pool_entries, &settings) {
             Ok(()) => {
+                eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
+                eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
                 println!("✅ Saved to: {}", path.display());
                 let _ = progress_tx.send(FileProgress::Done);
             }
@@ -379,8 +389,12 @@ impl FileOperationsWorker {
     ) {
         use lightningbeam_core::file_io::load_beam;
 
+        let load_start = std::time::Instant::now();
+        eprintln!("📊 [LOAD] Starting load operation...");
+
         // Step 1: Load from file
         let _ = progress_tx.send(FileProgress::LoadingProject);
+        let step1_start = std::time::Instant::now();
 
         let loaded_project = match load_beam(&path) {
             Ok(p) => p,
@@ -389,6 +403,7 @@ impl FileOperationsWorker {
                 return;
             }
         };
+        eprintln!("📊 [LOAD] Step 1: load_beam() took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Check for missing files
         if !loaded_project.missing_files.is_empty() {
@@ -397,6 +412,8 @@ impl FileOperationsWorker {
                 eprintln!("   - {}", missing.original_path.display());
             }
         }
+
+        eprintln!("📊 [LOAD] ✅ Total load time: {:.2}ms", load_start.elapsed().as_secs_f64() * 1000.0);
 
         // Send the loaded project back to UI thread for processing
         let _ = progress_tx.send(FileProgress::Complete(Ok(loaded_project)));
@@ -455,6 +472,10 @@ struct EditorApp {
     /// Prevents repeated backend queries for the same MIDI clip
     /// Format: (timestamp, note_number, is_note_on)
     midi_event_cache: HashMap<u32, Vec<(f64, u8, bool)>>,
+    /// Cache for audio waveform data (keyed by audio_pool_index)
+    /// Prevents repeated backend queries for the same audio file
+    /// Format: Vec of WaveformPeak (min/max pairs)
+    waveform_cache: HashMap<usize, Vec<daw_backend::WaveformPeak>>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
 
@@ -578,6 +599,7 @@ impl EditorApp {
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
+            waveform_cache: HashMap::new(), // Initialize empty waveform cache
             current_file_path: None, // No file loaded initially
             file_command_tx,
             file_operation: None, // No file operation in progress initially
@@ -590,53 +612,104 @@ impl EditorApp {
     /// - After loading a document from file
     /// - After creating a new document with pre-existing MIDI layers
     ///
-    /// For each MIDI audio layer:
-    /// 1. Creates a daw-backend MIDI track
-    /// 2. Loads the default instrument
+    /// For each audio layer (MIDI or Sampled):
+    /// 1. Creates a daw-backend track (MIDI or Audio)
+    /// 2. For MIDI: Loads the default instrument
     /// 3. Stores the bidirectional mapping
     /// 4. Syncs any existing clips on the layer
-    fn sync_midi_layers_to_backend(&mut self) {
+    fn sync_audio_layers_to_backend(&mut self) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
 
         // Iterate through all layers in the document
         for layer in &self.action_executor.document().root.children {
-            // Only process Audio layers with MIDI type
+            // Only process Audio layers
             if let AnyLayer::Audio(audio_layer) = layer {
-                if audio_layer.audio_layer_type == AudioLayerType::Midi {
-                    let layer_id = audio_layer.layer.id;
-                    let layer_name = &audio_layer.layer.name;
+                let layer_id = audio_layer.layer.id;
+                let layer_name = &audio_layer.layer.name;
 
-                    // Skip if already mapped (shouldn't happen, but be defensive)
-                    if self.layer_to_track_map.contains_key(&layer_id) {
-                        continue;
-                    }
+                // Skip if already mapped (shouldn't happen, but be defensive)
+                if self.layer_to_track_map.contains_key(&layer_id) {
+                    continue;
+                }
 
-                    // Create daw-backend MIDI track
-                    if let Some(ref controller_arc) = self.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-                        match controller.create_midi_track_sync(layer_name.clone()) {
-                            Ok(track_id) => {
-                                // Store bidirectional mapping
-                                self.layer_to_track_map.insert(layer_id, track_id);
-                                self.track_to_layer_map.insert(track_id, layer_id);
+                // Handle both MIDI and Sampled audio tracks
+                match audio_layer.audio_layer_type {
+                    AudioLayerType::Midi => {
+                        // Create daw-backend MIDI track
+                        if let Some(ref controller_arc) = self.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            match controller.create_midi_track_sync(layer_name.clone()) {
+                                Ok(track_id) => {
+                                    // Store bidirectional mapping
+                                    self.layer_to_track_map.insert(layer_id, track_id);
+                                    self.track_to_layer_map.insert(track_id, layer_id);
 
-                                // Load default instrument
-                                if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
-                                    eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
-                                } else {
-                                    println!("✅ Synced MIDI layer '{}' to backend (TrackId: {})", layer_name, track_id);
+                                    // Load default instrument
+                                    if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
+                                        eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
+                                    } else {
+                                        println!("✅ Synced MIDI layer '{}' to backend (TrackId: {})", layer_name, track_id);
+                                    }
+
+                                    // TODO: Sync any existing clips on this layer to the backend
+                                    // This will be implemented when we add clip synchronization
                                 }
-
-                                // TODO: Sync any existing clips on this layer to the backend
-                                // This will be implemented when we add clip synchronization
+                                Err(e) => {
+                                    eprintln!("⚠️  Failed to create daw-backend track for MIDI layer '{}': {}", layer_name, e);
+                                }
                             }
-                            Err(e) => {
-                                eprintln!("⚠️  Failed to create daw-backend track for MIDI layer '{}': {}", layer_name, e);
+                        }
+                    }
+                    AudioLayerType::Sampled => {
+                        // Create daw-backend Audio track
+                        if let Some(ref controller_arc) = self.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            match controller.create_audio_track_sync(layer_name.clone()) {
+                                Ok(track_id) => {
+                                    // Store bidirectional mapping
+                                    self.layer_to_track_map.insert(layer_id, track_id);
+                                    self.track_to_layer_map.insert(track_id, layer_id);
+                                    println!("✅ Synced Audio layer '{}' to backend (TrackId: {})", layer_name, track_id);
+
+                                    // TODO: Sync any existing clips on this layer to the backend
+                                    // This will be implemented when we add clip synchronization
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️  Failed to create daw-backend audio track for '{}': {}", layer_name, e);
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Fetch waveform data from backend for a specific audio pool index
+    /// Returns cached data if available, otherwise queries backend
+    fn fetch_waveform(&mut self, pool_index: usize) -> Option<Vec<daw_backend::WaveformPeak>> {
+        // Check if already cached
+        if let Some(waveform) = self.waveform_cache.get(&pool_index) {
+            return Some(waveform.clone());
+        }
+
+        // Fetch from backend
+        // Request 20,000 peaks for high-detail waveform visualization
+        // For a 200s file, this gives ~100 peaks/second, providing smooth visualization at all zoom levels
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            match controller.get_pool_waveform(pool_index, 20000) {
+                Ok(waveform) => {
+                    self.waveform_cache.insert(pool_index, waveform.clone());
+                    Some(waveform)
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to fetch waveform for pool index {}: {}", pool_index, e);
+                    None
+                }
+            }
+        } else {
+            None
         }
     }
 
@@ -969,8 +1042,37 @@ impl EditorApp {
                 // TODO: Implement add video layer
             }
             MenuAction::AddAudioTrack => {
-                println!("Menu: Add Audio Track");
-                // TODO: Implement add audio track
+                // Create a new sampled audio layer with a default name
+                let layer_count = self.action_executor.document().root.children.len();
+                let layer_name = format!("Audio Track {}", layer_count + 1);
+
+                // Create audio layer in document
+                let audio_layer = AudioLayer::new_sampled(layer_name.clone());
+                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(audio_layer));
+                self.action_executor.execute(Box::new(action));
+
+                // Get the newly created layer ID
+                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                    let layer_id = last_layer.id();
+                    self.active_layer_id = Some(layer_id);
+
+                    // Create corresponding daw-backend audio track
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        match controller.create_audio_track_sync(layer_name.clone()) {
+                            Ok(track_id) => {
+                                // Store bidirectional mapping
+                                self.layer_to_track_map.insert(layer_id, track_id);
+                                self.track_to_layer_map.insert(track_id, layer_id);
+                                println!("✅ Created {} (backend TrackId: {})", layer_name, track_id);
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️  Failed to create daw-backend audio track for {}: {}", layer_name, e);
+                                eprintln!("   Layer created but will be silent until backend track is available");
+                            }
+                        }
+                    }
+                }
             }
             MenuAction::AddMidiTrack => {
                 // Create a new MIDI audio layer with a default name
@@ -1270,6 +1372,9 @@ impl EditorApp {
     fn apply_loaded_project(&mut self, loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
         use lightningbeam_core::action::ActionExecutor;
 
+        let apply_start = std::time::Instant::now();
+        eprintln!("📊 [APPLY] Starting apply_loaded_project() on UI thread...");
+
         // Check for missing files
         if !loaded_project.missing_files.is_empty() {
             eprintln!("⚠️ {} missing files", loaded_project.missing_files.len());
@@ -1280,33 +1385,78 @@ impl EditorApp {
         }
 
         // Replace document
+        let step1_start = std::time::Instant::now();
         self.action_executor = ActionExecutor::new(loaded_project.document);
+        eprintln!("📊 [APPLY] Step 1: Replace document took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Restore UI layout from loaded document
+        let step2_start = std::time::Instant::now();
         self.restore_layout_from_document();
+        eprintln!("📊 [APPLY] Step 2: Restore UI layout took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
         // Set project in audio engine via query
+        let step3_start = std::time::Instant::now();
         if let Some(ref controller_arc) = self.audio_controller {
             let mut controller = controller_arc.lock().unwrap();
             if let Err(e) = controller.set_project(loaded_project.audio_project) {
                 eprintln!("❌ Failed to set project: {}", e);
                 return;
             }
+            eprintln!("📊 [APPLY] Step 3: Set audio project took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
 
-            // Load audio pool
-            if let Err(e) = controller.load_audio_pool(
-                loaded_project.audio_pool_entries,
-                &path,
-            ) {
-                eprintln!("❌ Failed to load audio pool: {}", e);
-                return;
-            }
+            // Load audio pool asynchronously to avoid blocking UI
+            let step4_start = std::time::Instant::now();
+            let controller_clone = controller_arc.clone();
+            let path_clone = path.clone();
+            let audio_pool_entries = loaded_project.audio_pool_entries;
+
+            std::thread::spawn(move || {
+                eprintln!("📊 [APPLY] Step 4: Starting async audio pool load...");
+                let load_start = std::time::Instant::now();
+                let mut controller = controller_clone.lock().unwrap();
+                if let Err(e) = controller.load_audio_pool(audio_pool_entries, &path_clone) {
+                    eprintln!("❌ Failed to load audio pool: {}", e);
+                } else {
+                    eprintln!("📊 [APPLY] Step 4: Async audio pool load completed in {:.2}ms", load_start.elapsed().as_secs_f64() * 1000.0);
+                }
+            });
+            eprintln!("📊 [APPLY] Step 4: Spawned async audio pool load in {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Reset state
+        let step5_start = std::time::Instant::now();
         self.layer_to_track_map.clear();
         self.track_to_layer_map.clear();
-        self.sync_midi_layers_to_backend();
+        eprintln!("📊 [APPLY] Step 5: Clear track maps took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
+
+        // Sync audio layers (MIDI and Sampled)
+        let step6_start = std::time::Instant::now();
+        self.sync_audio_layers_to_backend();
+        eprintln!("📊 [APPLY] Step 6: Sync audio layers took {:.2}ms", step6_start.elapsed().as_secs_f64() * 1000.0);
+
+        // Fetch waveforms for all audio clips in the loaded project
+        let step7_start = std::time::Instant::now();
+        // Collect pool indices first to avoid borrowing issues
+        let pool_indices: Vec<usize> = self.action_executor.document()
+            .audio_clips.values()
+            .filter_map(|clip| {
+                if let lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
+                    Some(*audio_pool_index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut waveforms_fetched = 0;
+        for pool_index in pool_indices {
+            if self.fetch_waveform(pool_index).is_some() {
+                waveforms_fetched += 1;
+            }
+        }
+        eprintln!("📊 [APPLY] Step 7: Fetched {} waveforms in {:.2}ms", waveforms_fetched, step7_start.elapsed().as_secs_f64() * 1000.0);
+
+        // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;
         self.current_file_path = Some(path.clone());
@@ -1316,6 +1466,7 @@ impl EditorApp {
             self.active_layer_id = Some(first.id());
         }
 
+        eprintln!("📊 [APPLY] ✅ Total apply_loaded_project() time: {:.2}ms", apply_start.elapsed().as_secs_f64() * 1000.0);
         println!("✅ Loaded from: {}", path.display());
     }
 
@@ -1376,23 +1527,31 @@ impl EditorApp {
 
                 // Add to audio engine pool if available
                 if let Some(ref controller_arc) = self.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-                    // Send audio data to the engine
-                    let path_str = path.to_string_lossy().to_string();
-                    controller.add_audio_file(
-                        path_str.clone(),
-                        audio_file.data,
-                        channels,
-                        sample_rate,
-                    );
+                    let pool_index = {
+                        let mut controller = controller_arc.lock().unwrap();
+                        // Send audio data to the engine
+                        let path_str = path.to_string_lossy().to_string();
+                        controller.add_audio_file(
+                            path_str.clone(),
+                            audio_file.data,
+                            channels,
+                            sample_rate,
+                        );
 
-                    // For now, use a placeholder pool index (the engine will assign the real one)
-                    // In a full implementation, we'd wait for the AudioFileAdded event
-                    let pool_index = self.action_executor.document().audio_clips.len();
+                        // For now, use a placeholder pool index (the engine will assign the real one)
+                        // In a full implementation, we'd wait for the AudioFileAdded event
+                        self.action_executor.document().audio_clips.len()
+                    }; // Controller lock is dropped here
 
                     // Create audio clip in document
                     let clip = AudioClip::new_sampled(&name, pool_index, duration);
                     let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+
+                    // Fetch waveform from backend and cache it for rendering
+                    if let Some(waveform) = self.fetch_waveform(pool_index) {
+                        println!("✅ Cached waveform with {} peaks", waveform.len());
+                    }
+
                     println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {}",
                         name, duration, channels, sample_rate, clip_id);
                 } else {
@@ -1502,6 +1661,29 @@ impl eframe::App for EditorApp {
             if let Some(action) = menu_system.check_events() {
                 self.handle_menu_action(action);
             }
+        }
+
+        // Fetch missing waveforms on-demand (for lazy loading after project load)
+        // Collect pool indices that need waveforms
+        let missing_waveforms: Vec<usize> = self.action_executor.document()
+            .audio_clips.values()
+            .filter_map(|clip| {
+                if let lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
+                    // Check if not already cached
+                    if !self.waveform_cache.contains_key(audio_pool_index) {
+                        Some(*audio_pool_index)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Fetch missing waveforms
+        for pool_index in missing_waveforms {
+            self.fetch_waveform(pool_index);
         }
 
         // Handle file operation progress
@@ -1675,6 +1857,7 @@ impl eframe::App for EditorApp {
                 polygon_sides: &mut self.polygon_sides,
                 layer_to_track_map: &self.layer_to_track_map,
                 midi_event_cache: &self.midi_event_cache,
+                waveform_cache: &self.waveform_cache,
             };
 
             render_layout_node(
@@ -1843,6 +2026,8 @@ struct RenderContext<'a> {
     layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
     midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
+    /// Cache of waveform data for rendering (keyed by audio_pool_index)
+    waveform_cache: &'a HashMap<usize, Vec<daw_backend::WaveformPeak>>,
 }
 
 /// Recursively render a layout node with drag support
@@ -2314,6 +2499,7 @@ fn render_pane(
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
+                waveform_cache: ctx.waveform_cache,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -2368,6 +2554,7 @@ fn render_pane(
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
+                waveform_cache: ctx.waveform_cache,
             };
 
             // Render pane content (header was already rendered above)

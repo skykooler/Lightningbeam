@@ -136,8 +136,8 @@ impl AudioFile {
             let peak_start = start_frame + peak_idx * frames_per_peak;
             let peak_end = (start_frame + (peak_idx + 1) * frames_per_peak).min(end_frame);
 
-            let mut min = 0.0f32;
-            let mut max = 0.0f32;
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
 
             // Scan all samples in this window
             for frame_idx in peak_start..peak_end {
@@ -150,6 +150,14 @@ impl AudioFile {
                         max = max.max(sample);
                     }
                 }
+            }
+
+            // If no samples were found, clamp to safe defaults
+            if min == f32::MAX {
+                min = 0.0;
+            }
+            if max == f32::MIN {
+                max = 0.0;
             }
 
             peaks.push(crate::io::WaveformPeak { min, max });
@@ -549,13 +557,18 @@ impl AudioClipPool {
         entries: Vec<AudioPoolEntry>,
         project_path: &Path,
     ) -> Result<Vec<usize>, String> {
+        let fn_start = std::time::Instant::now();
+        eprintln!("📊 [LOAD_SERIALIZED] Starting load_from_serialized with {} entries...", entries.len());
+
         let project_dir = project_path.parent()
             .ok_or_else(|| "Project path has no parent directory".to_string())?;
 
         let mut missing_indices = Vec::new();
 
         // Clear existing pool
+        let clear_start = std::time::Instant::now();
         self.files.clear();
+        eprintln!("📊 [LOAD_SERIALIZED] Clear pool took {:.2}ms", clear_start.elapsed().as_secs_f64() * 1000.0);
 
         // Find the maximum pool index to determine required size
         let max_index = entries.iter()
@@ -564,12 +577,18 @@ impl AudioClipPool {
             .unwrap_or(0);
 
         // Ensure we have space for all entries
+        let resize_start = std::time::Instant::now();
         self.files.resize(max_index + 1, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
+        eprintln!("📊 [LOAD_SERIALIZED] Resize pool to {} took {:.2}ms", max_index + 1, resize_start.elapsed().as_secs_f64() * 1000.0);
 
-        for entry in entries {
-            let success = if let Some(embedded) = entry.embedded_data {
+        for (i, entry) in entries.iter().enumerate() {
+            let entry_start = std::time::Instant::now();
+            eprintln!("📊 [LOAD_SERIALIZED] Processing entry {}/{}: '{}'", i + 1, entries.len(), entry.name);
+
+            let success = if let Some(ref embedded) = entry.embedded_data {
                 // Load from embedded data
-                match Self::load_from_embedded_into_pool(self, entry.pool_index, embedded, &entry.name) {
+                eprintln!("📊 [LOAD_SERIALIZED]   Entry has embedded data (format: {})", embedded.format);
+                match Self::load_from_embedded_into_pool(self, entry.pool_index, embedded.clone(), &entry.name) {
                     Ok(_) => {
                         eprintln!("[AudioPool] Successfully loaded embedded audio: {}", entry.name);
                         true
@@ -579,8 +598,9 @@ impl AudioClipPool {
                         false
                     }
                 }
-            } else if let Some(rel_path) = entry.relative_path {
+            } else if let Some(ref rel_path) = entry.relative_path {
                 // Load from file path
+                eprintln!("📊 [LOAD_SERIALIZED]   Entry has file path: {:?}", rel_path);
                 let full_path = project_dir.join(&rel_path);
 
                 if full_path.exists() {
@@ -597,7 +617,11 @@ impl AudioClipPool {
             if !success {
                 missing_indices.push(entry.pool_index);
             }
+
+            eprintln!("📊 [LOAD_SERIALIZED] Entry {} took {:.2}ms (success: {})", i + 1, entry_start.elapsed().as_secs_f64() * 1000.0, success);
         }
+
+        eprintln!("📊 [LOAD_SERIALIZED] ✅ Total load_from_serialized time: {:.2}ms", fn_start.elapsed().as_secs_f64() * 1000.0);
 
         Ok(missing_indices)
     }
@@ -611,20 +635,29 @@ impl AudioClipPool {
     ) -> Result<(), String> {
         use base64::{Engine as _, engine::general_purpose};
 
+        let fn_start = std::time::Instant::now();
+        eprintln!("📊 [POOL] Loading embedded audio '{}'...", name);
+
         // Decode base64
+        let step1_start = std::time::Instant::now();
         let data = general_purpose::STANDARD
             .decode(&embedded.data_base64)
             .map_err(|e| format!("Failed to decode base64: {}", e))?;
+        eprintln!("📊 [POOL]   Step 1: Decode base64 ({} bytes) took {:.2}ms", data.len(), step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Write to temporary file for symphonia to decode
+        let step2_start = std::time::Instant::now();
         let temp_dir = std::env::temp_dir();
         let temp_path = temp_dir.join(format!("lightningbeam_embedded_{}.{}", pool_index, embedded.format));
 
         std::fs::write(&temp_path, &data)
             .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+        eprintln!("📊 [POOL]   Step 2: Write temp file took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
         // Load the temporary file using existing infrastructure
+        let step3_start = std::time::Instant::now();
         let result = Self::load_file_into_pool(self, pool_index, &temp_path);
+        eprintln!("📊 [POOL]   Step 3: Decode audio with Symphonia took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
 
         // Clean up temporary file
         let _ = std::fs::remove_file(&temp_path);
@@ -633,6 +666,8 @@ impl AudioClipPool {
         if result.is_ok() && pool_index < self.files.len() {
             self.files[pool_index].path = PathBuf::from(format!("<embedded: {}>", name));
         }
+
+        eprintln!("📊 [POOL] ✅ Total load_from_embedded time: {:.2}ms", fn_start.elapsed().as_secs_f64() * 1000.0);
 
         result
     }
