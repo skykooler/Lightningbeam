@@ -43,3 +43,6 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Native file dialogs
 rfd = "0.15"
+
+# Cross-platform config paths
+directories = "5.0"

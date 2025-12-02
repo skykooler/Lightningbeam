@@ -646,12 +646,45 @@ impl AudioTrack {
     /// Rebuild the effects graph from preset after deserialization
     pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
         if let Some(preset) = &self.effects_graph_preset {
-            self.effects_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+            // Check if preset is empty or missing required nodes
+            let has_nodes = !preset.nodes.is_empty();
+            let has_output = preset.output_node.is_some();
+
+            if has_nodes && has_output {
+                // Valid preset - rebuild from it
+                self.effects_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+            } else {
+                // Empty or invalid preset - create default graph
+                self.effects_graph = Self::create_default_graph(sample_rate, buffer_size);
+            }
         } else {
             // No preset - create default graph
-            self.effects_graph = AudioGraph::new(sample_rate, buffer_size);
+            self.effects_graph = Self::create_default_graph(sample_rate, buffer_size);
         }
         Ok(())
+    }
+
+    /// Create a default effects graph with AudioInput -> AudioOutput
+    fn create_default_graph(sample_rate: u32, buffer_size: usize) -> AudioGraph {
+        let mut effects_graph = AudioGraph::new(sample_rate, buffer_size);
+
+        // Add AudioInput node
+        let input_node = Box::new(AudioInputNode::new("Audio Input"));
+        let input_id = effects_graph.add_node(input_node);
+        effects_graph.set_node_position(input_id, 100.0, 150.0);
+
+        // Add AudioOutput node
+        let output_node = Box::new(AudioOutputNode::new("Audio Output"));
+        let output_id = effects_graph.add_node(output_node);
+        effects_graph.set_node_position(output_id, 500.0, 150.0);
+
+        // Connect AudioInput -> AudioOutput
+        let _ = effects_graph.connect(input_id, 0, output_id, 0);
+
+        // Set the AudioOutput node as the graph's output
+        effects_graph.set_output_node(Some(output_id));
+
+        effects_graph
     }
 
     /// Add an automation lane to this track

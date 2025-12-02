@@ -18,6 +18,11 @@ use menu::{MenuAction, MenuSystem};
 mod theme;
 use theme::{Theme, ThemeMode};
 
+mod waveform_image_cache;
+
+mod config;
+use config::AppConfig;
+
 mod default_instrument;
 
 /// Lightningbeam Editor - Animation and video editing software
@@ -476,8 +481,13 @@ struct EditorApp {
     /// Prevents repeated backend queries for the same audio file
     /// Format: Vec of WaveformPeak (min/max pairs)
     waveform_cache: HashMap<usize, Vec<daw_backend::WaveformPeak>>,
+    /// Cache for rendered waveform images (GPU textures)
+    /// Stores pre-rendered waveform tiles at various zoom levels for fast blitting
+    waveform_image_cache: waveform_image_cache::WaveformImageCache,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
+    /// Application configuration (recent files, etc.)
+    config: AppConfig,
 
     /// File operations worker command sender
     file_command_tx: std::sync::mpsc::Sender<FileCommand>,
@@ -500,8 +510,17 @@ impl EditorApp {
     fn new(cc: &eframe::CreationContext, layouts: Vec<LayoutDefinition>, theme: Theme) -> Self {
         let current_layout = layouts[0].layout.clone();
 
+        // Load application config
+        let config = AppConfig::load();
+
         // Initialize native menu system
-        let menu_system = MenuSystem::new().ok();
+        let mut menu_system = MenuSystem::new().ok();
+
+        // Populate recent files menu
+        if let Some(ref mut menu_sys) = menu_system {
+            let recent_files = config.get_recent_files();
+            menu_sys.update_recent_files(&recent_files);
+        }
 
         // Create default document with a simple test scene
         let mut document = lightningbeam_core::document::Document::with_size("Untitled Animation", 1920.0, 1080.0)
@@ -600,7 +619,9 @@ impl EditorApp {
             polygon_sides: 5,                // Default to pentagon
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
             waveform_cache: HashMap::new(), // Initialize empty waveform cache
+            waveform_image_cache: waveform_image_cache::WaveformImageCache::new(), // Initialize waveform image cache
             current_file_path: None, // No file loaded initially
+            config,
             file_command_tx,
             file_operation: None, // No file operation in progress initially
         }
@@ -837,6 +858,18 @@ impl EditorApp {
                 {
                     self.load_from_file(path);
                 }
+            }
+            MenuAction::OpenRecent(index) => {
+                let recent_files = self.config.get_recent_files();
+
+                if let Some(path) = recent_files.get(index) {
+                    // TODO: Prompt to save current file if modified
+                    self.load_from_file(path.clone());
+                }
+            }
+            MenuAction::ClearRecentFiles => {
+                self.config.clear_recent_files();
+                self.update_recent_files_menu();
             }
             MenuAction::Revert => {
                 println!("Menu: Revert");
@@ -1337,6 +1370,14 @@ impl EditorApp {
         });
     }
 
+    /// Update the "Open Recent" menu to reflect current config
+    fn update_recent_files_menu(&mut self) {
+        if let Some(menu_system) = &mut self.menu_system {
+            let recent_files = self.config.get_recent_files();
+            menu_system.update_recent_files(&recent_files);
+        }
+    }
+
     /// Restore UI layout from loaded document
     fn restore_layout_from_document(&mut self) {
         let doc = self.action_executor.document();
@@ -1394,33 +1435,26 @@ impl EditorApp {
         self.restore_layout_from_document();
         eprintln!("📊 [APPLY] Step 2: Restore UI layout took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Set project in audio engine via query
+        // Load audio pool FIRST (before setting project, so clips can reference pool entries)
         let step3_start = std::time::Instant::now();
         if let Some(ref controller_arc) = self.audio_controller {
             let mut controller = controller_arc.lock().unwrap();
+            let audio_pool_entries = loaded_project.audio_pool_entries;
+
+            eprintln!("📊 [APPLY] Step 3: Starting audio pool load...");
+            if let Err(e) = controller.load_audio_pool(audio_pool_entries, &path) {
+                eprintln!("❌ Failed to load audio pool: {}", e);
+                return;
+            }
+            eprintln!("📊 [APPLY] Step 3: Load audio pool took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
+
+            // Now set project (clips can now reference the loaded pool entries)
+            let step4_start = std::time::Instant::now();
             if let Err(e) = controller.set_project(loaded_project.audio_project) {
                 eprintln!("❌ Failed to set project: {}", e);
                 return;
             }
-            eprintln!("📊 [APPLY] Step 3: Set audio project took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
-
-            // Load audio pool asynchronously to avoid blocking UI
-            let step4_start = std::time::Instant::now();
-            let controller_clone = controller_arc.clone();
-            let path_clone = path.clone();
-            let audio_pool_entries = loaded_project.audio_pool_entries;
-
-            std::thread::spawn(move || {
-                eprintln!("📊 [APPLY] Step 4: Starting async audio pool load...");
-                let load_start = std::time::Instant::now();
-                let mut controller = controller_clone.lock().unwrap();
-                if let Err(e) = controller.load_audio_pool(audio_pool_entries, &path_clone) {
-                    eprintln!("❌ Failed to load audio pool: {}", e);
-                } else {
-                    eprintln!("📊 [APPLY] Step 4: Async audio pool load completed in {:.2}ms", load_start.elapsed().as_secs_f64() * 1000.0);
-                }
-            });
-            eprintln!("📊 [APPLY] Step 4: Spawned async audio pool load in {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("📊 [APPLY] Step 4: Set audio project took {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Reset state
@@ -1460,6 +1494,10 @@ impl EditorApp {
         self.playback_time = 0.0;
         self.is_playing = false;
         self.current_file_path = Some(path.clone());
+
+        // Add to recent files
+        self.config.add_recent_file(path.clone());
+        self.update_recent_files_menu();
 
         // Set active layer
         if let Some(first) = self.action_executor.document().root.children.first() {
@@ -1694,6 +1732,7 @@ impl eframe::App for EditorApp {
             // Poll for progress updates
             let mut operation_complete = false;
             let mut loaded_project_data: Option<(lightningbeam_core::file_io::LoadedProject, std::path::PathBuf)> = None;
+            let mut update_recent_menu = false; // Track if we need to update recent files menu
 
             match operation {
                 FileOperation::Saving { ref mut progress_rx, ref path } => {
@@ -1702,6 +1741,11 @@ impl eframe::App for EditorApp {
                             FileProgress::Done => {
                                 println!("✅ Save complete!");
                                 self.current_file_path = Some(path.clone());
+
+                                // Add to recent files
+                                self.config.add_recent_file(path.clone());
+                                update_recent_menu = true;
+
                                 operation_complete = true;
                             }
                             FileProgress::Error(e) => {
@@ -1777,6 +1821,11 @@ impl eframe::App for EditorApp {
                 self.apply_loaded_project(loaded_project, path);
             }
 
+            // Update recent files menu if needed
+            if update_recent_menu {
+                self.update_recent_files_menu();
+            }
+
             // Request repaint to keep updating progress
             ctx.request_repaint();
         }
@@ -1804,8 +1853,11 @@ impl eframe::App for EditorApp {
 
         // Top menu bar (egui-rendered on all platforms)
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            if let Some(action) = MenuSystem::render_egui_menu_bar(ui) {
-                self.handle_menu_action(action);
+            if let Some(menu_system) = &self.menu_system {
+                let recent_files = self.config.get_recent_files();
+                if let Some(action) = menu_system.render_egui_menu_bar(ui, &recent_files) {
+                    self.handle_menu_action(action);
+                }
             }
         });
 
@@ -1858,6 +1910,7 @@ impl eframe::App for EditorApp {
                 layer_to_track_map: &self.layer_to_track_map,
                 midi_event_cache: &self.midi_event_cache,
                 waveform_cache: &self.waveform_cache,
+                waveform_image_cache: &mut self.waveform_image_cache,
             };
 
             render_layout_node(
@@ -2028,6 +2081,8 @@ struct RenderContext<'a> {
     midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
     /// Cache of waveform data for rendering (keyed by audio_pool_index)
     waveform_cache: &'a HashMap<usize, Vec<daw_backend::WaveformPeak>>,
+    /// Cache of rendered waveform images (GPU textures)
+    waveform_image_cache: &'a mut waveform_image_cache::WaveformImageCache,
 }
 
 /// Recursively render a layout node with drag support
@@ -2500,6 +2555,7 @@ fn render_pane(
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
                 waveform_cache: ctx.waveform_cache,
+                waveform_image_cache: ctx.waveform_image_cache,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -2555,6 +2611,7 @@ fn render_pane(
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
                 waveform_cache: ctx.waveform_cache,
+                waveform_image_cache: ctx.waveform_image_cache,
             };
 
             // Render pane content (header was already rendered above)

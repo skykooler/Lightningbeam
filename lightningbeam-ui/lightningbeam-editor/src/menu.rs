@@ -138,6 +138,8 @@ pub enum MenuAction {
     Save,
     SaveAs,
     OpenFile,
+    OpenRecent(usize), // Index into recent files list
+    ClearRecentFiles,  // Clear recent files list
     Revert,
     Import,
     Export,
@@ -440,6 +442,8 @@ pub struct MenuSystem {
     #[allow(dead_code)]
     menu: Menu,
     items: Vec<(MenuItem, MenuAction)>,
+    /// Reference to "Open Recent" submenu for dynamic updates
+    open_recent_submenu: Option<Submenu>,
 }
 
 impl MenuSystem {
@@ -447,19 +451,20 @@ impl MenuSystem {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let menu = Menu::new();
         let mut items = Vec::new();
+        let mut open_recent_submenu: Option<Submenu> = None;
 
         // Platform-specific: Add "Lightningbeam" menu on macOS
         #[cfg(target_os = "macos")]
         {
-            Self::build_submenu(&menu, &MenuItemDef::macos_app_menu(), &mut items)?;
+            Self::build_submenu(&menu, &MenuItemDef::macos_app_menu(), &mut items, &mut open_recent_submenu)?;
         }
 
         // Build all menus from the centralized structure
         for menu_def in MenuItemDef::menu_structure() {
-            Self::build_submenu(&menu, menu_def, &mut items)?;
+            Self::build_submenu(&menu, menu_def, &mut items, &mut open_recent_submenu)?;
         }
 
-        Ok(Self { menu, items })
+        Ok(Self { menu, items, open_recent_submenu })
     }
 
     /// Build a top-level submenu and append to menu
@@ -467,11 +472,12 @@ impl MenuSystem {
         menu: &Menu,
         def: &MenuDef,
         items: &mut Vec<(MenuItem, MenuAction)>,
+        open_recent_submenu: &mut Option<Submenu>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let MenuDef::Submenu { label, children } = def {
             let submenu = Submenu::new(*label, true);
             for child in *children {
-                Self::build_menu_item(&submenu, child, items)?;
+                Self::build_menu_item(&submenu, child, items, open_recent_submenu)?;
             }
             menu.append(&submenu)?;
         }
@@ -483,6 +489,7 @@ impl MenuSystem {
         parent: &Submenu,
         def: &MenuDef,
         items: &mut Vec<(MenuItem, MenuAction)>,
+        open_recent_submenu: &mut Option<Submenu>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         match def {
             MenuDef::Item(item_def) => {
@@ -496,13 +503,56 @@ impl MenuSystem {
             }
             MenuDef::Submenu { label, children } => {
                 let submenu = Submenu::new(*label, true);
+
+                // Capture reference if this is "Open Recent"
+                if *label == "Open Recent" {
+                    *open_recent_submenu = Some(submenu.clone());
+                }
+
                 for child in *children {
-                    Self::build_menu_item(&submenu, child, items)?;
+                    Self::build_menu_item(&submenu, child, items, open_recent_submenu)?;
                 }
                 parent.append(&submenu)?;
             }
         }
         Ok(())
+    }
+
+    /// Update "Open Recent" submenu with current recent files
+    /// Call this after menu creation and whenever recent files change
+    pub fn update_recent_files(&mut self, recent_files: &[std::path::PathBuf]) {
+        if let Some(submenu) = &self.open_recent_submenu {
+
+            // Clear existing items
+            while submenu.items().len() > 0 {
+                let _ = submenu.remove_at(0);
+            }
+
+            // Add recent file items
+            for (index, path) in recent_files.iter().enumerate() {
+                let display_name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
+
+                let item = MenuItem::new(&display_name, true, None);
+                if submenu.append(&item).is_ok() {
+                    self.items.push((item.clone(), MenuAction::OpenRecent(index)));
+                }
+            }
+
+            // Add separator and clear option if we have items
+            if !recent_files.is_empty() {
+                let _ = submenu.append(&PredefinedMenuItem::separator());
+            }
+
+            // Add "Clear Recent Files" item
+            let clear_item = MenuItem::new("Clear Recent Files", true, None);
+            if submenu.append(&clear_item).is_ok() {
+                self.items.push((clear_item.clone(), MenuAction::ClearRecentFiles));
+            }
+        }
     }
 
     /// Initialize native menus for macOS (app-wide, doesn't require window handle)
@@ -537,12 +587,12 @@ impl MenuSystem {
     }
 
     /// Render egui menu bar from the same menu structure (for Linux/Windows)
-    pub fn render_egui_menu_bar(ui: &mut egui::Ui) -> Option<MenuAction> {
+    pub fn render_egui_menu_bar(&self, ui: &mut egui::Ui, recent_files: &[std::path::PathBuf]) -> Option<MenuAction> {
         let mut action = None;
 
         egui::menu::bar(ui, |ui| {
             for menu_def in MenuItemDef::menu_structure() {
-                if let Some(a) = Self::render_menu_def(ui, menu_def) {
+                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files) {
                     action = Some(a);
                 }
             }
@@ -552,7 +602,7 @@ impl MenuSystem {
     }
 
     /// Recursively render a MenuDef as egui UI
-    fn render_menu_def(ui: &mut egui::Ui, def: &MenuDef) -> Option<MenuAction> {
+    fn render_menu_def(&self, ui: &mut egui::Ui, def: &MenuDef, recent_files: &[std::path::PathBuf]) -> Option<MenuAction> {
         match def {
             MenuDef::Item(item_def) => {
                 if Self::render_menu_item(ui, item_def) {
@@ -568,10 +618,37 @@ impl MenuSystem {
             MenuDef::Submenu { label, children } => {
                 let mut action = None;
                 ui.menu_button(*label, |ui| {
-                    for child in *children {
-                        if let Some(a) = Self::render_menu_def(ui, child) {
-                            action = Some(a);
+                    // Special handling for "Open Recent" submenu
+                    if *label == "Open Recent" {
+                        // Render dynamic recent files
+                        for (index, path) in recent_files.iter().enumerate() {
+                            let display_name = path
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("Unknown");
+
+                            if ui.button(display_name).clicked() {
+                                action = Some(MenuAction::OpenRecent(index));
+                                ui.close_menu();
+                            }
+                        }
+
+                        // Add separator and clear option if we have items
+                        if !recent_files.is_empty() {
+                            ui.separator();
+                        }
+
+                        if ui.button("Clear Recent Files").clicked() {
+                            action = Some(MenuAction::ClearRecentFiles);
                             ui.close_menu();
+                        }
+                    } else {
+                        // Normal submenu rendering
+                        for child in *children {
+                            if let Some(a) = self.render_menu_def(ui, child, recent_files) {
+                                action = Some(a);
+                                ui.close_menu();
+                            }
                         }
                     }
                 });
