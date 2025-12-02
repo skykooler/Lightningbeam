@@ -204,7 +204,7 @@ impl InfopanelPane {
     }
 
     /// Render tool-specific options section
-    fn render_tool_section(&mut self, ui: &mut Ui, shared: &mut SharedPaneState) {
+    fn render_tool_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
         let tool = *shared.selected_tool;
 
         // Only show tool options for tools that have options
@@ -218,6 +218,7 @@ impl InfopanelPane {
         }
 
         egui::CollapsingHeader::new("Tool Options")
+            .id_salt(("tool_options", path))
             .default_open(self.tool_section_open)
             .show(ui, |ui| {
                 self.tool_section_open = true;
@@ -234,7 +235,7 @@ impl InfopanelPane {
                         // Simplify mode
                         ui.horizontal(|ui| {
                             ui.label("Simplify:");
-                            egui::ComboBox::from_id_salt("draw_simplify")
+                            egui::ComboBox::from_id_salt(("draw_simplify", path))
                                 .selected_text(match shared.draw_simplify_mode {
                                     SimplifyMode::Corners => "Corners",
                                     SimplifyMode::Smooth => "Smooth",
@@ -325,10 +326,12 @@ impl InfopanelPane {
     fn render_transform_section(
         &mut self,
         ui: &mut Ui,
+        path: &NodePath,
         shared: &mut SharedPaneState,
         info: &SelectionInfo,
     ) {
         egui::CollapsingHeader::new("Transform")
+            .id_salt(("transform", path))
             .default_open(self.transform_section_open)
             .show(ui, |ui| {
                 self.transform_section_open = true;
@@ -523,10 +526,12 @@ impl InfopanelPane {
     fn render_shape_section(
         &mut self,
         ui: &mut Ui,
+        path: &NodePath,
         shared: &mut SharedPaneState,
         info: &SelectionInfo,
     ) {
         egui::CollapsingHeader::new("Shape")
+            .id_salt(("shape", path))
             .default_open(self.shape_section_open)
             .show(ui, |ui| {
                 self.shape_section_open = true;
@@ -666,8 +671,9 @@ impl InfopanelPane {
     }
 
     /// Render document settings section (shown when nothing is selected)
-    fn render_document_section(&self, ui: &mut Ui, shared: &mut SharedPaneState) {
+    fn render_document_section(&self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
         egui::CollapsingHeader::new("Document")
+            .id_salt(("document", path))
             .default_open(true)
             .show(ui, |ui| {
                 ui.add_space(4.0);
@@ -755,7 +761,7 @@ impl PaneRenderer for InfopanelPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
-        _path: &NodePath,
+        path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
         // Background
@@ -774,29 +780,29 @@ impl PaneRenderer for InfopanelPane {
         );
 
         egui::ScrollArea::vertical()
-            .id_salt("infopanel_scroll")
+            .id_salt(("infopanel_scroll", path))
             .show(&mut content_ui, |ui| {
                 ui.set_min_width(content_rect.width() - 16.0);
 
                 // 1. Tool options section (always shown if tool has options)
-                self.render_tool_section(ui, shared);
+                self.render_tool_section(ui, path, shared);
 
                 // 2. Gather selection info
                 let info = self.gather_selection_info(shared);
 
                 // 3. Transform section (if shapes selected)
                 if info.shape_count > 0 {
-                    self.render_transform_section(ui, shared, &info);
+                    self.render_transform_section(ui, path, shared, &info);
                 }
 
                 // 4. Shape properties section (if shapes selected)
                 if info.shape_count > 0 {
-                    self.render_shape_section(ui, shared, &info);
+                    self.render_shape_section(ui, path, shared, &info);
                 }
 
                 // 5. Document settings (if nothing selected)
                 if info.is_empty {
-                    self.render_document_section(ui, shared);
+                    self.render_document_section(ui, path, shared);
                 }
 
                 // Show selection count at bottom

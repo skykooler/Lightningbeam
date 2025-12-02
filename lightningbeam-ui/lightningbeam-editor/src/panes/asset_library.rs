@@ -272,6 +272,70 @@ fn generate_waveform_thumbnail(
     rgba
 }
 
+/// Generate a video thumbnail by decoding the first frame
+/// Returns a 64x64 RGBA thumbnail with letterboxing to maintain aspect ratio
+fn generate_video_thumbnail(
+    clip_id: &uuid::Uuid,
+    video_manager: &std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
+) -> Option<Vec<u8>> {
+    // Get a frame from the video (at 1 second to skip potential black intros)
+    let timestamp = 1.0;
+
+    let frame = {
+        let mut video_mgr = video_manager.lock().ok()?;
+        video_mgr.get_frame(clip_id, timestamp)?
+    };
+
+    let src_width = frame.width as usize;
+    let src_height = frame.height as usize;
+    let dst_size = THUMBNAIL_SIZE as usize;
+
+    // Calculate letterboxing dimensions to maintain aspect ratio
+    let src_aspect = src_width as f32 / src_height as f32;
+    let (scaled_width, scaled_height, offset_x, offset_y) = if src_aspect > 1.0 {
+        // Wide video - letterbox top and bottom
+        let scaled_width = dst_size;
+        let scaled_height = (dst_size as f32 / src_aspect) as usize;
+        let offset_y = (dst_size - scaled_height) / 2;
+        (scaled_width, scaled_height, 0, offset_y)
+    } else {
+        // Tall video - letterbox left and right
+        let scaled_height = dst_size;
+        let scaled_width = (dst_size as f32 * src_aspect) as usize;
+        let offset_x = (dst_size - scaled_width) / 2;
+        (scaled_width, scaled_height, offset_x, 0)
+    };
+
+    // Create thumbnail with black letterbox bars
+    let mut rgba = vec![0u8; dst_size * dst_size * 4];
+
+    let x_ratio = src_width as f32 / scaled_width as f32;
+    let y_ratio = src_height as f32 / scaled_height as f32;
+
+    // Fill the scaled region
+    for dst_y in 0..scaled_height {
+        for dst_x in 0..scaled_width {
+            let src_x = (dst_x as f32 * x_ratio) as usize;
+            let src_y = (dst_y as f32 * y_ratio) as usize;
+            let src_idx = (src_y * src_width + src_x) * 4;
+
+            let final_x = dst_x + offset_x;
+            let final_y = dst_y + offset_y;
+            let dst_idx = (final_y * dst_size + final_x) * 4;
+
+            // Copy RGBA bytes
+            if src_idx + 3 < frame.rgba_data.len() && dst_idx + 3 < rgba.len() {
+                rgba[dst_idx] = frame.rgba_data[src_idx];
+                rgba[dst_idx + 1] = frame.rgba_data[src_idx + 1];
+                rgba[dst_idx + 2] = frame.rgba_data[src_idx + 2];
+                rgba[dst_idx + 3] = frame.rgba_data[src_idx + 3];
+            }
+        }
+    }
+
+    Some(rgba)
+}
+
 /// Generate a piano roll thumbnail for MIDI clips
 /// Shows notes as horizontal bars with Y position = note % 12 (one octave)
 fn generate_midi_thumbnail(
@@ -960,16 +1024,17 @@ impl AssetLibraryPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        path: &NodePath,
         shared: &mut SharedPaneState,
         assets: &[&AssetEntry],
         document: &Document,
     ) {
         match self.view_mode {
             AssetViewMode::List => {
-                self.render_asset_list_view(ui, rect, shared, assets, document);
+                self.render_asset_list_view(ui, rect, path, shared, assets, document);
             }
             AssetViewMode::Grid => {
-                self.render_asset_grid_view(ui, rect, shared, assets, document);
+                self.render_asset_grid_view(ui, rect, path, shared, assets, document);
             }
         }
     }
@@ -979,6 +1044,7 @@ impl AssetLibraryPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        path: &NodePath,
         shared: &mut SharedPaneState,
         assets: &[&AssetEntry],
         document: &Document,
@@ -1019,6 +1085,7 @@ impl AssetLibraryPane {
         let scroll_area_rect = rect;
         ui.allocate_ui_at_rect(scroll_area_rect, |ui| {
             egui::ScrollArea::vertical()
+                .id_salt(("asset_list_scroll", path))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_min_width(scroll_area_rect.width() - 16.0); // Account for scrollbar
@@ -1157,8 +1224,9 @@ impl AssetLibraryPane {
                                         .map(|clip| generate_vector_thumbnail(clip, bg_color))
                                 }
                                 AssetCategory::Video => {
-                                    // Video backend not implemented yet - use placeholder
-                                    Some(generate_placeholder_thumbnail(AssetCategory::Video, 200))
+                                    // Generate video thumbnail from first frame
+                                    generate_video_thumbnail(&asset_id, &shared.video_manager)
+                                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200)))
                                 }
                                 AssetCategory::Audio => {
                                     // Check if it's sampled or MIDI
@@ -1287,6 +1355,7 @@ impl AssetLibraryPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        path: &NodePath,
         shared: &mut SharedPaneState,
         assets: &[&AssetEntry],
         document: &Document,
@@ -1335,6 +1404,7 @@ impl AssetLibraryPane {
         // Use egui's built-in ScrollArea for scrolling
         ui.allocate_ui_at_rect(rect, |ui| {
             egui::ScrollArea::vertical()
+                .id_salt(("asset_grid_scroll", path))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     // Reserve space for the entire grid
@@ -1429,7 +1499,9 @@ impl AssetLibraryPane {
                                         .map(|clip| generate_vector_thumbnail(clip, bg_color))
                                 }
                                 AssetCategory::Video => {
-                                    Some(generate_placeholder_thumbnail(AssetCategory::Video, 200))
+                                    // Generate video thumbnail from first frame
+                                    generate_video_thumbnail(&asset_id, &shared.video_manager)
+                                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200)))
                                 }
                                 AssetCategory::Audio => {
                                     if let Some(clip) = document.audio_clips.get(&asset_id) {
@@ -1572,7 +1644,7 @@ impl PaneRenderer for AssetLibraryPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
-        _path: &NodePath,
+        path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
         // Get an Arc clone of the document for thumbnail generation
@@ -1600,7 +1672,7 @@ impl PaneRenderer for AssetLibraryPane {
         // Render components
         self.render_search_bar(ui, search_rect, shared);
         self.render_category_tabs(ui, tabs_rect, shared);
-        self.render_assets(ui, list_rect, shared, &filtered_assets, &document_arc);
+        self.render_assets(ui, list_rect, path, shared, &filtered_assets, &document_arc);
 
         // Context menu handling
         if let Some(ref context_state) = self.context_menu.clone() {

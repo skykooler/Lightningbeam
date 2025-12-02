@@ -110,7 +110,17 @@ impl Action for AddClipInstanceAction {
     }
 
     fn execute_backend(&mut self, backend: &mut BackendContext, document: &Document) -> Result<(), String> {
-        // Only sync audio clips to the backend
+        // Only sync audio/MIDI clips to the backend
+        // Check if this is an audio layer first
+        let layer = document
+            .get_layer(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        // Only process audio layers - vector and video clips don't need backend sync
+        if !matches!(layer, AnyLayer::Audio(_)) {
+            return Ok(());
+        }
+
         // Look up the clip from the document
         let clip = document
             .get_audio_clip(&self.clip_instance.clip_id)

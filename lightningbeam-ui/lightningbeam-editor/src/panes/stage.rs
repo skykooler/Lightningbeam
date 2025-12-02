@@ -46,6 +46,8 @@ struct SharedVelloResources {
     sampler: wgpu::Sampler,
     /// Shared image cache for avoiding re-decoding images every frame
     image_cache: Mutex<lightningbeam_core::renderer::ImageCache>,
+    /// Video manager for video decoding and frame caching
+    video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -62,7 +64,7 @@ pub struct VelloResourcesMap {
 }
 
 impl SharedVelloResources {
-    pub fn new(device: &wgpu::Device) -> Result<Self, String> {
+    pub fn new(device: &wgpu::Device, video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>) -> Result<Self, String> {
         let renderer = vello::Renderer::new(
             device,
             vello::RendererOptions {
@@ -164,6 +166,7 @@ impl SharedVelloResources {
             blit_bind_group_layout,
             sampler,
             image_cache: Mutex::new(lightningbeam_core::renderer::ImageCache::new()),
+            video_manager,
         })
     }
 }
@@ -242,6 +245,7 @@ struct VelloCallback {
     selected_tool: lightningbeam_core::tool::Tool, // Current tool for rendering mode-specific UI
     eyedropper_request: Option<(egui::Pos2, super::ColorMode)>, // Pending eyedropper sample
     playback_time: f64, // Current playback time for animation evaluation
+    video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
 }
 
 impl VelloCallback {
@@ -261,8 +265,9 @@ impl VelloCallback {
         selected_tool: lightningbeam_core::tool::Tool,
         eyedropper_request: Option<(egui::Pos2, super::ColorMode)>,
         playback_time: f64,
+        video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     ) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time }
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time, video_manager }
     }
 }
 
@@ -288,7 +293,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Initialize shared resources if not yet created (only happens once for first Stage pane)
         if map.shared.is_none() {
             map.shared = Some(Arc::new(
-                SharedVelloResources::new(device).expect("Failed to initialize shared Vello resources")
+                SharedVelloResources::new(device, self.video_manager.clone()).expect("Failed to initialize shared Vello resources")
             ));
         }
 
@@ -320,7 +325,13 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
         // Render the document to the scene with camera transform
         let mut image_cache = shared.image_cache.lock().unwrap();
-        lightningbeam_core::renderer::render_document_with_transform(&self.document, &mut scene, camera_transform, &mut image_cache);
+        lightningbeam_core::renderer::render_document_with_transform(
+            &self.document,
+            &mut scene,
+            camera_transform,
+            &mut image_cache,
+            &shared.video_manager,
+        );
         drop(image_cache); // Explicitly release lock before other operations
 
         // Render drag preview objects with transparency
@@ -4237,9 +4248,31 @@ impl PaneRenderer for StagePane {
                                 shared.pending_actions.push(Box::new(action));
                             } else {
                                 // For clips, create a clip instance
-                                let clip_instance = ClipInstance::new(dragging.clip_id)
+                                // Video clips align to stage origin (0,0), other clips use mouse position
+                                let (pos_x, pos_y) = if dragging.clip_type == DragClipType::Video {
+                                    (0.0, 0.0)
+                                } else {
+                                    (world_pos.x as f64, world_pos.y as f64)
+                                };
+
+                                let mut clip_instance = ClipInstance::new(dragging.clip_id)
                                     .with_timeline_start(drop_time)
-                                    .with_position(world_pos.x as f64, world_pos.y as f64);
+                                    .with_position(pos_x, pos_y);
+
+                                // For video clips, scale to fill document dimensions
+                                if dragging.clip_type == DragClipType::Video {
+                                    if let Some((video_width, video_height)) = dragging.dimensions {
+                                        let doc_width = shared.action_executor.document().width;
+                                        let doc_height = shared.action_executor.document().height;
+
+                                        // Calculate scale to fill document
+                                        let scale_x = doc_width / video_width;
+                                        let scale_y = doc_height / video_height;
+
+                                        clip_instance.transform.scale_x = scale_x;
+                                        clip_instance.transform.scale_y = scale_y;
+                                    }
+                                }
 
                                 // Create and queue action
                                 let action = lightningbeam_core::actions::AddClipInstanceAction::new(
@@ -4347,6 +4380,7 @@ impl PaneRenderer for StagePane {
             *shared.selected_tool,
             self.pending_eyedropper_sample,
             *shared.playback_time,
+            shared.video_manager.clone(),
         );
 
         let cb = egui_wgpu::Callback::new_paint_callback(

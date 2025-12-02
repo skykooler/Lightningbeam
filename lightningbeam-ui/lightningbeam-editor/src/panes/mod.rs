@@ -109,6 +109,8 @@ pub struct SharedPaneState<'a> {
     pub schneider_max_error: &'a mut f64,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    /// Video manager for video decoding and frame caching
+    pub video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
     pub layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Global playback state

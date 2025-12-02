@@ -77,19 +77,30 @@ fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
 }
 
 /// Render a document to a Vello scene
-pub fn render_document(document: &Document, scene: &mut Scene, image_cache: &mut ImageCache) {
-    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache);
+pub fn render_document(
+    document: &Document,
+    scene: &mut Scene,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
+    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache, video_manager);
 }
 
 /// Render a document to a Vello scene with a base transform
 /// The base transform is composed with all object transforms (useful for camera zoom/pan)
-pub fn render_document_with_transform(document: &Document, scene: &mut Scene, base_transform: Affine, image_cache: &mut ImageCache) {
+pub fn render_document_with_transform(
+    document: &Document,
+    scene: &mut Scene,
+    base_transform: Affine,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
     // 1. Draw background
     render_background(document, scene, base_transform);
 
     // 2. Recursively render the root graphics object at current time
     let time = document.current_time;
-    render_graphics_object(document, time, scene, base_transform, image_cache);
+    render_graphics_object(document, time, scene, base_transform, image_cache, video_manager);
 }
 
 /// Draw the document background
@@ -109,7 +120,14 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
 }
 
 /// Recursively render the root graphics object and its children
-fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, base_transform: Affine, image_cache: &mut ImageCache) {
+fn render_graphics_object(
+    document: &Document,
+    time: f64,
+    scene: &mut Scene,
+    base_transform: Affine,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
     // Check if any layers are soloed
     let any_soloed = document.visible_layers().any(|layer| layer.soloed());
 
@@ -121,24 +139,36 @@ fn render_graphics_object(document: &Document, time: f64, scene: &mut Scene, bas
         if any_soloed {
             // Only render soloed layers when solo is active
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
             }
         } else {
             // Render all visible layers when no solo is active
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
         }
     }
 }
 
 /// Render a single layer
-fn render_layer(document: &Document, time: f64, layer: &AnyLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64, image_cache: &mut ImageCache) {
+fn render_layer(
+    document: &Document,
+    time: f64,
+    layer: &AnyLayer,
+    scene: &mut Scene,
+    base_transform: Affine,
+    parent_opacity: f64,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
     match layer {
-        AnyLayer::Vector(vector_layer) => render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache),
+        AnyLayer::Vector(vector_layer) => {
+            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager)
+        }
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
         }
-        AnyLayer::Video(_) => {
-            // Video rendering not yet implemented
+        AnyLayer::Video(video_layer) => {
+            let mut video_mgr = video_manager.lock().unwrap();
+            render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr);
         }
     }
 }
@@ -153,6 +183,7 @@ fn render_clip_instance(
     base_transform: Affine,
     animation_data: &crate::animation::AnimationData,
     image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
 ) {
     // Try to find the clip in the document's clip libraries
     // For now, only handle VectorClips (VideoClip and AudioClip rendering not yet implemented)
@@ -280,19 +311,192 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager);
+    }
+}
+
+/// Render a video layer with all its clip instances
+fn render_video_layer(
+    document: &Document,
+    time: f64,
+    layer: &crate::layer::VideoLayer,
+    scene: &mut Scene,
+    base_transform: Affine,
+    parent_opacity: f64,
+    video_manager: &mut crate::video::VideoManager,
+) {
+    use crate::animation::TransformProperty;
+
+    // Cascade opacity: parent_opacity × layer.opacity
+    let layer_opacity = parent_opacity * layer.layer.opacity;
+
+    // Render each video clip instance
+    for clip_instance in &layer.clip_instances {
+        // Get the video clip from the document
+        let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else {
+            continue; // Clip not found
+        };
+
+        // Remap timeline time to clip's internal time
+        let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration) else {
+            continue; // Clip instance not active at this time
+        };
+
+        // Get video frame from VideoManager
+        let Some(frame) = video_manager.get_frame(&clip_instance.clip_id, clip_time) else {
+            continue; // Frame not available
+        };
+
+        // Evaluate animated transform properties
+        let transform = &clip_instance.transform;
+        let x = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::X,
+            },
+            time,
+            transform.x,
+        );
+        let y = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::Y,
+            },
+            time,
+            transform.y,
+        );
+        let rotation = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::Rotation,
+            },
+            time,
+            transform.rotation,
+        );
+        let scale_x = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::ScaleX,
+            },
+            time,
+            transform.scale_x,
+        );
+        let scale_y = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::ScaleY,
+            },
+            time,
+            transform.scale_y,
+        );
+        let skew_x = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::SkewX,
+            },
+            time,
+            transform.skew_x,
+        );
+        let skew_y = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::SkewY,
+            },
+            time,
+            transform.skew_y,
+        );
+
+        // Build skew transform (applied around center)
+        let center_x = video_clip.width / 2.0;
+        let center_y = video_clip.height / 2.0;
+
+        let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
+            let skew_x_affine = if skew_x != 0.0 {
+                let tan_skew = skew_x.to_radians().tan();
+                Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+            } else {
+                Affine::IDENTITY
+            };
+
+            let skew_y_affine = if skew_y != 0.0 {
+                let tan_skew = skew_y.to_radians().tan();
+                Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+            } else {
+                Affine::IDENTITY
+            };
+
+            // Skew around center
+            Affine::translate((center_x, center_y))
+                * skew_x_affine
+                * skew_y_affine
+                * Affine::translate((-center_x, -center_y))
+        } else {
+            Affine::IDENTITY
+        };
+
+        let clip_transform = Affine::translate((x, y))
+            * Affine::rotate(rotation.to_radians())
+            * Affine::scale_non_uniform(scale_x, scale_y)
+            * skew_transform;
+        let instance_transform = base_transform * clip_transform;
+
+        // Evaluate animated opacity
+        let opacity = layer.layer.animation_data.eval(
+            &crate::animation::AnimationTarget::Object {
+                id: clip_instance.id,
+                property: TransformProperty::Opacity,
+            },
+            time,
+            clip_instance.opacity,
+        );
+
+        // Cascade opacity: layer_opacity × animated opacity
+        let final_opacity = (layer_opacity * opacity) as f32;
+
+        // Create peniko Image from video frame data (zero-copy via Arc clone)
+        // Coerce Arc<Vec<u8>> to Arc<dyn AsRef<[u8]> + Send + Sync>
+        let blob_data: Arc<dyn AsRef<[u8]> + Send + Sync> = frame.rgba_data.clone();
+        let image = Image::new(
+            vello::peniko::Blob::new(blob_data),
+            vello::peniko::ImageFormat::Rgba8,
+            frame.width,
+            frame.height,
+        );
+
+        // Apply opacity
+        let image_with_alpha = image.with_alpha(final_opacity);
+
+        // Create rectangle path for the video frame
+        let video_rect = Rect::new(0.0, 0.0, video_clip.width, video_clip.height);
+
+        // Render video frame as image fill
+        scene.fill(
+            Fill::NonZero,
+            instance_transform,
+            &image_with_alpha,
+            None,
+            &video_rect,
+        );
     }
 }
 
 /// Render a vector layer with all its clip instances and shape instances
-fn render_vector_layer(document: &Document, time: f64, layer: &VectorLayer, scene: &mut Scene, base_transform: Affine, parent_opacity: f64, image_cache: &mut ImageCache) {
-
+fn render_vector_layer(
+    document: &Document,
+    time: f64,
+    layer: &VectorLayer,
+    scene: &mut Scene,
+    base_transform: Affine,
+    parent_opacity: f64,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
     // Render clip instances first (they appear under shape instances)
     for clip_instance in &layer.clip_instances {
-        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache);
+        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager);
     }
 
     // Render each shape instance in the layer

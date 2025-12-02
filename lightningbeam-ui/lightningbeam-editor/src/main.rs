@@ -4,6 +4,7 @@ use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
 use lightningbeam_core::tool::Tool;
 use std::collections::HashMap;
+use std::sync::Arc;
 use clap::Parser;
 use uuid::Uuid;
 
@@ -457,6 +458,8 @@ struct EditorApp {
     audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
     audio_sample_rate: u32, // Audio sample rate
     audio_channels: u32, // Audio channel count
+    // Video decoding and management
+    video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, // Shared video manager
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
@@ -607,6 +610,9 @@ impl EditorApp {
             audio_event_rx,
             audio_sample_rate,
             audio_channels,
+            video_manager: std::sync::Arc::new(std::sync::Mutex::new(
+                lightningbeam_core::video::VideoManager::new()
+            )),
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
@@ -1072,7 +1078,20 @@ impl EditorApp {
             }
             MenuAction::AddVideoLayer => {
                 println!("Menu: Add Video Layer");
-                // TODO: Implement add video layer
+                // Create a new video layer with a default name
+                let layer_number = self.action_executor.document().root.children.len() + 1;
+                let layer_name = format!("Video {}", layer_number);
+                let new_layer = lightningbeam_core::layer::AnyLayer::Video(
+                    lightningbeam_core::layer::VideoLayer::new(&layer_name)
+                );
+
+                // Add the layer to the document
+                self.action_executor.document_mut().root.add_child(new_layer.clone());
+
+                // Set it as the active layer
+                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                    self.active_layer_id = Some(last_layer.id());
+                }
             }
             MenuAction::AddAudioTrack => {
                 // Create a new sampled audio layer with a default name
@@ -1663,26 +1682,77 @@ impl EditorApp {
     /// Import a video file (placeholder - decoder not yet ported)
     fn import_video(&mut self, path: &std::path::Path) {
         use lightningbeam_core::clip::VideoClip;
+        use lightningbeam_core::video::probe_video;
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("Untitled Video")
             .to_string();
 
-        // TODO: Use video decoder to get actual dimensions/duration
-        // For now, create a placeholder with default values
-        let clip = VideoClip::new(
+        let path_str = path.to_string_lossy().to_string();
+
+        // Probe video for metadata
+        let metadata = match probe_video(&path_str) {
+            Ok(meta) => meta,
+            Err(e) => {
+                eprintln!("Failed to probe video '{}': {}", name, e);
+                return;
+            }
+        };
+
+        // Create video clip with real metadata
+        let mut clip = VideoClip::new(
             &name,
-            path.to_string_lossy().to_string(),
-            1920.0,  // Default width (TODO: probe video)
-            1080.0,  // Default height (TODO: probe video)
-            0.0,     // Duration unknown (TODO: probe video)
-            30.0,    // Default frame rate (TODO: probe video)
+            path_str.clone(),
+            metadata.width as f64,
+            metadata.height as f64,
+            metadata.duration,
+            metadata.fps,
         );
 
+        let clip_id = clip.id;
+
+        // Load video into VideoManager
+        let doc_width = self.action_executor.document().width as u32;
+        let doc_height = self.action_executor.document().height as u32;
+
+        let mut video_mgr = self.video_manager.lock().unwrap();
+        if let Err(e) = video_mgr.load_video(clip_id, path_str.clone(), doc_width, doc_height) {
+            eprintln!("Failed to load video '{}': {}", name, e);
+            return;
+        }
+        drop(video_mgr);
+
+        // TODO: Extract audio in background thread if present
+        // TODO: Create AudioClip and link to VideoClip via linked_audio_clip_id
+
+        // Spawn background thread for thumbnail generation
+        let video_manager_clone = Arc::clone(&self.video_manager);
+        let duration = metadata.duration;
+        std::thread::spawn(move || {
+            let mut video_mgr = video_manager_clone.lock().unwrap();
+            if let Err(e) = video_mgr.generate_thumbnails(&clip_id, duration) {
+                eprintln!("Failed to generate video thumbnails: {}", e);
+            } else {
+                println!("  Generated thumbnails for video clip {}", clip_id);
+            }
+        });
+
+        // Add clip to document
         let clip_id = self.action_executor.document_mut().add_video_clip(clip);
-        println!("Imported video '{}' (placeholder - dimensions/duration unknown) - ID: {}", name, clip_id);
-        println!("Note: Video decoder not yet ported. Video preview unavailable.");
+
+        println!("Imported video '{}' ({}x{}, {:.2}s @ {:.0}fps) - ID: {}",
+            name,
+            metadata.width,
+            metadata.height,
+            metadata.duration,
+            metadata.fps,
+            clip_id
+        );
+
+        if metadata.has_audio {
+            println!("  Video has audio track (extraction not yet implemented)");
+        }
     }
 }
 
@@ -1900,6 +1970,7 @@ impl eframe::App for EditorApp {
                 rdp_tolerance: &mut self.rdp_tolerance,
                 schneider_max_error: &mut self.schneider_max_error,
                 audio_controller: self.audio_controller.as_ref(),
+                video_manager: &self.video_manager,
                 playback_time: &mut self.playback_time,
                 is_playing: &mut self.is_playing,
                 dragging_asset: &mut self.dragging_asset,
@@ -2067,6 +2138,7 @@ struct RenderContext<'a> {
     rdp_tolerance: &'a mut f64,
     schneider_max_error: &'a mut f64,
     audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     playback_time: &'a mut f64,
     is_playing: &'a mut bool,
     dragging_asset: &'a mut Option<panes::DraggingAsset>,
@@ -2545,6 +2617,7 @@ fn render_pane(
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
                 audio_controller: ctx.audio_controller,
+                video_manager: ctx.video_manager,
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
@@ -2601,6 +2674,7 @@ fn render_pane(
                 rdp_tolerance: ctx.rdp_tolerance,
                 schneider_max_error: ctx.schneider_max_error,
                 audio_controller: ctx.audio_controller,
+                video_manager: ctx.video_manager,
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,

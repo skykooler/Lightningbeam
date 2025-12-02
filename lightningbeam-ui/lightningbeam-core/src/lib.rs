@@ -14,6 +14,7 @@ pub mod layer_tree;
 pub mod clip;
 pub mod document;
 pub mod renderer;
+pub mod video;
 pub mod action;
 pub mod actions;
 pub mod selection;

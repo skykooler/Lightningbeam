@@ -247,6 +247,11 @@ pub struct VideoClip {
 
     /// Frame rate (from video metadata)
     pub frame_rate: f64,
+
+    /// Optional linked audio clip (extracted from video file)
+    /// When set, the audio clip should be moved/trimmed in sync with this video clip
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_audio_clip_id: Option<Uuid>,
 }
 
 impl VideoClip {
@@ -267,6 +272,7 @@ impl VideoClip {
             height,
             duration,
             frame_rate,
+            linked_audio_clip_id: None,
         }
     }
 }

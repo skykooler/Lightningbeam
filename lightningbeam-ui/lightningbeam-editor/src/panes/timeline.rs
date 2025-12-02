@@ -943,6 +943,7 @@ impl TimelinePane {
     }
 
     /// Render layer rows (timeline content area)
+    /// Returns video clip hover data for processing after input handling
     fn render_layers(
         &self,
         ui: &mut egui::Ui,
@@ -955,8 +956,11 @@ impl TimelinePane {
         waveform_cache: &std::collections::HashMap<usize, Vec<daw_backend::WaveformPeak>>,
         waveform_image_cache: &mut crate::waveform_image_cache::WaveformImageCache,
         audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
-    ) {
+    ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
         let painter = ui.painter();
+
+        // Collect video clip rects for hover detection (to avoid borrow conflicts)
+        let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f64)> = Vec::new();
 
         // Theme colors for active/inactive layers
         let active_style = theme.style(".timeline-row-active", ui.ctx());
@@ -1186,6 +1190,11 @@ impl TimelinePane {
                             }
                         }
 
+                        // VIDEO PREVIEW: Collect clip rect for hover detection
+                        if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
+                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, instance_start));
+                        }
+
                         // Draw border only if selected (brighter version of clip color)
                         if selection.contains_clip_instance(&clip_instance.id) {
                             painter.rect_stroke(
@@ -1221,6 +1230,9 @@ impl TimelinePane {
                 egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
             );
         }
+
+        // Return video clip hover data for processing after input handling
+        video_clip_hovers
     }
 
     /// Handle mouse input for scrubbing, panning, zooming, layer selection, and clip instance selection
@@ -1936,7 +1948,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.waveform_cache, shared.waveform_image_cache, shared.audio_controller);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.waveform_cache, shared.waveform_image_cache, shared.audio_controller);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
@@ -1961,6 +1973,70 @@ impl PaneRenderer for TimelinePane {
             shared.is_playing,
             shared.audio_controller,
         );
+
+        // VIDEO HOVER DETECTION: Handle video clip hover tooltips AFTER input handling
+        // This ensures hover events aren't consumed by the main input handler
+        for (clip_rect, clip_id, trim_start, instance_start) in video_clip_hovers {
+            let hover_response = ui.allocate_rect(clip_rect, egui::Sense::hover());
+
+            if hover_response.hovered() {
+                if let Some(hover_pos) = hover_response.hover_pos() {
+                    // Calculate timestamp at hover position
+                    let hover_offset_pixels = hover_pos.x - clip_rect.min.x;
+                    let hover_offset_time = (hover_offset_pixels as f64) / (self.pixels_per_second as f64);
+                    let hover_timestamp = instance_start + hover_offset_time;
+
+                    // Remap to clip content time accounting for trim
+                    let clip_content_time = trim_start + (hover_timestamp - instance_start);
+
+                    // Try to get thumbnail from video manager
+                    let thumbnail_data: Option<(u32, u32, std::sync::Arc<Vec<u8>>)> = {
+                        let video_mgr = shared.video_manager.lock().unwrap();
+                        video_mgr.get_thumbnail_at(&clip_id, clip_content_time)
+                    };
+
+                    if let Some((thumb_width, thumb_height, ref thumb_data)) = thumbnail_data {
+                        // Create texture from thumbnail
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [thumb_width as usize, thumb_height as usize],
+                            &thumb_data,
+                        );
+                        let texture = ui.ctx().load_texture(
+                            format!("video_hover_{}", clip_id),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+
+                        // Show tooltip with thumbnail positioned near cursor
+                        let tooltip_pos = hover_pos + egui::vec2(10.0, 10.0);
+                        egui::Area::new(egui::Id::new(format!("video_hover_tooltip_{}", clip_id)))
+                            .fixed_pos(tooltip_pos)
+                            .order(egui::Order::Tooltip)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .show(ui, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.image(&texture);
+                                            ui.label(format!("Time: {:.2}s", clip_content_time));
+                                        });
+                                    });
+                            });
+                    } else {
+                        // Show simple tooltip if no thumbnail available
+                        let tooltip_pos = hover_pos + egui::vec2(10.0, 10.0);
+                        egui::Area::new(egui::Id::new(format!("video_tooltip_{}", clip_id)))
+                            .fixed_pos(tooltip_pos)
+                            .order(egui::Order::Tooltip)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style())
+                                    .show(ui, |ui| {
+                                        ui.label(format!("Video clip\nTime: {:.2}s\n(Thumbnails generating...)", clip_content_time));
+                                    });
+                            });
+                    }
+                }
+            }
+        }
 
         // Handle asset drag-and-drop from Asset Library
         if let Some(dragging) = shared.dragging_asset.as_ref() {
@@ -2016,9 +2092,21 @@ impl PaneRenderer for TimelinePane {
                             let center_y = doc.height / 2.0;
 
                             // Create clip instance centered on stage, at drop time
-                            let clip_instance = ClipInstance::new(dragging.clip_id)
+                            let mut clip_instance = ClipInstance::new(dragging.clip_id)
                                 .with_timeline_start(drop_time)
                                 .with_position(center_x, center_y);
+
+                            // For video clips, scale to fill document dimensions
+                            if dragging.clip_type == DragClipType::Video {
+                                if let Some((video_width, video_height)) = dragging.dimensions {
+                                    // Calculate scale to fill document
+                                    let scale_x = doc.width / video_width;
+                                    let scale_y = doc.height / video_height;
+
+                                    clip_instance.transform.scale_x = scale_x;
+                                    clip_instance.transform.scale_y = scale_y;
+                                }
+                            }
 
                             // Create and queue action
                             let action = lightningbeam_core::actions::AddClipInstanceAction::new(
