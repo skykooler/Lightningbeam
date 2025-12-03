@@ -30,6 +30,10 @@ pub struct Engine {
     query_rx: rtrb::Consumer<Query>,
     query_response_tx: rtrb::Producer<QueryResponse>,
 
+    // Background chunk generation channel
+    chunk_generation_rx: std::sync::mpsc::Receiver<AudioEvent>,
+    chunk_generation_tx: std::sync::mpsc::Sender<AudioEvent>,
+
     // Shared playhead for UI reads
     playhead_atomic: Arc<AtomicU64>,
 
@@ -76,6 +80,9 @@ impl Engine {
         // Calculate a reasonable buffer size for the pool (typical audio callback size * channels)
         let buffer_size = 512 * channels as usize;
 
+        // Create channel for background chunk generation
+        let (chunk_generation_tx, chunk_generation_rx) = std::sync::mpsc::channel();
+
         Self {
             project: Project::new(sample_rate),
             audio_pool: AudioClipPool::new(),
@@ -89,6 +96,8 @@ impl Engine {
             event_tx,
             query_rx,
             query_response_tx,
+            chunk_generation_rx,
+            chunk_generation_tx,
             playhead_atomic: Arc::new(AtomicU64::new(0)),
             next_midi_clip_id_atomic: Arc::new(AtomicU32::new(0)),
             frames_since_last_event: 0,
@@ -188,6 +197,7 @@ impl Engine {
             next_midi_clip_id: Arc::clone(&self.next_midi_clip_id_atomic),
             sample_rate: self.sample_rate,
             channels: self.channels,
+            cached_export_response: None,
         }
     }
 
@@ -222,6 +232,14 @@ impl Engine {
         // Process all pending queries
         while let Ok(query) = self.query_rx.pop() {
             self.handle_query(query);
+        }
+
+        // Forward chunk generation events from background threads
+        while let Ok(event) = self.chunk_generation_rx.try_recv() {
+            if let AudioEvent::WaveformChunksReady { pool_index, detail_level, ref chunks } = event {
+                println!("📬 [AUDIO THREAD] Received {} chunks for pool {} level {}, forwarding to UI", chunks.len(), pool_index, detail_level);
+            }
+            let _ = self.event_tx.push(event);
         }
 
         if self.playing {
@@ -483,6 +501,7 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
             Command::AddAudioFile(path, data, channels, sample_rate) => {
+                println!("🎵 [ENGINE] Received AddAudioFile command for: {}", path);
                 // Detect original format from file extension
                 let path_buf = std::path::PathBuf::from(path.clone());
                 let original_format = path_buf.extension()
@@ -491,13 +510,60 @@ impl Engine {
 
                 // Create AudioFile and add to pool
                 let audio_file = crate::audio::pool::AudioFile::with_format(
-                    path_buf,
-                    data,
+                    path_buf.clone(),
+                    data.clone(),  // Clone data for background thread
                     channels,
                     sample_rate,
                     original_format,
                 );
                 let pool_index = self.audio_pool.add_file(audio_file);
+                println!("📦 [ENGINE] Added to pool at index {}", pool_index);
+
+                // Generate Level 0 (overview) waveform chunks asynchronously in background thread
+                let chunk_tx = self.chunk_generation_tx.clone();
+                let duration = data.len() as f64 / (sample_rate as f64 * channels as f64);
+                println!("🔄 [ENGINE] Spawning background thread to generate Level 0 chunks for pool {}", pool_index);
+                std::thread::spawn(move || {
+                    // Create temporary AudioFile for chunk generation
+                    let temp_audio_file = crate::audio::pool::AudioFile::with_format(
+                        path_buf,
+                        data,
+                        channels,
+                        sample_rate,
+                        None,
+                    );
+
+                    // Generate Level 0 chunks
+                    let chunk_count = crate::audio::waveform_cache::WaveformCache::calculate_chunk_count(duration, 0);
+                    println!("🔄 [BACKGROUND] Generating {} Level 0 chunks for pool {}", chunk_count, pool_index);
+                    let chunks = crate::audio::waveform_cache::WaveformCache::generate_chunks(
+                        &temp_audio_file,
+                        pool_index,
+                        0,  // Level 0 (overview)
+                        &(0..chunk_count).collect::<Vec<_>>(),
+                    );
+
+                    // Send chunks via MPSC channel (will be forwarded by audio thread)
+                    if !chunks.is_empty() {
+                        println!("📤 [BACKGROUND] Generated {} chunks, sending to audio thread (pool {})", chunks.len(), pool_index);
+                        let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
+                            .into_iter()
+                            .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
+                            .collect();
+
+                        match chunk_tx.send(AudioEvent::WaveformChunksReady {
+                            pool_index,
+                            detail_level: 0,
+                            chunks: event_chunks,
+                        }) {
+                            Ok(_) => println!("✅ [BACKGROUND] Chunks sent successfully for pool {}", pool_index),
+                            Err(e) => eprintln!("❌ [BACKGROUND] Failed to send chunks: {}", e),
+                        }
+                    } else {
+                        eprintln!("⚠️  [BACKGROUND] No chunks generated for pool {}", pool_index);
+                    }
+                });
+
                 // Notify UI about the new audio file
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
             }
@@ -1446,6 +1512,62 @@ impl Engine {
                     }
                 }
             }
+
+            Command::GenerateWaveformChunks {
+                pool_index,
+                detail_level,
+                chunk_indices,
+                priority: _priority, // TODO: Use priority for scheduling
+            } => {
+                println!("🔧 [ENGINE] Received GenerateWaveformChunks command: pool={}, level={}, chunks={:?}",
+                    pool_index, detail_level, chunk_indices);
+                // Get audio file data from pool
+                if let Some(audio_file) = self.audio_pool.get_file(pool_index) {
+                    println!("✅ [ENGINE] Found audio file in pool, spawning background thread");
+                    // Clone necessary data for background thread
+                    let data = audio_file.data.clone();
+                    let channels = audio_file.channels;
+                    let sample_rate = audio_file.sample_rate;
+                    let path = audio_file.path.clone();
+                    let chunk_tx = self.chunk_generation_tx.clone();
+
+                    // Generate chunks in background thread to avoid blocking audio thread
+                    std::thread::spawn(move || {
+                        // Create temporary AudioFile for chunk generation
+                        let temp_audio_file = crate::audio::pool::AudioFile::with_format(
+                            path,
+                            data,
+                            channels,
+                            sample_rate,
+                            None,
+                        );
+
+                        // Generate requested chunks
+                        let chunks = crate::audio::waveform_cache::WaveformCache::generate_chunks(
+                            &temp_audio_file,
+                            pool_index,
+                            detail_level,
+                            &chunk_indices,
+                        );
+
+                        // Send chunks via MPSC channel (will be forwarded by audio thread)
+                        if !chunks.is_empty() {
+                            let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
+                                .into_iter()
+                                .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
+                                .collect();
+
+                            let _ = chunk_tx.send(AudioEvent::WaveformChunksReady {
+                                pool_index,
+                                detail_level,
+                                chunks: event_chunks,
+                            });
+                        }
+                    });
+                } else {
+                    eprintln!("❌ [ENGINE] Pool index {} not found for waveform generation", pool_index);
+                }
+            }
         }
     }
 
@@ -1693,7 +1815,16 @@ impl Engine {
                 // Use raw pointer to get midi_pool reference before mutable borrow of project
                 let midi_pool_ptr: *const _ = &self.project.midi_clip_pool;
                 let midi_pool_ref = unsafe { &*midi_pool_ptr };
-                match crate::audio::export_audio(&mut self.project, &self.audio_pool, midi_pool_ref, &settings, &output_path) {
+
+                // Pass event_tx directly - Rust allows borrowing different fields simultaneously
+                match crate::audio::export_audio(
+                    &mut self.project,
+                    &self.audio_pool,
+                    midi_pool_ref,
+                    &settings,
+                    &output_path,
+                    Some(&mut self.event_tx),
+                ) {
                     Ok(()) => QueryResponse::AudioExported(Ok(())),
                     Err(e) => QueryResponse::AudioExported(Err(e)),
                 }
@@ -1747,13 +1878,58 @@ impl Engine {
 
                 // Create AudioFile and add to pool
                 let audio_file = crate::audio::pool::AudioFile::with_format(
-                    path_buf,
-                    data,
+                    path_buf.clone(),
+                    data.clone(),  // Clone data for background thread
                     channels,
                     sample_rate,
                     original_format,
                 );
                 let pool_index = self.audio_pool.add_file(audio_file);
+
+                // Generate Level 0 (overview) waveform chunks asynchronously in background thread
+                let chunk_tx = self.chunk_generation_tx.clone();
+                let duration = data.len() as f64 / (sample_rate as f64 * channels as f64);
+                println!("🔄 [ENGINE] Spawning background thread to generate Level 0 chunks for pool {}", pool_index);
+                std::thread::spawn(move || {
+                    // Create temporary AudioFile for chunk generation
+                    let temp_audio_file = crate::audio::pool::AudioFile::with_format(
+                        path_buf,
+                        data,
+                        channels,
+                        sample_rate,
+                        None,
+                    );
+
+                    // Generate Level 0 chunks
+                    let chunk_count = crate::audio::waveform_cache::WaveformCache::calculate_chunk_count(duration, 0);
+                    println!("🔄 [BACKGROUND] Generating {} Level 0 chunks for pool {}", chunk_count, pool_index);
+                    let chunks = crate::audio::waveform_cache::WaveformCache::generate_chunks(
+                        &temp_audio_file,
+                        pool_index,
+                        0,  // Level 0 (overview)
+                        &(0..chunk_count).collect::<Vec<_>>(),
+                    );
+
+                    // Send chunks via MPSC channel (will be forwarded by audio thread)
+                    if !chunks.is_empty() {
+                        println!("📤 [BACKGROUND] Generated {} chunks, sending to audio thread (pool {})", chunks.len(), pool_index);
+                        let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
+                            .into_iter()
+                            .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
+                            .collect();
+
+                        match chunk_tx.send(AudioEvent::WaveformChunksReady {
+                            pool_index,
+                            detail_level: 0,
+                            chunks: event_chunks,
+                        }) {
+                            Ok(_) => println!("✅ [BACKGROUND] Chunks sent successfully for pool {}", pool_index),
+                            Err(e) => eprintln!("❌ [BACKGROUND] Failed to send chunks: {}", e),
+                        }
+                    } else {
+                        eprintln!("⚠️  [BACKGROUND] No chunks generated for pool {}", pool_index);
+                    }
+                });
 
                 // Notify UI about the new audio file (for event listeners)
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
@@ -1779,7 +1955,10 @@ impl Engine {
         };
 
         // Send response back
-        let _ = self.query_response_tx.push(response);
+        match self.query_response_tx.push(response) {
+            Ok(_) => {},
+            Err(_) => eprintln!("❌ [ENGINE] FAILED to send query response - queue full!"),
+        }
     }
 
     /// Handle starting a recording
@@ -2051,6 +2230,8 @@ pub struct EngineController {
     sample_rate: u32,
     #[allow(dead_code)] // Used in public getter method
     channels: u32,
+    /// Cached export response found by other query methods
+    cached_export_response: Option<Result<(), String>>,
 }
 
 // Safety: EngineController is safe to Send across threads because:
@@ -2169,7 +2350,10 @@ impl EngineController {
 
     /// Add an audio file to the pool (must be called from non-audio thread with pre-loaded data)
     pub fn add_audio_file(&mut self, path: String, data: Vec<f32>, channels: u32, sample_rate: u32) {
-        let _ = self.command_tx.push(Command::AddAudioFile(path, data, channels, sample_rate));
+        match self.command_tx.push(Command::AddAudioFile(path.clone(), data, channels, sample_rate)) {
+            Ok(_) => println!("✅ [CONTROLLER] AddAudioFile command queued successfully: {}", path),
+            Err(_) => eprintln!("❌ [CONTROLLER] Failed to queue AddAudioFile command (buffer full): {}", path),
+        }
     }
 
     /// Add an audio file to the pool synchronously and get the pool index
@@ -2660,13 +2844,21 @@ impl EngineController {
             return Err("Failed to send query - queue full".to_string());
         }
 
-        // Wait for response (with timeout)
+        // Wait for response (with shorter timeout to avoid blocking UI during export)
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(2);
+        let timeout = std::time::Duration::from_millis(50);
 
         while start.elapsed() < timeout {
-            if let Ok(QueryResponse::PoolWaveform(result)) = self.query_response_rx.pop() {
-                return result;
+            if let Ok(response) = self.query_response_rx.pop() {
+                match response {
+                    QueryResponse::PoolWaveform(result) => return result,
+                    QueryResponse::AudioExported(result) => {
+                        // Cache for poll_export_completion()
+                        println!("💾 [CONTROLLER] Caching AudioExported response from get_pool_waveform");
+                        self.cached_export_response = Some(result);
+                    }
+                    _ => {} // Discard other responses
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -2681,18 +2873,49 @@ impl EngineController {
             return Err("Failed to send query - queue full".to_string());
         }
 
-        // Wait for response (with timeout)
+        // Wait for response (with shorter timeout to avoid blocking UI during export)
         let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(2);
+        let timeout = std::time::Duration::from_millis(50);
 
         while start.elapsed() < timeout {
-            if let Ok(QueryResponse::PoolFileInfo(result)) = self.query_response_rx.pop() {
-                return result;
+            if let Ok(response) = self.query_response_rx.pop() {
+                match response {
+                    QueryResponse::PoolFileInfo(result) => return result,
+                    QueryResponse::AudioExported(result) => {
+                        // Cache for poll_export_completion()
+                        println!("💾 [CONTROLLER] Caching AudioExported response from get_pool_file_info");
+                        self.cached_export_response = Some(result);
+                    }
+                    _ => {} // Discard other responses
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
         Err("Query timeout".to_string())
+    }
+
+    /// Request waveform chunks to be generated
+    /// This is an asynchronous command - chunks will be returned via WaveformChunksReady events
+    pub fn generate_waveform_chunks(
+        &mut self,
+        pool_index: usize,
+        detail_level: u8,
+        chunk_indices: Vec<u32>,
+        priority: u8,
+    ) -> Result<(), String> {
+        let command = Command::GenerateWaveformChunks {
+            pool_index,
+            detail_level,
+            chunk_indices,
+            priority,
+        };
+
+        if let Err(_) = self.command_tx.push(command) {
+            return Err("Failed to send command - queue full".to_string());
+        }
+
+        Ok(())
     }
 
     /// Load audio pool from serialized entries
@@ -2779,19 +3002,57 @@ impl EngineController {
         Err("Query timeout".to_string())
     }
 
-    /// Export audio to a file
-    pub fn export_audio<P: AsRef<std::path::Path>>(&mut self, settings: &crate::audio::ExportSettings, output_path: P) -> Result<(), String> {
+    /// Start an audio export (non-blocking)
+    ///
+    /// Sends the export query to the audio thread and returns immediately.
+    /// Use `poll_export_completion()` to check for completion.
+    pub fn start_export_audio<P: AsRef<std::path::Path>>(&mut self, settings: &crate::audio::ExportSettings, output_path: P) -> Result<(), String> {
         // Send export query
         if let Err(_) = self.query_tx.push(Query::ExportAudio(settings.clone(), output_path.as_ref().to_path_buf())) {
             return Err("Failed to send export query - queue full".to_string());
         }
+        Ok(())
+    }
+
+    /// Poll for export completion (non-blocking)
+    ///
+    /// Returns:
+    /// - `Ok(Some(result))` if export completed (result may be Ok or Err)
+    /// - `Ok(None)` if export is still in progress
+    /// - `Err` should not happen in normal operation
+    pub fn poll_export_completion(&mut self) -> Result<Option<Result<(), String>>, String> {
+        // Check if we have a cached response from another query method
+        if let Some(result) = self.cached_export_response.take() {
+            println!("✅ [CONTROLLER] Found cached AudioExported response!");
+            return Ok(Some(result));
+        }
+
+        // Keep popping responses until we find AudioExported or queue is empty
+        while let Ok(response) = self.query_response_rx.pop() {
+            println!("📥 [CONTROLLER] Received response: {:?}", std::mem::discriminant(&response));
+            if let QueryResponse::AudioExported(result) = response {
+                println!("✅ [CONTROLLER] Found AudioExported response!");
+                return Ok(Some(result));
+            }
+            // Discard other query responses (they're for synchronous queries)
+            println!("⏭️  [CONTROLLER] Skipping non-export response");
+        }
+        Ok(None)
+    }
+
+    /// Export audio to a file (blocking)
+    ///
+    /// This is a convenience method that calls start_export_audio and waits for completion.
+    /// For non-blocking export with progress updates, use start_export_audio() and poll_export_completion().
+    pub fn export_audio<P: AsRef<std::path::Path>>(&mut self, settings: &crate::audio::ExportSettings, output_path: P) -> Result<(), String> {
+        self.start_export_audio(settings, &output_path)?;
 
         // Wait for response (with longer timeout since export can take a while)
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(300); // 5 minute timeout for export
 
         while start.elapsed() < timeout {
-            if let Ok(QueryResponse::AudioExported(result)) = self.query_response_rx.pop() {
+            if let Some(result) = self.poll_export_completion()? {
                 return result;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));

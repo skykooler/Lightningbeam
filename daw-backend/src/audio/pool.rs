@@ -170,6 +170,8 @@ impl AudioFile {
 /// Pool of shared audio files (audio clip content)
 pub struct AudioClipPool {
     files: Vec<AudioFile>,
+    /// Waveform chunk cache for multi-resolution waveform generation
+    waveform_cache: crate::audio::waveform_cache::WaveformCache,
 }
 
 /// Type alias for backwards compatibility
@@ -180,6 +182,7 @@ impl AudioClipPool {
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
+            waveform_cache: crate::audio::waveform_cache::WaveformCache::new(100), // 100MB cache
         }
     }
 
@@ -368,6 +371,97 @@ impl AudioClipPool {
         }
 
         rendered_frames * dst_channels
+    }
+
+    /// Generate waveform chunks for a file in the pool
+    ///
+    /// This generates chunks at a specific detail level and caches them.
+    /// Returns the generated chunks.
+    pub fn generate_waveform_chunks(
+        &mut self,
+        pool_index: usize,
+        detail_level: u8,
+        chunk_indices: &[u32],
+    ) -> Vec<crate::io::WaveformChunk> {
+        let file = match self.files.get(pool_index) {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        let chunks = crate::audio::waveform_cache::WaveformCache::generate_chunks(
+            file,
+            pool_index,
+            detail_level,
+            chunk_indices,
+        );
+
+        // Store chunks in cache
+        for chunk in &chunks {
+            let key = crate::io::WaveformChunkKey {
+                pool_index,
+                detail_level: chunk.detail_level,
+                chunk_index: chunk.chunk_index,
+            };
+            self.waveform_cache.store_chunk(key, chunk.peaks.clone());
+        }
+
+        chunks
+    }
+
+    /// Generate Level 0 (overview) chunks for a file
+    ///
+    /// This should be called immediately when a file is imported.
+    /// Returns the generated chunks.
+    pub fn generate_overview_chunks(
+        &mut self,
+        pool_index: usize,
+    ) -> Vec<crate::io::WaveformChunk> {
+        let file = match self.files.get(pool_index) {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+
+        self.waveform_cache.generate_overview_chunks(file, pool_index)
+    }
+
+    /// Get a cached waveform chunk
+    pub fn get_waveform_chunk(
+        &self,
+        pool_index: usize,
+        detail_level: u8,
+        chunk_index: u32,
+    ) -> Option<&Vec<crate::io::WaveformPeak>> {
+        let key = crate::io::WaveformChunkKey {
+            pool_index,
+            detail_level,
+            chunk_index,
+        };
+        self.waveform_cache.get_chunk(&key)
+    }
+
+    /// Check if a waveform chunk is cached
+    pub fn has_waveform_chunk(
+        &self,
+        pool_index: usize,
+        detail_level: u8,
+        chunk_index: u32,
+    ) -> bool {
+        let key = crate::io::WaveformChunkKey {
+            pool_index,
+            detail_level,
+            chunk_index,
+        };
+        self.waveform_cache.has_chunk(&key)
+    }
+
+    /// Get waveform cache memory usage in MB
+    pub fn waveform_cache_memory_mb(&self) -> f64 {
+        self.waveform_cache.memory_usage_mb()
+    }
+
+    /// Get number of cached waveform chunks
+    pub fn waveform_chunk_count(&self) -> usize {
+        self.waveform_cache.chunk_count()
     }
 }
 

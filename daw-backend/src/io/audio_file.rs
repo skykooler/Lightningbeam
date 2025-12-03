@@ -13,6 +13,24 @@ pub struct WaveformPeak {
     pub max: f32,
 }
 
+/// Uniquely identifies a waveform chunk
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WaveformChunkKey {
+    pub pool_index: usize,
+    pub detail_level: u8,    // 0-4
+    pub chunk_index: u32,    // Sequential chunk number
+}
+
+/// A chunk of waveform data at a specific detail level
+#[derive(Debug, Clone)]
+pub struct WaveformChunk {
+    pub audio_pool_index: usize,
+    pub detail_level: u8,           // 0-4 (overview to max detail)
+    pub chunk_index: u32,           // Sequential chunk number
+    pub time_range: (f64, f64),     // Start and end time in seconds
+    pub peaks: Vec<WaveformPeak>,   // Variable length based on level
+}
+
 pub struct AudioFile {
     pub data: Vec<f32>,
     pub channels: u32,

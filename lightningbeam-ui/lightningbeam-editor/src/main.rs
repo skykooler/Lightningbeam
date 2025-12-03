@@ -3,7 +3,7 @@ use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
 use lightningbeam_core::tool::Tool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use clap::Parser;
 use uuid::Uuid;
@@ -25,6 +25,8 @@ mod config;
 use config::AppConfig;
 
 mod default_instrument;
+
+mod export;
 
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
@@ -507,6 +509,7 @@ struct EditorApp {
     audio_stream: Option<cpal::Stream>, // Audio stream (must be kept alive)
     audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>, // Shared audio controller
     audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
+    audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>, // Flag set when audio events arrive
     audio_sample_rate: u32, // Audio sample rate
     audio_channels: u32, // Audio channel count
     // Video decoding and management
@@ -537,6 +540,14 @@ struct EditorApp {
     /// Prevents repeated backend queries for the same audio file
     /// Format: Vec of WaveformPeak (min/max pairs)
     waveform_cache: HashMap<usize, Vec<daw_backend::WaveformPeak>>,
+    /// Chunk-based waveform cache for multi-resolution waveforms
+    /// Format: (pool_index, detail_level, chunk_index) -> Vec<WaveformPeak>
+    waveform_chunk_cache: HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
+    /// Cache for audio file durations to avoid repeated queries
+    /// Format: pool_index -> duration in seconds
+    audio_duration_cache: HashMap<usize, f64>,
+    /// Track which audio pool indices got new waveform data this frame (for thumbnail invalidation)
+    audio_pools_with_new_waveforms: HashSet<usize>,
     /// Cache for rendered waveform images (GPU textures)
     /// Stores pre-rendered waveform tiles at various zoom levels for fast blitting
     waveform_image_cache: waveform_image_cache::WaveformImageCache,
@@ -553,6 +564,13 @@ struct EditorApp {
     /// Audio extraction channel for background thread communication
     audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
     audio_extraction_rx: std::sync::mpsc::Receiver<AudioExtractionResult>,
+
+    /// Export dialog state
+    export_dialog: export::dialog::ExportDialog,
+    /// Export progress dialog
+    export_progress_dialog: export::dialog::ExportProgressDialog,
+    /// Export orchestrator for background exports
+    export_orchestrator: Option<export::ExportOrchestrator>,
 }
 
 /// Import filter types for the file dialog
@@ -668,6 +686,7 @@ impl EditorApp {
             audio_stream,
             audio_controller,
             audio_event_rx,
+            audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             audio_sample_rate,
             audio_channels,
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
@@ -686,6 +705,9 @@ impl EditorApp {
             polygon_sides: 5,                // Default to pentagon
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
             waveform_cache: HashMap::new(), // Initialize empty waveform cache
+            waveform_chunk_cache: HashMap::new(), // Initialize empty chunk-based waveform cache
+            audio_duration_cache: HashMap::new(), // Initialize empty audio duration cache
+            audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new waveforms
             waveform_image_cache: waveform_image_cache::WaveformImageCache::new(), // Initialize waveform image cache
             current_file_path: None, // No file loaded initially
             config,
@@ -693,6 +715,9 @@ impl EditorApp {
             file_operation: None, // No file operation in progress initially
             audio_extraction_tx,
             audio_extraction_rx,
+            export_dialog: export::dialog::ExportDialog::default(),
+            export_progress_dialog: export::dialog::ExportProgressDialog::default(),
+            export_orchestrator: None,
         }
     }
 
@@ -776,31 +801,75 @@ impl EditorApp {
     }
 
     /// Fetch waveform data from backend for a specific audio pool index
-    /// Returns cached data if available, otherwise queries backend
+    /// Returns cached data if available, otherwise tries to assemble from chunks
+    /// For thumbnails, uses Level 0 (overview) chunks which are fast to generate
     fn fetch_waveform(&mut self, pool_index: usize) -> Option<Vec<daw_backend::WaveformPeak>> {
-        // Check if already cached
+        // Check if already cached in old waveform cache
         if let Some(waveform) = self.waveform_cache.get(&pool_index) {
             return Some(waveform.clone());
         }
 
-        // Fetch from backend
-        // Request 20,000 peaks for high-detail waveform visualization
-        // For a 200s file, this gives ~100 peaks/second, providing smooth visualization at all zoom levels
-        if let Some(ref controller_arc) = self.audio_controller {
-            let mut controller = controller_arc.lock().unwrap();
-            match controller.get_pool_waveform(pool_index, 20000) {
-                Ok(waveform) => {
-                    self.waveform_cache.insert(pool_index, waveform.clone());
-                    Some(waveform)
-                }
-                Err(e) => {
-                    eprintln!("⚠️  Failed to fetch waveform for pool index {}: {}", pool_index, e);
-                    None
-                }
-            }
+        // Try to assemble from Level 0 (overview) chunks - perfect for thumbnails
+        // Level 0 = 1 peak/sec, so a 200s file only needs 200 peaks (very fast)
+
+        // Get audio file duration (use cached value to avoid repeated queries)
+        let audio_file_duration = if let Some(&duration) = self.audio_duration_cache.get(&pool_index) {
+            duration
         } else {
-            None
+            // Duration not cached - query it once and cache
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                match controller.get_pool_file_info(pool_index) {
+                    Ok((duration, _, _)) => {
+                        self.audio_duration_cache.insert(pool_index, duration);
+                        duration
+                    }
+                    Err(_) => return None,
+                }
+            } else {
+                return None;
+            }
+        };
+
+        // Assemble Level 0 chunks for the entire file
+        let detail_level = 0; // Level 0 (overview)
+        let chunk_time_span = 60.0; // 60 seconds per chunk
+        let total_chunks = (audio_file_duration / chunk_time_span).ceil() as u32;
+
+        let mut assembled_peaks = Vec::new();
+        let mut missing_chunks = Vec::new();
+
+        // Check if all required chunks are available
+        for chunk_idx in 0..total_chunks {
+            let key = (pool_index, detail_level, chunk_idx);
+            if let Some(chunk_peaks) = self.waveform_chunk_cache.get(&key) {
+                assembled_peaks.extend_from_slice(chunk_peaks);
+            } else {
+                missing_chunks.push(chunk_idx);
+            }
         }
+
+        // If any chunks are missing, request them (but only if we have a controller)
+        if !missing_chunks.is_empty() {
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let _ = controller.generate_waveform_chunks(
+                    pool_index,
+                    detail_level,
+                    missing_chunks,
+                    2, // High priority for thumbnails
+                );
+            }
+            return None; // Will retry next frame when chunks arrive
+        }
+
+        // All chunks available - cache and return
+        if !assembled_peaks.is_empty() {
+            self.waveform_cache.insert(pool_index, assembled_peaks.clone());
+            return Some(assembled_peaks);
+        }
+
+        None
     }
 
     fn switch_layout(&mut self, index: usize) {
@@ -1032,7 +1101,9 @@ impl EditorApp {
             }
             MenuAction::Export => {
                 println!("Menu: Export");
-                // TODO: Implement export
+                // Open export dialog with calculated timeline endpoint
+                let timeline_endpoint = self.action_executor.document().calculate_timeline_endpoint();
+                self.export_dialog.open(timeline_endpoint);
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
@@ -1653,6 +1724,7 @@ impl EditorApp {
                         let mut controller = controller_arc.lock().unwrap();
                         // Send audio data to the engine
                         let path_str = path.to_string_lossy().to_string();
+                        println!("📤 [UI] Sending AddAudioFile command to engine: {}", path_str);
                         controller.add_audio_file(
                             path_str.clone(),
                             audio_file.data,
@@ -1950,6 +2022,13 @@ impl eframe::App for EditorApp {
             o.zoom_with_keyboard = false;
         });
 
+        // Force continuous repaint if we have pending waveform updates
+        // This ensures thumbnails update immediately when waveform data arrives
+        if !self.audio_pools_with_new_waveforms.is_empty() {
+            println!("🔄 [UPDATE] Pending waveform updates for pools: {:?}", self.audio_pools_with_new_waveforms);
+            ctx.request_repaint();
+        }
+
         // Poll audio extraction results from background threads
         while let Ok(result) = self.audio_extraction_rx.try_recv() {
             self.handle_audio_extraction_result(result);
@@ -2091,9 +2170,16 @@ impl eframe::App for EditorApp {
             ctx.request_repaint();
         }
 
+        // Check if audio events are pending and request repaint if needed
+        if self.audio_events_pending.load(std::sync::atomic::Ordering::Relaxed) {
+            ctx.request_repaint();
+        }
+
         // Poll audio events from the audio engine
         if let Some(event_rx) = &mut self.audio_event_rx {
+            let mut polled_events = false;
             while let Ok(event) = event_rx.pop() {
+                polled_events = true;
                     use daw_backend::AudioEvent;
                     match event {
                         AudioEvent::PlaybackPosition(time) => {
@@ -2102,14 +2188,171 @@ impl eframe::App for EditorApp {
                         AudioEvent::PlaybackStopped => {
                             self.is_playing = false;
                         }
+                        AudioEvent::ExportProgress { frames_rendered, total_frames } => {
+                            // Update export progress dialog with actual render progress
+                            let progress = frames_rendered as f32 / total_frames as f32;
+                            self.export_progress_dialog.update_progress(
+                                format!("Rendering: {} / {} frames", frames_rendered, total_frames),
+                                progress,
+                            );
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::WaveformChunksReady { pool_index, detail_level, chunks } => {
+                            // Store waveform chunks in the cache
+                            let mut all_peaks = Vec::new();
+                            for (chunk_index, _time_range, peaks) in chunks {
+                                let key = (pool_index, detail_level, chunk_index);
+                                self.waveform_chunk_cache.insert(key, peaks.clone());
+                                all_peaks.extend(peaks);
+                            }
+
+                            // If this is Level 0 (overview), also populate the old waveform_cache
+                            // so asset library thumbnails can use it immediately
+                            if detail_level == 0 && !all_peaks.is_empty() {
+                                println!("💾 [EVENT] Storing {} Level 0 peaks for pool {} in waveform_cache", all_peaks.len(), pool_index);
+                                self.waveform_cache.insert(pool_index, all_peaks);
+                                // Mark this pool index as having new waveform data (for thumbnail invalidation)
+                                self.audio_pools_with_new_waveforms.insert(pool_index);
+                                println!("🔔 [EVENT] Marked pool {} for thumbnail invalidation", pool_index);
+                            }
+
+                            // Invalidate image cache for this pool index
+                            // (The waveform tiles will be regenerated with new chunk data)
+                            self.waveform_image_cache.invalidate_audio(pool_index);
+
+                            ctx.request_repaint();
+                        }
                         _ => {} // Ignore other events for now
                     }
                 }
+
+            // If we polled events, set the flag to trigger another update
+            // (in case more events arrive before the next frame)
+            if polled_events {
+                self.audio_events_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                // No events this frame, clear the flag
+                self.audio_events_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         // Request continuous repaints when playing to update time display
         if self.is_playing {
             ctx.request_repaint();
+        }
+
+        // Handle export dialog
+        if let Some((settings, output_path)) = self.export_dialog.render(ctx) {
+            // User clicked Export - start the export
+            println!("🎬 [MAIN] Export button clicked: {}", output_path.display());
+
+            if let Some(audio_controller) = &self.audio_controller {
+                println!("🎬 [MAIN] Audio controller available");
+
+                // Create orchestrator if needed
+                if self.export_orchestrator.is_none() {
+                    println!("🎬 [MAIN] Creating new orchestrator");
+                    self.export_orchestrator = Some(export::ExportOrchestrator::new());
+                }
+
+                // Start export
+                if let Some(orchestrator) = &mut self.export_orchestrator {
+                    println!("🎬 [MAIN] Calling start_audio_export...");
+                    orchestrator.start_audio_export(
+                        settings,
+                        output_path,
+                        Arc::clone(audio_controller),
+                    );
+                    println!("🎬 [MAIN] start_audio_export returned, opening progress dialog");
+                    // Open progress dialog
+                    self.export_progress_dialog.open();
+                    println!("🎬 [MAIN] Progress dialog opened");
+                }
+            } else {
+                eprintln!("❌ Cannot export: Audio controller not available");
+            }
+        }
+
+        // Render export progress dialog and handle cancel
+        if self.export_progress_dialog.render(ctx) {
+            // User clicked Cancel
+            if let Some(orchestrator) = &mut self.export_orchestrator {
+                orchestrator.cancel();
+            }
+        }
+
+        // Keep requesting repaints while export progress dialog is open
+        if self.export_progress_dialog.open {
+            ctx.request_repaint();
+        }
+
+        // Poll export orchestrator for progress
+        if let Some(orchestrator) = &mut self.export_orchestrator {
+            // Only log occasionally to avoid spam
+            static mut POLL_COUNT: u32 = 0;
+            unsafe {
+                POLL_COUNT += 1;
+                if POLL_COUNT % 60 == 0 {
+                    println!("🔍 [MAIN] Polling orchestrator (poll #{})...", POLL_COUNT);
+                }
+            }
+            if let Some(progress) = orchestrator.poll_progress() {
+                println!("📨 [MAIN] Received progress from orchestrator!");
+                match progress {
+                    lightningbeam_core::export::ExportProgress::Started { total_frames } => {
+                        println!("Export started: {} frames", total_frames);
+                        self.export_progress_dialog.update_progress(
+                            "Starting export...".to_string(),
+                            0.0,
+                        );
+                        ctx.request_repaint(); // Keep repainting during export
+                    }
+                    lightningbeam_core::export::ExportProgress::FrameRendered { frame, total } => {
+                        let progress = frame as f32 / total as f32;
+                        self.export_progress_dialog.update_progress(
+                            format!("Rendering frame {} of {}", frame, total),
+                            progress,
+                        );
+                        ctx.request_repaint();
+                    }
+                    lightningbeam_core::export::ExportProgress::AudioRendered => {
+                        self.export_progress_dialog.update_progress(
+                            "Rendering audio...".to_string(),
+                            0.5,
+                        );
+                        ctx.request_repaint();
+                    }
+                    lightningbeam_core::export::ExportProgress::Finalizing => {
+                        self.export_progress_dialog.update_progress(
+                            "Finalizing export...".to_string(),
+                            0.9,
+                        );
+                        ctx.request_repaint();
+                    }
+                    lightningbeam_core::export::ExportProgress::Complete { ref output_path } => {
+                        println!("✅ Export complete: {}", output_path.display());
+                        self.export_progress_dialog.update_progress(
+                            format!("Export complete: {}", output_path.display()),
+                            1.0,
+                        );
+                        // Close the progress dialog after a brief delay
+                        self.export_progress_dialog.close();
+                    }
+                    lightningbeam_core::export::ExportProgress::Error { ref message } => {
+                        eprintln!("❌ Export error: {}", message);
+                        self.export_progress_dialog.update_progress(
+                            format!("Error: {}", message),
+                            0.0,
+                        );
+                        // Keep the dialog open to show the error
+                    }
+                }
+            }
+
+            // Request repaint while exporting to update progress
+            if orchestrator.is_exporting() {
+                ctx.request_repaint();
+            }
         }
 
         // Top menu bar (egui-rendered on all platforms)
@@ -2172,7 +2415,9 @@ impl eframe::App for EditorApp {
                 layer_to_track_map: &self.layer_to_track_map,
                 midi_event_cache: &self.midi_event_cache,
                 waveform_cache: &self.waveform_cache,
+                waveform_chunk_cache: &self.waveform_chunk_cache,
                 waveform_image_cache: &mut self.waveform_image_cache,
+                audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
             };
 
             render_layout_node(
@@ -2308,6 +2553,13 @@ impl eframe::App for EditorApp {
                 }
             }
         });
+
+        // Clear the set of audio pools with new waveforms at the end of the frame
+        // (Thumbnails have been invalidated above, so this can be cleared for next frame)
+        if !self.audio_pools_with_new_waveforms.is_empty() {
+            println!("🧹 [UPDATE] Clearing waveform update set: {:?}", self.audio_pools_with_new_waveforms);
+        }
+        self.audio_pools_with_new_waveforms.clear();
     }
 
 }
@@ -2350,8 +2602,12 @@ struct RenderContext<'a> {
     midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
     /// Cache of waveform data for rendering (keyed by audio_pool_index)
     waveform_cache: &'a HashMap<usize, Vec<daw_backend::WaveformPeak>>,
+    /// Chunk-based waveform cache for multi-resolution waveforms
+    waveform_chunk_cache: &'a HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
     /// Cache of rendered waveform images (GPU textures)
     waveform_image_cache: &'a mut waveform_image_cache::WaveformImageCache,
+    /// Audio pool indices with new waveform data this frame (for thumbnail invalidation)
+    audio_pools_with_new_waveforms: &'a HashSet<usize>,
 }
 
 /// Recursively render a layout node with drag support
@@ -2825,7 +3081,9 @@ fn render_pane(
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
                 waveform_cache: ctx.waveform_cache,
+                waveform_chunk_cache: ctx.waveform_chunk_cache,
                 waveform_image_cache: ctx.waveform_image_cache,
+                audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -2882,7 +3140,9 @@ fn render_pane(
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
                 waveform_cache: ctx.waveform_cache,
+                waveform_chunk_cache: ctx.waveform_chunk_cache,
                 waveform_image_cache: ctx.waveform_image_cache,
+                audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
             };
 
             // Render pane content (header was already rendered above)

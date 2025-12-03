@@ -1197,20 +1197,20 @@ impl AssetLibraryPane {
                         let asset_category = asset.category;
                         let ctx = ui.ctx().clone();
 
-                        // Only pre-fetch waveform data if thumbnail not already cached
-                        // (get_pool_waveform is expensive - it blocks waiting for audio thread)
+                        // Get waveform data from cache if thumbnail not already cached
                         let prefetched_waveform: Option<Vec<(f32, f32)>> =
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
                                     if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        if let Some(controller_arc) = shared.audio_controller {
-                                            let mut controller = controller_arc.lock().unwrap();
-                                            controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
-                                                .ok()
-                                                .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
+                                        // Use cached waveform data (populated by fetch_waveform in main.rs)
+                                        let waveform = shared.waveform_cache.get(audio_pool_index)
+                                            .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                        if waveform.is_some() {
+                                            println!("🎵 Found waveform for pool {} (asset {})", audio_pool_index, asset_id);
                                         } else {
-                                            None
+                                            println!("⚠️  No waveform yet for pool {} (asset {})", audio_pool_index, asset_id);
                                         }
+                                        waveform
                                     } else {
                                         None
                                     }
@@ -1246,8 +1246,10 @@ impl AssetLibraryPane {
                                             AudioClipType::Sampled { .. } => {
                                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                                 if let Some(ref peaks) = prefetched_waveform {
+                                                    println!("✅ Generating waveform thumbnail with {} peaks for asset {}", peaks.len(), asset_id);
                                                     Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
                                                 } else {
+                                                    println!("📦 Generating placeholder thumbnail for asset {}", asset_id);
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }
                                             }
@@ -1483,20 +1485,20 @@ impl AssetLibraryPane {
                         let asset_category = asset.category;
                         let ctx = ui.ctx().clone();
 
-                        // Only pre-fetch waveform data if thumbnail not already cached
-                        // (get_pool_waveform is expensive - it blocks waiting for audio thread)
+                        // Get waveform data from cache if thumbnail not already cached
                         let prefetched_waveform: Option<Vec<(f32, f32)>> =
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
                                     if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        if let Some(controller_arc) = shared.audio_controller {
-                                            let mut controller = controller_arc.lock().unwrap();
-                                            controller.get_pool_waveform(*audio_pool_index, THUMBNAIL_SIZE as usize)
-                                                .ok()
-                                                .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
+                                        // Use cached waveform data (populated by fetch_waveform in main.rs)
+                                        let waveform = shared.waveform_cache.get(audio_pool_index)
+                                            .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                        if waveform.is_some() {
+                                            println!("🎵 Found waveform for pool {} (asset {})", audio_pool_index, asset_id);
                                         } else {
-                                            None
+                                            println!("⚠️  No waveform yet for pool {} (asset {})", audio_pool_index, asset_id);
                                         }
+                                        waveform
                                     } else {
                                         None
                                     }
@@ -1531,8 +1533,10 @@ impl AssetLibraryPane {
                                             AudioClipType::Sampled { .. } => {
                                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                                 if let Some(ref peaks) = prefetched_waveform {
+                                                    println!("✅ Generating waveform thumbnail with {} peaks for asset {}", peaks.len(), asset_id);
                                                     Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
                                                 } else {
+                                                    println!("📦 Generating placeholder thumbnail for asset {}", asset_id);
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }
                                             }
@@ -1682,6 +1686,26 @@ impl PaneRenderer for AssetLibraryPane {
         // Get an Arc clone of the document for thumbnail generation
         // This allows us to pass &mut shared to render functions while still accessing document
         let document_arc = shared.action_executor.document_arc();
+
+        // Invalidate thumbnails for audio clips that got new waveform data
+        if !shared.audio_pools_with_new_waveforms.is_empty() {
+            println!("🎨 [ASSET_LIB] Checking for thumbnails to invalidate (pools: {:?})", shared.audio_pools_with_new_waveforms);
+            let mut invalidated_any = false;
+            for (asset_id, clip) in &document_arc.audio_clips {
+                if let lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
+                    if shared.audio_pools_with_new_waveforms.contains(audio_pool_index) {
+                        println!("❌ [ASSET_LIB] Invalidating thumbnail for asset {} (pool {})", asset_id, audio_pool_index);
+                        self.thumbnail_cache.invalidate(asset_id);
+                        invalidated_any = true;
+                    }
+                }
+            }
+            // Force a repaint if we invalidated any thumbnails
+            if invalidated_any {
+                println!("🔄 [ASSET_LIB] Requesting repaint after invalidating thumbnails");
+                ui.ctx().request_repaint();
+            }
+        }
 
         // Collect and filter assets
         let all_assets = self.collect_assets(&document_arc);

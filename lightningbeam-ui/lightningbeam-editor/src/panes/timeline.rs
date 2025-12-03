@@ -595,6 +595,83 @@ impl TimelinePane {
         precache
     }
 
+    /// Select appropriate detail level based on zoom (pixels per second)
+    ///
+    /// Detail levels:
+    /// - Level 0 (Overview): 1 peak/sec - for extreme zoom out (0-2 pps)
+    /// - Level 1 (Low): 10 peaks/sec - for zoomed out view (2-20 pps)
+    /// - Level 2 (Medium): 100 peaks/sec - for normal view (20-200 pps)
+    /// - Level 3 (High): 1000 peaks/sec - for zoomed in (200-2000 pps)
+    /// - Level 4 (Max): Full resolution - for maximum zoom (>2000 pps)
+    fn select_detail_level(pixels_per_second: f64) -> u8 {
+        if pixels_per_second < 2.0 {
+            0  // Overview
+        } else if pixels_per_second < 20.0 {
+            1  // Low
+        } else if pixels_per_second < 200.0 {
+            2  // Medium
+        } else if pixels_per_second < 2000.0 {
+            3  // High
+        } else {
+            4  // Max (full resolution)
+        }
+    }
+
+    /// Assemble waveform peaks from chunks for the ENTIRE audio file
+    ///
+    /// Returns peaks for the entire audio file, or None if chunks are not available
+    /// This assembles a complete waveform from chunks at the appropriate detail level
+    fn assemble_peaks_from_chunks(
+        waveform_chunk_cache: &std::collections::HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
+        audio_pool_index: usize,
+        detail_level: u8,
+        audio_file_duration: f64,
+        audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    ) -> Option<Vec<daw_backend::WaveformPeak>> {
+        // Calculate chunk time span based on detail level
+        let chunk_time_span = match detail_level {
+            0 => 60.0,  // Level 0: 60 seconds per chunk
+            1 => 30.0,  // Level 1: 30 seconds per chunk
+            2 => 10.0,  // Level 2: 10 seconds per chunk
+            3 => 5.0,   // Level 3: 5 seconds per chunk
+            4 => 1.0,   // Level 4: 1 second per chunk
+            _ => 10.0,  // Default
+        };
+
+        // Calculate total number of chunks needed for entire audio file
+        let total_chunks = (audio_file_duration / chunk_time_span).ceil() as u32;
+
+        let mut assembled_peaks = Vec::new();
+        let mut missing_chunks = Vec::new();
+
+        // Check if all required chunks are available
+        for chunk_idx in 0..total_chunks {
+            let key = (audio_pool_index, detail_level, chunk_idx);
+            if let Some(chunk_peaks) = waveform_chunk_cache.get(&key) {
+                assembled_peaks.extend_from_slice(chunk_peaks);
+            } else {
+                // Track missing chunk
+                missing_chunks.push(chunk_idx);
+            }
+        }
+
+        // If any chunks are missing, request them and return None
+        if !missing_chunks.is_empty() {
+            if let Some(controller_arc) = audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let _ = controller.generate_waveform_chunks(
+                    audio_pool_index,
+                    detail_level,
+                    missing_chunks,
+                    1,  // Medium priority
+                );
+            }
+            return None;
+        }
+
+        Some(assembled_peaks)
+    }
+
     /// Render waveform visualization using cached texture tiles
     /// This is much faster than line-based rendering for many clips
     #[allow(clippy::too_many_arguments)]
@@ -674,21 +751,37 @@ impl TimelinePane {
             let tile_screen_x = timeline_left_edge + ((tile_timeline_start - viewport_start_time) * pixels_per_second) as f32;
             let tile_screen_width = ((tile_timeline_end - tile_timeline_start) * pixels_per_second) as f32;
 
-            // Clip to the visible clip rectangle
-            let tile_rect = egui::Rect::from_min_size(
+            // Create unclipped tile rect
+            let unclipped_tile_rect = egui::Rect::from_min_size(
                 egui::pos2(tile_screen_x, clip_rect.min.y),
                 egui::vec2(tile_screen_width, clip_rect.height()),
-            ).intersect(clip_rect);
+            );
+
+            // Clip to the visible clip rectangle
+            let tile_rect = unclipped_tile_rect.intersect(clip_rect);
 
             if tile_rect.width() <= 0.0 || tile_rect.height() <= 0.0 {
                 continue; // Nothing visible
             }
 
+            // Adjust UV coordinates based on how much the tile was clipped
+            let uv_span = uv_max_x - uv_min_x;
+            let adjusted_uv_min_x = if unclipped_tile_rect.width() > 0.0 {
+                uv_min_x + ((tile_rect.min.x - unclipped_tile_rect.min.x) / unclipped_tile_rect.width()) * uv_span
+            } else {
+                uv_min_x
+            };
+            let adjusted_uv_max_x = if unclipped_tile_rect.width() > 0.0 {
+                uv_min_x + ((tile_rect.max.x - unclipped_tile_rect.min.x) / unclipped_tile_rect.width()) * uv_span
+            } else {
+                uv_max_x
+            };
+
             // Blit texture with adjusted UV coordinates
             painter.image(
                 texture.id(),
                 tile_rect,
-                egui::Rect::from_min_max(egui::pos2(uv_min_x, 0.0), egui::pos2(uv_max_x, 1.0)),
+                egui::Rect::from_min_max(egui::pos2(adjusted_uv_min_x, 0.0), egui::pos2(adjusted_uv_max_x, 1.0)),
                 tint_color,
             );
         }
@@ -987,6 +1080,7 @@ impl TimelinePane {
         selection: &lightningbeam_core::selection::Selection,
         midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
         waveform_cache: &std::collections::HashMap<usize, Vec<daw_backend::WaveformPeak>>,
+        waveform_chunk_cache: &std::collections::HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
         waveform_image_cache: &mut crate::waveform_image_cache::WaveformImageCache,
         audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
@@ -1273,18 +1367,41 @@ impl TimelinePane {
                                     }
                                     // Sampled Audio: Draw waveform
                                     lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
-                                        if let Some(waveform) = waveform_cache.get(audio_pool_index) {
-                                            // Get audio file duration from backend
-                                            let audio_file_duration = if let Some(ref controller_arc) = audio_controller {
-                                                let mut controller = controller_arc.lock().unwrap();
-                                                controller.get_pool_file_info(*audio_pool_index)
-                                                    .ok()
-                                                    .map(|(duration, _, _)| duration)
-                                                    .unwrap_or(clip.duration)  // Fallback to clip duration
-                                            } else {
-                                                clip.duration  // Fallback if no controller
-                                            };
+                                        // Get audio file duration from backend
+                                        let audio_file_duration = if let Some(ref controller_arc) = audio_controller {
+                                            let mut controller = controller_arc.lock().unwrap();
+                                            controller.get_pool_file_info(*audio_pool_index)
+                                                .ok()
+                                                .map(|(duration, _, _)| duration)
+                                                .unwrap_or(clip.duration)  // Fallback to clip duration
+                                        } else {
+                                            clip.duration  // Fallback if no controller
+                                        };
 
+                                        // Select detail level based on zoom
+                                        let requested_level = Self::select_detail_level(self.pixels_per_second as f64);
+
+                                        // Try to assemble peaks from chunks with progressive fallback to lower detail levels
+                                        let mut peaks_to_render = None;
+                                        for level in (0..=requested_level).rev() {
+                                            if let Some(peaks) = Self::assemble_peaks_from_chunks(
+                                                waveform_chunk_cache,
+                                                *audio_pool_index,
+                                                level,
+                                                audio_file_duration,
+                                                audio_controller,
+                                            ) {
+                                                peaks_to_render = Some(peaks);
+                                                break;
+                                            }
+                                        }
+
+                                        // Final fallback to old waveform_cache if no chunks available at any level
+                                        let peaks_to_render = peaks_to_render
+                                            .or_else(|| waveform_cache.get(audio_pool_index).cloned())
+                                            .unwrap_or_default();
+
+                                        if !peaks_to_render.is_empty() {
                                             Self::render_audio_waveform(
                                                 painter,
                                                 clip_rect,
@@ -1297,7 +1414,7 @@ impl TimelinePane {
                                                 self.viewport_start_time,
                                                 self.pixels_per_second as f64,
                                                 waveform_image_cache,
-                                                waveform,
+                                                &peaks_to_render,
                                                 ui.ctx(),
                                                 bright_color,  // Use bright color for waveform (lighter than background)
                                             );
@@ -2079,7 +2196,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.waveform_cache, shared.waveform_image_cache, shared.audio_controller);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.waveform_cache, shared.waveform_chunk_cache, shared.waveform_image_cache, shared.audio_controller);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

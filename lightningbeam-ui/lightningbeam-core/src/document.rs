@@ -3,7 +3,7 @@
 //! The Document represents a complete animation project with settings
 //! and a root graphics object containing the scene graph.
 
-use crate::clip::{AudioClip, ImageAsset, VideoClip, VectorClip};
+use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
 use crate::layer::AnyLayer;
 use crate::layout::LayoutNode;
 use crate::shape::ShapeColor;
@@ -186,6 +186,65 @@ impl Document {
     /// Get the aspect ratio
     pub fn aspect_ratio(&self) -> f64 {
         self.width / self.height
+    }
+
+    /// Calculate the actual timeline endpoint based on the last clip
+    ///
+    /// Returns the end time of the last clip instance across all layers,
+    /// or the document's duration if no clips are found.
+    pub fn calculate_timeline_endpoint(&self) -> f64 {
+        let mut max_end_time: f64 = 0.0;
+
+        // Helper function to calculate the end time of a clip instance
+        let calculate_instance_end = |instance: &ClipInstance, clip_duration: f64| -> f64 {
+            let effective_duration = if let Some(timeline_duration) = instance.timeline_duration {
+                // Explicit timeline duration set (may include looping)
+                timeline_duration
+            } else {
+                // Calculate from trim points
+                let trim_end = instance.trim_end.unwrap_or(clip_duration);
+                let trimmed_duration = trim_end - instance.trim_start;
+                trimmed_duration / instance.playback_speed // Adjust for playback speed
+            };
+            instance.timeline_start + effective_duration
+        };
+
+        // Iterate through all layers to find the maximum end time
+        for layer in &self.root.children {
+            match layer {
+                crate::layer::AnyLayer::Vector(vector_layer) => {
+                    for instance in &vector_layer.clip_instances {
+                        if let Some(clip) = self.vector_clips.get(&instance.clip_id) {
+                            let end_time = calculate_instance_end(instance, clip.duration);
+                            max_end_time = max_end_time.max(end_time);
+                        }
+                    }
+                }
+                crate::layer::AnyLayer::Audio(audio_layer) => {
+                    for instance in &audio_layer.clip_instances {
+                        if let Some(clip) = self.audio_clips.get(&instance.clip_id) {
+                            let end_time = calculate_instance_end(instance, clip.duration);
+                            max_end_time = max_end_time.max(end_time);
+                        }
+                    }
+                }
+                crate::layer::AnyLayer::Video(video_layer) => {
+                    for instance in &video_layer.clip_instances {
+                        if let Some(clip) = self.video_clips.get(&instance.clip_id) {
+                            let end_time = calculate_instance_end(instance, clip.duration);
+                            max_end_time = max_end_time.max(end_time);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return the maximum end time, or document duration if no clips found
+        if max_end_time > 0.0 {
+            max_end_time
+        } else {
+            self.duration
+        }
     }
 
     /// Set the current playback time

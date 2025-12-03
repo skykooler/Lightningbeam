@@ -176,6 +176,16 @@ pub enum Command {
     AutomationRemoveKeyframe(TrackId, u32, f64),
     /// Set the display name of an AutomationInput node (track_id, node_id, name)
     AutomationSetName(TrackId, u32, String),
+
+    // Waveform chunk generation commands
+    /// Generate waveform chunks for an audio file
+    /// (pool_index, detail_level, chunk_indices, priority)
+    GenerateWaveformChunks {
+        pool_index: usize,
+        detail_level: u8,
+        chunk_indices: Vec<u32>,
+        priority: u8, // 0=Low, 1=Medium, 2=High
+    },
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -228,6 +238,21 @@ pub enum AudioEvent {
     GraphPresetLoaded(TrackId),
     /// Preset has been saved to file (track_id, preset_path)
     GraphPresetSaved(TrackId, String),
+    /// Export progress (frames_rendered, total_frames)
+    ExportProgress {
+        frames_rendered: usize,
+        total_frames: usize,
+    },
+    /// Waveform generated for audio pool file (pool_index, waveform)
+    WaveformGenerated(usize, Vec<WaveformPeak>),
+
+    /// Waveform chunks ready for retrieval
+    /// (pool_index, detail_level, chunks: Vec<(chunk_index, time_range, peaks)>)
+    WaveformChunksReady {
+        pool_index: usize,
+        detail_level: u8,
+        chunks: Vec<(u32, (f64, f64), Vec<WaveformPeak>)>,
+    },
 }
 
 /// Synchronous queries sent from UI thread to audio thread

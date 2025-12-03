@@ -2,6 +2,7 @@ use super::buffer_pool::BufferPool;
 use super::midi_pool::MidiClipPool;
 use super::pool::AudioPool;
 use super::project::Project;
+use crate::command::AudioEvent;
 use std::path::Path;
 
 /// Supported export formats
@@ -59,15 +60,20 @@ impl Default for ExportSettings {
 ///
 /// This performs offline rendering, processing the entire timeline
 /// in chunks to generate the final audio file.
+///
+/// If an event producer is provided, progress events will be sent
+/// after each chunk with (frames_rendered, total_frames).
 pub fn export_audio<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
     midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
-) -> Result<(), String> {
+    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+) -> Result<(), String>
+{
     // Render the project to memory
-    let samples = render_to_memory(project, pool, midi_pool, settings)?;
+    let samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
 
     // Write to file based on format
     match settings.format {
@@ -79,12 +85,23 @@ pub fn export_audio<P: AsRef<Path>>(
 }
 
 /// Render the project to memory
-fn render_to_memory(
+///
+/// This function renders the project's audio to an in-memory buffer
+/// of interleaved f32 samples. This is useful for custom export formats
+/// or for passing audio to external encoders (e.g., FFmpeg for MP3/AAC).
+///
+/// The returned samples are interleaved (L,R,L,R,... for stereo).
+///
+/// If an event producer is provided, progress events will be sent
+/// after each chunk with (frames_rendered, total_frames).
+pub fn render_to_memory(
     project: &mut Project,
     pool: &AudioPool,
     midi_pool: &MidiClipPool,
     settings: &ExportSettings,
-) -> Result<Vec<f32>, String> {
+    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+) -> Result<Vec<f32>, String>
+{
     // Calculate total number of frames
     let duration = settings.end_time - settings.start_time;
     let total_frames = (duration * settings.sample_rate as f64).round() as usize;
@@ -106,6 +123,7 @@ fn render_to_memory(
 
     let mut playhead = settings.start_time;
     let chunk_duration = CHUNK_FRAMES as f64 / settings.sample_rate as f64;
+    let mut frames_rendered = 0;
 
     // Render the entire timeline in chunks
     while playhead < settings.end_time {
@@ -137,6 +155,15 @@ fn render_to_memory(
 
         // Append to output
         all_samples.extend_from_slice(&render_buffer[..samples_needed]);
+
+        // Update progress
+        frames_rendered += samples_needed / settings.channels as usize;
+        if let Some(event_tx) = event_tx.as_mut() {
+            let _ = event_tx.push(AudioEvent::ExportProgress {
+                frames_rendered,
+                total_frames,
+            });
+        }
 
         playhead += chunk_duration;
     }
