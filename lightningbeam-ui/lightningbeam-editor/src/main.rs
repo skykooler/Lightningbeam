@@ -156,7 +156,7 @@ enum SplitPreviewMode {
 
 /// Icon cache for pane type icons
 struct IconCache {
-    icons: HashMap<PaneType, egui_extras::RetainedImage>,
+    icons: HashMap<PaneType, egui::TextureHandle>,
     assets_path: std::path::PathBuf,
 }
 
@@ -172,15 +172,46 @@ impl IconCache {
         }
     }
 
-    fn get_or_load(&mut self, pane_type: PaneType) -> Option<&egui_extras::RetainedImage> {
+    fn get_or_load(&mut self, pane_type: PaneType, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&pane_type) {
-            // Load and cache the icon
+            // Load SVG and rasterize using resvg
             let icon_path = self.assets_path.join(pane_type.icon_file());
-            if let Ok(image) = egui_extras::RetainedImage::from_svg_bytes(
-                pane_type.icon_file(),
-                &std::fs::read(&icon_path).unwrap_or_default(),
-            ) {
-                self.icons.insert(pane_type, image);
+            if let Ok(svg_data) = std::fs::read(&icon_path) {
+                // Rasterize at reasonable size for pane icons
+                let render_size = 64;
+
+                if let Ok(tree) = resvg::usvg::Tree::from_data(&svg_data, &resvg::usvg::Options::default()) {
+                    let pixmap_size = tree.size().to_int_size();
+                    let scale_x = render_size as f32 / pixmap_size.width() as f32;
+                    let scale_y = render_size as f32 / pixmap_size.height() as f32;
+                    let scale = scale_x.min(scale_y);
+
+                    let final_size = resvg::usvg::Size::from_wh(
+                        pixmap_size.width() as f32 * scale,
+                        pixmap_size.height() as f32 * scale,
+                    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
+
+                    if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(
+                        final_size.width() as u32,
+                        final_size.height() as u32,
+                    ) {
+                        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+                        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+                        // Convert RGBA8 to egui ColorImage
+                        let rgba_data = pixmap.data();
+                        let size = [pixmap.width() as usize, pixmap.height() as usize];
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
+
+                        // Upload to GPU
+                        let texture = ctx.load_texture(
+                            pane_type.icon_file(),
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.icons.insert(pane_type, texture);
+                    }
+                }
             }
         }
         self.icons.get(&pane_type)
@@ -1103,7 +1134,7 @@ impl EditorApp {
                 let layer_name = format!("Layer {}", layer_count + 1);
 
                 let action = lightningbeam_core::actions::AddLayerAction::new_vector(layer_name);
-                self.action_executor.execute(Box::new(action));
+                let _ = self.action_executor.execute(Box::new(action));
 
                 // Select the newly created layer (last child in the document)
                 if let Some(last_layer) = self.action_executor.document().root.children.last() {
@@ -1135,7 +1166,7 @@ impl EditorApp {
                 // Create audio layer in document
                 let audio_layer = AudioLayer::new_sampled(layer_name.clone());
                 let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(audio_layer));
-                self.action_executor.execute(Box::new(action));
+                let _ = self.action_executor.execute(Box::new(action));
 
                 // Get the newly created layer ID
                 if let Some(last_layer) = self.action_executor.document().root.children.last() {
@@ -1168,7 +1199,7 @@ impl EditorApp {
                 // Create MIDI layer in document
                 let midi_layer = AudioLayer::new_midi(layer_name.clone());
                 let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(midi_layer));
-                self.action_executor.execute(Box::new(action));
+                let _ = self.action_executor.execute(Box::new(action));
 
                 // Get the newly created layer ID
                 if let Some(last_layer) = self.action_executor.document().root.children.last() {
@@ -1602,7 +1633,7 @@ impl EditorApp {
     /// Import an audio file via daw-backend
     fn import_audio(&mut self, path: &std::path::Path) {
         use daw_backend::io::audio_file::AudioFile;
-        use lightningbeam_core::clip::{AudioClip, AudioClipType};
+        use lightningbeam_core::clip::AudioClip;
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -1768,7 +1799,7 @@ impl EditorApp {
 
                 std::thread::spawn(move || {
                     use lightningbeam_core::video::extract_audio_from_video;
-                    use lightningbeam_core::clip::{AudioClip, AudioClipType};
+                    use lightningbeam_core::clip::AudioClip;
 
                     // Extract audio from video (slow FFmpeg operation)
                     match extract_audio_from_video(&path_clone) {
@@ -2196,7 +2227,7 @@ impl eframe::App for EditorApp {
                     }
                 } else {
                     // No audio system available, execute without backend
-                    self.action_executor.execute(action);
+                    let _ = self.action_executor.execute(action);
                 }
             }
 
@@ -2660,8 +2691,8 @@ fn render_pane(
 
     // Load and render icon if available
     if let Some(pane_type) = pane_type {
-        if let Some(icon) = ctx.icon_cache.get_or_load(pane_type) {
-            let icon_texture_id = icon.texture_id(ui.ctx());
+        if let Some(icon) = ctx.icon_cache.get_or_load(pane_type, ui.ctx()) {
+            let icon_texture_id = icon.id();
             let icon_rect = icon_button_rect.shrink(2.0); // Small padding inside button
             ui.painter().image(
                 icon_texture_id,
@@ -2698,10 +2729,10 @@ fn render_pane(
 
         for pane_type_option in PaneType::all() {
             // Load icon for this pane type
-            if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option) {
+            if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option, ui.ctx()) {
                 ui.horizontal(|ui| {
                     // Show icon
-                    let icon_texture_id = icon.texture_id(ui.ctx());
+                    let icon_texture_id = icon.id();
                     let icon_size = egui::vec2(16.0, 16.0);
                     ui.add(egui::Image::new((icon_texture_id, icon_size)));
 

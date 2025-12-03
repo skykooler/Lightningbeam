@@ -1093,7 +1093,7 @@ impl AssetLibraryPane {
 
         // Use egui's built-in ScrollArea for scrolling
         let scroll_area_rect = rect;
-        ui.allocate_ui_at_rect(scroll_area_rect, |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(scroll_area_rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_list_scroll", path))
                 .auto_shrink([false, false])
@@ -1423,7 +1423,7 @@ impl AssetLibraryPane {
         let total_height = GRID_SPACING + rows as f32 * (item_height + GRID_SPACING);
 
         // Use egui's built-in ScrollArea for scrolling
-        ui.allocate_ui_at_rect(rect, |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_grid_scroll", path))
                 .auto_shrink([false, false])

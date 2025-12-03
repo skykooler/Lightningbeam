@@ -3,7 +3,7 @@
 //! Provides functions for testing if points or rectangles intersect with
 //! shapes and objects, taking into account transform hierarchies.
 
-use crate::clip::{ClipInstance, VectorClip, VideoClip};
+use crate::clip::ClipInstance;
 use crate::layer::VectorLayer;
 use crate::object::ShapeInstance;
 use crate::shape::Shape;

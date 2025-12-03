@@ -3,8 +3,6 @@
 /// This module provides a default instrument (bass synthesizer) for MIDI tracks
 /// until the user implements the node editor to load custom instruments.
 
-use std::path::PathBuf;
-
 /// Embedded default MIDI instrument preset (bass synthesizer)
 const DEFAULT_MIDI_INSTRUMENT: &str = include_str!("../../../src/assets/instruments/synthesizers/bass.json");
 

@@ -4,7 +4,6 @@
 //! Layers can be nested within other layers for organizational purposes.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Node in the layer tree
 #[derive(Clone, Debug, Serialize, Deserialize)]

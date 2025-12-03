@@ -17,7 +17,7 @@ use crate::object::Transform;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
-use vello::kurbo::{Rect, Affine, Shape as KurboShape};
+use vello::kurbo::{Rect, Shape as KurboShape};
 
 /// Vector clip containing nested layers
 ///

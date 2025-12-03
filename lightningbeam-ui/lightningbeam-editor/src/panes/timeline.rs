@@ -165,7 +165,7 @@ impl TimelinePane {
 
         let layers: Vec<_> = document.root.children.iter().rev().collect();
         let layer = layers.get(hovered_layer_index)?;
-        let layer_data = layer.layer();
+        let _layer_data = layer.layer();
 
         let clip_instances = match layer {
             lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
@@ -848,7 +848,7 @@ impl TimelinePane {
 
             // Mute button
             // TODO: Replace with SVG icon (volume-up-fill.svg / volume-mute.svg)
-            let mute_response = ui.allocate_ui_at_rect(mute_button_rect, |ui| {
+            let mute_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
                 let mute_text = if is_muted { "🔇" } else { "🔊" };
                 let button = egui::Button::new(mute_text)
                     .fill(if is_muted {
@@ -872,7 +872,7 @@ impl TimelinePane {
 
             // Solo button
             // TODO: Replace with SVG headphones icon
-            let solo_response = ui.allocate_ui_at_rect(solo_button_rect, |ui| {
+            let solo_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
                 let button = egui::Button::new("🎧")
                     .fill(if is_soloed {
                         egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
@@ -895,7 +895,7 @@ impl TimelinePane {
 
             // Lock button
             // TODO: Replace with SVG lock/lock-open icons
-            let lock_response = ui.allocate_ui_at_rect(lock_button_rect, |ui| {
+            let lock_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lock_button_rect), |ui| {
                 let lock_text = if is_locked { "🔒" } else { "🔓" };
                 let button = egui::Button::new(lock_text)
                     .fill(if is_locked {
@@ -918,7 +918,7 @@ impl TimelinePane {
             }
 
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
-            let volume_response = ui.allocate_ui_at_rect(volume_slider_rect, |ui| {
+            let volume_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
                     // 0.0-1.0 volume maps to 0.0-0.7 slider (70%)
@@ -1086,7 +1086,7 @@ impl TimelinePane {
                     // Instance positioned on the layer's timeline using timeline_start
                     // The layer itself has start_time, so the absolute timeline position is:
                     // layer.start_time + instance.timeline_start
-                    let layer_data = layer.layer();
+                    let _layer_data = layer.layer();
                     let mut instance_start = clip_instance.timeline_start;
 
                     // Apply drag offset preview for selected clips with snapping
@@ -1428,7 +1428,7 @@ impl TimelinePane {
                     if clicked_layer_index < layer_count {
                         let layers: Vec<_> = document.root.children.iter().rev().collect();
                         if let Some(layer) = layers.get(clicked_layer_index) {
-                            let layer_data = layer.layer();
+                            let _layer_data = layer.layer();
 
                             // Get clip instances for this layer
                             let clip_instances = match layer {
@@ -1605,7 +1605,7 @@ impl TimelinePane {
                             // Iterate through all layers to find selected clip instances
                             for layer in &document.root.children {
                                 let layer_id = layer.id();
-                                let layer_data = layer.layer();
+                                let _layer_data = layer.layer();
 
                                 let clip_instances = match layer {
                                     lightningbeam_core::layer::AnyLayer::Vector(vl) => {

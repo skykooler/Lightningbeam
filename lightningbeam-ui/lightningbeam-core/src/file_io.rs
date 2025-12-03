@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use flacenc::error::Verify;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 /// File format version
 pub const BEAM_VERSION: &str = "1.0.0";
@@ -272,7 +273,7 @@ pub fn save_beam(
             // Priority 3: No original file - encode PCM as FLAC
             eprintln!("📊 [SAVE_BEAM] Encoding PCM to FLAC for pool {} (no original file)", entry.pool_index);
             // Embedded data is always PCM - encode as FLAC
-            let audio_bytes = base64::decode(&embedded_data.data_base64)
+            let audio_bytes = BASE64_STANDARD.decode(&embedded_data.data_base64)
                 .map_err(|e| format!("Failed to decode base64 audio data for pool index {}: {}", entry.pool_index, e))?;
 
             let zip_filename = format!("media/audio/{}.flac", entry.pool_index);
@@ -511,13 +512,13 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
                             flac_decode_time += flac_decode_start.elapsed().as_secs_f64() * 1000.0;
 
                             Some(daw_backend::audio::pool::EmbeddedAudioData {
-                                data_base64: base64::encode(&pcm_bytes),
+                                data_base64: BASE64_STANDARD.encode(&pcm_bytes),
                                 format: "wav".to_string(), // Mark as WAV since it's now PCM
                             })
                         } else {
                             // Lossy format - store as-is
                             Some(daw_backend::audio::pool::EmbeddedAudioData {
-                                data_base64: base64::encode(&audio_bytes),
+                                data_base64: BASE64_STANDARD.encode(&audio_bytes),
                                 format: format.clone(),
                             })
                         };

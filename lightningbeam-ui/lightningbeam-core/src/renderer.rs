@@ -6,7 +6,6 @@ use crate::animation::TransformProperty;
 use crate::clip::ImageAsset;
 use crate::document::Document;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
-use crate::object::ShapeInstance;
 use kurbo::{Affine, Shape};
 use std::collections::HashMap;
 use std::sync::Arc;

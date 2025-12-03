@@ -829,7 +829,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                     // 7. Draw path drawing preview
                     if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.tool_state {
-                        use vello::kurbo::{BezPath, Point};
+                        use vello::kurbo::BezPath;
 
                         if points.len() >= 2 {
                             // Build a simple line path from the raw points for preview
@@ -1175,15 +1175,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                     // Copy the pixel from texture to staging buffer
                     encoder.copy_texture_to_buffer(
-                        wgpu::ImageCopyTexture {
+                        wgpu::TexelCopyTextureInfo {
                             texture,
                             mip_level: 0,
                             origin: wgpu::Origin3d { x: tex_x, y: tex_y, z: 0 },
                             aspect: wgpu::TextureAspect::All,
                         },
-                        wgpu::ImageCopyBuffer {
+                        wgpu::TexelCopyBufferInfo {
                             buffer: &staging_buffer,
-                            layout: wgpu::ImageDataLayout {
+                            layout: wgpu::TexelCopyBufferLayout {
                                 offset: 0,
                                 bytes_per_row: Some(bytes_per_row),
                                 rows_per_image: Some(1),
@@ -1554,7 +1554,6 @@ impl StagePane {
                         use std::collections::HashMap;
 
                         // Separate shape instances from clip instances
-                        use lightningbeam_core::object::Transform;
                         let mut shape_instance_positions = HashMap::new();
                         let mut clip_instance_transforms = HashMap::new();
 
@@ -1795,7 +1794,7 @@ impl StagePane {
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
-                    shared.action_executor.execute(Box::new(action));
+                    let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -1923,7 +1922,7 @@ impl StagePane {
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
-                    shared.action_executor.execute(Box::new(action));
+                    let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -2015,7 +2014,7 @@ impl StagePane {
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
-                    shared.action_executor.execute(Box::new(action));
+                    let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -2106,7 +2105,7 @@ impl StagePane {
 
                     // Create and execute action immediately
                     let action = AddShapeAction::new(active_layer_id, shape, object);
-                    shared.action_executor.execute(Box::new(action));
+                    let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -2390,7 +2389,7 @@ impl StagePane {
 
                         // Create and execute action immediately
                         let action = AddShapeAction::new(active_layer_id, shape, object);
-                        shared.action_executor.execute(Box::new(action));
+                        let _ = shared.action_executor.execute(Box::new(action));
                     }
                 }
 
@@ -2449,7 +2448,7 @@ impl StagePane {
                 2.0, // tolerance - could be made configurable
                 lightningbeam_core::gap_handling::GapHandlingMode::BridgeSegment,
             );
-            shared.action_executor.execute(Box::new(action));
+            let _ = shared.action_executor.execute(Box::new(action));
             println!("Paint bucket action executed");
         }
     }
@@ -3937,7 +3936,6 @@ impl StagePane {
                         if delta.x.abs() > 0.01 || delta.y.abs() > 0.01 {
                             if let Some(active_layer_id) = shared.active_layer_id {
                                 use std::collections::HashMap;
-                                use lightningbeam_core::object::Transform;
 
                                 let mut shape_instance_positions = HashMap::new();
                                 let mut clip_instance_transforms = HashMap::new();
@@ -4273,7 +4271,7 @@ impl PaneRenderer for StagePane {
                             let mut add_layer_action = lightningbeam_core::actions::AddLayerAction::new(new_layer);
 
                             // Execute immediately to get the layer ID
-                            add_layer_action.execute(shared.action_executor.document_mut());
+                            let _ = add_layer_action.execute(shared.action_executor.document_mut());
                             target_layer_id = add_layer_action.created_layer_id();
 
                             // Update active layer to the new layer
