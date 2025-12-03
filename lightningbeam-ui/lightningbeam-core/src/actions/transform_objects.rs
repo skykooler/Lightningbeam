@@ -30,7 +30,7 @@ impl TransformShapeInstancesAction {
 }
 
 impl Action for TransformShapeInstancesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {
                 for (shape_instance_id, (_old, new)) in &self.shape_instance_transforms {
@@ -40,9 +40,10 @@ impl Action for TransformShapeInstancesAction {
                 }
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {
                 for (shape_instance_id, (old, _new)) in &self.shape_instance_transforms {
@@ -52,6 +53,7 @@ impl Action for TransformShapeInstancesAction {
                 }
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -89,7 +91,7 @@ mod tests {
         let mut action = TransformShapeInstancesAction::new(layer_id, transforms);
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify transform changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -101,7 +103,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -140,7 +142,7 @@ mod tests {
         transforms.insert(instance_id, (old_transform, new_transform));
 
         let mut action = TransformShapeInstancesAction::new(layer_id, transforms);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -187,7 +189,7 @@ mod tests {
         );
 
         let mut action = TransformShapeInstancesAction::new(layer_id, transforms);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both transformed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -203,7 +205,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -234,8 +236,8 @@ mod tests {
         let mut action = TransformShapeInstancesAction::new(fake_layer_id, transforms);
 
         // Should not panic
-        action.execute(&mut document);
-        action.rollback(&mut document);
+        action.execute(&mut document).unwrap();
+        action.rollback(&mut document).unwrap();
     }
 
     #[test]
@@ -254,8 +256,8 @@ mod tests {
         let mut action = TransformShapeInstancesAction::new(layer_id, transforms);
 
         // Should not panic - just silently skip nonexistent instance
-        action.execute(&mut document);
-        action.rollback(&mut document);
+        action.execute(&mut document).unwrap();
+        action.rollback(&mut document).unwrap();
     }
 
     #[test]
@@ -276,8 +278,8 @@ mod tests {
         let mut action = TransformShapeInstancesAction::new(layer_id, transforms);
 
         // Should not panic - action only operates on vector layers
-        action.execute(&mut document);
-        action.rollback(&mut document);
+        action.execute(&mut document).unwrap();
+        action.rollback(&mut document).unwrap();
     }
 
     #[test]

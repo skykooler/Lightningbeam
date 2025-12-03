@@ -68,7 +68,7 @@ impl PaintBucketAction {
 }
 
 impl Action for PaintBucketAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         println!("=== PaintBucketAction::execute ===");
 
         // Optimization: Check if we're clicking on an existing shape first
@@ -116,7 +116,7 @@ impl Action for PaintBucketAction {
                             println!("Updated shape fill color");
                         }
 
-                        return; // Done! No need to create a new shape
+                        return Ok(()); // Done! No need to create a new shape
                     }
                 }
             }
@@ -131,7 +131,7 @@ impl Action for PaintBucketAction {
 
         if all_curves.is_empty() {
             println!("No curves found, returning");
-            return;
+            return Ok(());
         }
 
         // Step 2: Build planar graph
@@ -176,14 +176,15 @@ impl Action for PaintBucketAction {
         }
 
         println!("=== Paint Bucket Complete: Face filled with curves ===");
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         // Remove the created shape and object if they exist
         if let (Some(shape_id), Some(object_id)) = (self.created_shape_id, self.created_shape_instance_id) {
             let layer = match document.get_layer_mut(&self.layer_id) {
                 Some(l) => l,
-                None => return,
+                None => return Ok(()),
             };
 
             if let AnyLayer::Vector(vector_layer) = layer {
@@ -194,6 +195,7 @@ impl Action for PaintBucketAction {
             self.created_shape_id = None;
             self.created_shape_instance_id = None;
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -331,7 +333,7 @@ mod tests {
             GapHandlingMode::BridgeSegment,
         );
 
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify a filled shape was created
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -343,7 +345,7 @@ mod tests {
         }
 
         // Test rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Should only have original shape

@@ -1024,10 +1024,10 @@ impl EditorApp {
                         Err(e) => eprintln!("Undo failed: {}", e),
                     }
                 } else {
-                    if self.action_executor.undo() {
-                        println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default());
-                    } else {
-                        println!("Nothing to undo");
+                    match self.action_executor.undo() {
+                        Ok(true) => println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default()),
+                        Ok(false) => println!("Nothing to undo"),
+                        Err(e) => eprintln!("Undo failed: {}", e),
                     }
                 }
             }
@@ -1046,10 +1046,10 @@ impl EditorApp {
                         Err(e) => eprintln!("Redo failed: {}", e),
                     }
                 } else {
-                    if self.action_executor.redo() {
-                        println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default());
-                    } else {
-                        println!("Nothing to redo");
+                    match self.action_executor.redo() {
+                        Ok(true) => println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default()),
+                        Ok(false) => println!("Nothing to redo"),
+                        Err(e) => eprintln!("Redo failed: {}", e),
                     }
                 }
             }

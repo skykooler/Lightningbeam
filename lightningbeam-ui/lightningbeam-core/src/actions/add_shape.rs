@@ -50,10 +50,10 @@ impl AddShapeAction {
 }
 
 impl Action for AddShapeAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         let layer = match document.get_layer_mut(&self.layer_id) {
             Some(l) => l,
-            None => return,
+            None => return Ok(()),
         };
 
         if let AnyLayer::Vector(vector_layer) = layer {
@@ -65,14 +65,15 @@ impl Action for AddShapeAction {
             self.created_shape_id = Some(shape_id);
             self.created_object_id = Some(object_id);
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         // Remove the created shape and object if they exist
         if let (Some(shape_id), Some(object_id)) = (self.created_shape_id, self.created_object_id) {
             let layer = match document.get_layer_mut(&self.layer_id) {
                 Some(l) => l,
-                None => return,
+                None => return Ok(()),
             };
 
             if let AnyLayer::Vector(vector_layer) = layer {
@@ -85,6 +86,7 @@ impl Action for AddShapeAction {
             self.created_shape_id = None;
             self.created_object_id = None;
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -114,7 +116,7 @@ mod tests {
 
         // Create and execute action
         let mut action = AddShapeAction::new(layer_id, shape, object);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify shape and object were added
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -129,7 +131,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify shape and object were removed
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -157,7 +159,7 @@ mod tests {
         assert_eq!(action.description(), "Add shape");
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             assert_eq!(layer.shapes.len(), 1);
@@ -180,8 +182,8 @@ mod tests {
 
         // Execute twice - shapes are stored in HashMap (keyed by ID, so same shape overwrites)
         // while shape_instances are stored in Vec (so duplicates accumulate)
-        action.execute(&mut document);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
+        action.execute(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Shapes use HashMap keyed by shape.id, so same shape overwrites = 1
@@ -209,8 +211,8 @@ mod tests {
         let mut action1 = AddShapeAction::new(layer_id, shape1, object1);
         let mut action2 = AddShapeAction::new(layer_id, shape2, object2);
 
-        action1.execute(&mut document);
-        action2.execute(&mut document);
+        action1.execute(&mut document).unwrap();
+        action2.execute(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
             // Two different shapes = 2 entries in HashMap

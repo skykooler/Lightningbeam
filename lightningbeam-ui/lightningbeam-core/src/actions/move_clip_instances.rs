@@ -26,7 +26,7 @@ impl MoveClipInstancesAction {
 }
 
 impl Action for MoveClipInstancesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         // Expand moves to include grouped instances
         let mut expanded_moves = self.layer_moves.clone();
         let mut already_processed = std::collections::HashSet::new();
@@ -71,15 +71,67 @@ impl Action for MoveClipInstancesAction {
             }
         }
 
-        // Store expanded moves for rollback
-        self.layer_moves = expanded_moves.clone();
+        // Auto-adjust moves to avoid overlaps
+        let mut adjusted_moves: HashMap<Uuid, Vec<(Uuid, f64, f64)>> = HashMap::new();
 
-        // Apply all moves (including expanded)
         for (layer_id, moves) in &expanded_moves {
-            let layer = match document.get_layer_mut(layer_id) {
-                Some(l) => l,
-                None => continue,
-            };
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Vector layers don't need adjustment
+            if matches!(layer, AnyLayer::Vector(_)) {
+                adjusted_moves.insert(*layer_id, moves.clone());
+                continue;
+            }
+
+            let mut adjusted_layer_moves = Vec::new();
+
+            for (instance_id, old_start, new_start) in moves {
+                // Get the instance to calculate its duration
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    AnyLayer::Video(vl) => &vl.clip_instances,
+                    AnyLayer::Vector(vl) => &vl.clip_instances,
+                };
+
+                let instance = clip_instances.iter()
+                    .find(|ci| &ci.id == instance_id)
+                    .ok_or_else(|| format!("Instance {} not found", instance_id))?;
+
+                let clip_duration = document.get_clip_duration(&instance.clip_id)
+                    .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
+
+                let trim_start = instance.trim_start;
+                let trim_end = instance.trim_end.unwrap_or(clip_duration);
+                let effective_duration = trim_end - trim_start;
+
+                // Find nearest valid position, excluding this instance from overlap checks
+                let adjusted_start = document.find_nearest_valid_position(
+                    layer_id,
+                    *new_start,
+                    effective_duration,
+                    Some(instance_id),
+                );
+
+                if let Some(valid_start) = adjusted_start {
+                    adjusted_layer_moves.push((*instance_id, *old_start, valid_start));
+                } else {
+                    return Err(format!(
+                        "Cannot move clip: no valid position found on layer"
+                    ));
+                }
+            }
+
+            adjusted_moves.insert(*layer_id, adjusted_layer_moves);
+        }
+
+        // Store adjusted moves for rollback
+        self.layer_moves = adjusted_moves.clone();
+
+        // Apply all adjusted moves
+        for (layer_id, moves) in &adjusted_moves {
+            let layer = document.get_layer_mut(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
 
             // Get mutable reference to clip_instances for this layer type
             let clip_instances = match layer {
@@ -96,14 +148,14 @@ impl Action for MoveClipInstancesAction {
                 }
             }
         }
+
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         for (layer_id, moves) in &self.layer_moves {
-            let layer = match document.get_layer_mut(layer_id) {
-                Some(l) => l,
-                None => continue,
-            };
+            let layer = document.get_layer_mut(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
 
             // Get mutable reference to clip_instances for this layer type
             let clip_instances = match layer {
@@ -120,6 +172,8 @@ impl Action for MoveClipInstancesAction {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -296,7 +350,7 @@ mod tests {
         let mut action = MoveClipInstancesAction::new(layer_moves);
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify position changed
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -309,7 +363,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify position restored
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {

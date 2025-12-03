@@ -60,7 +60,7 @@ impl SetShapePropertiesAction {
 }
 
 impl Action for SetShapePropertiesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {
                 if let Some(shape) = vector_layer.shapes.get_mut(&self.shape_id) {
@@ -107,9 +107,10 @@ impl Action for SetShapePropertiesAction {
                 }
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(old_value) = &self.old_value {
             if let Some(layer) = document.get_layer_mut(&self.layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
@@ -131,6 +132,7 @@ impl Action for SetShapePropertiesAction {
                 }
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -187,7 +189,7 @@ mod tests {
         // Create and execute action
         let new_color = Some(ShapeColor::rgb(0, 255, 0));
         let mut action = SetShapePropertiesAction::set_fill_color(layer_id, shape_id, new_color);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify color changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -196,7 +198,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -224,7 +226,7 @@ mod tests {
 
         // Create and execute action
         let mut action = SetShapePropertiesAction::set_stroke_width(layer_id, shape_id, 5.0);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify width changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -233,7 +235,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {

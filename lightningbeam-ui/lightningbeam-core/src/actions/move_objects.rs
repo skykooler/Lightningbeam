@@ -34,10 +34,10 @@ impl MoveShapeInstancesAction {
 }
 
 impl Action for MoveShapeInstancesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         let layer = match document.get_layer_mut(&self.layer_id) {
             Some(l) => l,
-            None => return,
+            None => return Ok(()),
         };
 
         if let AnyLayer::Vector(vector_layer) = layer {
@@ -48,12 +48,13 @@ impl Action for MoveShapeInstancesAction {
                 });
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         let layer = match document.get_layer_mut(&self.layer_id) {
             Some(l) => l,
-            None => return,
+            None => return Ok(()),
         };
 
         if let AnyLayer::Vector(vector_layer) = layer {
@@ -64,6 +65,7 @@ impl Action for MoveShapeInstancesAction {
                 });
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -109,7 +111,7 @@ mod tests {
         let mut action = MoveShapeInstancesAction::new(layer_id, positions);
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify position changed
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -119,7 +121,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify position restored
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {

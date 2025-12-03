@@ -58,10 +58,14 @@ pub struct BackendContext<'a> {
 /// only affect the document (vector graphics) don't need to implement these.
 pub trait Action: Send {
     /// Apply this action to the document
-    fn execute(&mut self, document: &mut Document);
+    ///
+    /// Returns Ok(()) if successful, or Err(message) if the action cannot be performed
+    fn execute(&mut self, document: &mut Document) -> Result<(), String>;
 
     /// Undo this action (rollback changes)
-    fn rollback(&mut self, document: &mut Document);
+    ///
+    /// Returns Ok(()) if successful, or Err(message) if rollback fails
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String>;
 
     /// Get a human-readable description of this action (for UI display)
     fn description(&self) -> String;
@@ -158,9 +162,11 @@ impl ActionExecutor {
     /// Execute an action and add it to the undo stack
     ///
     /// This clears the redo stack since we're creating a new timeline branch.
-    pub fn execute(&mut self, mut action: Box<dyn Action>) {
+    ///
+    /// Returns Ok(()) if successful, or Err(message) if the action failed
+    pub fn execute(&mut self, mut action: Box<dyn Action>) -> Result<(), String> {
         // Apply the action (uses copy-on-write if other Arc holders exist)
-        action.execute(Arc::make_mut(&mut self.document));
+        action.execute(Arc::make_mut(&mut self.document))?;
 
         // Clear redo stack (new action invalidates redo history)
         self.redo_stack.clear();
@@ -172,39 +178,55 @@ impl ActionExecutor {
         if self.undo_stack.len() > self.max_undo_depth {
             self.undo_stack.remove(0);
         }
+
+        Ok(())
     }
 
     /// Undo the last action
     ///
-    /// Returns true if an action was undone, false if undo stack is empty.
-    pub fn undo(&mut self) -> bool {
+    /// Returns Ok(true) if an action was undone, Ok(false) if undo stack is empty,
+    /// or Err(message) if rollback failed
+    pub fn undo(&mut self) -> Result<bool, String> {
         if let Some(mut action) = self.undo_stack.pop() {
             // Rollback the action (uses copy-on-write if other Arc holders exist)
-            action.rollback(Arc::make_mut(&mut self.document));
-
-            // Move to redo stack
-            self.redo_stack.push(action);
-
-            true
+            match action.rollback(Arc::make_mut(&mut self.document)) {
+                Ok(()) => {
+                    // Move to redo stack
+                    self.redo_stack.push(action);
+                    Ok(true)
+                }
+                Err(e) => {
+                    // Put action back on undo stack if rollback failed
+                    self.undo_stack.push(action);
+                    Err(e)
+                }
+            }
         } else {
-            false
+            Ok(false)
         }
     }
 
     /// Redo the last undone action
     ///
-    /// Returns true if an action was redone, false if redo stack is empty.
-    pub fn redo(&mut self) -> bool {
+    /// Returns Ok(true) if an action was redone, Ok(false) if redo stack is empty,
+    /// or Err(message) if re-execution failed
+    pub fn redo(&mut self) -> Result<bool, String> {
         if let Some(mut action) = self.redo_stack.pop() {
             // Re-execute the action (uses copy-on-write if other Arc holders exist)
-            action.execute(Arc::make_mut(&mut self.document));
-
-            // Move back to undo stack
-            self.undo_stack.push(action);
-
-            true
+            match action.execute(Arc::make_mut(&mut self.document)) {
+                Ok(()) => {
+                    // Move back to undo stack
+                    self.undo_stack.push(action);
+                    Ok(true)
+                }
+                Err(e) => {
+                    // Put action back on redo stack if re-execution failed
+                    self.redo_stack.push(action);
+                    Err(e)
+                }
+            }
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -273,12 +295,12 @@ impl ActionExecutor {
         backend: &mut BackendContext,
     ) -> Result<(), String> {
         // 1. Execute document changes
-        action.execute(Arc::make_mut(&mut self.document));
+        action.execute(Arc::make_mut(&mut self.document))?;
 
         // 2. Execute backend changes (pass document for reading clip data)
         if let Err(e) = action.execute_backend(backend, &self.document) {
             // ATOMIC ROLLBACK: Backend failed → undo document
-            action.rollback(Arc::make_mut(&mut self.document));
+            action.rollback(Arc::make_mut(&mut self.document))?;
             return Err(e);
         }
 
@@ -309,7 +331,7 @@ impl ActionExecutor {
         if let Some(mut action) = self.undo_stack.pop() {
             // Rollback in REVERSE order: backend first, then document
             action.rollback_backend(backend, &self.document)?;
-            action.rollback(Arc::make_mut(&mut self.document));
+            action.rollback(Arc::make_mut(&mut self.document))?;
 
             // Move to redo stack
             self.redo_stack.push(action);
@@ -334,11 +356,15 @@ impl ActionExecutor {
     pub fn redo_with_backend(&mut self, backend: &mut BackendContext) -> Result<bool, String> {
         if let Some(mut action) = self.redo_stack.pop() {
             // Re-execute in same order: document first, then backend
-            action.execute(Arc::make_mut(&mut self.document));
+            if let Err(e) = action.execute(Arc::make_mut(&mut self.document)) {
+                // Put action back on redo stack if document execute fails
+                self.redo_stack.push(action);
+                return Err(e);
+            }
 
             if let Err(e) = action.execute_backend(backend, &self.document) {
                 // Rollback document if backend fails
-                action.rollback(Arc::make_mut(&mut self.document));
+                action.rollback(Arc::make_mut(&mut self.document))?;
                 // Put action back on redo stack
                 self.redo_stack.push(action);
                 return Err(e);
@@ -374,12 +400,14 @@ mod tests {
     }
 
     impl Action for TestAction {
-        fn execute(&mut self, _document: &mut Document) {
+        fn execute(&mut self, _document: &mut Document) -> Result<(), String> {
             self.executed = true;
+            Ok(())
         }
 
-        fn rollback(&mut self, _document: &mut Document) {
+        fn rollback(&mut self, _document: &mut Document) -> Result<(), String> {
             self.executed = false;
+            Ok(())
         }
 
         fn description(&self) -> String {
@@ -397,20 +425,20 @@ mod tests {
 
         // Execute an action
         let action = Box::new(TestAction::new("Test Action"));
-        executor.execute(action);
+        executor.execute(action).unwrap();
 
         assert!(executor.can_undo());
         assert!(!executor.can_redo());
         assert_eq!(executor.undo_depth(), 1);
 
         // Undo
-        assert!(executor.undo());
+        assert!(executor.undo().unwrap());
         assert!(!executor.can_undo());
         assert!(executor.can_redo());
         assert_eq!(executor.redo_depth(), 1);
 
         // Redo
-        assert!(executor.redo());
+        assert!(executor.redo().unwrap());
         assert!(executor.can_undo());
         assert!(!executor.can_redo());
     }
@@ -420,12 +448,12 @@ mod tests {
         let document = Document::new("Test");
         let mut executor = ActionExecutor::new(document);
 
-        executor.execute(Box::new(TestAction::new("Action 1")));
-        executor.execute(Box::new(TestAction::new("Action 2")));
+        executor.execute(Box::new(TestAction::new("Action 1"))).unwrap();
+        executor.execute(Box::new(TestAction::new("Action 2"))).unwrap();
 
         assert_eq!(executor.undo_description(), Some("Action 2".to_string()));
 
-        executor.undo();
+        executor.undo().unwrap();
         assert_eq!(executor.redo_description(), Some("Action 2".to_string()));
         assert_eq!(executor.undo_description(), Some("Action 1".to_string()));
     }
@@ -435,14 +463,14 @@ mod tests {
         let document = Document::new("Test");
         let mut executor = ActionExecutor::new(document);
 
-        executor.execute(Box::new(TestAction::new("Action 1")));
-        executor.execute(Box::new(TestAction::new("Action 2")));
-        executor.undo();
+        executor.execute(Box::new(TestAction::new("Action 1"))).unwrap();
+        executor.execute(Box::new(TestAction::new("Action 2"))).unwrap();
+        executor.undo().unwrap();
 
         assert!(executor.can_redo());
 
         // Execute new action should clear redo stack
-        executor.execute(Box::new(TestAction::new("Action 3")));
+        executor.execute(Box::new(TestAction::new("Action 3"))).unwrap();
 
         assert!(!executor.can_redo());
         assert_eq!(executor.undo_depth(), 2);
@@ -454,10 +482,10 @@ mod tests {
         let mut executor = ActionExecutor::new(document);
         executor.set_max_undo_depth(3);
 
-        executor.execute(Box::new(TestAction::new("Action 1")));
-        executor.execute(Box::new(TestAction::new("Action 2")));
-        executor.execute(Box::new(TestAction::new("Action 3")));
-        executor.execute(Box::new(TestAction::new("Action 4")));
+        executor.execute(Box::new(TestAction::new("Action 1"))).unwrap();
+        executor.execute(Box::new(TestAction::new("Action 2"))).unwrap();
+        executor.execute(Box::new(TestAction::new("Action 3"))).unwrap();
+        executor.execute(Box::new(TestAction::new("Action 4"))).unwrap();
 
         // Should only keep last 3
         assert_eq!(executor.undo_depth(), 3);

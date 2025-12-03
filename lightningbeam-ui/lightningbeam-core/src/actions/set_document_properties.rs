@@ -88,7 +88,7 @@ impl SetDocumentPropertiesAction {
 }
 
 impl Action for SetDocumentPropertiesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         // Store old value if not already stored
         if self.old_value.is_none() {
             self.old_value = Some(self.get_current_value(document));
@@ -97,12 +97,14 @@ impl Action for SetDocumentPropertiesAction {
         // Apply new value
         let new_value = self.property.value();
         self.apply_value(document, new_value);
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(old_value) = self.old_value {
             self.apply_value(document, old_value);
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -126,10 +128,10 @@ mod tests {
         document.width = 1920.0;
 
         let mut action = SetDocumentPropertiesAction::set_width(1280.0);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
         assert_eq!(document.width, 1280.0);
 
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
         assert_eq!(document.width, 1920.0);
     }
 
@@ -139,10 +141,10 @@ mod tests {
         document.height = 1080.0;
 
         let mut action = SetDocumentPropertiesAction::set_height(720.0);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
         assert_eq!(document.height, 720.0);
 
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
         assert_eq!(document.height, 1080.0);
     }
 
@@ -152,10 +154,10 @@ mod tests {
         document.duration = 10.0;
 
         let mut action = SetDocumentPropertiesAction::set_duration(30.0);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
         assert_eq!(document.duration, 30.0);
 
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
         assert_eq!(document.duration, 10.0);
     }
 
@@ -165,10 +167,10 @@ mod tests {
         document.framerate = 30.0;
 
         let mut action = SetDocumentPropertiesAction::set_framerate(60.0);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
         assert_eq!(document.framerate, 60.0);
 
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
         assert_eq!(document.framerate, 30.0);
     }
 

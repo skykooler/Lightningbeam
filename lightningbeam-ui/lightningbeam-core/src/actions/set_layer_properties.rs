@@ -74,7 +74,7 @@ impl SetLayerPropertiesAction {
 }
 
 impl Action for SetLayerPropertiesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         for (i, &layer_id) in self.layer_ids.iter().enumerate() {
             // Find the layer in the document
             if let Some(layer) = document.root_mut().get_child_mut(&layer_id) {
@@ -101,9 +101,10 @@ impl Action for SetLayerPropertiesAction {
                 }
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         for (i, &layer_id) in self.layer_ids.iter().enumerate() {
             // Find the layer in the document
             if let Some(layer) = document.root_mut().get_child_mut(&layer_id) {
@@ -120,6 +121,7 @@ impl Action for SetLayerPropertiesAction {
                 }
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -157,14 +159,14 @@ mod tests {
 
         // Create and execute action
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Volume(0.5));
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify volume changed
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.volume(), 0.5);
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify volume restored
         let layer_ref = document.root.get_child(&layer_id).unwrap();
@@ -183,13 +185,13 @@ mod tests {
 
         // Mute
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Muted(true));
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.muted(), true);
 
         // Unmute via rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.muted(), false);
@@ -208,14 +210,14 @@ mod tests {
             vec![id1, id2],
             LayerProperty::Soloed(true),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both soloed
         assert_eq!(document.root.get_child(&id1).unwrap().soloed(), true);
         assert_eq!(document.root.get_child(&id2).unwrap().soloed(), true);
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both unsoloed
         assert_eq!(document.root.get_child(&id1).unwrap().soloed(), false);
@@ -234,13 +236,13 @@ mod tests {
 
         // Lock
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Locked(true));
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.locked(), true);
 
         // Unlock via rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.locked(), false);
@@ -258,13 +260,13 @@ mod tests {
 
         // Set opacity to 0.5
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Opacity(0.5));
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.opacity(), 0.5);
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.opacity(), 1.0);
@@ -282,13 +284,13 @@ mod tests {
 
         // Hide
         let mut action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Visible(false));
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.visible(), false);
 
         // Show via rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         let layer_ref = document.root.get_child(&layer_id).unwrap();
         assert_eq!(layer_ref.visible(), true);
@@ -307,14 +309,14 @@ mod tests {
             vec![id1, id2],
             LayerProperty::Locked(true),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both locked
         assert_eq!(document.root.get_child(&id1).unwrap().locked(), true);
         assert_eq!(document.root.get_child(&id2).unwrap().locked(), true);
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both unlocked
         assert_eq!(document.root.get_child(&id1).unwrap().locked(), false);
@@ -334,14 +336,14 @@ mod tests {
             vec![id1, id2],
             LayerProperty::Opacity(0.25),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both have reduced opacity
         assert_eq!(document.root.get_child(&id1).unwrap().opacity(), 0.25);
         assert_eq!(document.root.get_child(&id2).unwrap().opacity(), 0.25);
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both restored to 1.0
         assert_eq!(document.root.get_child(&id1).unwrap().opacity(), 1.0);
@@ -386,7 +388,7 @@ mod tests {
         let mut action = SetLayerPropertiesAction::new(fake_id, LayerProperty::Locked(true));
 
         // Should not panic
-        action.execute(&mut document);
-        action.rollback(&mut document);
+        action.execute(&mut document).unwrap();
+        action.rollback(&mut document).unwrap();
     }
 }

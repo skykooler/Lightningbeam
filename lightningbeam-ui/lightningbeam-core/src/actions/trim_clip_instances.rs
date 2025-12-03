@@ -62,7 +62,7 @@ impl TrimClipInstancesAction {
 }
 
 impl Action for TrimClipInstancesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         // Expand trims to include grouped instances
         let mut expanded_trims = self.layer_trims.clone();
         let mut already_processed = std::collections::HashSet::new();
@@ -155,11 +155,103 @@ impl Action for TrimClipInstancesAction {
             }
         }
 
-        // Store expanded trims for rollback
-        self.layer_trims = expanded_trims.clone();
+        // Auto-clamp trims to avoid overlaps when extending clips
+        let mut clamped_trims: HashMap<Uuid, Vec<(Uuid, TrimType, TrimData, TrimData)>> = HashMap::new();
 
-        // Apply all trims (including expanded)
         for (layer_id, trims) in &expanded_trims {
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Only validate for audio/video layers
+            let should_validate = matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_));
+
+            let mut clamped_layer_trims = Vec::new();
+
+            for (instance_id, trim_type, old, new) in trims {
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    AnyLayer::Video(vl) => &vl.clip_instances,
+                    AnyLayer::Vector(vl) => &vl.clip_instances,
+                };
+
+                let instance = clip_instances.iter()
+                    .find(|ci| &ci.id == instance_id)
+                    .ok_or_else(|| format!("Instance {} not found", instance_id))?;
+
+                let clip_duration = document.get_clip_duration(&instance.clip_id)
+                    .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
+
+                let mut clamped_new = new.clone();
+
+                match trim_type {
+                    TrimType::TrimLeft => {
+                        if let (Some(old_trim), Some(new_trim), Some(old_timeline), Some(new_timeline)) =
+                            (old.trim_value, new.trim_value, old.timeline_start, new.timeline_start)
+                        {
+                            // If extending to the left (new_trim < old_trim)
+                            if should_validate && new_trim < old_trim {
+                                // Find the maximum we can extend left
+                                let max_extend = document.find_max_trim_extend_left(
+                                    layer_id,
+                                    instance_id,
+                                    instance.timeline_start,
+                                );
+
+                                // Calculate how much we want to extend
+                                let desired_extend = old_trim - new_trim;
+
+                                // Clamp to max allowed
+                                let actual_extend = desired_extend.min(max_extend);
+                                let clamped_trim_start = old_trim - actual_extend;
+                                let clamped_timeline_start = old_timeline - actual_extend;
+
+                                clamped_new = TrimData::left(clamped_trim_start, clamped_timeline_start);
+                            }
+                        }
+                    }
+                    TrimType::TrimRight => {
+                        let old_trim_end = old.trim_value.unwrap_or(clip_duration);
+                        let new_trim_end = new.trim_value.unwrap_or(clip_duration);
+
+                        // If extending to the right (new_trim_end > old_trim_end)
+                        if should_validate && new_trim_end > old_trim_end {
+                            // Calculate current effective duration
+                            let current_effective_duration = old_trim_end - instance.trim_start;
+
+                            // Find the maximum we can extend right
+                            let max_extend = document.find_max_trim_extend_right(
+                                layer_id,
+                                instance_id,
+                                instance.timeline_start,
+                                current_effective_duration,
+                            );
+
+                            // Calculate how much we want to extend
+                            let desired_extend = new_trim_end - old_trim_end;
+
+                            // Clamp to max allowed
+                            let actual_extend = desired_extend.min(max_extend);
+                            let clamped_trim_end = old_trim_end + actual_extend;
+
+                            // Don't exceed clip duration
+                            let final_trim_end = clamped_trim_end.min(clip_duration);
+
+                            clamped_new = TrimData::right(Some(final_trim_end));
+                        }
+                    }
+                }
+
+                clamped_layer_trims.push((*instance_id, *trim_type, old.clone(), clamped_new));
+            }
+
+            clamped_trims.insert(*layer_id, clamped_layer_trims);
+        }
+
+        // Store clamped trims for rollback
+        self.layer_trims = clamped_trims.clone();
+
+        // Apply all clamped trims
+        for (layer_id, trims) in &clamped_trims {
             let layer = match document.get_layer_mut(layer_id) {
                 Some(l) => l,
                 None => continue,
@@ -192,9 +284,10 @@ impl Action for TrimClipInstancesAction {
                 }
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         for (layer_id, trims) in &self.layer_trims {
             let layer = match document.get_layer_mut(layer_id) {
                 Some(l) => l,
@@ -228,6 +321,7 @@ impl Action for TrimClipInstancesAction {
                 }
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -427,7 +521,7 @@ mod tests {
         let mut action = TrimClipInstancesAction::new(layer_trims);
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify trim applied
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -441,7 +535,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -486,7 +580,7 @@ mod tests {
         let mut action = TrimClipInstancesAction::new(layer_trims);
 
         // Execute
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify trim applied
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
@@ -499,7 +593,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {

@@ -333,6 +333,290 @@ impl Document {
     pub fn remove_image_asset(&mut self, id: &Uuid) -> Option<ImageAsset> {
         self.image_assets.remove(id)
     }
+
+    // === CLIP OVERLAP DETECTION METHODS ===
+
+    /// Get the duration of any clip type by ID
+    ///
+    /// Searches through all clip libraries to find the clip and return its duration
+    pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<f64> {
+        if let Some(clip) = self.vector_clips.get(clip_id) {
+            Some(clip.duration)
+        } else if let Some(clip) = self.video_clips.get(clip_id) {
+            Some(clip.duration)
+        } else if let Some(clip) = self.audio_clips.get(clip_id) {
+            Some(clip.duration)
+        } else {
+            None
+        }
+    }
+
+    /// Calculate the end time of a clip instance on the timeline
+    pub fn get_clip_instance_end_time(&self, layer_id: &Uuid, instance_id: &Uuid) -> Option<f64> {
+        let layer = self.get_layer(layer_id)?;
+
+        // Find the clip instance
+        let instances = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Vector(vector) => &vector.clip_instances,
+        };
+
+        let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
+        let clip_duration = self.get_clip_duration(&instance.clip_id)?;
+
+        let trim_start = instance.trim_start;
+        let trim_end = instance.trim_end.unwrap_or(clip_duration);
+        let effective_duration = trim_end - trim_start;
+
+        Some(instance.timeline_start + effective_duration)
+    }
+
+    /// Check if a time range overlaps with any existing clip on the layer
+    ///
+    /// Returns (overlaps, conflicting_instance_id)
+    ///
+    /// Only checks audio and video layers - vector/MIDI layers return false
+    pub fn check_overlap_on_layer(
+        &self,
+        layer_id: &Uuid,
+        start_time: f64,
+        end_time: f64,
+        exclude_instance_id: Option<&Uuid>,
+    ) -> (bool, Option<Uuid>) {
+        let Some(layer) = self.get_layer(layer_id) else {
+            return (false, None);
+        };
+
+        // Only check audio and video layers
+        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+            return (false, None);
+        }
+
+        let instances = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Vector(vector) => &vector.clip_instances,
+        };
+
+        for instance in instances {
+            // Skip the instance we're checking against itself
+            if let Some(exclude_id) = exclude_instance_id {
+                if &instance.id == exclude_id {
+                    continue;
+                }
+            }
+
+            // Calculate instance end time
+            let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) else {
+                continue;
+            };
+
+            let instance_start = instance.timeline_start;
+            let trim_start = instance.trim_start;
+            let trim_end = instance.trim_end.unwrap_or(clip_duration);
+            let instance_end = instance_start + (trim_end - trim_start);
+
+            // Check overlap: start_a < end_b AND start_b < end_a
+            if start_time < instance_end && instance_start < end_time {
+                return (true, Some(instance.id));
+            }
+        }
+
+        (false, None)
+    }
+
+    /// Find the nearest valid position for a clip on a layer to avoid overlaps
+    ///
+    /// Returns adjusted timeline_start, or None if no valid position exists
+    ///
+    /// Strategy: Prefers snapping to the right (later in timeline) over left
+    pub fn find_nearest_valid_position(
+        &self,
+        layer_id: &Uuid,
+        desired_start: f64,
+        clip_duration: f64,
+        exclude_instance_id: Option<&Uuid>,
+    ) -> Option<f64> {
+        let layer = self.get_layer(layer_id)?;
+
+        // Vector/MIDI layers don't need adjustment
+        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+            return Some(desired_start);
+        }
+
+        // Check if desired position is already valid
+        let desired_end = desired_start + clip_duration;
+        let (overlaps, _) = self.check_overlap_on_layer(layer_id, desired_start, desired_end, exclude_instance_id);
+        if !overlaps {
+            return Some(desired_start);
+        }
+
+        // Collect all existing clip time ranges on this layer
+        let instances = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            _ => return Some(desired_start), // Shouldn't reach here
+        };
+
+        let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
+        for instance in instances {
+            if let Some(exclude_id) = exclude_instance_id {
+                if &instance.id == exclude_id {
+                    continue;
+                }
+            }
+
+            if let Some(clip_dur) = self.get_clip_duration(&instance.clip_id) {
+                let inst_start = instance.timeline_start;
+                let trim_start = instance.trim_start;
+                let trim_end = instance.trim_end.unwrap_or(clip_dur);
+                let inst_end = inst_start + (trim_end - trim_start);
+                occupied_ranges.push((inst_start, inst_end, instance.id));
+            }
+        }
+
+        // Sort by start time
+        occupied_ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Find the clip we're overlapping with
+        for (occupied_start, occupied_end, _) in &occupied_ranges {
+            if desired_start < *occupied_end && *occupied_start < desired_end {
+                // Try snapping to the right (after this clip)
+                let snap_right = *occupied_end;
+                let snap_right_end = snap_right + clip_duration;
+
+                let (overlaps_right, _) = self.check_overlap_on_layer(
+                    layer_id,
+                    snap_right,
+                    snap_right_end,
+                    exclude_instance_id,
+                );
+
+                if !overlaps_right {
+                    return Some(snap_right);
+                }
+
+                // Try snapping to the left (before this clip)
+                let snap_left = occupied_start - clip_duration;
+                if snap_left >= 0.0 {
+                    let (overlaps_left, _) = self.check_overlap_on_layer(
+                        layer_id,
+                        snap_left,
+                        *occupied_start,
+                        exclude_instance_id,
+                    );
+
+                    if !overlaps_left {
+                        return Some(snap_left);
+                    }
+                }
+            }
+        }
+
+        // If no gap found, try placing at timeline start
+        if occupied_ranges.is_empty() || occupied_ranges[0].0 >= clip_duration {
+            return Some(0.0);
+        }
+
+        // No valid position found
+        None
+    }
+
+    /// Find the maximum amount we can extend a clip to the left without overlapping
+    ///
+    /// Returns the distance to the nearest clip to the left, or the distance to
+    /// timeline start (0.0) if no clips exist to the left.
+    pub fn find_max_trim_extend_left(
+        &self,
+        layer_id: &Uuid,
+        instance_id: &Uuid,
+        current_timeline_start: f64,
+    ) -> f64 {
+        let Some(layer) = self.get_layer(layer_id) else {
+            return current_timeline_start; // No limit if layer not found
+        };
+
+        // Only check audio and video layers
+        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+            return current_timeline_start; // No limit for vector layers
+        };
+
+        // Find the nearest clip to the left
+        let mut nearest_end = 0.0; // Can extend to timeline start by default
+
+        let instances = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Vector(vector) => &vector.clip_instances,
+        };
+
+        for other in instances {
+            if &other.id == instance_id {
+                continue;
+            }
+
+            // Calculate other clip's end time
+            if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
+                let trim_end = other.trim_end.unwrap_or(clip_duration);
+                let other_end = other.timeline_start + (trim_end - other.trim_start);
+
+                // If this clip is to the left and closer than current nearest
+                if other_end <= current_timeline_start && other_end > nearest_end {
+                    nearest_end = other_end;
+                }
+            }
+        }
+
+        current_timeline_start - nearest_end
+    }
+
+    /// Find the maximum amount we can extend a clip to the right without overlapping
+    ///
+    /// Returns the distance to the nearest clip to the right, or f64::MAX if no
+    /// clips exist to the right.
+    pub fn find_max_trim_extend_right(
+        &self,
+        layer_id: &Uuid,
+        instance_id: &Uuid,
+        current_timeline_start: f64,
+        current_effective_duration: f64,
+    ) -> f64 {
+        let Some(layer) = self.get_layer(layer_id) else {
+            return f64::MAX; // No limit if layer not found
+        };
+
+        // Only check audio and video layers
+        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+            return f64::MAX; // No limit for vector layers
+        }
+
+        let instances = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Vector(vector) => &vector.clip_instances,
+        };
+
+        let mut nearest_start = f64::MAX;
+        let current_end = current_timeline_start + current_effective_duration;
+
+        for other in instances {
+            if &other.id == instance_id {
+                continue;
+            }
+
+            // If this clip is to the right and closer than current nearest
+            if other.timeline_start >= current_end && other.timeline_start < nearest_start {
+                nearest_start = other.timeline_start;
+            }
+        }
+
+        if nearest_start == f64::MAX {
+            f64::MAX // No clip to the right, can extend freely
+        } else {
+            nearest_start - current_timeline_start // Distance to next clip
+        }
+    }
 }
 
 #[cfg(test)]

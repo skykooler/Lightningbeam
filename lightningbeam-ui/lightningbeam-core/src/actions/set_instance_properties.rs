@@ -109,7 +109,7 @@ impl SetInstancePropertiesAction {
 }
 
 impl Action for SetInstancePropertiesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         let new_value = self.property.value();
         let layer_id = self.layer_id;
 
@@ -140,14 +140,16 @@ impl Action for SetInstancePropertiesAction {
         for (instance_id, _) in &self.instance_changes {
             self.apply_to_instance(document, instance_id, new_value);
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         for (instance_id, old_value) in &self.instance_changes {
             if let Some(value) = old_value {
                 self.apply_to_instance(document, instance_id, *value);
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -195,7 +197,7 @@ mod tests {
             instance_id,
             InstancePropertyChange::X(50.0),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify position changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -205,7 +207,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -233,7 +235,7 @@ mod tests {
             instance_id,
             InstancePropertyChange::Rotation(45.0),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify rotation changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -242,7 +244,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -270,7 +272,7 @@ mod tests {
             instance_id,
             InstancePropertyChange::Opacity(0.5),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify opacity changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -279,7 +281,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -314,7 +316,7 @@ mod tests {
             vec![instance1_id, instance2_id],
             InstancePropertyChange::ScaleX(2.0),
         );
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -323,7 +325,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {

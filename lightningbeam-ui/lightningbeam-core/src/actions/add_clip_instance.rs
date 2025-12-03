@@ -59,50 +59,81 @@ impl AddClipInstanceAction {
 }
 
 impl Action for AddClipInstanceAction {
-    fn execute(&mut self, document: &mut Document) {
-        if let Some(layer) = document.get_layer_mut(&self.layer_id) {
-            match layer {
-                AnyLayer::Vector(vector_layer) => {
-                    vector_layer.clip_instances.push(self.clip_instance.clone());
-                }
-                AnyLayer::Audio(audio_layer) => {
-                    audio_layer.clip_instances.push(self.clip_instance.clone());
-                }
-                AnyLayer::Video(video_layer) => {
-                    video_layer.clip_instances.push(self.clip_instance.clone());
-                }
-            }
-            self.executed = true;
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
+        // Calculate the clip's effective duration
+        let clip_duration = document.get_clip_duration(&self.clip_instance.clip_id)
+            .ok_or_else(|| format!("Clip {} not found", self.clip_instance.clip_id))?;
+
+        let trim_start = self.clip_instance.trim_start;
+        let trim_end = self.clip_instance.trim_end.unwrap_or(clip_duration);
+        let effective_duration = trim_end - trim_start;
+
+        // Auto-adjust position for audio/video layers to avoid overlaps
+        let adjusted_start = document.find_nearest_valid_position(
+            &self.layer_id,
+            self.clip_instance.timeline_start,
+            effective_duration,
+            None, // Not excluding any instance
+        );
+
+        if let Some(valid_start) = adjusted_start {
+            // Update instance to use the valid position
+            self.clip_instance.timeline_start = valid_start;
+        } else {
+            // No valid position found - reject the operation
+            return Err("Cannot add clip: no valid position found on layer (layer is full)".to_string());
         }
+
+        // Add the clip instance with adjusted position
+        let layer = document.get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        match layer {
+            AnyLayer::Vector(vector_layer) => {
+                vector_layer.clip_instances.push(self.clip_instance.clone());
+            }
+            AnyLayer::Audio(audio_layer) => {
+                audio_layer.clip_instances.push(self.clip_instance.clone());
+            }
+            AnyLayer::Video(video_layer) => {
+                video_layer.clip_instances.push(self.clip_instance.clone());
+            }
+        }
+        self.executed = true;
+
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         if !self.executed {
-            return;
+            return Ok(());
         }
 
         let instance_id = self.clip_instance.id;
 
-        if let Some(layer) = document.get_layer_mut(&self.layer_id) {
-            match layer {
-                AnyLayer::Vector(vector_layer) => {
-                    vector_layer
-                        .clip_instances
-                        .retain(|ci| ci.id != instance_id);
-                }
-                AnyLayer::Audio(audio_layer) => {
-                    audio_layer
-                        .clip_instances
-                        .retain(|ci| ci.id != instance_id);
-                }
-                AnyLayer::Video(video_layer) => {
-                    video_layer
-                        .clip_instances
-                        .retain(|ci| ci.id != instance_id);
-                }
+        let layer = document.get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        match layer {
+            AnyLayer::Vector(vector_layer) => {
+                vector_layer
+                    .clip_instances
+                    .retain(|ci| ci.id != instance_id);
             }
-            self.executed = false;
+            AnyLayer::Audio(audio_layer) => {
+                audio_layer
+                    .clip_instances
+                    .retain(|ci| ci.id != instance_id);
+            }
+            AnyLayer::Video(video_layer) => {
+                video_layer
+                    .clip_instances
+                    .retain(|ci| ci.id != instance_id);
+            }
         }
+        self.executed = false;
+
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -261,7 +292,7 @@ mod tests {
 
         // Execute action
         let mut action = AddClipInstanceAction::new(layer_id, clip_instance);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify clip instance was added
         if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer(&layer_id) {
@@ -272,7 +303,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify clip instance was removed
         if let Some(AnyLayer::Vector(vector_layer)) = document.get_layer(&layer_id) {

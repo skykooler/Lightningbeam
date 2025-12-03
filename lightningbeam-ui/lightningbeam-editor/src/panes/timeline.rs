@@ -746,7 +746,7 @@ impl TimelinePane {
                         lightningbeam_core::layer::AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)), // Blue
                     }
                 }
-                lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(255, 150, 100)), // Orange/Red
+                lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)), // Purple
             };
 
             // Color indicator bar on the left edge
@@ -1061,21 +1061,51 @@ impl TimelinePane {
                     let layer_data = layer.layer();
                     let mut instance_start = clip_instance.timeline_start;
 
-                    // Apply drag offset preview for selected clips
+                    // Apply drag offset preview for selected clips with snapping
                     let is_selected = selection.contains_clip_instance(&clip_instance.id);
 
                     if let Some(drag_type) = self.clip_drag_state {
                         if is_selected {
                             match drag_type {
                                 ClipDragType::Move => {
-                                    // Move: shift the entire clip along the timeline
-                                    instance_start += self.drag_offset;
+                                    // Move: shift the entire clip along the timeline with auto-snap preview
+                                    let desired_start = clip_instance.timeline_start + self.drag_offset;
+                                    let current_duration = instance_duration;
+
+                                    // Find snapped position for preview
+                                    let snapped_start = document
+                                        .find_nearest_valid_position(
+                                            &layer.id(),
+                                            desired_start,
+                                            current_duration,
+                                            Some(&clip_instance.id),
+                                        )
+                                        .unwrap_or(desired_start);
+
+                                    instance_start = snapped_start;
                                 }
                                 ClipDragType::TrimLeft => {
-                                    // Trim left: calculate new trim_start and clamp to valid range
-                                    let new_trim_start = (clip_instance.trim_start + self.drag_offset)
+                                    // Trim left: calculate new trim_start with snap to adjacent clips
+                                    let desired_trim_start = (clip_instance.trim_start + self.drag_offset)
                                         .max(0.0)
                                         .min(clip_duration);
+
+                                    let new_trim_start = if desired_trim_start < clip_instance.trim_start {
+                                        // Extending left - check for adjacent clips
+                                        let max_extend = document.find_max_trim_extend_left(
+                                            &layer.id(),
+                                            &clip_instance.id,
+                                            clip_instance.timeline_start,
+                                        );
+
+                                        let desired_extend = clip_instance.trim_start - desired_trim_start;
+                                        let actual_extend = desired_extend.min(max_extend);
+                                        clip_instance.trim_start - actual_extend
+                                    } else {
+                                        // Shrinking - no snap needed
+                                        desired_trim_start
+                                    };
+
                                     let actual_offset = new_trim_start - clip_instance.trim_start;
 
                                     // Move start and reduce duration by actual clamped offset
@@ -1089,11 +1119,32 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimRight => {
-                                    // Trim right: extend or reduce duration, clamped to available content
-                                    let max_duration = clip_duration - clip_instance.trim_start;
-                                    instance_duration = (instance_duration + self.drag_offset)
-                                        .max(0.0)
-                                        .min(max_duration);
+                                    // Trim right: extend or reduce duration with snap to adjacent clips
+                                    let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                    let desired_change = self.drag_offset;
+                                    let desired_trim_end = (old_trim_end + desired_change)
+                                        .max(clip_instance.trim_start)
+                                        .min(clip_duration);
+
+                                    let new_trim_end = if desired_trim_end > old_trim_end {
+                                        // Extending right - check for adjacent clips
+                                        let current_duration = old_trim_end - clip_instance.trim_start;
+                                        let max_extend = document.find_max_trim_extend_right(
+                                            &layer.id(),
+                                            &clip_instance.id,
+                                            clip_instance.timeline_start,
+                                            current_duration,
+                                        );
+
+                                        let desired_extend = desired_trim_end - old_trim_end;
+                                        let actual_extend = desired_extend.min(max_extend);
+                                        old_trim_end + actual_extend
+                                    } else {
+                                        // Shrinking - no snap needed
+                                        desired_trim_end
+                                    };
+
+                                    instance_duration = (new_trim_end - clip_instance.trim_start).max(0.0);
                                 }
                             }
                         }
@@ -1128,8 +1179,8 @@ impl TimelinePane {
                                 }
                             }
                             lightningbeam_core::layer::AnyLayer::Video(_) => (
-                                egui::Color32::from_rgb(255, 150, 100), // Orange/Red
-                                egui::Color32::from_rgb(255, 200, 150), // Bright orange/red
+                                egui::Color32::from_rgb(150, 80, 220), // Purple
+                                egui::Color32::from_rgb(200, 150, 255), // Bright purple
                             ),
                         };
 
@@ -2081,8 +2132,31 @@ impl PaneRenderer for TimelinePane {
 
                         ui.painter().rect_filled(highlight_rect, 0.0, highlight_color);
 
-                        // Show drop time indicator
-                        let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x);
+                        // Show drop time indicator with snap preview
+                        let raw_drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
+
+                        // Calculate snapped drop time for preview
+                        let drop_time = if is_compatible {
+                            // Get clip duration to calculate snapped position
+                            let clip_duration = {
+                                let doc = shared.action_executor.document();
+                                doc.get_clip_duration(&dragging.clip_id).unwrap_or(1.0)
+                            };
+
+                            // Find nearest valid position (auto-snap for preview)
+                            let snapped = shared.action_executor.document()
+                                .find_nearest_valid_position(
+                                    &layer.id(),
+                                    raw_drop_time,
+                                    clip_duration,
+                                    None,
+                                );
+
+                            snapped.unwrap_or(raw_drop_time)
+                        } else {
+                            raw_drop_time
+                        };
+
                         let drop_x = self.time_to_x(drop_time);
                         if drop_x >= 0.0 && drop_x <= content_rect.width() {
                             ui.painter().line_segment(
@@ -2106,8 +2180,7 @@ impl PaneRenderer for TimelinePane {
                                 let center_y = doc.height / 2.0;
 
                                 let mut clip_instance = ClipInstance::new(dragging.clip_id)
-                                    .with_timeline_start(drop_time)
-                                    .with_position(center_x, center_y);
+                                    .with_timeline_start(drop_time);
 
                                 // For video clips, scale to fill document dimensions
                                 if dragging.clip_type == DragClipType::Video {
@@ -2118,7 +2191,20 @@ impl PaneRenderer for TimelinePane {
 
                                         clip_instance.transform.scale_x = scale_x;
                                         clip_instance.transform.scale_y = scale_y;
+
+                                        // Position at (0, 0) to center the scaled video
+                                        // (scaled dimensions = document dimensions, so top-left at origin centers it)
+                                        clip_instance.transform.x = 0.0;
+                                        clip_instance.transform.y = 0.0;
+                                    } else {
+                                        // No dimensions available, use document center
+                                        clip_instance.transform.x = center_x;
+                                        clip_instance.transform.y = center_y;
                                     }
+                                } else {
+                                    // Non-video clips: center at document center
+                                    clip_instance.transform.x = center_x;
+                                    clip_instance.transform.y = center_y;
                                 }
 
                                 (center_x, center_y, clip_instance)

@@ -1283,6 +1283,8 @@ pub struct StagePane {
     instance_id: u64,
     // Eyedropper state
     pending_eyedropper_sample: Option<(egui::Pos2, super::ColorMode)>,
+    // Last known viewport rect (for zoom-to-fit calculation)
+    last_viewport_rect: Option<egui::Rect>,
 }
 
 // Global counter for generating unique instance IDs
@@ -1301,6 +1303,7 @@ impl StagePane {
             last_pan_pos: None,
             instance_id,
             pending_eyedropper_sample: None,
+            last_viewport_rect: None,
         }
     }
 
@@ -1336,6 +1339,35 @@ impl StagePane {
     pub fn recenter(&mut self) {
         self.pan_offset = egui::Vec2::ZERO;
         self.zoom = 1.0;
+    }
+
+    /// Zoom to fit the canvas (document dimensions) in the available viewport
+    pub fn zoom_to_fit(&mut self, shared: &SharedPaneState) {
+        let document = shared.action_executor.document();
+
+        // Get document dimensions
+        let doc_width = document.width as f32;
+        let doc_height = document.height as f32;
+
+        // Get viewport size from last known rect
+        let viewport_size = if let Some(rect) = self.last_viewport_rect {
+            rect.size()
+        } else {
+            // Fallback if we don't have a rect yet
+            egui::vec2(800.0, 600.0)
+        };
+
+        // Calculate zoom to fit both width and height (no padding - use entire space)
+        let zoom_x = viewport_size.x / doc_width;
+        let zoom_y = viewport_size.y / doc_height;
+
+        // Use the smaller zoom to ensure both dimensions fit
+        self.zoom = zoom_x.min(zoom_y).clamp(0.1, 10.0);
+
+        // Center the document in the viewport
+        let canvas_center = egui::vec2(doc_width / 2.0, doc_height / 2.0) * self.zoom;
+        let viewport_center = viewport_size / 2.0;
+        self.pan_offset = viewport_center - canvas_center;
     }
 
     /// Apply zoom while keeping the point under the mouse cursor stationary
@@ -4124,6 +4156,23 @@ impl StagePane {
 }
 
 impl PaneRenderer for StagePane {
+    fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+        ui.horizontal(|ui| {
+            // Zoom to fit button
+            if ui.button("⊡ Fit").on_hover_text("Zoom to fit canvas in view").clicked() {
+                self.zoom_to_fit(shared);
+            }
+
+            ui.separator();
+
+            // Zoom level display
+            let text_style = shared.theme.style(".text-primary", ui.ctx());
+            let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
+            ui.colored_label(text_color, format!("Zoom: {:.0}%", self.zoom * 100.0));
+        });
+        true
+    }
+
     fn render_content(
         &mut self,
         ui: &mut egui::Ui,
@@ -4131,6 +4180,9 @@ impl PaneRenderer for StagePane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
+        // Store viewport rect for zoom-to-fit calculation
+        self.last_viewport_rect = Some(rect);
+
         // Check for completed eyedropper samples from GPU readback and apply them
         if let Ok(mut results) = EYEDROPPER_RESULTS
             .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))

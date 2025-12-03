@@ -29,10 +29,10 @@ impl TransformClipInstancesAction {
 }
 
 impl Action for TransformClipInstancesAction {
-    fn execute(&mut self, document: &mut Document) {
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         let layer = match document.get_layer_mut(&self.layer_id) {
             Some(l) => l,
-            None => return,
+            None => return Ok(()),
         };
 
         // Get mutable reference to clip_instances for this layer type
@@ -48,12 +48,13 @@ impl Action for TransformClipInstancesAction {
                 clip_instance.transform = new.clone();
             }
         }
+        Ok(())
     }
 
-    fn rollback(&mut self, document: &mut Document) {
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         let layer = match document.get_layer_mut(&self.layer_id) {
             Some(l) => l,
-            None => return,
+            None => return Ok(()),
         };
 
         // Get mutable reference to clip_instances for this layer type
@@ -69,6 +70,7 @@ impl Action for TransformClipInstancesAction {
                 clip_instance.transform = old.clone();
             }
         }
+        Ok(())
     }
 
     fn description(&self) -> String {
@@ -108,7 +110,7 @@ mod tests {
         let mut action = TransformClipInstancesAction::new(layer_id, transforms);
 
         // Execute action
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify transform changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -120,7 +122,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify transform restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -153,7 +155,7 @@ mod tests {
         transforms.insert(instance_id, (old_transform, new_transform));
 
         let mut action = TransformClipInstancesAction::new(layer_id, transforms);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify
         if let Some(AnyLayer::Audio(al)) = document.get_layer_mut(&layer_id) {
@@ -194,7 +196,7 @@ mod tests {
         transforms.insert(instance_id, (old_transform, new_transform));
 
         let mut action = TransformClipInstancesAction::new(layer_id, transforms);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify rotation and scale
         if let Some(AnyLayer::Video(vl)) = document.get_layer_mut(&layer_id) {
@@ -240,7 +242,7 @@ mod tests {
         );
 
         let mut action = TransformClipInstancesAction::new(layer_id, transforms);
-        action.execute(&mut document);
+        action.execute(&mut document).unwrap();
 
         // Verify both transformed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -256,7 +258,7 @@ mod tests {
         }
 
         // Rollback
-        action.rollback(&mut document);
+        action.rollback(&mut document).unwrap();
 
         // Verify both restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
@@ -287,8 +289,8 @@ mod tests {
         let mut action = TransformClipInstancesAction::new(fake_layer_id, transforms);
 
         // Should not panic, just return early
-        action.execute(&mut document);
-        action.rollback(&mut document);
+        action.execute(&mut document).unwrap();
+        action.rollback(&mut document).unwrap();
     }
 
     #[test]
