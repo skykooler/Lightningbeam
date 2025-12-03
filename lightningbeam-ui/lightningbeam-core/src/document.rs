@@ -440,7 +440,10 @@ impl Document {
     ) -> Option<f64> {
         let layer = self.get_layer(layer_id)?;
 
-        // Vector/MIDI layers don't need adjustment
+        // Clamp to timeline start (can't go before 0)
+        let desired_start = desired_start.max(0.0);
+
+        // Vector/MIDI layers don't need overlap adjustment, but still respect timeline start
         if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
             return Some(desired_start);
         }

@@ -72,13 +72,33 @@ fn can_drop_on_layer(layer: &AnyLayer, clip_type: DragClipType) -> bool {
     }
 }
 
-/// Find an existing sampled audio track in the document
+/// Find an existing sampled audio track in the document where a clip can be placed without overlap
 /// Returns the layer ID if found, None otherwise
-fn find_sampled_audio_track(document: &lightningbeam_core::document::Document) -> Option<uuid::Uuid> {
+fn find_sampled_audio_track_for_clip(
+    document: &lightningbeam_core::document::Document,
+    clip_id: uuid::Uuid,
+    timeline_start: f64,
+) -> Option<uuid::Uuid> {
+    // Get the clip duration
+    let clip_duration = document.get_clip_duration(&clip_id)?;
+    let clip_end = timeline_start + clip_duration;
+
+    // Check each sampled audio layer
     for layer in &document.root.children {
         if let AnyLayer::Audio(audio_layer) = layer {
             if audio_layer.audio_layer_type == AudioLayerType::Sampled {
-                return Some(audio_layer.layer.id);
+                // Check if there's any overlap with existing clips on this layer
+                let (overlaps, _) = document.check_overlap_on_layer(
+                    &audio_layer.layer.id,
+                    timeline_start,
+                    clip_end,
+                    None, // Don't exclude any instances
+                );
+
+                if !overlaps {
+                    // Found a suitable layer
+                    return Some(audio_layer.layer.id);
+                }
             }
         }
     }
@@ -480,6 +500,8 @@ impl TimelinePane {
         pixels_per_second: f64,
         zoom_bucket: u32,
         height: u32,
+        trim_start: f64,
+        audio_file_duration: f64,
     ) -> Vec<crate::waveform_image_cache::WaveformCacheKey> {
         use crate::waveform_image_cache::{WaveformCacheKey, TILE_WIDTH_PIXELS};
 
@@ -496,20 +518,21 @@ impl TimelinePane {
         let seconds_per_pixel_in_tile = 1.0 / zoom_bucket as f64;
         let tile_duration_seconds = TILE_WIDTH_PIXELS as f64 * seconds_per_pixel_in_tile;
 
-        // Calculate total tiles needed based on TIME, not screen pixels
-        let total_tiles = ((clip_duration / tile_duration_seconds).ceil() as u32).max(1);
-
         // Calculate visible time range within the clip
         let visible_start_pixel = (clip_rect.min.x - clip_start_x).max(0.0);
         let visible_end_pixel = (clip_rect.max.x - clip_start_x).min(clip_width);
 
         // Convert screen pixels to time within clip
-        let visible_start_time = (visible_start_pixel as f64) / pixels_per_second;
-        let visible_end_time = (visible_end_pixel as f64) / pixels_per_second;
+        let visible_start_time_in_clip = (visible_start_pixel as f64) / pixels_per_second;
+        let visible_end_time_in_clip = (visible_end_pixel as f64) / pixels_per_second;
 
-        // Calculate which tiles cover this time range
-        let start_tile = ((visible_start_time / tile_duration_seconds).floor() as u32).min(total_tiles.saturating_sub(1));
-        let end_tile = ((visible_end_time / tile_duration_seconds).ceil() as u32).min(total_tiles);
+        // Convert to audio file coordinates (tiles are indexed by audio file position)
+        let visible_audio_start = trim_start + visible_start_time_in_clip;
+        let visible_audio_end = (trim_start + visible_end_time_in_clip).min(audio_file_duration);
+
+        // Calculate which tiles from the audio file cover this range
+        let start_tile = (visible_audio_start / tile_duration_seconds).floor() as u32;
+        let end_tile = ((visible_audio_end / tile_duration_seconds).ceil() as u32).max(start_tile + 1);
 
         // Generate cache keys for visible tiles
         let mut keys = Vec::new();
@@ -611,10 +634,9 @@ impl TimelinePane {
             pixels_per_second,
             zoom_bucket,
             clip_rect.height() as u32,
+            trim_start,
+            audio_file_duration,
         );
-
-        // Calculate the unclipped clip position (where the full clip would be on screen)
-        let clip_screen_x = timeline_left_edge + ((clip_start_time - viewport_start_time) * pixels_per_second) as f32;
 
         // Render each tile
         for key in &visible_tiles {
@@ -623,52 +645,50 @@ impl TimelinePane {
                 ctx,
                 waveform_peaks,
                 audio_file_duration,
-                trim_start,
             );
 
-            // Calculate tile time offset and duration
+            // Calculate tile position in audio file (tiles now represent fixed portions of the audio file)
             // Each pixel in the tile texture represents (1.0 / zoom_bucket) seconds
             let seconds_per_pixel_in_tile = 1.0 / key.zoom_bucket as f64;
-            let tile_time_offset = key.tile_index as f64 * TILE_WIDTH_PIXELS as f64 * seconds_per_pixel_in_tile;
-            let tile_duration_seconds = TILE_WIDTH_PIXELS as f64 * seconds_per_pixel_in_tile;
+            let tile_audio_start = key.tile_index as f64 * TILE_WIDTH_PIXELS as f64 * seconds_per_pixel_in_tile;
+            let tile_audio_end = tile_audio_start + TILE_WIDTH_PIXELS as f64 * seconds_per_pixel_in_tile;
 
-            // Clip tile duration to clip's actual duration
-            // At extreme zoom-out, a tile can represent more time than the clip contains
-            let tile_end_time = tile_time_offset + tile_duration_seconds;
-            let visible_tile_duration = if tile_end_time > clip_duration {
-                (clip_duration - tile_time_offset).max(0.0)
-            } else {
-                tile_duration_seconds
-            };
+            // Calculate which portion of this tile is visible in the trimmed clip
+            let visible_audio_start = tile_audio_start.max(trim_start);
+            let visible_audio_end = tile_audio_end.min(trim_start + clip_duration).min(audio_file_duration);
 
-            // Skip tiles completely outside clip bounds
-            if visible_tile_duration <= 0.0 {
-                continue;
+            if visible_audio_start >= visible_audio_end {
+                continue; // No visible portion
             }
 
-            // Convert time to screen space using CURRENT zoom level
-            // This makes tiles stretch/squash smoothly when zooming between zoom buckets
-            let tile_screen_offset = (tile_time_offset * pixels_per_second) as f32;
-            let tile_screen_x = clip_screen_x + tile_screen_offset;
-            let tile_screen_width = (visible_tile_duration * pixels_per_second) as f32;
+            // Calculate UV coordinates (only show the portion within trim bounds)
+            let uv_min_x = ((visible_audio_start - tile_audio_start) / (tile_audio_end - tile_audio_start)).max(0.0) as f32;
+            let uv_max_x = ((visible_audio_end - tile_audio_start) / (tile_audio_end - tile_audio_start)).min(1.0) as f32;
 
-            // Calculate UV coordinates (clip texture if tile extends beyond clip)
-            let uv_max_x = if tile_duration_seconds > 0.0 {
-                (visible_tile_duration / tile_duration_seconds).min(1.0) as f32
-            } else {
-                1.0
-            };
+            // Map audio file position to timeline position
+            // Audio time trim_start corresponds to timeline position clip_start_time
+            let tile_timeline_start = clip_start_time + (visible_audio_start - trim_start);
+            let tile_timeline_end = clip_start_time + (visible_audio_end - trim_start);
 
+            // Convert to screen space
+            let tile_screen_x = timeline_left_edge + ((tile_timeline_start - viewport_start_time) * pixels_per_second) as f32;
+            let tile_screen_width = ((tile_timeline_end - tile_timeline_start) * pixels_per_second) as f32;
+
+            // Clip to the visible clip rectangle
             let tile_rect = egui::Rect::from_min_size(
                 egui::pos2(tile_screen_x, clip_rect.min.y),
                 egui::vec2(tile_screen_width, clip_rect.height()),
-            );
+            ).intersect(clip_rect);
+
+            if tile_rect.width() <= 0.0 || tile_rect.height() <= 0.0 {
+                continue; // Nothing visible
+            }
 
             // Blit texture with adjusted UV coordinates
             painter.image(
                 texture.id(),
                 tile_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(uv_max_x, 1.0)),
+                egui::Rect::from_min_max(egui::pos2(uv_min_x, 0.0), egui::pos2(uv_max_x, 1.0)),
                 tint_color,
             );
         }
@@ -678,7 +698,7 @@ impl TimelinePane {
         // Create temporary HashMap with just this clip's waveform for pre-caching
         let mut temp_waveform_cache = std::collections::HashMap::new();
         temp_waveform_cache.insert(audio_pool_index, waveform_peaks.to_vec());
-        waveform_image_cache.precache_tiles(&precache_tiles, ctx, &temp_waveform_cache, audio_file_duration, trim_start);
+        waveform_image_cache.precache_tiles(&precache_tiles, ctx, &temp_waveform_cache, audio_file_duration);
     }
 
     /// Render layer header column (left side with track names and controls)
@@ -981,6 +1001,14 @@ impl TimelinePane {
         let active_color = active_style.background_color.unwrap_or(egui::Color32::from_rgb(85, 85, 85));
         let inactive_color = inactive_style.background_color.unwrap_or(egui::Color32::from_rgb(136, 136, 136));
 
+        // Build a map of clip_instance_id -> InstanceGroup for linked clip previews
+        let mut instance_to_group: std::collections::HashMap<uuid::Uuid, &lightningbeam_core::instance_group::InstanceGroup> = std::collections::HashMap::new();
+        for group in document.instance_groups.values() {
+            for (_, instance_id) in &group.members {
+                instance_to_group.insert(*instance_id, group);
+            }
+        }
+
         // Draw layer rows from document (reversed so newest layers appear on top)
         for (i, layer) in document.root.children.iter().rev().enumerate() {
             let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
@@ -1064,8 +1092,26 @@ impl TimelinePane {
                     // Apply drag offset preview for selected clips with snapping
                     let is_selected = selection.contains_clip_instance(&clip_instance.id);
 
+                    // Check if this clip is linked to a selected clip being dragged
+                    let is_linked_to_dragged = if self.clip_drag_state.is_some() {
+                        if let Some(group) = instance_to_group.get(&clip_instance.id) {
+                            // Check if any OTHER member of this group is selected
+                            group.members.iter().any(|(_, member_id)| {
+                                *member_id != clip_instance.id && selection.contains_clip_instance(member_id)
+                            })
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // Track preview trim values for waveform rendering
+                    let mut preview_trim_start = clip_instance.trim_start;
+                    let mut preview_clip_duration = clip_duration;
+
                     if let Some(drag_type) = self.clip_drag_state {
-                        if is_selected {
+                        if is_selected || is_linked_to_dragged {
                             match drag_type {
                                 ClipDragType::Move => {
                                     // Move: shift the entire clip along the timeline with auto-snap preview
@@ -1117,6 +1163,9 @@ impl TimelinePane {
                                     if let Some(trim_end) = clip_instance.trim_end {
                                         instance_duration = (trim_end - new_trim_start).max(0.0);
                                     }
+
+                                    // Update preview trim for waveform rendering
+                                    preview_trim_start = new_trim_start;
                                 }
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
@@ -1145,6 +1194,10 @@ impl TimelinePane {
                                     };
 
                                     instance_duration = (new_trim_end - clip_instance.trim_start).max(0.0);
+
+                                    // Update preview clip duration for waveform rendering
+                                    // (the waveform system uses clip_duration to determine visible range)
+                                    preview_clip_duration = new_trim_end - preview_trim_start;
                                 }
                             }
                         }
@@ -1238,8 +1291,8 @@ impl TimelinePane {
                                                 rect.min.x,
                                                 *audio_pool_index,
                                                 instance_start,
-                                                clip.duration,
-                                                clip_instance.trim_start,
+                                                preview_clip_duration,
+                                                preview_trim_start,
                                                 audio_file_duration,
                                                 self.viewport_start_time,
                                                 self.pixels_per_second as f64,
@@ -1259,12 +1312,26 @@ impl TimelinePane {
                             video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, instance_start));
                         }
 
-                        // Draw border only if selected (brighter version of clip color)
+                        // Draw border on all clips for visual separation
                         if selection.contains_clip_instance(&clip_instance.id) {
+                            // Selected: bright colored border
                             painter.rect_stroke(
                                 clip_rect,
                                 3.0,
                                 egui::Stroke::new(3.0, bright_color),
+                                egui::StrokeKind::Middle,
+                            );
+                        } else {
+                            // Unselected: thin dark border using darker version of clip color
+                            let dark_border = egui::Color32::from_rgb(
+                                clip_color.r() / 2,
+                                clip_color.g() / 2,
+                                clip_color.b() / 2,
+                            );
+                            painter.rect_stroke(
+                                clip_rect,
+                                3.0,
+                                egui::Stroke::new(1.0, dark_border),
                                 egui::StrokeKind::Middle,
                             );
                         }
@@ -2224,14 +2291,14 @@ impl PaneRenderer for TimelinePane {
                             if let Some(linked_audio_clip_id) = dragging.linked_audio_clip_id {
                                 eprintln!("DEBUG: Video has linked audio clip: {}", linked_audio_clip_id);
 
-                                // Find or create sampled audio track
+                                // Find or create sampled audio track where the audio won't overlap
                                 let audio_layer_id = {
                                     let doc = shared.action_executor.document();
-                                    let result = find_sampled_audio_track(doc);
+                                    let result = find_sampled_audio_track_for_clip(doc, linked_audio_clip_id, drop_time);
                                     if let Some(id) = result {
-                                        eprintln!("DEBUG: Found existing audio track: {}", id);
+                                        eprintln!("DEBUG: Found existing audio track without overlap: {}", id);
                                     } else {
-                                        eprintln!("DEBUG: No existing audio track found");
+                                        eprintln!("DEBUG: No suitable audio track found, will create new one");
                                     }
                                     result
                                 }.unwrap_or_else(|| {

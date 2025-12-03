@@ -100,7 +100,6 @@ impl WaveformImageCache {
         ctx: &egui::Context,
         waveform: &[daw_backend::WaveformPeak],
         audio_file_duration: f64,
-        trim_start: f64,
     ) -> egui::TextureHandle {
         // Check if already cached
         let texture = if let Some(cached) = self.cache.get_mut(&key) {
@@ -127,7 +126,6 @@ impl WaveformImageCache {
             audio_file_duration,
             key.zoom_bucket,
             key.height,
-            trim_start,
         );
 
         // Upload to GPU as texture
@@ -170,7 +168,6 @@ impl WaveformImageCache {
         ctx: &egui::Context,
         waveform_peak_cache: &HashMap<usize, Vec<daw_backend::WaveformPeak>>,
         audio_file_duration: f64,
-        trim_start: f64,
     ) {
         // Limit pre-caching to avoid frame time spike
         const MAX_PRECACHE_PER_FRAME: usize = 2;
@@ -190,7 +187,7 @@ impl WaveformImageCache {
             // Get waveform peaks
             if let Some(waveform) = waveform_peak_cache.get(&key.audio_pool_index) {
                 // Generate and cache
-                let _ = self.get_or_create(*key, ctx, waveform, audio_file_duration, trim_start);
+                let _ = self.get_or_create(*key, ctx, waveform, audio_file_duration);
                 precached += 1;
             }
         }
@@ -261,7 +258,6 @@ fn render_waveform_to_image(
     audio_file_duration: f64,
     zoom_bucket: u32,
     height: u32,
-    trim_start: f64,
 ) -> egui::ColorImage {
     let width = TILE_WIDTH_PIXELS;
     let height = height as usize;
@@ -272,15 +268,11 @@ fn render_waveform_to_image(
     // Render as white - will be tinted at render time with clip background color
     let waveform_color = egui::Color32::WHITE;
 
-    // Calculate time range for this tile
+    // Calculate time range for this tile (tiles represent fixed portions of the audio file)
     // Each pixel represents (1.0 / zoom_bucket) seconds
     let seconds_per_pixel = 1.0 / zoom_bucket as f64;
-    let tile_start_in_clip = tile_index as f64 * TILE_WIDTH_PIXELS as f64 * seconds_per_pixel;
-    let tile_end_in_clip = tile_start_in_clip + width as f64 * seconds_per_pixel;
-
-    // Add trim_start offset to get position in source audio file
-    let tile_start_time = trim_start + tile_start_in_clip;
-    let tile_end_time = (trim_start + tile_end_in_clip).min(audio_file_duration);
+    let tile_start_time = tile_index as f64 * TILE_WIDTH_PIXELS as f64 * seconds_per_pixel;
+    let tile_end_time = (tile_start_time + width as f64 * seconds_per_pixel).min(audio_file_duration);
 
     // Calculate which waveform peaks correspond to this tile
     let peak_start_idx = ((tile_start_time / audio_file_duration) * waveform.len() as f64) as usize;

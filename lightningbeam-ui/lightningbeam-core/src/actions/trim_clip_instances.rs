@@ -203,7 +203,7 @@ impl Action for TrimClipInstancesAction {
                                 // Clamp to max allowed
                                 let actual_extend = desired_extend.min(max_extend);
                                 let clamped_trim_start = old_trim - actual_extend;
-                                let clamped_timeline_start = old_timeline - actual_extend;
+                                let clamped_timeline_start = (old_timeline - actual_extend).max(0.0);
 
                                 clamped_new = TrimData::left(clamped_trim_start, clamped_timeline_start);
                             }
