@@ -72,6 +72,19 @@ fn can_drop_on_layer(layer: &AnyLayer, clip_type: DragClipType) -> bool {
     }
 }
 
+/// Find an existing sampled audio track in the document
+/// Returns the layer ID if found, None otherwise
+fn find_sampled_audio_track(document: &lightningbeam_core::document::Document) -> Option<uuid::Uuid> {
+    for layer in &document.root.children {
+        if let AnyLayer::Audio(audio_layer) = layer {
+            if audio_layer.audio_layer_type == AudioLayerType::Sampled {
+                return Some(audio_layer.layer.id);
+            }
+        }
+    }
+    None
+}
+
 impl TimelinePane {
     pub fn new() -> Self {
         Self {
@@ -2086,34 +2099,92 @@ impl PaneRenderer for TimelinePane {
                             let layer_id = layer.id();
                             let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
 
-                            // Get document dimensions for centering
-                            let doc = shared.action_executor.document();
-                            let center_x = doc.width / 2.0;
-                            let center_y = doc.height / 2.0;
+                            // Get document dimensions for centering and create clip instance
+                            let (center_x, center_y, mut clip_instance) = {
+                                let doc = shared.action_executor.document();
+                                let center_x = doc.width / 2.0;
+                                let center_y = doc.height / 2.0;
 
-                            // Create clip instance centered on stage, at drop time
-                            let mut clip_instance = ClipInstance::new(dragging.clip_id)
-                                .with_timeline_start(drop_time)
-                                .with_position(center_x, center_y);
+                                let mut clip_instance = ClipInstance::new(dragging.clip_id)
+                                    .with_timeline_start(drop_time)
+                                    .with_position(center_x, center_y);
 
-                            // For video clips, scale to fill document dimensions
-                            if dragging.clip_type == DragClipType::Video {
-                                if let Some((video_width, video_height)) = dragging.dimensions {
-                                    // Calculate scale to fill document
-                                    let scale_x = doc.width / video_width;
-                                    let scale_y = doc.height / video_height;
+                                // For video clips, scale to fill document dimensions
+                                if dragging.clip_type == DragClipType::Video {
+                                    if let Some((video_width, video_height)) = dragging.dimensions {
+                                        // Calculate scale to fill document
+                                        let scale_x = doc.width / video_width;
+                                        let scale_y = doc.height / video_height;
 
-                                    clip_instance.transform.scale_x = scale_x;
-                                    clip_instance.transform.scale_y = scale_y;
+                                        clip_instance.transform.scale_x = scale_x;
+                                        clip_instance.transform.scale_y = scale_y;
+                                    }
                                 }
-                            }
 
-                            // Create and queue action
+                                (center_x, center_y, clip_instance)
+                            }; // doc is dropped here
+
+                            // Save instance ID for potential grouping
+                            let video_instance_id = clip_instance.id;
+
+                            // Create and queue action for video
                             let action = lightningbeam_core::actions::AddClipInstanceAction::new(
                                 layer_id,
                                 clip_instance,
                             );
                             shared.pending_actions.push(Box::new(action));
+
+                            // If video has linked audio, auto-place it and create group
+                            if let Some(linked_audio_clip_id) = dragging.linked_audio_clip_id {
+                                eprintln!("DEBUG: Video has linked audio clip: {}", linked_audio_clip_id);
+
+                                // Find or create sampled audio track
+                                let audio_layer_id = {
+                                    let doc = shared.action_executor.document();
+                                    let result = find_sampled_audio_track(doc);
+                                    if let Some(id) = result {
+                                        eprintln!("DEBUG: Found existing audio track: {}", id);
+                                    } else {
+                                        eprintln!("DEBUG: No existing audio track found");
+                                    }
+                                    result
+                                }.unwrap_or_else(|| {
+                                    eprintln!("DEBUG: Creating new audio track");
+                                    // Create new sampled audio layer
+                                    let audio_layer = lightningbeam_core::layer::AudioLayer::new_sampled("Audio Track");
+                                    let layer_id = shared.action_executor.document_mut().root.add_child(
+                                        lightningbeam_core::layer::AnyLayer::Audio(audio_layer)
+                                    );
+                                    eprintln!("DEBUG: Created audio layer with ID: {}", layer_id);
+                                    layer_id
+                                });
+
+                                eprintln!("DEBUG: Using audio layer ID: {}", audio_layer_id);
+
+                                // Create audio clip instance at same timeline position
+                                let audio_instance = ClipInstance::new(linked_audio_clip_id)
+                                    .with_timeline_start(drop_time);
+                                let audio_instance_id = audio_instance.id;
+
+                                eprintln!("DEBUG: Created audio instance: {} for clip: {}", audio_instance_id, linked_audio_clip_id);
+
+                                // Queue audio action
+                                let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                    audio_layer_id,
+                                    audio_instance,
+                                );
+                                shared.pending_actions.push(Box::new(audio_action));
+                                eprintln!("DEBUG: Queued audio action, total pending: {}", shared.pending_actions.len());
+
+                                // Create instance group linking video and audio
+                                let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
+                                group.add_member(layer_id, video_instance_id);
+                                group.add_member(audio_layer_id, audio_instance_id);
+                                shared.action_executor.document_mut().add_instance_group(group);
+                                eprintln!("DEBUG: Created instance group");
+                            } else {
+                                eprintln!("DEBUG: Video has NO linked audio clip!");
+                            }
 
                             // Clear drag state
                             *shared.dragging_asset = None;

@@ -63,7 +63,103 @@ impl TrimClipInstancesAction {
 
 impl Action for TrimClipInstancesAction {
     fn execute(&mut self, document: &mut Document) {
+        // Expand trims to include grouped instances
+        let mut expanded_trims = self.layer_trims.clone();
+        let mut already_processed = std::collections::HashSet::new();
+
         for (layer_id, trims) in &self.layer_trims {
+            for (instance_id, trim_type, old, new) in trims {
+                // Skip if already processed
+                if already_processed.contains(instance_id) {
+                    continue;
+                }
+                already_processed.insert(*instance_id);
+
+                // Check if this instance is in a group
+                if let Some(group) = document.find_group_for_instance(instance_id) {
+                    // Calculate offset based on trim type
+                    match trim_type {
+                        TrimType::TrimLeft => {
+                            if let (Some(old_trim), Some(new_trim), Some(old_timeline), Some(new_timeline)) =
+                                (old.trim_value, new.trim_value, old.timeline_start, new.timeline_start)
+                            {
+                                let trim_offset = new_trim - old_trim;
+                                let timeline_offset = new_timeline - old_timeline;
+
+                                // Add all group members to the trim list
+                                for (member_layer_id, member_instance_id) in group.get_members() {
+                                    if member_instance_id != instance_id && !already_processed.contains(member_instance_id) {
+                                        already_processed.insert(*member_instance_id);
+
+                                        // Find member's current values
+                                        if let Some(layer) = document.get_layer(member_layer_id) {
+                                            let clip_instances = match layer {
+                                                AnyLayer::Vector(vl) => &vl.clip_instances,
+                                                AnyLayer::Audio(al) => &al.clip_instances,
+                                                AnyLayer::Video(vl) => &vl.clip_instances,
+                                            };
+
+                                            if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
+                                                let member_old_trim = instance.trim_start;
+                                                let member_old_timeline = instance.timeline_start;
+                                                let member_new_trim = member_old_trim + trim_offset;
+                                                let member_new_timeline = member_old_timeline + timeline_offset;
+
+                                                expanded_trims.entry(*member_layer_id)
+                                                    .or_insert_with(Vec::new)
+                                                    .push((
+                                                        *member_instance_id,
+                                                        TrimType::TrimLeft,
+                                                        TrimData::left(member_old_trim, member_old_timeline),
+                                                        TrimData::left(member_new_trim, member_new_timeline),
+                                                    ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TrimType::TrimRight => {
+                            // Add all group members to the trim list
+                            for (member_layer_id, member_instance_id) in group.get_members() {
+                                if member_instance_id != instance_id && !already_processed.contains(member_instance_id) {
+                                    already_processed.insert(*member_instance_id);
+
+                                    // Find member's current trim_end
+                                    if let Some(layer) = document.get_layer(member_layer_id) {
+                                        let clip_instances = match layer {
+                                            AnyLayer::Vector(vl) => &vl.clip_instances,
+                                            AnyLayer::Audio(al) => &al.clip_instances,
+                                            AnyLayer::Video(vl) => &vl.clip_instances,
+                                        };
+
+                                        if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
+                                            let member_old_trim_end = instance.trim_end;
+                                            let member_new_trim_end = new.trim_value;
+
+                                            expanded_trims.entry(*member_layer_id)
+                                                .or_insert_with(Vec::new)
+                                                .push((
+                                                    *member_instance_id,
+                                                    TrimType::TrimRight,
+                                                    TrimData::right(member_old_trim_end),
+                                                    TrimData::right(member_new_trim_end),
+                                                ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store expanded trims for rollback
+        self.layer_trims = expanded_trims.clone();
+
+        // Apply all trims (including expanded)
+        for (layer_id, trims) in &expanded_trims {
             let layer = match document.get_layer_mut(layer_id) {
                 Some(l) => l,
                 None => continue,
@@ -141,6 +237,155 @@ impl Action for TrimClipInstancesAction {
         } else {
             format!("Trim {} clip instances", total_count)
         }
+    }
+
+    fn execute_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
+        use crate::layer::AnyLayer;
+        use crate::clip::AudioClipType;
+
+        // Get audio controller
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()), // No audio system, skip backend sync
+        };
+
+        // Process each layer's trims
+        for (layer_id, trims) in &self.layer_trims {
+            // Get the layer to determine its type
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Only process audio layers
+            if !matches!(layer, AnyLayer::Audio(_)) {
+                continue;
+            }
+
+            // Look up backend track ID
+            let track_id = backend.layer_to_track_map.get(layer_id)
+                .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
+
+            // Process each clip instance trim
+            for (instance_id, trim_type, _old, new) in trims {
+                // Get clip instances from the layer
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    _ => continue,
+                };
+
+                // Find the clip instance (post-execute, so it has new trim values)
+                let instance = clip_instances.iter()
+                    .find(|ci| ci.id == *instance_id)
+                    .ok_or_else(|| format!("Clip instance {} not found", instance_id))?;
+
+                // Look up the clip to determine its type and duration
+                let clip = document.get_audio_clip(&instance.clip_id)
+                    .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
+
+                // Calculate new internal_start and internal_end for backend
+                // Note: instance already has the new trim values after execute()
+                let internal_start = instance.trim_start;
+                let internal_end = instance.trim_end.unwrap_or(clip.duration);
+
+                // Handle trim based on clip type
+                match &clip.clip_type {
+                    AudioClipType::Midi { midi_clip_id } => {
+                        // For MIDI: trim_clip expects the pool clip ID
+                        controller.trim_clip(*track_id, *midi_clip_id, internal_start, internal_end);
+                    }
+                    AudioClipType::Sampled { .. } => {
+                        // For sampled audio: trim_clip expects the instance ID
+                        let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
+                            .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
+
+                        match backend_instance_id {
+                            crate::action::BackendClipInstanceId::Audio(audio_id) => {
+                                controller.trim_clip(*track_id, *audio_id, internal_start, internal_end);
+                            }
+                            _ => return Err("Expected audio instance ID for sampled clip".to_string()),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rollback_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
+        use crate::layer::AnyLayer;
+        use crate::clip::AudioClipType;
+
+        // Get audio controller
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()), // No audio system, skip backend sync
+        };
+
+        // Process each layer's trims (restore old trim values)
+        for (layer_id, trims) in &self.layer_trims {
+            // Get the layer to determine its type
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Only process audio layers
+            if !matches!(layer, AnyLayer::Audio(_)) {
+                continue;
+            }
+
+            // Look up backend track ID
+            let track_id = backend.layer_to_track_map.get(layer_id)
+                .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
+
+            // Process each clip instance trim (restore old values)
+            for (instance_id, trim_type, old, _new) in trims {
+                // Get clip instances from the layer
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    _ => continue,
+                };
+
+                // Find the clip instance
+                let instance = clip_instances.iter()
+                    .find(|ci| ci.id == *instance_id)
+                    .ok_or_else(|| format!("Clip instance {} not found", instance_id))?;
+
+                // Look up the clip to determine its type and duration
+                let clip = document.get_audio_clip(&instance.clip_id)
+                    .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
+
+                // Calculate old internal_start and internal_end for backend
+                let internal_start = match trim_type {
+                    TrimType::TrimLeft => old.trim_value.unwrap_or(0.0),
+                    TrimType::TrimRight => instance.trim_start, // trim_start wasn't changed
+                };
+                let internal_end = match trim_type {
+                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.duration), // trim_end wasn't changed
+                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.duration),
+                };
+
+                // Handle trim based on clip type
+                match &clip.clip_type {
+                    AudioClipType::Midi { midi_clip_id } => {
+                        // For MIDI: trim_clip expects the pool clip ID
+                        controller.trim_clip(*track_id, *midi_clip_id, internal_start, internal_end);
+                    }
+                    AudioClipType::Sampled { .. } => {
+                        // For sampled audio: trim_clip expects the instance ID
+                        let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
+                            .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
+
+                        match backend_instance_id {
+                            crate::action::BackendClipInstanceId::Audio(audio_id) => {
+                                controller.trim_clip(*track_id, *audio_id, internal_start, internal_end);
+                            }
+                            _ => return Err("Expected audio instance ID for sampled clip".to_string()),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

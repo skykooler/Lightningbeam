@@ -107,6 +107,9 @@ pub struct Document {
     /// Image asset library - static images for fill textures
     pub image_assets: HashMap<Uuid, ImageAsset>,
 
+    /// Instance groups for linked clip instances
+    pub instance_groups: HashMap<Uuid, crate::instance_group::InstanceGroup>,
+
     /// Current UI layout state (serialized for save/load)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layout: Option<LayoutNode>,
@@ -135,6 +138,7 @@ impl Default for Document {
             video_clips: HashMap::new(),
             audio_clips: HashMap::new(),
             image_assets: HashMap::new(),
+            instance_groups: HashMap::new(),
             ui_layout: None,
             ui_layout_base: None,
             current_time: 0.0,
@@ -241,6 +245,24 @@ impl Document {
         let id = clip.id;
         self.audio_clips.insert(id, clip);
         id
+    }
+
+    /// Add an instance group to the document
+    pub fn add_instance_group(&mut self, group: crate::instance_group::InstanceGroup) -> Uuid {
+        let id = group.id;
+        self.instance_groups.insert(id, group);
+        id
+    }
+
+    /// Remove an instance group from the document
+    pub fn remove_instance_group(&mut self, group_id: &Uuid) {
+        self.instance_groups.remove(group_id);
+    }
+
+    /// Find the group that contains a specific clip instance
+    pub fn find_group_for_instance(&self, instance_id: &Uuid) -> Option<&crate::instance_group::InstanceGroup> {
+        self.instance_groups.values()
+            .find(|group| group.contains_instance(instance_id))
     }
 
     /// Get a vector clip by ID

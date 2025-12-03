@@ -172,6 +172,13 @@ impl Action for AddClipInstanceAction {
                     QueryResponse::MidiClipInstanceAdded(Ok(instance_id)) => {
                         self.backend_track_id = Some(*backend_track_id);
                         self.backend_midi_instance_id = Some(instance_id);
+
+                        // Add to global clip instance mapping
+                        backend.clip_instance_to_backend_map.insert(
+                            self.clip_instance.id,
+                            crate::action::BackendClipInstanceId::Midi(instance_id)
+                        );
+
                         Ok(())
                     }
                     QueryResponse::MidiClipInstanceAdded(Err(e)) => Err(e),
@@ -193,6 +200,13 @@ impl Action for AddClipInstanceAction {
                     QueryResponse::AudioClipInstanceAdded(Ok(instance_id)) => {
                         self.backend_track_id = Some(*backend_track_id);
                         self.backend_audio_instance_id = Some(instance_id);
+
+                        // Add to global clip instance mapping
+                        backend.clip_instance_to_backend_map.insert(
+                            self.clip_instance.id,
+                            crate::action::BackendClipInstanceId::Audio(instance_id)
+                        );
+
                         Ok(())
                     }
                     QueryResponse::AudioClipInstanceAdded(Err(e)) => Err(e),
@@ -212,6 +226,9 @@ impl Action for AddClipInstanceAction {
             } else if let Some(audio_instance_id) = self.backend_audio_instance_id {
                 controller.remove_audio_clip(track_id, audio_instance_id);
             }
+
+            // Remove from global clip instance mapping
+            backend.clip_instance_to_backend_map.remove(&self.clip_instance.id);
 
             // Clear stored IDs
             self.backend_track_id = None;

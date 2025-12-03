@@ -426,6 +426,26 @@ impl FileOperationsWorker {
     }
 }
 
+/// Result from background audio extraction thread
+#[derive(Debug)]
+enum AudioExtractionResult {
+    Success {
+        video_clip_id: Uuid,
+        audio_clip: lightningbeam_core::clip::AudioClip,
+        pool_index: usize,
+        video_name: String,
+        channels: u32,
+        sample_rate: u32,
+    },
+    NoAudio {
+        video_clip_id: Uuid,
+    },
+    Error {
+        video_clip_id: Uuid,
+        error: String,
+    },
+}
+
 struct EditorApp {
     layouts: Vec<LayoutDefinition>,
     current_layout_index: usize,
@@ -463,6 +483,8 @@ struct EditorApp {
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
+    // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
+    clip_instance_to_backend_map: HashMap<Uuid, lightningbeam_core::action::BackendClipInstanceId>,
     // Playback state (global for all panes)
     playback_time: f64, // Current playback position in seconds (persistent - save with document)
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
@@ -496,6 +518,10 @@ struct EditorApp {
     file_command_tx: std::sync::mpsc::Sender<FileCommand>,
     /// Current file operation in progress (if any)
     file_operation: Option<FileOperation>,
+
+    /// Audio extraction channel for background thread communication
+    audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
+    audio_extraction_rx: std::sync::mpsc::Receiver<AudioExtractionResult>,
 }
 
 /// Import filter types for the file dialog
@@ -580,6 +606,9 @@ impl EditorApp {
                 }
             };
 
+        // Create audio extraction channel for background thread communication
+        let (audio_extraction_tx, audio_extraction_rx) = std::sync::mpsc::channel();
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -615,6 +644,7 @@ impl EditorApp {
             )),
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
+            clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
             dragging_asset: None, // No asset being dragged initially
@@ -630,6 +660,8 @@ impl EditorApp {
             config,
             file_command_tx,
             file_operation: None, // No file operation in progress initially
+            audio_extraction_tx,
+            audio_extraction_rx,
         }
     }
 
@@ -983,6 +1015,7 @@ impl EditorApp {
                     let mut backend_context = lightningbeam_core::action::BackendContext {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
+                        clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
                     };
 
                     match self.action_executor.undo_with_backend(&mut backend_context) {
@@ -1004,6 +1037,7 @@ impl EditorApp {
                     let mut backend_context = lightningbeam_core::action::BackendContext {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
+                        clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
                     };
 
                     match self.action_executor.redo_with_backend(&mut backend_context) {
@@ -1723,8 +1757,78 @@ impl EditorApp {
         }
         drop(video_mgr);
 
-        // TODO: Extract audio in background thread if present
-        // TODO: Create AudioClip and link to VideoClip via linked_audio_clip_id
+        // Spawn background thread for audio extraction if video has audio
+        if metadata.has_audio {
+            if let Some(ref audio_controller) = self.audio_controller {
+                let path_clone = path_str.clone();
+                let video_clip_id = clip_id;
+                let video_name = name.clone();
+                let audio_controller_clone = Arc::clone(audio_controller);
+                let tx = self.audio_extraction_tx.clone();
+
+                std::thread::spawn(move || {
+                    use lightningbeam_core::video::extract_audio_from_video;
+                    use lightningbeam_core::clip::{AudioClip, AudioClipType};
+
+                    // Extract audio from video (slow FFmpeg operation)
+                    match extract_audio_from_video(&path_clone) {
+                        Ok(Some(extracted)) => {
+                            // Add audio to daw-backend pool synchronously to get pool index
+                            let pool_index = {
+                                let mut controller = audio_controller_clone.lock().unwrap();
+                                match controller.add_audio_file_sync(
+                                    path_clone.clone(),
+                                    extracted.samples,
+                                    extracted.channels,
+                                    extracted.sample_rate,
+                                ) {
+                                    Ok(index) => index,
+                                    Err(e) => {
+                                        eprintln!("Failed to add audio file to backend: {}", e);
+                                        let _ = tx.send(AudioExtractionResult::Error {
+                                            video_clip_id,
+                                            error: format!("Failed to add audio to backend: {}", e),
+                                        });
+                                        return;
+                                    }
+                                }
+                            };
+
+                            // Create AudioClip
+                            let audio_clip_name = format!("{} (Audio)", video_name);
+                            let audio_clip = AudioClip::new_sampled(
+                                &audio_clip_name,
+                                pool_index,
+                                extracted.duration,
+                            );
+
+                            // Send success result
+                            let _ = tx.send(AudioExtractionResult::Success {
+                                video_clip_id,
+                                audio_clip,
+                                pool_index,
+                                video_name,
+                                channels: extracted.channels,
+                                sample_rate: extracted.sample_rate,
+                            });
+                        }
+                        Ok(None) => {
+                            // Video has no audio stream
+                            let _ = tx.send(AudioExtractionResult::NoAudio { video_clip_id });
+                        }
+                        Err(e) => {
+                            // Audio extraction failed
+                            let _ = tx.send(AudioExtractionResult::Error {
+                                video_clip_id,
+                                error: e,
+                            });
+                        }
+                    }
+                });
+            } else {
+                eprintln!("  ⚠️  Video has audio but audio engine not initialized - skipping extraction");
+            }
+        }
 
         // Spawn background thread for thumbnail generation
         let video_manager_clone = Arc::clone(&self.video_manager);
@@ -1751,7 +1855,58 @@ impl EditorApp {
         );
 
         if metadata.has_audio {
-            println!("  Video has audio track (extraction not yet implemented)");
+            println!("  Extracting audio track in background...");
+        }
+    }
+
+    /// Handle audio extraction results from background thread
+    fn handle_audio_extraction_result(&mut self, result: AudioExtractionResult) {
+        match result {
+            AudioExtractionResult::Success {
+                video_clip_id,
+                audio_clip,
+                pool_index,
+                video_name,
+                channels,
+                sample_rate,
+            } => {
+                // Add AudioClip to document
+                let audio_clip_id = self.action_executor.document_mut().add_audio_clip(audio_clip);
+
+                // Update VideoClip's linked_audio_clip_id
+                if let Some(video_clip) = self.action_executor.document_mut().video_clips
+                    .get_mut(&video_clip_id)
+                {
+                    video_clip.linked_audio_clip_id = Some(audio_clip_id);
+
+                    // Get audio clip duration for logging
+                    let duration = self.action_executor.document().audio_clips
+                        .get(&audio_clip_id)
+                        .map(|c| c.duration)
+                        .unwrap_or(0.0);
+
+                    println!("✅ Extracted audio from '{}' ({:.1}s, {}ch, {}Hz) - AudioClip ID: {}",
+                        video_name,
+                        duration,
+                        channels,
+                        sample_rate,
+                        audio_clip_id
+                    );
+
+                    // Fetch waveform from backend and cache it for rendering
+                    if let Some(waveform) = self.fetch_waveform(pool_index) {
+                        println!("   Cached waveform with {} peaks", waveform.len());
+                    }
+                } else {
+                    eprintln!("⚠️  Audio extracted but VideoClip {} not found (may have been deleted)", video_clip_id);
+                }
+            }
+            AudioExtractionResult::NoAudio { video_clip_id } => {
+                println!("ℹ️  Video {} has no audio stream", video_clip_id);
+            }
+            AudioExtractionResult::Error { video_clip_id, error } => {
+                eprintln!("❌ Failed to extract audio from video {}: {}", video_clip_id, error);
+            }
         }
     }
 }
@@ -1763,6 +1918,11 @@ impl eframe::App for EditorApp {
         ctx.options_mut(|o| {
             o.zoom_with_keyboard = false;
         });
+
+        // Poll audio extraction results from background threads
+        while let Ok(result) = self.audio_extraction_rx.try_recv() {
+            self.handle_audio_extraction_result(result);
+        }
 
         // Check for native menu events (macOS)
         if let Some(menu_system) = &self.menu_system {
@@ -2014,6 +2174,11 @@ impl eframe::App for EditorApp {
                 self.pending_view_action = None;
             }
 
+            // Sync any new audio layers created during this frame to the backend
+            // This handles layers created directly (e.g., auto-created audio tracks for video+audio)
+            // Must happen BEFORE executing actions so the layer-to-track mapping is available
+            self.sync_audio_layers_to_backend();
+
             // Execute all pending actions (two-phase dispatch)
             for action in pending_actions {
                 // Create backend context for actions that need backend sync
@@ -2022,6 +2187,7 @@ impl eframe::App for EditorApp {
                     let mut backend_context = lightningbeam_core::action::BackendContext {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
+                        clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
                     };
 
                     // Execute action with backend synchronization

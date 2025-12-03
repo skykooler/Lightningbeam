@@ -38,6 +38,19 @@ fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> AnyLayer {
     }
 }
 
+/// Find an existing sampled audio track in the document
+/// Returns the layer ID if found, None otherwise
+fn find_sampled_audio_track(document: &lightningbeam_core::document::Document) -> Option<uuid::Uuid> {
+    for layer in &document.root.children {
+        if let AnyLayer::Audio(audio_layer) = layer {
+            if audio_layer.audio_layer_type == AudioLayerType::Sampled {
+                return Some(audio_layer.layer.id);
+            }
+        }
+    }
+    None
+}
+
 /// Shared Vello resources (created once, reused by all Stage panes)
 struct SharedVelloResources {
     renderer: Arc<Mutex<vello::Renderer>>,
@@ -4169,6 +4182,9 @@ impl PaneRenderer for StagePane {
 
                     // Handle drop on mouse release
                     if ui.input(|i| i.pointer.any_released()) {
+                        eprintln!("DEBUG STAGE DROP: Dropping clip type {:?}, linked_audio: {:?}",
+                            dragging.clip_type, dragging.linked_audio_clip_id);
+
                         // Convert screen position to world coordinates
                         let canvas_pos = pointer_pos - rect.min;
                         let world_pos = (canvas_pos - self.pan_offset) / self.zoom;
@@ -4274,12 +4290,67 @@ impl PaneRenderer for StagePane {
                                     }
                                 }
 
-                                // Create and queue action
+                                // Save instance ID for potential grouping
+                                let video_instance_id = clip_instance.id;
+
+                                // Create and queue action for video
                                 let action = lightningbeam_core::actions::AddClipInstanceAction::new(
                                     layer_id,
                                     clip_instance,
                                 );
                                 shared.pending_actions.push(Box::new(action));
+
+                                // If video has linked audio, auto-place it and create group
+                                if let Some(linked_audio_clip_id) = dragging.linked_audio_clip_id {
+                                    eprintln!("DEBUG STAGE: Video has linked audio clip: {}", linked_audio_clip_id);
+
+                                    // Find or create sampled audio track
+                                    let audio_layer_id = {
+                                        let doc = shared.action_executor.document();
+                                        let result = find_sampled_audio_track(doc);
+                                        if let Some(id) = result {
+                                            eprintln!("DEBUG STAGE: Found existing audio track: {}", id);
+                                        } else {
+                                            eprintln!("DEBUG STAGE: No existing audio track found");
+                                        }
+                                        result
+                                    }.unwrap_or_else(|| {
+                                        eprintln!("DEBUG STAGE: Creating new audio track");
+                                        // Create new sampled audio layer
+                                        let audio_layer = AudioLayer::new_sampled("Audio Track");
+                                        let layer_id = shared.action_executor.document_mut().root.add_child(
+                                            AnyLayer::Audio(audio_layer)
+                                        );
+                                        eprintln!("DEBUG STAGE: Created audio layer with ID: {}", layer_id);
+                                        layer_id
+                                    });
+
+                                    eprintln!("DEBUG STAGE: Using audio layer ID: {}", audio_layer_id);
+
+                                    // Create audio clip instance at same timeline position
+                                    let audio_instance = ClipInstance::new(linked_audio_clip_id)
+                                        .with_timeline_start(drop_time);
+                                    let audio_instance_id = audio_instance.id;
+
+                                    eprintln!("DEBUG STAGE: Created audio instance: {} for clip: {}", audio_instance_id, linked_audio_clip_id);
+
+                                    // Queue audio action
+                                    let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                        audio_layer_id,
+                                        audio_instance,
+                                    );
+                                    shared.pending_actions.push(Box::new(audio_action));
+                                    eprintln!("DEBUG STAGE: Queued audio action, total pending: {}", shared.pending_actions.len());
+
+                                    // Create instance group linking video and audio
+                                    let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
+                                    group.add_member(layer_id, video_instance_id);
+                                    group.add_member(audio_layer_id, audio_instance_id);
+                                    shared.action_executor.document_mut().add_instance_group(group);
+                                    eprintln!("DEBUG STAGE: Created instance group");
+                                } else {
+                                    eprintln!("DEBUG STAGE: Video has NO linked audio clip!");
+                                }
                             }
                         }
 

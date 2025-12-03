@@ -22,6 +22,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Backend clip instance ID - wraps both MIDI and Audio instance IDs
+#[derive(Debug, Clone, Copy)]
+pub enum BackendClipInstanceId {
+    Midi(daw_backend::MidiClipInstanceId),
+    Audio(daw_backend::AudioClipInstanceId),
+}
+
 /// Backend context for actions that need to interact with external systems
 ///
 /// This bundles all backend references (audio, future video) that actions
@@ -32,6 +39,9 @@ pub struct BackendContext<'a> {
 
     /// Mapping from document layer UUIDs to backend track IDs
     pub layer_to_track_map: &'a HashMap<Uuid, daw_backend::TrackId>,
+
+    /// Mapping from document clip instance UUIDs to backend clip instance IDs
+    pub clip_instance_to_backend_map: &'a mut HashMap<Uuid, BackendClipInstanceId>,
 
     // Future: pub video_controller: Option<&'a mut VideoController>,
 }

@@ -27,7 +27,55 @@ impl MoveClipInstancesAction {
 
 impl Action for MoveClipInstancesAction {
     fn execute(&mut self, document: &mut Document) {
+        // Expand moves to include grouped instances
+        let mut expanded_moves = self.layer_moves.clone();
+        let mut already_processed = std::collections::HashSet::new();
+
         for (layer_id, moves) in &self.layer_moves {
+            for (instance_id, old_start, new_start) in moves {
+                // Skip if already processed
+                if already_processed.contains(instance_id) {
+                    continue;
+                }
+                already_processed.insert(*instance_id);
+
+                // Check if this instance is in a group
+                if let Some(group) = document.find_group_for_instance(instance_id) {
+                    let offset = new_start - old_start;
+
+                    // Add all group members to the move list
+                    for (member_layer_id, member_instance_id) in group.get_members() {
+                        if member_instance_id != instance_id && !already_processed.contains(member_instance_id) {
+                            already_processed.insert(*member_instance_id);
+
+                            // Find member's current position
+                            if let Some(layer) = document.get_layer(member_layer_id) {
+                                let clip_instances = match layer {
+                                    AnyLayer::Vector(vl) => &vl.clip_instances,
+                                    AnyLayer::Audio(al) => &al.clip_instances,
+                                    AnyLayer::Video(vl) => &vl.clip_instances,
+                                };
+
+                                if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
+                                    let member_old = instance.timeline_start;
+                                    let member_new = member_old + offset;
+
+                                    expanded_moves.entry(*member_layer_id)
+                                        .or_insert_with(Vec::new)
+                                        .push((*member_instance_id, member_old, member_new));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store expanded moves for rollback
+        self.layer_moves = expanded_moves.clone();
+
+        // Apply all moves (including expanded)
+        for (layer_id, moves) in &expanded_moves {
             let layer = match document.get_layer_mut(layer_id) {
                 Some(l) => l,
                 None => continue,
@@ -81,6 +129,140 @@ impl Action for MoveClipInstancesAction {
         } else {
             format!("Move {} clip instances", total_count)
         }
+    }
+
+    fn execute_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
+        use crate::layer::AnyLayer;
+        use crate::clip::AudioClipType;
+
+        // Get audio controller
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()), // No audio system, skip backend sync
+        };
+
+        // Process each layer's moves
+        for (layer_id, moves) in &self.layer_moves {
+            // Get the layer to determine its type
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Only process audio layers
+            if !matches!(layer, AnyLayer::Audio(_)) {
+                continue;
+            }
+
+            // Look up backend track ID
+            let track_id = backend.layer_to_track_map.get(layer_id)
+                .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
+
+            // Process each clip instance move
+            for (instance_id, _old_start, new_start) in moves {
+                // Get clip instances from the layer
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    _ => continue,
+                };
+
+                // Find the clip instance
+                let instance = clip_instances.iter()
+                    .find(|ci| ci.id == *instance_id)
+                    .ok_or_else(|| format!("Clip instance {} not found", instance_id))?;
+
+                // Look up the clip to determine its type
+                let clip = document.get_audio_clip(&instance.clip_id)
+                    .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
+
+                // Handle move based on clip type
+                match &clip.clip_type {
+                    AudioClipType::Midi { midi_clip_id } => {
+                        // For MIDI: move_clip expects the pool clip ID
+                        controller.move_clip(*track_id, *midi_clip_id, *new_start);
+                    }
+                    AudioClipType::Sampled { .. } => {
+                        // For sampled audio: move_clip expects the instance ID
+                        let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
+                            .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
+
+                        match backend_instance_id {
+                            crate::action::BackendClipInstanceId::Audio(audio_id) => {
+                                controller.move_clip(*track_id, *audio_id, *new_start);
+                            }
+                            _ => return Err("Expected audio instance ID for sampled clip".to_string()),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn rollback_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
+        use crate::layer::AnyLayer;
+        use crate::clip::AudioClipType;
+
+        // Get audio controller
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()), // No audio system, skip backend sync
+        };
+
+        // Process each layer's moves (restore old positions)
+        for (layer_id, moves) in &self.layer_moves {
+            // Get the layer to determine its type
+            let layer = document.get_layer(layer_id)
+                .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Only process audio layers
+            if !matches!(layer, AnyLayer::Audio(_)) {
+                continue;
+            }
+
+            // Look up backend track ID
+            let track_id = backend.layer_to_track_map.get(layer_id)
+                .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
+
+            // Process each clip instance move (restore old position)
+            for (instance_id, old_start, _new_start) in moves {
+                // Get clip instances from the layer
+                let clip_instances = match layer {
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    _ => continue,
+                };
+
+                // Find the clip instance
+                let instance = clip_instances.iter()
+                    .find(|ci| ci.id == *instance_id)
+                    .ok_or_else(|| format!("Clip instance {} not found", instance_id))?;
+
+                // Look up the clip to determine its type
+                let clip = document.get_audio_clip(&instance.clip_id)
+                    .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
+
+                // Handle move based on clip type (restore old position)
+                match &clip.clip_type {
+                    AudioClipType::Midi { midi_clip_id } => {
+                        // For MIDI: move_clip expects the pool clip ID
+                        controller.move_clip(*track_id, *midi_clip_id, *old_start);
+                    }
+                    AudioClipType::Sampled { .. } => {
+                        // For sampled audio: move_clip expects the instance ID
+                        let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
+                            .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
+
+                        match backend_instance_id {
+                            crate::action::BackendClipInstanceId::Audio(audio_id) => {
+                                controller.move_clip(*track_id, *audio_id, *old_start);
+                            }
+                            _ => return Err("Expected audio instance ID for sampled clip".to_string()),
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

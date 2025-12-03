@@ -48,6 +48,8 @@ pub struct DraggingAsset {
     pub duration: f64,
     /// Dimensions (width, height) for vector/video clips, None for audio
     pub dimensions: Option<(f64, f64)>,
+    /// Optional linked audio clip ID (for video clips with extracted audio)
+    pub linked_audio_clip_id: Option<Uuid>,
 }
 
 pub mod toolbar;

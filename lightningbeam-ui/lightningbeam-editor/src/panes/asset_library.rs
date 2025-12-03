@@ -674,8 +674,18 @@ impl AssetLibraryPane {
             });
         }
 
-        // Collect audio clips
+        // Build set of audio clip IDs that are linked to videos
+        let linked_audio_ids: std::collections::HashSet<uuid::Uuid> = document.video_clips.values()
+            .filter_map(|video| video.linked_audio_clip_id)
+            .collect();
+
+        // Collect audio clips (skip those linked to videos)
         for (id, clip) in &document.audio_clips {
+            // Skip if this audio clip is linked to a video
+            if linked_audio_ids.contains(id) {
+                continue;
+            }
+
             let (extra_info, drag_clip_type) = match &clip.clip_type {
                 AudioClipType::Sampled { .. } => ("Sampled".to_string(), DragClipType::AudioSampled),
                 AudioClipType::Midi { .. } => ("MIDI".to_string(), DragClipType::AudioMidi),
@@ -1292,12 +1302,23 @@ impl AssetLibraryPane {
 
                         // Handle drag start
                         if response.drag_started() {
+                            // For video clips, get the linked audio clip ID
+                            let linked_audio_clip_id = if asset.drag_clip_type == DragClipType::Video {
+                                let result = document.video_clips.get(&asset.id)
+                                    .and_then(|video| video.linked_audio_clip_id);
+                                eprintln!("DEBUG DRAG: Video clip {} has linked audio: {:?}", asset.id, result);
+                                result
+                            } else {
+                                None
+                            };
+
                             *shared.dragging_asset = Some(DraggingAsset {
                                 clip_id: asset.id,
                                 clip_type: asset.drag_clip_type,
                                 name: asset.name.clone(),
                                 duration: asset.duration,
                                 dimensions: asset.dimensions,
+                                linked_audio_clip_id,
                             });
                         }
 
@@ -1587,12 +1608,23 @@ impl AssetLibraryPane {
 
                         // Handle drag start
                         if response.drag_started() {
+                            // For video clips, get the linked audio clip ID
+                            let linked_audio_clip_id = if asset.drag_clip_type == DragClipType::Video {
+                                let result = document.video_clips.get(&asset.id)
+                                    .and_then(|video| video.linked_audio_clip_id);
+                                eprintln!("DEBUG DRAG: Video clip {} has linked audio: {:?}", asset.id, result);
+                                result
+                            } else {
+                                None
+                            };
+
                             *shared.dragging_asset = Some(DraggingAsset {
                                 clip_id: asset.id,
                                 clip_type: asset.drag_clip_type,
                                 name: asset.name.clone(),
                                 duration: asset.duration,
                                 dimensions: asset.dimensions,
+                                linked_audio_clip_id,
                             });
                         }
                     }

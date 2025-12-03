@@ -1737,6 +1737,29 @@ impl Engine {
                     Err(e) => QueryResponse::AudioClipInstanceAdded(Err(e.to_string())),
                 }
             }
+            Query::AddAudioFileSync(path, data, channels, sample_rate) => {
+                // Add audio file to pool and return the pool index
+                // Detect original format from file extension
+                let path_buf = std::path::PathBuf::from(&path);
+                let original_format = path_buf.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|s| s.to_lowercase());
+
+                // Create AudioFile and add to pool
+                let audio_file = crate::audio::pool::AudioFile::with_format(
+                    path_buf,
+                    data,
+                    channels,
+                    sample_rate,
+                    original_format,
+                );
+                let pool_index = self.audio_pool.add_file(audio_file);
+
+                // Notify UI about the new audio file (for event listeners)
+                let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
+
+                QueryResponse::AudioFileAddedSync(Ok(pool_index))
+            }
             Query::GetProject => {
                 // Clone the entire project for serialization
                 QueryResponse::ProjectRetrieved(Ok(Box::new(self.project.clone())))
@@ -2147,6 +2170,16 @@ impl EngineController {
     /// Add an audio file to the pool (must be called from non-audio thread with pre-loaded data)
     pub fn add_audio_file(&mut self, path: String, data: Vec<f32>, channels: u32, sample_rate: u32) {
         let _ = self.command_tx.push(Command::AddAudioFile(path, data, channels, sample_rate));
+    }
+
+    /// Add an audio file to the pool synchronously and get the pool index
+    /// Returns the pool index where the audio file was added
+    pub fn add_audio_file_sync(&mut self, path: String, data: Vec<f32>, channels: u32, sample_rate: u32) -> Result<usize, String> {
+        let query = Query::AddAudioFileSync(path, data, channels, sample_rate);
+        match self.send_query(query)? {
+            QueryResponse::AudioFileAddedSync(result) => result,
+            _ => Err("Unexpected query response".to_string()),
+        }
     }
 
     /// Add a clip to an audio track
