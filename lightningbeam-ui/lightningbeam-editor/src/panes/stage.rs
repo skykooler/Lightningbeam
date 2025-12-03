@@ -858,7 +858,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                     // 6. Draw transform tool handles (when Transform tool is active)
                     use lightningbeam_core::tool::Tool;
-                    if matches!(self.selected_tool, Tool::Transform) && !self.selection.is_empty() {
+                    let should_draw_transform_handles = matches!(self.selected_tool, Tool::Transform) && !self.selection.is_empty();
+                    if should_draw_transform_handles {
                         // For single object: use object-aligned (rotated) bounding box
                         // For multiple objects: use axis-aligned bounding box (simpler for now)
 
@@ -1124,6 +1125,207 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(50, 200, 50), None, &line_path);
                             }
                         }
+                    }
+                } else if let lightningbeam_core::layer::AnyLayer::Video(video_layer) = layer {
+                    // Draw transform handles for video layers when Transform tool is active
+                    use lightningbeam_core::tool::Tool;
+                    if matches!(self.selected_tool, Tool::Transform) {
+                        use vello::peniko::{Color, Fill};
+                        use vello::kurbo::{Circle, Rect as KurboRect, Stroke};
+
+                        let stroke_width = 2.0 / self.zoom.max(0.5) as f64;
+
+                        // Find visible clip instance at current playback time
+                        let playback_time = self.playback_time;
+
+                        // Find clip instance visible at playback time
+                        let visible_clip = video_layer.clip_instances.iter().find(|inst| {
+                            let clip_duration = self.document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
+                            let effective_duration = inst.effective_duration(clip_duration);
+                            playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
+                        });
+
+                    if let Some(clip_inst) = visible_clip {
+                        // Get video clip dimensions
+                        if let Some(video_clip) = self.document.get_video_clip(&clip_inst.clip_id) {
+                            let handle_size = (8.0 / self.zoom.max(0.5) as f64).max(6.0);
+                            let handle_color = Color::from_rgb8(0, 120, 255); // Blue
+                            let rotation_handle_offset = 20.0 / self.zoom.max(0.5) as f64;
+
+                            // Video clip local bounding box (0,0 to width,height)
+                            let local_bbox = KurboRect::new(0.0, 0.0, video_clip.width, video_clip.height);
+
+                            // Calculate the 4 corners in local space
+                            let local_corners = [
+                                vello::kurbo::Point::new(local_bbox.x0, local_bbox.y0), // Top-left
+                                vello::kurbo::Point::new(local_bbox.x1, local_bbox.y0), // Top-right
+                                vello::kurbo::Point::new(local_bbox.x1, local_bbox.y1), // Bottom-right
+                                vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1), // Bottom-left
+                            ];
+
+                            // Build skew transforms around center
+                            let center_x = (local_bbox.x0 + local_bbox.x1) / 2.0;
+                            let center_y = (local_bbox.y0 + local_bbox.y1) / 2.0;
+
+                            let skew_transform = if clip_inst.transform.skew_x != 0.0 || clip_inst.transform.skew_y != 0.0 {
+                                let skew_x_affine = if clip_inst.transform.skew_x != 0.0 {
+                                    let tan_skew = clip_inst.transform.skew_x.to_radians().tan();
+                                    Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
+                                } else {
+                                    Affine::IDENTITY
+                                };
+
+                                let skew_y_affine = if clip_inst.transform.skew_y != 0.0 {
+                                    let tan_skew = clip_inst.transform.skew_y.to_radians().tan();
+                                    Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
+                                } else {
+                                    Affine::IDENTITY
+                                };
+
+                                Affine::translate((center_x, center_y))
+                                    * skew_x_affine
+                                    * skew_y_affine
+                                    * Affine::translate((-center_x, -center_y))
+                            } else {
+                                Affine::IDENTITY
+                            };
+
+                            // Transform to world space
+                            let obj_transform = Affine::translate((clip_inst.transform.x, clip_inst.transform.y))
+                                * Affine::rotate(clip_inst.transform.rotation.to_radians())
+                                * Affine::scale_non_uniform(clip_inst.transform.scale_x, clip_inst.transform.scale_y)
+                                * skew_transform;
+
+                            let world_corners: Vec<vello::kurbo::Point> = local_corners
+                                .iter()
+                                .map(|&p| obj_transform * p)
+                                .collect();
+
+                            // Draw rotated bounding box outline
+                            let bbox_path = {
+                                let mut path = vello::kurbo::BezPath::new();
+                                path.move_to(world_corners[0]);
+                                path.line_to(world_corners[1]);
+                                path.line_to(world_corners[2]);
+                                path.line_to(world_corners[3]);
+                                path.close_path();
+                                path
+                            };
+
+                            scene.stroke(
+                                &Stroke::new(stroke_width),
+                                camera_transform,
+                                handle_color,
+                                None,
+                                &bbox_path,
+                            );
+
+                            // Draw 4 corner handles (squares)
+                            for corner in &world_corners {
+                                let handle_rect = KurboRect::new(
+                                    corner.x - handle_size / 2.0,
+                                    corner.y - handle_size / 2.0,
+                                    corner.x + handle_size / 2.0,
+                                    corner.y + handle_size / 2.0,
+                                );
+
+                                // Fill
+                                scene.fill(
+                                    Fill::NonZero,
+                                    camera_transform,
+                                    handle_color,
+                                    None,
+                                    &handle_rect,
+                                );
+
+                                // White outline
+                                scene.stroke(
+                                    &Stroke::new(1.0),
+                                    camera_transform,
+                                    Color::from_rgb8(255, 255, 255),
+                                    None,
+                                    &handle_rect,
+                                );
+                            }
+
+                            // Draw 4 edge handles (circles at midpoints)
+                            let edge_midpoints = [
+                                vello::kurbo::Point::new((world_corners[0].x + world_corners[1].x) / 2.0, (world_corners[0].y + world_corners[1].y) / 2.0), // Top
+                                vello::kurbo::Point::new((world_corners[1].x + world_corners[2].x) / 2.0, (world_corners[1].y + world_corners[2].y) / 2.0), // Right
+                                vello::kurbo::Point::new((world_corners[2].x + world_corners[3].x) / 2.0, (world_corners[2].y + world_corners[3].y) / 2.0), // Bottom
+                                vello::kurbo::Point::new((world_corners[3].x + world_corners[0].x) / 2.0, (world_corners[3].y + world_corners[0].y) / 2.0), // Left
+                            ];
+
+                            for edge in &edge_midpoints {
+                                let edge_circle = Circle::new(*edge, handle_size / 2.0);
+
+                                // Fill
+                                scene.fill(
+                                    Fill::NonZero,
+                                    camera_transform,
+                                    handle_color,
+                                    None,
+                                    &edge_circle,
+                                );
+
+                                // White outline
+                                scene.stroke(
+                                    &Stroke::new(1.0),
+                                    camera_transform,
+                                    Color::from_rgb8(255, 255, 255),
+                                    None,
+                                    &edge_circle,
+                                );
+                            }
+
+                            // Draw rotation handle (circle above top edge center)
+                            let top_center = edge_midpoints[0];
+                            let rotation_rad = clip_inst.transform.rotation.to_radians();
+                            let cos_r = rotation_rad.cos();
+                            let sin_r = rotation_rad.sin();
+                            let offset_x = -(-rotation_handle_offset) * sin_r;
+                            let offset_y = -rotation_handle_offset * cos_r;
+                            let rotation_handle_pos = vello::kurbo::Point::new(
+                                top_center.x + offset_x,
+                                top_center.y + offset_y,
+                            );
+                            let rotation_circle = Circle::new(rotation_handle_pos, handle_size / 2.0);
+
+                            // Fill with different color (green)
+                            scene.fill(
+                                Fill::NonZero,
+                                camera_transform,
+                                Color::from_rgb8(50, 200, 50),
+                                None,
+                                &rotation_circle,
+                            );
+
+                            // White outline
+                            scene.stroke(
+                                &Stroke::new(1.0),
+                                camera_transform,
+                                Color::from_rgb8(255, 255, 255),
+                                None,
+                                &rotation_circle,
+                            );
+
+                            // Draw line connecting rotation handle to bbox
+                            let line_path = {
+                                let mut path = vello::kurbo::BezPath::new();
+                                path.move_to(rotation_handle_pos);
+                                path.line_to(top_center);
+                                path
+                            };
+
+                            scene.stroke(
+                                &Stroke::new(1.0),
+                                camera_transform,
+                                Color::from_rgb8(50, 200, 50),
+                                None,
+                                &line_path,
+                            );
+                        }
+                    }
                     }
                 }
             }
@@ -2963,33 +3165,42 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
+        // Check if we have an active layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        // Only work on VectorLayer - just check type, don't hold reference
+        // Check layer type - support VectorLayer (with selection) and VideoLayer (visible clip at playback time)
+        let is_vector_layer;
+        let is_video_layer;
         {
             let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
                 Some(layer) => layer,
                 None => return,
             };
 
-            if !matches!(active_layer, AnyLayer::Vector(_)) {
-                return;
-            }
+            is_vector_layer = matches!(active_layer, AnyLayer::Vector(_));
+            is_video_layer = matches!(active_layer, AnyLayer::Video(_));
         }
 
-        // Need a selection to transform
-        if shared.selection.is_empty() {
+        // For vector layers, need a selection to transform
+        // For video layers, transform the visible clip at playback time
+        if is_vector_layer && shared.selection.is_empty() {
+            return;
+        } else if !is_vector_layer && !is_video_layer {
             return;
         }
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
-        // For single object: use rotated bounding box
-        // For multiple objects: use axis-aligned bounding box
+        // For video layers, transform the visible clip at playback time (no selection needed)
+        if is_video_layer {
+            self.handle_transform_video_clip(ui, response, point, &active_layer_id, shared);
+            return;
+        }
+
+        // For vector layers: single object uses rotated bbox, multiple objects use axis-aligned bbox
         let total_selected = shared.selection.shape_instances().len() + shared.selection.clip_instances().len();
         if total_selected == 1 {
             // Single object - rotated bounding box
@@ -3336,6 +3547,37 @@ impl StagePane {
                 } else {
                     return;
                 }
+            } else if let Some(AnyLayer::Video(video_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
+                // Handle Video layer clip instance
+                if let Some(clip_instance) = video_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
+                    // Get video clip dimensions for bounding box
+                    let local_bbox = if let Some(video_clip) = shared.action_executor.document().get_video_clip(&clip_instance.clip_id) {
+                        vello::kurbo::Rect::new(0.0, 0.0, video_clip.width, video_clip.height)
+                    } else {
+                        return; // Video clip not found
+                    };
+
+                    let local_corners = [
+                        vello::kurbo::Point::new(local_bbox.x0, local_bbox.y0),
+                        vello::kurbo::Point::new(local_bbox.x1, local_bbox.y0),
+                        vello::kurbo::Point::new(local_bbox.x1, local_bbox.y1),
+                        vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1),
+                    ];
+
+                    // Video clip instances use the same transform as vector clip instances
+                    let obj_transform = Affine::translate((clip_instance.transform.x, clip_instance.transform.y))
+                        * Affine::rotate(clip_instance.transform.rotation.to_radians())
+                        * Affine::scale_non_uniform(clip_instance.transform.scale_x, clip_instance.transform.scale_y);
+
+                    let world_corners: Vec<vello::kurbo::Point> = local_corners
+                        .iter()
+                        .map(|&p| obj_transform * p)
+                        .collect();
+
+                    (local_bbox, world_corners, obj_transform, clip_instance.transform.clone())
+                } else {
+                    return;
+                }
             } else {
                 return;
             }
@@ -3448,9 +3690,13 @@ impl StagePane {
         }
 
         // === Mouse down: hit test handles (using the same handle positions and order as cursor logic) ===
-        if response.drag_started() || response.clicked() {
+        let should_start_transform = (response.drag_started() || response.clicked())
+            || (matches!(*shared.tool_state, ToolState::Idle) && ui.input(|i| i.pointer.primary_down()) && response.hovered());
+
+        if should_start_transform && matches!(*shared.tool_state, ToolState::Idle) {
             // Check rotation handle (same as cursor logic)
             if point.distance(rotation_handle_pos) < tolerance {
+
                 // Start rotation around the visual center of the shape
                 // Calculate local center
                 let local_center = vello::kurbo::Point::new(
@@ -3871,6 +4117,142 @@ impl StagePane {
                                 _ => {}
                             }
                         }
+                    } else if let AnyLayer::Video(video_layer) = layer {
+                        // Handle Video layer clip instances
+                        if let Some(clip_instance) = video_layer.clip_instances.iter_mut().find(|ci| ci.id == object_id) {
+                            if let Some(original) = original_transforms.get(&object_id) {
+                                match mode {
+                                    lightningbeam_core::tool::TransformMode::ScaleCorner { origin } => {
+                                        let original_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let inv_original_transform = original_transform.inverse();
+
+                                        let local_start = inv_original_transform * start_mouse;
+                                        let local_current = inv_original_transform * point;
+                                        let local_origin = inv_original_transform * origin;
+
+                                        let start_dx = local_start.x - local_origin.x;
+                                        let start_dy = local_start.y - local_origin.y;
+                                        let current_dx = local_current.x - local_origin.x;
+                                        let current_dy = local_current.y - local_origin.y;
+
+                                        let scale_x = if start_dx.abs() > 0.001 { current_dx / start_dx } else { 1.0 };
+                                        let scale_y = if start_dy.abs() > 0.001 { current_dy / start_dy } else { 1.0 };
+
+                                        let new_scale_x = original.scale_x * scale_x;
+                                        let new_scale_y = original.scale_y * scale_y;
+
+                                        const MIN_SCALE: f64 = 0.01;
+                                        let new_scale_x = if new_scale_x.abs() < MIN_SCALE { MIN_SCALE * new_scale_x.signum() } else { new_scale_x };
+                                        let new_scale_y = if new_scale_y.abs() < MIN_SCALE { MIN_SCALE * new_scale_y.signum() } else { new_scale_y };
+
+                                        let old_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let world_origin_before = old_transform * local_origin;
+
+                                        let new_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(new_scale_x, new_scale_y);
+                                        let world_origin_after = new_transform * local_origin;
+
+                                        let pos_offset_x = world_origin_before.x - world_origin_after.x;
+                                        let pos_offset_y = world_origin_before.y - world_origin_after.y;
+
+                                        clip_instance.transform.scale_x = new_scale_x;
+                                        clip_instance.transform.scale_y = new_scale_y;
+                                        clip_instance.transform.x = original.x + pos_offset_x;
+                                        clip_instance.transform.y = original.y + pos_offset_y;
+                                        clip_instance.transform.rotation = original.rotation;
+                                    }
+                                    lightningbeam_core::tool::TransformMode::Rotate { center } => {
+                                        let start_vec = start_mouse - center;
+                                        let current_vec = point - center;
+                                        let start_angle = start_vec.y.atan2(start_vec.x);
+                                        let current_angle = current_vec.y.atan2(current_vec.x);
+                                        let delta_angle = (current_angle - start_angle).to_degrees();
+
+                                        let local_center = vello::kurbo::Point::new(
+                                            (local_bbox.x0 + local_bbox.x1) / 2.0,
+                                            (local_bbox.y0 + local_bbox.y1) / 2.0,
+                                        );
+
+                                        let original_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let world_center_before = original_transform * local_center;
+
+                                        let new_rotation = original.rotation + delta_angle;
+                                        let new_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(new_rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let world_center_after = new_transform * local_center;
+
+                                        let pos_offset_x = world_center_before.x - world_center_after.x;
+                                        let pos_offset_y = world_center_before.y - world_center_after.y;
+
+                                        clip_instance.transform.rotation = new_rotation;
+                                        clip_instance.transform.x = original.x + pos_offset_x;
+                                        clip_instance.transform.y = original.y + pos_offset_y;
+                                        clip_instance.transform.scale_x = original.scale_x;
+                                        clip_instance.transform.scale_y = original.scale_y;
+                                    }
+                                    lightningbeam_core::tool::TransformMode::ScaleEdge { axis, origin } => {
+                                        let original_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let inv_original_transform = original_transform.inverse();
+
+                                        let local_start = inv_original_transform * start_mouse;
+                                        let local_current = inv_original_transform * point;
+                                        let local_origin = inv_original_transform * origin;
+
+                                        use lightningbeam_core::tool::Axis;
+                                        let (new_scale_x, new_scale_y) = match axis {
+                                            Axis::Horizontal => {
+                                                let start_dx = local_start.x - local_origin.x;
+                                                let current_dx = local_current.x - local_origin.x;
+                                                let scale_x = if start_dx.abs() > 0.001 { current_dx / start_dx } else { 1.0 };
+                                                let new_scale_x = original.scale_x * scale_x;
+                                                const MIN_SCALE: f64 = 0.01;
+                                                let new_scale_x = if new_scale_x.abs() < MIN_SCALE { MIN_SCALE * new_scale_x.signum() } else { new_scale_x };
+                                                (new_scale_x, original.scale_y)
+                                            }
+                                            Axis::Vertical => {
+                                                let start_dy = local_start.y - local_origin.y;
+                                                let current_dy = local_current.y - local_origin.y;
+                                                let scale_y = if start_dy.abs() > 0.001 { current_dy / start_dy } else { 1.0 };
+                                                let new_scale_y = original.scale_y * scale_y;
+                                                const MIN_SCALE: f64 = 0.01;
+                                                let new_scale_y = if new_scale_y.abs() < MIN_SCALE { MIN_SCALE * new_scale_y.signum() } else { new_scale_y };
+                                                (original.scale_x, new_scale_y)
+                                            }
+                                        };
+
+                                        let old_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
+                                        let world_origin_before = old_transform * local_origin;
+
+                                        let new_transform = Affine::translate((original.x, original.y))
+                                            * Affine::rotate(original.rotation.to_radians())
+                                            * Affine::scale_non_uniform(new_scale_x, new_scale_y);
+                                        let world_origin_after = new_transform * local_origin;
+
+                                        let pos_offset_x = world_origin_before.x - world_origin_after.x;
+                                        let pos_offset_y = world_origin_before.y - world_origin_after.y;
+
+                                        clip_instance.transform.scale_x = new_scale_x;
+                                        clip_instance.transform.scale_y = new_scale_y;
+                                        clip_instance.transform.x = original.x + pos_offset_x;
+                                        clip_instance.transform.y = original.y + pos_offset_y;
+                                        clip_instance.transform.rotation = original.rotation;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3896,6 +4278,13 @@ impl StagePane {
                             clip_instance_transforms.insert(obj_id, (original, clip_instance.transform.clone()));
                         }
                     }
+                } else if let Some(AnyLayer::Video(video_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
+                    // Handle Video layer clip instances
+                    for (obj_id, original) in original_transforms {
+                        if let Some(clip_instance) = video_layer.clip_instances.iter().find(|ci| ci.id == obj_id) {
+                            clip_instance_transforms.insert(obj_id, (original, clip_instance.transform.clone()));
+                        }
+                    }
                 }
 
                 // Create action for shape instances
@@ -3912,6 +4301,49 @@ impl StagePane {
 
                 *shared.tool_state = ToolState::Idle;
             }
+        }
+    }
+
+    fn handle_transform_video_clip(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        point: vello::kurbo::Point,
+        layer_id: &uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        // Find the visible clip instance at playback time
+        let playback_time = *shared.playback_time;
+
+        let visible_clip_id = {
+            let document = shared.action_executor.document();
+            if let Some(AnyLayer::Video(video_layer)) = document.get_layer(layer_id) {
+                video_layer.clip_instances.iter().find(|inst| {
+                    let clip_duration = document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
+                    let effective_duration = inst.effective_duration(clip_duration);
+                    playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
+                }).map(|inst| inst.id)
+            } else {
+                None
+            }
+        };
+
+        // If we found a visible clip, ensure it's selected and handle transform
+        if let Some(clip_id) = visible_clip_id {
+            // Keep the visible clip selected for video layers
+            // (unlike vector layers where user manually selects)
+            if !shared.selection.contains_clip_instance(&clip_id) {
+                shared.selection.clear();
+                shared.selection.add_clip_instance(clip_id);
+            }
+
+            // Handle transform with the selected clip
+            self.handle_transform_single_object(ui, response, point, layer_id, shared);
+        } else {
+            // No visible clip at playback time, clear selection
+            shared.selection.clear();
         }
     }
 

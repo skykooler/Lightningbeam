@@ -486,13 +486,13 @@ impl VideoManager {
         while t < duration {
             // Decode frame at this timestamp
             if let Ok(rgba_data) = decoder.get_frame(t) {
-                // Decode already scaled to output dimensions, but we want 64px width for thumbnails
+                // Decode already scaled to output dimensions, but we want 128px width for thumbnails
                 // We need to scale down further
                 let current_width = decoder.output_width;
                 let current_height = decoder.output_height;
 
-                // Calculate thumbnail dimensions (64px width, maintain aspect ratio)
-                let thumb_width = 64u32;
+                // Calculate thumbnail dimensions (128px width, maintain aspect ratio)
+                let thumb_width = 128u32;
                 let aspect_ratio = current_height as f32 / current_width as f32;
                 let thumb_height = (thumb_width as f32 * aspect_ratio) as u32;
 
@@ -551,8 +551,8 @@ impl VideoManager {
         let (_, rgba_data) = &thumbnails[idx];
 
         // Return (width, height, data)
-        // Thumbnails are always 64px width
-        let thumb_width = 64;
+        // Thumbnails are always 128px width
+        let thumb_width = 128;
         let thumb_height = (rgba_data.len() / (thumb_width * 4)) as u32;
 
         Some((thumb_width as u32, thumb_height, Arc::clone(rgba_data)))
