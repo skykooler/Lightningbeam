@@ -18,8 +18,7 @@ pathdiff = "0.2"
 
 # Audio export
 hound = "3.5"
-# TODO: Add MP3 support with a different crate
-# mp3lame-encoder API is too complex, need to find a better option
+ffmpeg-next = "8.0"  # For MP3/AAC encoding
 
 # Node-based audio graph dependencies
 dasp_graph = "0.11"

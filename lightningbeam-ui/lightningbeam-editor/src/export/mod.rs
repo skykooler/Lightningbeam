@@ -142,79 +142,33 @@ impl ExportOrchestrator {
             return;
         }
 
+        println!("🧵 [EXPORT THREAD] Starting export for format: {:?}", settings.format);
+
         // Convert settings to DAW backend format
         let daw_settings = daw_backend::audio::ExportSettings {
             format: match settings.format {
                 lightningbeam_core::export::AudioFormat::Wav => daw_backend::audio::ExportFormat::Wav,
                 lightningbeam_core::export::AudioFormat::Flac => daw_backend::audio::ExportFormat::Flac,
-                lightningbeam_core::export::AudioFormat::Mp3 |
-                lightningbeam_core::export::AudioFormat::Aac => {
-                    // MP3/AAC not supported yet
-                    progress_tx
-                        .send(ExportProgress::Error {
-                            message: format!("{} export not yet implemented. Please use WAV or FLAC format.", settings.format.name()),
-                        })
-                        .ok();
-                    return;
-                }
+                lightningbeam_core::export::AudioFormat::Mp3 => daw_backend::audio::ExportFormat::Mp3,
+                lightningbeam_core::export::AudioFormat::Aac => daw_backend::audio::ExportFormat::Aac,
             },
             sample_rate: settings.sample_rate,
             channels: settings.channels,
             bit_depth: settings.bit_depth,
-            mp3_bitrate: 320, // Not used for WAV/FLAC
+            mp3_bitrate: settings.bitrate_kbps,
             start_time: settings.start_time,
             end_time: settings.end_time,
         };
 
-        println!("🧵 [EXPORT THREAD] Starting non-blocking export...");
+        // Use DAW backend export for all formats
+        let result = Self::run_daw_backend_export(
+            &daw_settings,
+            &output_path,
+            &audio_controller,
+            &cancel_flag,
+        );
 
-        // Start the export (non-blocking - just sends the query)
-        {
-            let mut controller = audio_controller.lock().unwrap();
-            println!("🧵 [EXPORT THREAD] Sending export query...");
-            if let Err(e) = controller.start_export_audio(&daw_settings, &output_path) {
-                println!("🧵 [EXPORT THREAD] Failed to start export: {}", e);
-                progress_tx.send(ExportProgress::Error { message: e }).ok();
-                return;
-            }
-            println!("🧵 [EXPORT THREAD] Export query sent, lock released");
-        }
-
-        // Poll for completion without holding the lock for extended periods
-        let duration = settings.end_time - settings.start_time;
-        let start_time = std::time::Instant::now();
-        let result = loop {
-            if cancel_flag.load(Ordering::Relaxed) {
-                break Err("Export cancelled by user".to_string());
-            }
-
-            // Sleep before polling to avoid spinning
-            std::thread::sleep(std::time::Duration::from_millis(100));
-
-            // Brief lock to poll for completion
-            let poll_result = {
-                let mut controller = audio_controller.lock().unwrap();
-                controller.poll_export_completion()
-            };
-
-            match poll_result {
-                Ok(Some(result)) => {
-                    // Export completed
-                    println!("🧵 [EXPORT THREAD] Export completed: {:?}", result.is_ok());
-                    break result;
-                }
-                Ok(None) => {
-                    // Still in progress - actual progress comes via AudioEvent::ExportProgress
-                    // No need to send progress here
-                }
-                Err(e) => {
-                    // Polling error (shouldn't happen)
-                    println!("🧵 [EXPORT THREAD] Poll error: {}", e);
-                    break Err(e);
-                }
-            }
-        };
-        println!("🧵 [EXPORT THREAD] Export loop finished");
+        println!("🧵 [EXPORT THREAD] Export finished");
 
         // Send completion or error
         match result {
@@ -229,6 +183,54 @@ impl ExportOrchestrator {
                 println!("📤 [EXPORT THREAD] Sending Error event: {}", err);
                 let send_result = progress_tx.send(ExportProgress::Error { message: err });
                 println!("📤 [EXPORT THREAD] Error event sent: {:?}", send_result.is_ok());
+            }
+        }
+    }
+
+    /// Run export using DAW backend (for all formats)
+    fn run_daw_backend_export(
+        settings: &daw_backend::audio::ExportSettings,
+        output_path: &PathBuf,
+        audio_controller: &Arc<std::sync::Mutex<daw_backend::EngineController>>,
+        cancel_flag: &Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        println!("🧵 [EXPORT THREAD] Starting DAW backend export...");
+
+        // Start the export (non-blocking - just sends the query)
+        {
+            let mut controller = audio_controller.lock().unwrap();
+            println!("🧵 [EXPORT THREAD] Sending export query...");
+            controller.start_export_audio(settings, output_path)?;
+            println!("🧵 [EXPORT THREAD] Export query sent, lock released");
+        }
+
+        // Poll for completion without holding the lock for extended periods
+        loop {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("Export cancelled by user".to_string());
+            }
+
+            // Sleep before polling to avoid spinning
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Brief lock to poll for completion
+            let poll_result = {
+                let mut controller = audio_controller.lock().unwrap();
+                controller.poll_export_completion()
+            };
+
+            match poll_result {
+                Ok(Some(result)) => {
+                    println!("🧵 [EXPORT THREAD] DAW backend export completed: {:?}", result.is_ok());
+                    return result;
+                }
+                Ok(None) => {
+                    // Still in progress
+                }
+                Err(e) => {
+                    println!("🧵 [EXPORT THREAD] Poll error: {}", e);
+                    return Err(e);
+                }
             }
         }
     }

@@ -10,7 +10,8 @@ use std::path::Path;
 pub enum ExportFormat {
     Wav,
     Flac,
-    // TODO: Add MP3 support
+    Mp3,
+    Aac,
 }
 
 impl ExportFormat {
@@ -19,6 +20,8 @@ impl ExportFormat {
         match self {
             ExportFormat::Wav => "wav",
             ExportFormat::Flac => "flac",
+            ExportFormat::Mp3 => "mp3",
+            ExportFormat::Aac => "m4a",
         }
     }
 }
@@ -72,13 +75,23 @@ pub fn export_audio<P: AsRef<Path>>(
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
 ) -> Result<(), String>
 {
-    // Render the project to memory
-    let samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
-
-    // Write to file based on format
+    // Route to appropriate export implementation based on format
     match settings.format {
-        ExportFormat::Wav => write_wav(&samples, settings, output_path)?,
-        ExportFormat::Flac => write_flac(&samples, settings, output_path)?,
+        ExportFormat::Wav | ExportFormat::Flac => {
+            // Render to memory then write (existing path)
+            let samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
+            match settings.format {
+                ExportFormat::Wav => write_wav(&samples, settings, output_path)?,
+                ExportFormat::Flac => write_flac(&samples, settings, output_path)?,
+                _ => unreachable!(),
+            }
+        }
+        ExportFormat::Mp3 => {
+            export_mp3(project, pool, midi_pool, settings, output_path, event_tx)?;
+        }
+        ExportFormat::Aac => {
+            export_aac(project, pool, midi_pool, settings, output_path, event_tx)?;
+        }
     }
 
     Ok(())
@@ -270,7 +283,319 @@ fn write_flac<P: AsRef<Path>>(
     Ok(())
 }
 
-// TODO: Add MP3 export support with a better library
+/// Export audio as MP3 using FFmpeg
+fn export_mp3<P: AsRef<Path>>(
+    project: &mut Project,
+    pool: &AudioPool,
+    midi_pool: &MidiClipPool,
+    settings: &ExportSettings,
+    output_path: P,
+    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // FFmpeg encoding doesn't support cancellation in this implementation
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    // Initialize FFmpeg
+    ffmpeg_next::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
+
+    // Step 1: Render audio to memory
+    let pcm_samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
+
+    // Check for cancellation
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("Export cancelled".to_string());
+    }
+
+    // Step 2: Set up FFmpeg encoder
+    let encoder_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::MP3)
+        .ok_or("MP3 encoder (libmp3lame) not found")?;
+
+    // Create output file
+    let mut output = ffmpeg_next::format::output(&output_path)
+        .map_err(|e| format!("Failed to create output file: {}", e))?;
+
+    // Create encoder
+    let mut encoder = ffmpeg_next::codec::Context::new_with_codec(encoder_codec)
+        .encoder()
+        .audio()
+        .map_err(|e| format!("Failed to create encoder: {}", e))?;
+
+    // Configure encoder
+    let channel_layout = match settings.channels {
+        1 => ffmpeg_next::channel_layout::ChannelLayout::MONO,
+        2 => ffmpeg_next::channel_layout::ChannelLayout::STEREO,
+        _ => return Err(format!("Unsupported channel count: {}", settings.channels)),
+    };
+
+    encoder.set_rate(settings.sample_rate as i32);
+    encoder.set_channel_layout(channel_layout);
+    encoder.set_format(ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Planar));
+    encoder.set_bit_rate((settings.mp3_bitrate * 1000) as usize);
+    encoder.set_time_base(ffmpeg_next::Rational(1, settings.sample_rate as i32));
+
+    // Open encoder
+    let mut encoder = encoder.open_as(encoder_codec)
+        .map_err(|e| format!("Failed to open MP3 encoder: {}", e))?;
+
+    // Add stream and set parameters
+    {
+        let mut stream = output.add_stream(encoder_codec)
+            .map_err(|e| format!("Failed to add stream: {}", e))?;
+        stream.set_parameters(&encoder);
+    }
+
+    // Write header
+    output.write_header()
+        .map_err(|e| format!("Failed to write header: {}", e))?;
+
+    // Step 3: Encode frames and write to output
+    let num_frames = pcm_samples.len() / settings.channels as usize;
+    let planar_samples = convert_to_planar_i16(&pcm_samples, settings.channels);
+
+    // Get encoder frame size
+    let frame_size = encoder.frame_size();
+    let samples_per_frame = if frame_size > 0 {
+        frame_size as usize
+    } else {
+        1152 // Default MP3 frame size
+    };
+
+    // Encode in chunks
+    let mut samples_encoded = 0;
+    while samples_encoded < num_frames {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("Export cancelled".to_string());
+        }
+
+        let samples_remaining = num_frames - samples_encoded;
+        let chunk_size = samples_remaining.min(samples_per_frame);
+
+        // Create audio frame
+        let mut frame = ffmpeg_next::frame::Audio::new(
+            ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Planar),
+            chunk_size,
+            channel_layout,
+        );
+        frame.set_rate(settings.sample_rate);
+
+        // Copy planar samples to frame
+        unsafe {
+            for ch in 0..settings.channels as usize {
+                let plane = frame.data_mut(ch);
+                let offset = samples_encoded;
+                let src = &planar_samples[ch][offset..offset + chunk_size];
+
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr() as *const u8,
+                    plane.as_mut_ptr(),
+                    chunk_size * std::mem::size_of::<i16>(),
+                );
+            }
+        }
+
+        // Send frame to encoder
+        encoder.send_frame(&frame)
+            .map_err(|e| format!("Failed to send frame: {}", e))?;
+
+        // Receive and write packets
+        receive_and_write_packets(&mut encoder, &mut output)?;
+
+        samples_encoded += chunk_size;
+    }
+
+    // Flush encoder
+    encoder.send_eof()
+        .map_err(|e| format!("Failed to send EOF: {}", e))?;
+    receive_and_write_packets(&mut encoder, &mut output)?;
+
+    // Write trailer
+    output.write_trailer()
+        .map_err(|e| format!("Failed to write trailer: {}", e))?;
+
+    Ok(())
+}
+
+/// Export audio as AAC using FFmpeg
+fn export_aac<P: AsRef<Path>>(
+    project: &mut Project,
+    pool: &AudioPool,
+    midi_pool: &MidiClipPool,
+    settings: &ExportSettings,
+    output_path: P,
+    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    // Initialize FFmpeg
+    ffmpeg_next::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
+
+    // Step 1: Render audio to memory
+    let pcm_samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
+
+    // Check for cancellation
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err("Export cancelled".to_string());
+    }
+
+    // Step 2: Set up FFmpeg encoder
+    let encoder_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::AAC)
+        .ok_or("AAC encoder not found")?;
+
+    // Create output file
+    let mut output = ffmpeg_next::format::output(&output_path)
+        .map_err(|e| format!("Failed to create output file: {}", e))?;
+
+    // Create encoder
+    let mut encoder = ffmpeg_next::codec::Context::new_with_codec(encoder_codec)
+        .encoder()
+        .audio()
+        .map_err(|e| format!("Failed to create encoder: {}", e))?;
+
+    // Configure encoder
+    let channel_layout = match settings.channels {
+        1 => ffmpeg_next::channel_layout::ChannelLayout::MONO,
+        2 => ffmpeg_next::channel_layout::ChannelLayout::STEREO,
+        _ => return Err(format!("Unsupported channel count: {}", settings.channels)),
+    };
+
+    encoder.set_rate(settings.sample_rate as i32);
+    encoder.set_channel_layout(channel_layout);
+    encoder.set_format(ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar));
+    encoder.set_bit_rate((settings.mp3_bitrate * 1000) as usize);
+    encoder.set_time_base(ffmpeg_next::Rational(1, settings.sample_rate as i32));
+
+    // Open encoder
+    let mut encoder = encoder.open_as(encoder_codec)
+        .map_err(|e| format!("Failed to open AAC encoder: {}", e))?;
+
+    // Add stream and set parameters
+    {
+        let mut stream = output.add_stream(encoder_codec)
+            .map_err(|e| format!("Failed to add stream: {}", e))?;
+        stream.set_parameters(&encoder);
+    }
+
+    // Write header
+    output.write_header()
+        .map_err(|e| format!("Failed to write header: {}", e))?;
+
+    // Step 3: Encode frames and write to output
+    let num_frames = pcm_samples.len() / settings.channels as usize;
+    let planar_samples = convert_to_planar_f32(&pcm_samples, settings.channels);
+
+    // Get encoder frame size
+    let frame_size = encoder.frame_size();
+    let samples_per_frame = if frame_size > 0 {
+        frame_size as usize
+    } else {
+        1024 // Default AAC frame size
+    };
+
+    // Encode in chunks
+    let mut samples_encoded = 0;
+    while samples_encoded < num_frames {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("Export cancelled".to_string());
+        }
+
+        let samples_remaining = num_frames - samples_encoded;
+        let chunk_size = samples_remaining.min(samples_per_frame);
+
+        // Create audio frame
+        let mut frame = ffmpeg_next::frame::Audio::new(
+            ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
+            chunk_size,
+            channel_layout,
+        );
+        frame.set_rate(settings.sample_rate);
+
+        // Copy planar samples to frame
+        unsafe {
+            for ch in 0..settings.channels as usize {
+                let plane = frame.data_mut(ch);
+                let offset = samples_encoded;
+                let src = &planar_samples[ch][offset..offset + chunk_size];
+
+                std::ptr::copy_nonoverlapping(
+                    src.as_ptr() as *const u8,
+                    plane.as_mut_ptr(),
+                    chunk_size * std::mem::size_of::<f32>(),
+                );
+            }
+        }
+
+        // Send frame to encoder
+        encoder.send_frame(&frame)
+            .map_err(|e| format!("Failed to send frame: {}", e))?;
+
+        // Receive and write packets
+        receive_and_write_packets(&mut encoder, &mut output)?;
+
+        samples_encoded += chunk_size;
+    }
+
+    // Flush encoder
+    encoder.send_eof()
+        .map_err(|e| format!("Failed to send EOF: {}", e))?;
+    receive_and_write_packets(&mut encoder, &mut output)?;
+
+    // Write trailer
+    output.write_trailer()
+        .map_err(|e| format!("Failed to write trailer: {}", e))?;
+
+    Ok(())
+}
+
+/// Convert interleaved f32 samples to planar i16 format
+fn convert_to_planar_i16(interleaved: &[f32], channels: u32) -> Vec<Vec<i16>> {
+    let num_frames = interleaved.len() / channels as usize;
+    let mut planar = vec![vec![0i16; num_frames]; channels as usize];
+
+    for (i, chunk) in interleaved.chunks(channels as usize).enumerate() {
+        for (ch, &sample) in chunk.iter().enumerate() {
+            let clamped = sample.max(-1.0).min(1.0);
+            planar[ch][i] = (clamped * 32767.0) as i16;
+        }
+    }
+
+    planar
+}
+
+/// Convert interleaved f32 samples to planar f32 format
+fn convert_to_planar_f32(interleaved: &[f32], channels: u32) -> Vec<Vec<f32>> {
+    let num_frames = interleaved.len() / channels as usize;
+    let mut planar = vec![vec![0.0f32; num_frames]; channels as usize];
+
+    for (i, chunk) in interleaved.chunks(channels as usize).enumerate() {
+        for (ch, &sample) in chunk.iter().enumerate() {
+            planar[ch][i] = sample;
+        }
+    }
+
+    planar
+}
+
+/// Receive encoded packets and write to output
+fn receive_and_write_packets(
+    encoder: &mut ffmpeg_next::encoder::Audio,
+    output: &mut ffmpeg_next::format::context::Output,
+) -> Result<(), String> {
+    let mut encoded = ffmpeg_next::Packet::empty();
+
+    while encoder.receive_packet(&mut encoded).is_ok() {
+        encoded.set_stream(0);
+        encoded.write_interleaved(output)
+            .map_err(|e| format!("Failed to write packet: {}", e))?;
+    }
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

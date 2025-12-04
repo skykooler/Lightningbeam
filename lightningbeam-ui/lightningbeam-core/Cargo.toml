@@ -24,7 +24,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 daw-backend = { path = "../../daw-backend" }
 
 # Video decoding
-ffmpeg-next = "7.0"
+ffmpeg-next = "8.0"
 lru = "0.12"
 
 # File I/O
