@@ -321,6 +321,17 @@ enum FileOperation {
     },
 }
 
+/// Information about an imported asset (for auto-placement)
+#[derive(Debug, Clone)]
+struct ImportedAssetInfo {
+    clip_id: uuid::Uuid,
+    clip_type: panes::DragClipType,
+    name: String,
+    dimensions: Option<(f64, f64)>,
+    duration: f64,
+    linked_audio_clip_id: Option<uuid::Uuid>,
+}
+
 /// Worker thread for file operations (save/load)
 struct FileOperationsWorker {
     command_rx: std::sync::mpsc::Receiver<FileCommand>,
@@ -1013,7 +1024,11 @@ impl EditorApp {
                 println!("Menu: Revert");
                 // TODO: Implement revert
             }
-            MenuAction::Import => {
+            MenuAction::Import | MenuAction::ImportToLibrary => {
+                let auto_place = matches!(action, MenuAction::Import);
+
+                // TODO: Implement auto-placement when auto_place is true
+
                 use lightningbeam_core::file_types::*;
                 use rfd::FileDialog;
 
@@ -1076,25 +1091,33 @@ impl EditorApp {
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
 
-                    match get_file_type(extension) {
+                    let imported_asset = match get_file_type(extension) {
                         Some(FileType::Image) => {
                             self.last_import_filter = ImportFilter::Images;
-                            self.import_image(&path);
+                            self.import_image(&path)
                         }
                         Some(FileType::Audio) => {
                             self.last_import_filter = ImportFilter::Audio;
-                            self.import_audio(&path);
+                            self.import_audio(&path)
                         }
                         Some(FileType::Video) => {
                             self.last_import_filter = ImportFilter::Video;
-                            self.import_video(&path);
+                            self.import_video(&path)
                         }
                         Some(FileType::Midi) => {
                             self.last_import_filter = ImportFilter::Midi;
-                            self.import_midi(&path);
+                            self.import_midi(&path)
                         }
                         None => {
                             println!("Unsupported file type: {}", extension);
+                            None
+                        }
+                    };
+
+                    // Auto-place if this is "Import" (not "Import to Library")
+                    if auto_place {
+                        if let Some(asset_info) = imported_asset {
+                            self.auto_place_asset(asset_info);
                         }
                     }
                 }
@@ -1664,7 +1687,7 @@ impl EditorApp {
     }
 
     /// Import an image file as an ImageAsset
-    fn import_image(&mut self, path: &std::path::Path) {
+    fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
 
         // Get filename for asset name
@@ -1694,15 +1717,25 @@ impl EditorApp {
                 // Add to document
                 let asset_id = self.action_executor.document_mut().add_image_asset(asset);
                 println!("Imported image '{}' ({}x{}) - ID: {}", name, width, height, asset_id);
+
+                Some(ImportedAssetInfo {
+                    clip_id: asset_id,
+                    clip_type: panes::DragClipType::Image,
+                    name,
+                    dimensions: Some((width as f64, height as f64)),
+                    duration: 0.0, // Images have no duration
+                    linked_audio_clip_id: None,
+                })
             }
             Err(e) => {
                 eprintln!("Failed to load image '{}': {}", path.display(), e);
+                None
             }
         }
     }
 
     /// Import an audio file via daw-backend
-    fn import_audio(&mut self, path: &std::path::Path) {
+    fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use daw_backend::io::audio_file::AudioFile;
         use lightningbeam_core::clip::AudioClip;
 
@@ -1748,18 +1781,29 @@ impl EditorApp {
 
                     println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {}",
                         name, duration, channels, sample_rate, clip_id);
+
+                    Some(ImportedAssetInfo {
+                        clip_id,
+                        clip_type: panes::DragClipType::AudioSampled,
+                        name,
+                        dimensions: None,
+                        duration,
+                        linked_audio_clip_id: None,
+                    })
                 } else {
                     eprintln!("Cannot import audio: audio engine not initialized");
+                    None
                 }
             }
             Err(e) => {
                 eprintln!("Failed to load audio '{}': {}", path.display(), e);
+                None
             }
         }
     }
 
     /// Import a MIDI file via daw-backend
-    fn import_midi(&mut self, path: &std::path::Path) {
+    fn import_midi(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
 
         let name = path.file_stem()
@@ -1806,18 +1850,29 @@ impl EditorApp {
                     println!("Imported MIDI '{}' ({:.1}s, {} total events, {} note events) - Frontend ID: {}, Backend ID: {}",
                         name, duration, event_count, note_event_count, frontend_clip_id, backend_clip_id);
                     println!("✅ Added MIDI clip to backend pool and cached {} note events", note_event_count);
+
+                    Some(ImportedAssetInfo {
+                        clip_id: frontend_clip_id,
+                        clip_type: panes::DragClipType::AudioMidi,
+                        name,
+                        dimensions: None,
+                        duration,
+                        linked_audio_clip_id: None,
+                    })
                 } else {
                     eprintln!("⚠️  Cannot import MIDI: audio system not available");
+                    None
                 }
             }
             Err(e) => {
                 eprintln!("Failed to load MIDI '{}': {}", path.display(), e);
+                None
             }
         }
     }
 
     /// Import a video file (placeholder - decoder not yet ported)
-    fn import_video(&mut self, path: &std::path::Path) {
+    fn import_video(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
 
@@ -1833,7 +1888,7 @@ impl EditorApp {
             Ok(meta) => meta,
             Err(e) => {
                 eprintln!("Failed to probe video '{}': {}", name, e);
-                return;
+                return None;
             }
         };
 
@@ -1856,7 +1911,7 @@ impl EditorApp {
         let mut video_mgr = self.video_manager.lock().unwrap();
         if let Err(e) = video_mgr.load_video(clip_id, path_str.clone(), doc_width, doc_height) {
             eprintln!("Failed to load video '{}': {}", name, e);
-            return;
+            return None;
         }
         drop(video_mgr);
 
@@ -1960,6 +2015,291 @@ impl EditorApp {
         if metadata.has_audio {
             println!("  Extracting audio track in background...");
         }
+
+        Some(ImportedAssetInfo {
+            clip_id,
+            clip_type: panes::DragClipType::Video,
+            name,
+            dimensions: Some((metadata.width as f64, metadata.height as f64)),
+            duration: metadata.duration,
+            linked_audio_clip_id: None, // Audio extraction happens async in background thread
+        })
+    }
+
+    /// Auto-place an imported asset at playhead time
+    /// Places images at document center, video/audio clips on appropriate layers
+    fn auto_place_asset(&mut self, asset_info: ImportedAssetInfo) {
+        use lightningbeam_core::clip::ClipInstance;
+        use lightningbeam_core::layer::*;
+
+        let drop_time = self.playback_time;
+
+        // Find or create a compatible layer
+        let document = self.action_executor.document();
+        let mut target_layer_id = None;
+
+        // Check if active layer is compatible
+        if let Some(active_id) = self.active_layer_id {
+            if let Some(layer) = document.get_layer(&active_id) {
+                if panes::layer_matches_clip_type(layer, asset_info.clip_type) {
+                    target_layer_id = Some(active_id);
+                }
+            }
+        }
+
+        // If no compatible active layer, create a new layer
+        if target_layer_id.is_none() {
+            let layer_name = format!("{} Layer", match asset_info.clip_type {
+                panes::DragClipType::Vector => "Vector",
+                panes::DragClipType::Video => "Video",
+                panes::DragClipType::AudioSampled => "Audio",
+                panes::DragClipType::AudioMidi => "MIDI",
+                panes::DragClipType::Image => "Image",
+            });
+            let new_layer = panes::create_layer_for_clip_type(asset_info.clip_type, &layer_name);
+
+            // Create and execute add layer action
+            let action = lightningbeam_core::actions::AddLayerAction::new(new_layer);
+            let _ = self.action_executor.execute(Box::new(action));
+
+            // Get the newly created layer ID (it's the last child in the document)
+            let doc = self.action_executor.document();
+            if let Some(last_layer) = doc.root.children.last() {
+                target_layer_id = Some(last_layer.id());
+
+                // Update active layer to the new layer
+                self.active_layer_id = target_layer_id;
+            }
+        }
+
+        // Add clip instance or shape to the target layer
+        if let Some(layer_id) = target_layer_id {
+            // For images, create a shape with image fill instead of a clip instance
+            if asset_info.clip_type == panes::DragClipType::Image {
+                // Get image dimensions
+                let (width, height) = asset_info.dimensions.unwrap_or((100.0, 100.0));
+
+                // Get document center position
+                let doc = self.action_executor.document();
+                let center_x = doc.width / 2.0;
+                let center_y = doc.height / 2.0;
+
+                // Create a rectangle path at the origin (position handled by transform)
+                use kurbo::BezPath;
+                let mut path = BezPath::new();
+                path.move_to((0.0, 0.0));
+                path.line_to((width, 0.0));
+                path.line_to((width, height));
+                path.line_to((0.0, height));
+                path.close_path();
+
+                // Create shape with image fill (references the ImageAsset)
+                use lightningbeam_core::shape::Shape;
+                let shape = Shape::new(path).with_image_fill(asset_info.clip_id);
+
+                // Create shape instance at document center
+                use lightningbeam_core::object::ShapeInstance;
+                let shape_instance = ShapeInstance::new(shape.id)
+                    .with_position(center_x, center_y);
+
+                // Create and execute action
+                let action = lightningbeam_core::actions::AddShapeAction::new(
+                    layer_id,
+                    shape,
+                    shape_instance,
+                );
+                let _ = self.action_executor.execute(Box::new(action));
+            } else {
+                // For clips, create a clip instance
+                // Video clips align to stage origin (0,0) and scale to document size
+                // Audio clips are centered in document
+                let (pos_x, pos_y) = if asset_info.clip_type == panes::DragClipType::Video {
+                    (0.0, 0.0)
+                } else {
+                    let doc = self.action_executor.document();
+                    (doc.width / 2.0, doc.height / 2.0)
+                };
+
+                let mut clip_instance = ClipInstance::new(asset_info.clip_id)
+                    .with_timeline_start(drop_time)
+                    .with_position(pos_x, pos_y);
+
+                // For video clips, scale to fill document dimensions
+                if asset_info.clip_type == panes::DragClipType::Video {
+                    if let Some((video_width, video_height)) = asset_info.dimensions {
+                        let doc = self.action_executor.document();
+                        let doc_width = doc.width;
+                        let doc_height = doc.height;
+
+                        // Calculate scale to fill document
+                        let scale_x = doc_width / video_width;
+                        let scale_y = doc_height / video_height;
+
+                        clip_instance.transform.scale_x = scale_x;
+                        clip_instance.transform.scale_y = scale_y;
+                    }
+                }
+
+                // Save instance ID for potential grouping
+                let video_instance_id = clip_instance.id;
+
+                // Create and execute action for video/audio with backend sync
+                let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                    layer_id,
+                    clip_instance,
+                );
+
+                // Execute with backend synchronization (same as drag-from-library)
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    let mut backend_context = lightningbeam_core::action::BackendContext {
+                        audio_controller: Some(&mut *controller),
+                        layer_to_track_map: &self.layer_to_track_map,
+                        clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                    };
+
+                    if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
+                        eprintln!("❌ Failed to execute AddClipInstanceAction with backend: {}", e);
+                    }
+                } else {
+                    // No audio controller, just execute without backend
+                    let _ = self.action_executor.execute(Box::new(action));
+                }
+
+                // If video has linked audio, auto-place it and create group
+                if let Some(linked_audio_clip_id) = asset_info.linked_audio_clip_id {
+                    // Find or create sampled audio track
+                    let audio_layer_id = {
+                        let doc = self.action_executor.document();
+                        panes::find_sampled_audio_track(doc)
+                    }.unwrap_or_else(|| {
+                        // Create new sampled audio layer
+                        let audio_layer = AudioLayer::new_sampled("Audio Track");
+                        self.action_executor.document_mut().root.add_child(
+                            AnyLayer::Audio(audio_layer)
+                        )
+                    });
+
+                    // Sync newly created audio layer with backend BEFORE adding clip instances
+                    self.sync_audio_layers_to_backend();
+
+                    // Create audio clip instance at same timeline position
+                    let audio_instance = ClipInstance::new(linked_audio_clip_id)
+                        .with_timeline_start(drop_time);
+                    let audio_instance_id = audio_instance.id;
+
+                    // Execute audio action with backend sync
+                    let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                        audio_layer_id,
+                        audio_instance,
+                    );
+
+                    // Execute with backend synchronization
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        let mut backend_context = lightningbeam_core::action::BackendContext {
+                            audio_controller: Some(&mut *controller),
+                            layer_to_track_map: &self.layer_to_track_map,
+                            clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        };
+
+                        if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
+                            eprintln!("❌ Failed to execute audio AddClipInstanceAction with backend: {}", e);
+                        }
+                    } else {
+                        let _ = self.action_executor.execute(Box::new(audio_action));
+                    }
+
+                    // Create instance group linking video and audio
+                    let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
+                    group.add_member(layer_id, video_instance_id);
+                    group.add_member(audio_layer_id, audio_instance_id);
+                    self.action_executor.document_mut().add_instance_group(group);
+                }
+            }
+        }
+    }
+
+    /// Auto-place extracted audio for a video that was already placed
+    fn auto_place_extracted_audio(&mut self, video_clip_id: uuid::Uuid, audio_clip_id: uuid::Uuid) {
+        use lightningbeam_core::clip::ClipInstance;
+        use lightningbeam_core::layer::*;
+
+        // Find the video clip instance in the document
+        let document = self.action_executor.document();
+        let mut video_instance_info: Option<(uuid::Uuid, uuid::Uuid, f64)> = None; // (layer_id, instance_id, timeline_start)
+
+        // Search all layers for a video clip instance with matching clip_id
+        for layer in &document.root.children {
+            if let AnyLayer::Video(video_layer) = layer {
+                for instance in &video_layer.clip_instances {
+                    if instance.clip_id == video_clip_id {
+                        video_instance_info = Some((
+                            video_layer.layer.id,
+                            instance.id,
+                            instance.timeline_start,
+                        ));
+                        break;
+                    }
+                }
+            }
+            if video_instance_info.is_some() {
+                break;
+            }
+        }
+
+        // If we found a video instance, auto-place the audio
+        if let Some((video_layer_id, video_instance_id, timeline_start)) = video_instance_info {
+            // Find or create sampled audio track
+            let audio_layer_id = {
+                let doc = self.action_executor.document();
+                panes::find_sampled_audio_track(doc)
+            }.unwrap_or_else(|| {
+                // Create new sampled audio layer
+                let audio_layer = AudioLayer::new_sampled("Audio Track");
+                self.action_executor.document_mut().root.add_child(
+                    AnyLayer::Audio(audio_layer)
+                )
+            });
+
+            // Sync newly created audio layer with backend BEFORE adding clip instances
+            self.sync_audio_layers_to_backend();
+
+            // Create audio clip instance at same timeline position as video
+            let audio_instance = ClipInstance::new(audio_clip_id)
+                .with_timeline_start(timeline_start);
+            let audio_instance_id = audio_instance.id;
+
+            // Execute audio action with backend sync
+            let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                audio_layer_id,
+                audio_instance,
+            );
+
+            // Execute with backend synchronization
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let mut backend_context = lightningbeam_core::action::BackendContext {
+                    audio_controller: Some(&mut *controller),
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                };
+
+                if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
+                    eprintln!("❌ Failed to execute extracted audio AddClipInstanceAction with backend: {}", e);
+                }
+            } else {
+                let _ = self.action_executor.execute(Box::new(audio_action));
+            }
+
+            // Create instance group linking video and audio
+            let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
+            group.add_member(video_layer_id, video_instance_id);
+            group.add_member(audio_layer_id, audio_instance_id);
+            self.action_executor.document_mut().add_instance_group(group);
+
+            println!("   🔗 Auto-placed audio and linked to video instance");
+        }
     }
 
     /// Handle audio extraction results from background thread
@@ -2000,6 +2340,9 @@ impl EditorApp {
                     if let Some(waveform) = self.fetch_waveform(pool_index) {
                         println!("   Cached waveform with {} peaks", waveform.len());
                     }
+
+                    // Auto-place extracted audio if the video was auto-placed
+                    self.auto_place_extracted_audio(video_clip_id, audio_clip_id);
                 } else {
                     eprintln!("⚠️  Audio extracted but VideoClip {} not found (may have been deleted)", video_clip_id);
                 }

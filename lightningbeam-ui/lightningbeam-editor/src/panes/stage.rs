@@ -10,47 +10,6 @@ use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
 use vello::kurbo::Shape;
 
-/// Check if a clip type matches a layer type
-fn layer_matches_clip_type(layer: &AnyLayer, clip_type: DragClipType) -> bool {
-    match (layer, clip_type) {
-        (AnyLayer::Vector(_), DragClipType::Vector) => true,
-        (AnyLayer::Vector(_), DragClipType::Image) => true, // Images go on vector layers as shapes
-        (AnyLayer::Video(_), DragClipType::Video) => true,
-        (AnyLayer::Audio(audio), DragClipType::AudioSampled) => {
-            audio.audio_layer_type == AudioLayerType::Sampled
-        }
-        (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
-            audio.audio_layer_type == AudioLayerType::Midi
-        }
-        _ => false,
-    }
-}
-
-/// Create a new layer of the appropriate type for a clip
-fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> AnyLayer {
-    match clip_type {
-        DragClipType::Vector => AnyLayer::Vector(VectorLayer::new(name)),
-        DragClipType::Video => AnyLayer::Video(VideoLayer::new(name)),
-        DragClipType::AudioSampled => AnyLayer::Audio(AudioLayer::new_sampled(name)),
-        DragClipType::AudioMidi => AnyLayer::Audio(AudioLayer::new_midi(name)),
-        // Images are placed as shapes on vector layers, not their own layer type
-        DragClipType::Image => AnyLayer::Vector(VectorLayer::new(name)),
-    }
-}
-
-/// Find an existing sampled audio track in the document
-/// Returns the layer ID if found, None otherwise
-fn find_sampled_audio_track(document: &lightningbeam_core::document::Document) -> Option<uuid::Uuid> {
-    for layer in &document.root.children {
-        if let AnyLayer::Audio(audio_layer) = layer {
-            if audio_layer.audio_layer_type == AudioLayerType::Sampled {
-                return Some(audio_layer.layer.id);
-            }
-        }
-    }
-    None
-}
-
 /// Shared Vello resources (created once, reused by all Stage panes)
 struct SharedVelloResources {
     renderer: Arc<Mutex<vello::Renderer>>,
@@ -4681,7 +4640,7 @@ impl PaneRenderer for StagePane {
                         // Check if active layer is compatible
                         if let Some(active_id) = shared.active_layer_id {
                             if let Some(layer) = document.get_layer(active_id) {
-                                if layer_matches_clip_type(layer, dragging.clip_type) {
+                                if super::layer_matches_clip_type(layer, dragging.clip_type) {
                                     target_layer_id = Some(*active_id);
                                 }
                             }
@@ -4697,7 +4656,7 @@ impl PaneRenderer for StagePane {
                                 DragClipType::AudioMidi => "MIDI",
                                 DragClipType::Image => "Image",
                             });
-                            let new_layer = create_layer_for_clip_type(dragging.clip_type, &layer_name);
+                            let new_layer = super::create_layer_for_clip_type(dragging.clip_type, &layer_name);
 
                             // Create add layer action
                             let mut add_layer_action = lightningbeam_core::actions::AddLayerAction::new(new_layer);
@@ -4789,7 +4748,7 @@ impl PaneRenderer for StagePane {
                                     // Find or create sampled audio track
                                     let audio_layer_id = {
                                         let doc = shared.action_executor.document();
-                                        let result = find_sampled_audio_track(doc);
+                                        let result = super::find_sampled_audio_track(doc);
                                         if let Some(id) = result {
                                             eprintln!("DEBUG STAGE: Found existing audio track: {}", id);
                                         } else {

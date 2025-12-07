@@ -142,6 +142,7 @@ pub enum MenuAction {
     ClearRecentFiles,  // Clear recent files list
     Revert,
     Import,
+    ImportToLibrary,
     Export,
     Quit,
 
@@ -232,7 +233,8 @@ impl MenuItemDef {
     const SAVE_AS: Self = Self { label: "Save As...", action: MenuAction::SaveAs, shortcut: Some(Shortcut::new(ShortcutKey::S, CTRL, SHIFT, NO_ALT)) };
     const OPEN_FILE: Self = Self { label: "Open File...", action: MenuAction::OpenFile, shortcut: Some(Shortcut::new(ShortcutKey::O, CTRL, NO_SHIFT, NO_ALT)) };
     const REVERT: Self = Self { label: "Revert", action: MenuAction::Revert, shortcut: None };
-    const IMPORT: Self = Self { label: "Import...", action: MenuAction::Import, shortcut: Some(Shortcut::new(ShortcutKey::I, CTRL, SHIFT, NO_ALT)) };
+    const IMPORT: Self = Self { label: "Import...", action: MenuAction::Import, shortcut: Some(Shortcut::new(ShortcutKey::I, CTRL, NO_SHIFT, NO_ALT)) };
+    const IMPORT_TO_LIBRARY: Self = Self { label: "Import to Library...", action: MenuAction::ImportToLibrary, shortcut: Some(Shortcut::new(ShortcutKey::I, CTRL, SHIFT, NO_ALT)) };
     const EXPORT: Self = Self { label: "Export...", action: MenuAction::Export, shortcut: Some(Shortcut::new(ShortcutKey::E, CTRL, SHIFT, NO_ALT)) };
     const QUIT: Self = Self { label: "Quit", action: MenuAction::Quit, shortcut: Some(Shortcut::new(ShortcutKey::Q, CTRL, NO_SHIFT, NO_ALT)) };
 
@@ -293,7 +295,7 @@ impl MenuItemDef {
     pub fn all_with_shortcuts() -> &'static [&'static MenuItemDef] {
         &[
             &Self::NEW_FILE, &Self::NEW_WINDOW, &Self::SAVE, &Self::SAVE_AS,
-            &Self::OPEN_FILE, &Self::IMPORT, &Self::EXPORT, &Self::QUIT,
+            &Self::OPEN_FILE, &Self::IMPORT, &Self::IMPORT_TO_LIBRARY, &Self::EXPORT, &Self::QUIT,
             &Self::UNDO, &Self::REDO, &Self::CUT, &Self::COPY, &Self::PASTE,
             &Self::DELETE, &Self::SELECT_ALL, &Self::SELECT_NONE,
             &Self::GROUP, &Self::ADD_LAYER, &Self::NEW_KEYFRAME,
@@ -324,6 +326,7 @@ impl MenuItemDef {
                     MenuDef::Item(&Self::REVERT),
                     MenuDef::Separator,
                     MenuDef::Item(&Self::IMPORT),
+                    MenuDef::Item(&Self::IMPORT_TO_LIBRARY),
                     MenuDef::Item(&Self::EXPORT),
                     #[cfg(not(target_os = "macos"))]
                     MenuDef::Separator,

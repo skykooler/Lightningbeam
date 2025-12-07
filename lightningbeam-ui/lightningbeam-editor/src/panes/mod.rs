@@ -76,6 +76,52 @@ impl Default for ColorMode {
     }
 }
 
+/// Helper functions for layer/clip type matching and creation
+
+/// Check if a clip type matches a layer type
+pub fn layer_matches_clip_type(layer: &lightningbeam_core::layer::AnyLayer, clip_type: DragClipType) -> bool {
+    use lightningbeam_core::layer::*;
+    match (layer, clip_type) {
+        (AnyLayer::Vector(_), DragClipType::Vector) => true,
+        (AnyLayer::Vector(_), DragClipType::Image) => true, // Images go on vector layers as shapes
+        (AnyLayer::Video(_), DragClipType::Video) => true,
+        (AnyLayer::Audio(audio), DragClipType::AudioSampled) => {
+            audio.audio_layer_type == AudioLayerType::Sampled
+        }
+        (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
+            audio.audio_layer_type == AudioLayerType::Midi
+        }
+        _ => false,
+    }
+}
+
+/// Create a new layer of the appropriate type for a clip
+pub fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> lightningbeam_core::layer::AnyLayer {
+    use lightningbeam_core::layer::*;
+    match clip_type {
+        DragClipType::Vector => AnyLayer::Vector(VectorLayer::new(name)),
+        DragClipType::Video => AnyLayer::Video(VideoLayer::new(name)),
+        DragClipType::AudioSampled => AnyLayer::Audio(AudioLayer::new_sampled(name)),
+        DragClipType::AudioMidi => AnyLayer::Audio(AudioLayer::new_midi(name)),
+        // Images are placed as shapes on vector layers, not their own layer type
+        DragClipType::Image => AnyLayer::Vector(VectorLayer::new(name)),
+    }
+}
+
+/// Find an existing sampled audio track in the document
+/// Returns the layer ID if found, None otherwise
+pub fn find_sampled_audio_track(document: &lightningbeam_core::document::Document) -> Option<uuid::Uuid> {
+    use lightningbeam_core::layer::*;
+    for layer in &document.root.children {
+        if let AnyLayer::Audio(audio_layer) = layer {
+            if audio_layer.audio_layer_type == AudioLayerType::Sampled {
+                return Some(audio_layer.layer.id);
+            }
+        }
+    }
+    None
+}
+
 /// Shared state that all panes can access
 pub struct SharedPaneState<'a> {
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
