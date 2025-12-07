@@ -4705,30 +4705,36 @@ impl PaneRenderer for StagePane {
                                 shared.pending_actions.push(Box::new(action));
                             } else {
                                 // For clips, create a clip instance
-                                // Video clips align to stage origin (0,0), other clips use mouse position
-                                let (pos_x, pos_y) = if dragging.clip_type == DragClipType::Video {
-                                    (0.0, 0.0)
-                                } else {
-                                    (world_pos.x as f64, world_pos.y as f64)
-                                };
-
                                 let mut clip_instance = ClipInstance::new(dragging.clip_id)
-                                    .with_timeline_start(drop_time)
-                                    .with_position(pos_x, pos_y);
+                                    .with_timeline_start(drop_time);
 
-                                // For video clips, scale to fill document dimensions
+                                // For video clips, scale to fit and center in document
                                 if dragging.clip_type == DragClipType::Video {
                                     if let Some((video_width, video_height)) = dragging.dimensions {
                                         let doc_width = shared.action_executor.document().width;
                                         let doc_height = shared.action_executor.document().height;
 
-                                        // Calculate scale to fill document
+                                        // Calculate scale to fit (use minimum to preserve aspect ratio)
                                         let scale_x = doc_width / video_width;
                                         let scale_y = doc_height / video_height;
+                                        let uniform_scale = scale_x.min(scale_y);
 
-                                        clip_instance.transform.scale_x = scale_x;
-                                        clip_instance.transform.scale_y = scale_y;
+                                        clip_instance.transform.scale_x = uniform_scale;
+                                        clip_instance.transform.scale_y = uniform_scale;
+
+                                        // Center the video in the document
+                                        let scaled_width = video_width * uniform_scale;
+                                        let scaled_height = video_height * uniform_scale;
+                                        let center_x = (doc_width - scaled_width) / 2.0;
+                                        let center_y = (doc_height - scaled_height) / 2.0;
+
+                                        clip_instance.transform.x = center_x;
+                                        clip_instance.transform.y = center_y;
                                     }
+                                } else {
+                                    // Audio clips use mouse drop position
+                                    clip_instance.transform.x = world_pos.x as f64;
+                                    clip_instance.transform.y = world_pos.y as f64;
                                 }
 
                                 // Save instance ID for potential grouping
