@@ -2015,7 +2015,7 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Disable egui's built-in Ctrl+Plus/Minus zoom behavior
         // We handle zoom ourselves for the Stage pane
         ctx.options_mut(|o| {
@@ -2242,34 +2242,71 @@ impl eframe::App for EditorApp {
         }
 
         // Handle export dialog
-        if let Some((settings, output_path)) = self.export_dialog.render(ctx) {
-            // User clicked Export - start the export
-            println!("🎬 [MAIN] Export button clicked: {}", output_path.display());
+        if let Some(export_result) = self.export_dialog.render(ctx) {
+            use export::dialog::ExportResult;
 
-            if let Some(audio_controller) = &self.audio_controller {
-                println!("🎬 [MAIN] Audio controller available");
+            // Create orchestrator if needed
+            if self.export_orchestrator.is_none() {
+                self.export_orchestrator = Some(export::ExportOrchestrator::new());
+            }
 
-                // Create orchestrator if needed
-                if self.export_orchestrator.is_none() {
-                    println!("🎬 [MAIN] Creating new orchestrator");
-                    self.export_orchestrator = Some(export::ExportOrchestrator::new());
-                }
+            let export_started = if let Some(orchestrator) = &mut self.export_orchestrator {
+                match export_result {
+                    ExportResult::AudioOnly(settings, output_path) => {
+                        println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
 
-                // Start export
-                if let Some(orchestrator) = &mut self.export_orchestrator {
-                    println!("🎬 [MAIN] Calling start_audio_export...");
-                    orchestrator.start_audio_export(
-                        settings,
-                        output_path,
-                        Arc::clone(audio_controller),
-                    );
-                    println!("🎬 [MAIN] start_audio_export returned, opening progress dialog");
-                    // Open progress dialog
-                    self.export_progress_dialog.open();
-                    println!("🎬 [MAIN] Progress dialog opened");
+                        if let Some(audio_controller) = &self.audio_controller {
+                            orchestrator.start_audio_export(
+                                settings,
+                                output_path,
+                                Arc::clone(audio_controller),
+                            );
+                            true
+                        } else {
+                            eprintln!("❌ Cannot export audio: Audio controller not available");
+                            false
+                        }
+                    }
+                    ExportResult::VideoOnly(settings, output_path) => {
+                        println!("🎬 [MAIN] Starting video-only export: {}", output_path.display());
+
+                        match orchestrator.start_video_export(settings, output_path) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                eprintln!("❌ Failed to start video export: {}", err);
+                                false
+                            }
+                        }
+                    }
+                    ExportResult::VideoWithAudio(video_settings, audio_settings, output_path) => {
+                        println!("🎬🎵 [MAIN] Starting video+audio export: {}", output_path.display());
+
+                        if let Some(audio_controller) = &self.audio_controller {
+                            match orchestrator.start_video_with_audio_export(
+                                video_settings,
+                                audio_settings,
+                                output_path,
+                                Arc::clone(audio_controller),
+                            ) {
+                                Ok(()) => true,
+                                Err(err) => {
+                                    eprintln!("❌ Failed to start video+audio export: {}", err);
+                                    false
+                                }
+                            }
+                        } else {
+                            eprintln!("❌ Cannot export with audio: Audio controller not available");
+                            false
+                        }
+                    }
                 }
             } else {
-                eprintln!("❌ Cannot export: Audio controller not available");
+                false
+            };
+
+            // Open progress dialog if export started successfully
+            if export_started {
+                self.export_progress_dialog.open();
             }
         }
 
@@ -2284,6 +2321,48 @@ impl eframe::App for EditorApp {
         // Keep requesting repaints while export progress dialog is open
         if self.export_progress_dialog.open {
             ctx.request_repaint();
+        }
+
+        // Render video frames incrementally (if video export in progress)
+        if let Some(orchestrator) = &mut self.export_orchestrator {
+            if orchestrator.is_exporting() {
+                // Get GPU resources from eframe's wgpu render state
+                if let Some(render_state) = frame.wgpu_render_state() {
+                    let device = &render_state.device;
+                    let queue = &render_state.queue;
+
+                    // Create temporary renderer and image cache for export
+                    // Note: Creating a new renderer per frame is inefficient but simple
+                    // TODO: Reuse renderer across frames by storing it in EditorApp
+                    let mut temp_renderer = vello::Renderer::new(
+                        device,
+                        vello::RendererOptions {
+                            use_cpu: false,
+                            antialiasing_support: vello::AaSupport::all(),
+                            num_init_threads: None,
+                            pipeline_cache: None,
+                        },
+                    ).ok();
+
+                    let mut temp_image_cache = lightningbeam_core::renderer::ImageCache::new();
+
+                    if let Some(renderer) = &mut temp_renderer {
+                        if let Ok(has_more) = orchestrator.render_next_video_frame(
+                            self.action_executor.document_mut(),
+                            device,
+                            queue,
+                            renderer,
+                            &mut temp_image_cache,
+                            &self.video_manager,
+                        ) {
+                            if has_more {
+                                // More frames to render - request repaint for next frame
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Poll export orchestrator for progress

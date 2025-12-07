@@ -3,22 +3,46 @@
 //! Provides a user interface for configuring and starting audio/video exports.
 
 use eframe::egui;
-use lightningbeam_core::export::{AudioExportSettings, AudioFormat};
+use lightningbeam_core::export::{AudioExportSettings, AudioFormat, VideoExportSettings, VideoCodec, VideoQuality};
 use std::path::PathBuf;
+
+/// Export type selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportType {
+    Audio,
+    Video,
+}
+
+/// Export result from dialog
+#[derive(Debug, Clone)]
+pub enum ExportResult {
+    AudioOnly(AudioExportSettings, PathBuf),
+    VideoOnly(VideoExportSettings, PathBuf),
+    VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
+}
 
 /// Export dialog state
 pub struct ExportDialog {
     /// Is the dialog open?
     pub open: bool,
 
-    /// Export settings
-    pub settings: AudioExportSettings,
+    /// Export type (Audio or Video)
+    pub export_type: ExportType,
+
+    /// Audio export settings
+    pub audio_settings: AudioExportSettings,
+
+    /// Video export settings
+    pub video_settings: VideoExportSettings,
+
+    /// Include audio with video?
+    pub include_audio: bool,
 
     /// Output file path
     pub output_path: Option<PathBuf>,
 
-    /// Selected preset index (for UI)
-    pub selected_preset: usize,
+    /// Selected audio preset index (for UI)
+    pub selected_audio_preset: usize,
 
     /// Error message (if any)
     pub error_message: Option<String>,
@@ -28,9 +52,12 @@ impl Default for ExportDialog {
     fn default() -> Self {
         Self {
             open: false,
-            settings: AudioExportSettings::default(),
+            export_type: ExportType::Audio,
+            audio_settings: AudioExportSettings::default(),
+            video_settings: VideoExportSettings::default(),
+            include_audio: true,
             output_path: None,
-            selected_preset: 0,
+            selected_audio_preset: 0,
             error_message: None,
         }
     }
@@ -40,7 +67,8 @@ impl ExportDialog {
     /// Open the dialog with default settings
     pub fn open(&mut self, timeline_duration: f64) {
         self.open = true;
-        self.settings.end_time = timeline_duration;
+        self.audio_settings.end_time = timeline_duration;
+        self.video_settings.end_time = timeline_duration;
         self.error_message = None;
     }
 
@@ -52,18 +80,23 @@ impl ExportDialog {
 
     /// Render the export dialog
     ///
-    /// Returns Some(settings, output_path) if the user clicked Export,
-    /// None otherwise.
-    pub fn render(&mut self, ctx: &egui::Context) -> Option<(AudioExportSettings, PathBuf)> {
+    /// Returns Some(ExportResult) if the user clicked Export, None otherwise.
+    pub fn render(&mut self, ctx: &egui::Context) -> Option<ExportResult> {
         if !self.open {
             return None;
         }
 
         let mut should_export = false;
         let mut should_close = false;
+        let mut open = self.open;
 
-        egui::Window::new("Export Audio")
-            .open(&mut self.open)
+        let window_title = match self.export_type {
+            ExportType::Audio => "Export Audio",
+            ExportType::Video => "Export Video",
+        };
+
+        egui::Window::new(window_title)
+            .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -76,159 +109,31 @@ impl ExportDialog {
                     ui.add_space(8.0);
                 }
 
-                // Preset selection
-                ui.heading("Preset");
+                // Export type selection (tabs)
                 ui.horizontal(|ui| {
-                    let presets = [
-                        ("High Quality WAV", AudioExportSettings::high_quality_wav()),
-                        ("High Quality FLAC", AudioExportSettings::high_quality_flac()),
-                        ("Standard MP3", AudioExportSettings::standard_mp3()),
-                        ("Standard AAC", AudioExportSettings::standard_aac()),
-                        ("High Quality MP3", AudioExportSettings::high_quality_mp3()),
-                        ("High Quality AAC", AudioExportSettings::high_quality_aac()),
-                        ("Podcast MP3", AudioExportSettings::podcast_mp3()),
-                        ("Podcast AAC", AudioExportSettings::podcast_aac()),
-                    ];
-
-                    egui::ComboBox::from_id_source("export_preset")
-                        .selected_text(presets[self.selected_preset].0)
-                        .show_ui(ui, |ui| {
-                            for (i, (name, _)) in presets.iter().enumerate() {
-                                if ui.selectable_value(&mut self.selected_preset, i, *name).clicked() {
-                                    // Save current time range before applying preset
-                                    let saved_start = self.settings.start_time;
-                                    let saved_end = self.settings.end_time;
-                                    self.settings = presets[i].1.clone();
-                                    // Restore time range
-                                    self.settings.start_time = saved_start;
-                                    self.settings.end_time = saved_end;
-                                }
-                            }
-                        });
+                    ui.selectable_value(&mut self.export_type, ExportType::Audio, "🎵 Audio");
+                    ui.selectable_value(&mut self.export_type, ExportType::Video, "🎬 Video");
                 });
 
                 ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
 
-                // Format settings
-                ui.heading("Format");
-                ui.horizontal(|ui| {
-                    ui.label("Format:");
-                    egui::ComboBox::from_id_source("audio_format")
-                        .selected_text(self.settings.format.name())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.settings.format, AudioFormat::Wav, "WAV (Uncompressed)");
-                            ui.selectable_value(&mut self.settings.format, AudioFormat::Flac, "FLAC (Lossless)");
-                            ui.selectable_value(&mut self.settings.format, AudioFormat::Mp3, "MP3");
-                            ui.selectable_value(&mut self.settings.format, AudioFormat::Aac, "AAC");
-                        });
-                });
-
-                ui.add_space(8.0);
-
-                // Audio settings
-                ui.horizontal(|ui| {
-                    ui.label("Sample Rate:");
-                    egui::ComboBox::from_id_source("sample_rate")
-                        .selected_text(format!("{} Hz", self.settings.sample_rate))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.settings.sample_rate, 44100, "44100 Hz");
-                            ui.selectable_value(&mut self.settings.sample_rate, 48000, "48000 Hz");
-                            ui.selectable_value(&mut self.settings.sample_rate, 96000, "96000 Hz");
-                        });
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Channels:");
-                    ui.radio_value(&mut self.settings.channels, 1, "Mono");
-                    ui.radio_value(&mut self.settings.channels, 2, "Stereo");
-                });
-
-                ui.add_space(8.0);
-
-                // Format-specific settings
-                if self.settings.format.supports_bit_depth() {
-                    ui.horizontal(|ui| {
-                        ui.label("Bit Depth:");
-                        ui.radio_value(&mut self.settings.bit_depth, 16, "16-bit");
-                        ui.radio_value(&mut self.settings.bit_depth, 24, "24-bit");
-                    });
-                }
-
-                if self.settings.format.uses_bitrate() {
-                    ui.horizontal(|ui| {
-                        ui.label("Bitrate:");
-                        egui::ComboBox::from_id_source("bitrate")
-                            .selected_text(format!("{} kbps", self.settings.bitrate_kbps))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.settings.bitrate_kbps, 128, "128 kbps");
-                                ui.selectable_value(&mut self.settings.bitrate_kbps, 192, "192 kbps");
-                                ui.selectable_value(&mut self.settings.bitrate_kbps, 256, "256 kbps");
-                                ui.selectable_value(&mut self.settings.bitrate_kbps, 320, "320 kbps");
-                            });
-                    });
+                // Render either audio or video settings
+                match self.export_type {
+                    ExportType::Audio => self.render_audio_settings(ui),
+                    ExportType::Video => self.render_video_settings(ui),
                 }
 
                 ui.add_space(12.0);
 
-                // Time range
-                ui.heading("Time Range");
-                ui.horizontal(|ui| {
-                    ui.label("Start:");
-                    ui.add(egui::DragValue::new(&mut self.settings.start_time)
-                        .speed(0.1)
-                        .clamp_range(0.0..=self.settings.end_time)
-                        .suffix(" s"));
-
-                    ui.label("End:");
-                    ui.add(egui::DragValue::new(&mut self.settings.end_time)
-                        .speed(0.1)
-                        .clamp_range(self.settings.start_time..=f64::MAX)
-                        .suffix(" s"));
-                });
-
-                let duration = self.settings.duration();
-                ui.label(format!("Duration: {:.2} seconds", duration));
+                // Time range (common to both)
+                self.render_time_range(ui);
 
                 ui.add_space(12.0);
 
-                // Output file path
-                ui.heading("Output");
-                ui.horizontal(|ui| {
-                    let path_text = self.output_path.as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "No file selected".to_string());
-
-                    ui.label("File:");
-                    ui.text_edit_singleline(&mut path_text.clone());
-
-                    if ui.button("Browse...").clicked() {
-                        // Open file dialog
-                        let default_name = format!("audio.{}", self.settings.format.extension());
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name(&default_name)
-                            .add_filter("Audio", &[self.settings.format.extension()])
-                            .save_file()
-                        {
-                            self.output_path = Some(path);
-                        }
-                    }
-                });
-
-                ui.add_space(12.0);
-
-                // Estimated file size
-                if duration > 0.0 {
-                    let estimated_mb = if self.settings.format.uses_bitrate() {
-                        // Lossy: bitrate * duration / 8 / 1024
-                        (self.settings.bitrate_kbps as f64 * duration) / 8.0 / 1024.0
-                    } else {
-                        // Lossless: sample_rate * channels * bit_depth * duration / 8 / 1024 / 1024
-                        let compression_factor = if self.settings.format == AudioFormat::Flac { 0.6 } else { 1.0 };
-                        (self.settings.sample_rate as f64 * self.settings.channels as f64 *
-                         self.settings.bit_depth as f64 * duration * compression_factor) / 8.0 / 1024.0 / 1024.0
-                    };
-                    ui.label(format!("Estimated size: ~{:.1} MB", estimated_mb));
-                }
+                // Output file path (common to both)
+                self.render_output_selection(ui);
 
                 ui.add_space(16.0);
 
@@ -246,31 +151,318 @@ impl ExportDialog {
                 });
             });
 
+        // Update open state (in case user clicked X button)
+        self.open = open;
+
         if should_close {
             self.close();
             return None;
         }
 
         if should_export {
-            // Validate settings
-            if let Err(err) = self.settings.validate() {
-                self.error_message = Some(err);
-                return None;
-            }
-
-            // Check if output path is set
-            if self.output_path.is_none() {
-                self.error_message = Some("Please select an output file".to_string());
-                return None;
-            }
-
-            // Return settings and path
-            let result = Some((self.settings.clone(), self.output_path.clone().unwrap()));
-            self.close();
-            return result;
+            return self.handle_export();
         }
 
         None
+    }
+
+    /// Render audio export settings UI
+    fn render_audio_settings(&mut self, ui: &mut egui::Ui) {
+        // Preset selection
+        ui.heading("Preset");
+                ui.horizontal(|ui| {
+                    let presets = [
+                        ("High Quality WAV", AudioExportSettings::high_quality_wav()),
+                        ("High Quality FLAC", AudioExportSettings::high_quality_flac()),
+                        ("Standard MP3", AudioExportSettings::standard_mp3()),
+                        ("Standard AAC", AudioExportSettings::standard_aac()),
+                        ("High Quality MP3", AudioExportSettings::high_quality_mp3()),
+                        ("High Quality AAC", AudioExportSettings::high_quality_aac()),
+                        ("Podcast MP3", AudioExportSettings::podcast_mp3()),
+                        ("Podcast AAC", AudioExportSettings::podcast_aac()),
+                    ];
+
+                    egui::ComboBox::from_id_source("export_preset")
+                        .selected_text(presets[self.selected_audio_preset].0)
+                        .show_ui(ui, |ui| {
+                            for (i, (name, _)) in presets.iter().enumerate() {
+                                if ui.selectable_value(&mut self.selected_audio_preset, i, *name).clicked() {
+                                    // Save current time range before applying preset
+                                    let saved_start = self.audio_settings.start_time;
+                                    let saved_end = self.audio_settings.end_time;
+                                    self.audio_settings = presets[i].1.clone();
+                                    // Restore time range
+                                    self.audio_settings.start_time = saved_start;
+                                    self.audio_settings.end_time = saved_end;
+                                }
+                            }
+                        });
+                });
+
+                ui.add_space(12.0);
+
+        ui.add_space(12.0);
+
+        // Format settings
+        ui.heading("Format");
+        ui.horizontal(|ui| {
+            ui.label("Format:");
+            egui::ComboBox::from_id_source("audio_format")
+                .selected_text(self.audio_settings.format.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.audio_settings.format, AudioFormat::Wav, "WAV (Uncompressed)");
+                    ui.selectable_value(&mut self.audio_settings.format, AudioFormat::Flac, "FLAC (Lossless)");
+                    ui.selectable_value(&mut self.audio_settings.format, AudioFormat::Mp3, "MP3");
+                    ui.selectable_value(&mut self.audio_settings.format, AudioFormat::Aac, "AAC");
+                });
+        });
+
+        ui.add_space(8.0);
+
+        // Audio settings
+        ui.horizontal(|ui| {
+            ui.label("Sample Rate:");
+            egui::ComboBox::from_id_source("sample_rate")
+                .selected_text(format!("{} Hz", self.audio_settings.sample_rate))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.audio_settings.sample_rate, 44100, "44100 Hz");
+                    ui.selectable_value(&mut self.audio_settings.sample_rate, 48000, "48000 Hz");
+                    ui.selectable_value(&mut self.audio_settings.sample_rate, 96000, "96000 Hz");
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Channels:");
+            ui.radio_value(&mut self.audio_settings.channels, 1, "Mono");
+            ui.radio_value(&mut self.audio_settings.channels, 2, "Stereo");
+        });
+
+        ui.add_space(8.0);
+
+        // Format-specific settings
+        if self.audio_settings.format.supports_bit_depth() {
+            ui.horizontal(|ui| {
+                ui.label("Bit Depth:");
+                ui.radio_value(&mut self.audio_settings.bit_depth, 16, "16-bit");
+                ui.radio_value(&mut self.audio_settings.bit_depth, 24, "24-bit");
+            });
+        }
+
+        if self.audio_settings.format.uses_bitrate() {
+            ui.horizontal(|ui| {
+                ui.label("Bitrate:");
+                egui::ComboBox::from_id_source("bitrate")
+                    .selected_text(format!("{} kbps", self.audio_settings.bitrate_kbps))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.audio_settings.bitrate_kbps, 128, "128 kbps");
+                        ui.selectable_value(&mut self.audio_settings.bitrate_kbps, 192, "192 kbps");
+                        ui.selectable_value(&mut self.audio_settings.bitrate_kbps, 256, "256 kbps");
+                        ui.selectable_value(&mut self.audio_settings.bitrate_kbps, 320, "320 kbps");
+                    });
+            });
+        }
+    }
+
+    /// Render video export settings UI
+    fn render_video_settings(&mut self, ui: &mut egui::Ui) {
+        // Codec selection
+        ui.heading("Codec");
+        ui.horizontal(|ui| {
+            ui.label("Codec:");
+            egui::ComboBox::from_id_source("video_codec")
+                .selected_text(format!("{:?}", self.video_settings.codec))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.codec, VideoCodec::H264, "H.264 (Most Compatible)");
+                    ui.selectable_value(&mut self.video_settings.codec, VideoCodec::H265, "H.265 (Better Compression)");
+                    ui.selectable_value(&mut self.video_settings.codec, VideoCodec::VP8, "VP8 (WebM)");
+                    ui.selectable_value(&mut self.video_settings.codec, VideoCodec::VP9, "VP9 (WebM)");
+                    ui.selectable_value(&mut self.video_settings.codec, VideoCodec::ProRes422, "ProRes 422 (Professional)");
+                });
+        });
+
+        ui.add_space(12.0);
+
+        // Resolution
+        ui.heading("Resolution");
+        ui.horizontal(|ui| {
+            ui.label("Width:");
+            let mut custom_width = self.video_settings.width.unwrap_or(1920);
+            if ui.add(egui::DragValue::new(&mut custom_width).clamp_range(1..=7680)).changed() {
+                self.video_settings.width = Some(custom_width);
+            }
+
+            ui.label("Height:");
+            let mut custom_height = self.video_settings.height.unwrap_or(1080);
+            if ui.add(egui::DragValue::new(&mut custom_height).clamp_range(1..=4320)).changed() {
+                self.video_settings.height = Some(custom_height);
+            }
+        });
+
+        // Resolution presets
+        ui.horizontal(|ui| {
+            if ui.button("1080p").clicked() {
+                self.video_settings.width = Some(1920);
+                self.video_settings.height = Some(1080);
+            }
+            if ui.button("4K").clicked() {
+                self.video_settings.width = Some(3840);
+                self.video_settings.height = Some(2160);
+            }
+            if ui.button("720p").clicked() {
+                self.video_settings.width = Some(1280);
+                self.video_settings.height = Some(720);
+            }
+        });
+
+        ui.add_space(12.0);
+
+        // Framerate
+        ui.heading("Framerate");
+        ui.horizontal(|ui| {
+            ui.label("FPS:");
+            egui::ComboBox::from_id_source("framerate")
+                .selected_text(format!("{}", self.video_settings.framerate as u32))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.framerate, 24.0, "24");
+                    ui.selectable_value(&mut self.video_settings.framerate, 30.0, "30");
+                    ui.selectable_value(&mut self.video_settings.framerate, 60.0, "60");
+                });
+        });
+
+        ui.add_space(12.0);
+
+        // Quality
+        ui.heading("Quality");
+        ui.horizontal(|ui| {
+            ui.label("Quality:");
+            egui::ComboBox::from_id_source("video_quality")
+                .selected_text(self.video_settings.quality.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.quality, VideoQuality::Low, VideoQuality::Low.name());
+                    ui.selectable_value(&mut self.video_settings.quality, VideoQuality::Medium, VideoQuality::Medium.name());
+                    ui.selectable_value(&mut self.video_settings.quality, VideoQuality::High, VideoQuality::High.name());
+                    ui.selectable_value(&mut self.video_settings.quality, VideoQuality::VeryHigh, VideoQuality::VeryHigh.name());
+                });
+        });
+
+        ui.add_space(12.0);
+
+        // Include audio checkbox
+        ui.checkbox(&mut self.include_audio, "Include Audio");
+    }
+
+    /// Render time range UI (common to both audio and video)
+    fn render_time_range(&mut self, ui: &mut egui::Ui) {
+        let (start_time, end_time) = match self.export_type {
+            ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
+            ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
+        };
+
+        ui.heading("Time Range");
+        ui.horizontal(|ui| {
+            ui.label("Start:");
+            ui.add(egui::DragValue::new(start_time)
+                .speed(0.1)
+                .clamp_range(0.0..=*end_time)
+                .suffix(" s"));
+
+            ui.label("End:");
+            ui.add(egui::DragValue::new(end_time)
+                .speed(0.1)
+                .clamp_range(*start_time..=f64::MAX)
+                .suffix(" s"));
+        });
+
+        let duration = *end_time - *start_time;
+        ui.label(format!("Duration: {:.2} seconds", duration));
+    }
+
+    /// Render output file selection UI (common to both audio and video)
+    fn render_output_selection(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Output");
+        ui.horizontal(|ui| {
+            let path_text = self.output_path.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "No file selected".to_string());
+
+            ui.label("File:");
+            ui.text_edit_singleline(&mut path_text.clone());
+
+            if ui.button("Browse...").clicked() {
+                // Determine file extension and filter based on export type
+                let (default_name, filter_name, extensions) = match self.export_type {
+                    ExportType::Audio => {
+                        let ext = self.audio_settings.format.extension();
+                        (format!("audio.{}", ext), "Audio", vec![ext])
+                    }
+                    ExportType::Video => {
+                        let ext = self.video_settings.codec.container_format();
+                        (format!("video.{}", ext), "Video", vec![ext])
+                    }
+                };
+
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name(&default_name)
+                    .add_filter(filter_name, &extensions)
+                    .save_file()
+                {
+                    self.output_path = Some(path);
+                }
+            }
+        });
+    }
+
+    /// Handle export button click
+    fn handle_export(&mut self) -> Option<ExportResult> {
+        // Check if output path is set
+        if self.output_path.is_none() {
+            self.error_message = Some("Please select an output file".to_string());
+            return None;
+        }
+
+        let output_path = self.output_path.clone().unwrap();
+
+        let result = match self.export_type {
+            ExportType::Audio => {
+                // Validate audio settings
+                if let Err(err) = self.audio_settings.validate() {
+                    self.error_message = Some(err);
+                    return None;
+                }
+
+                Some(ExportResult::AudioOnly(self.audio_settings.clone(), output_path))
+            }
+            ExportType::Video => {
+                // Validate video settings
+                if let Err(err) = self.video_settings.validate() {
+                    self.error_message = Some(err);
+                    return None;
+                }
+
+                if self.include_audio {
+                    // Validate audio settings too
+                    if let Err(err) = self.audio_settings.validate() {
+                        self.error_message = Some(err);
+                        return None;
+                    }
+
+                    // Sync time range from video to audio
+                    self.audio_settings.start_time = self.video_settings.start_time;
+                    self.audio_settings.end_time = self.video_settings.end_time;
+
+                    Some(ExportResult::VideoWithAudio(
+                        self.video_settings.clone(),
+                        self.audio_settings.clone(),
+                        output_path,
+                    ))
+                } else {
+                    Some(ExportResult::VideoOnly(self.video_settings.clone(), output_path))
+                }
+            }
+        };
+
+        self.close();
+        result
     }
 }
 
