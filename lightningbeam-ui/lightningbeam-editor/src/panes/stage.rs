@@ -1740,6 +1740,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                                     store: wgpu::StoreOp::Store,
                                 },
+                                depth_slice: None,
                             })],
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
@@ -1828,7 +1829,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     });
 
                     // Poll the device to complete the mapping
-                    device.poll(wgpu::Maintain::Wait);
+                    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
                     // Read the pixel data
                     if receiver.recv().is_ok() {

@@ -621,7 +621,7 @@ pub fn render_frame_to_rgba(
         sender.send(result).ok();
     });
 
-    device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     receiver
         .recv()
@@ -926,6 +926,7 @@ pub fn render_frame_to_rgba_hdr(
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             occlusion_query_set: None,
@@ -990,7 +991,7 @@ pub fn render_frame_to_rgba_hdr(
         sender.send(result).ok();
     });
 
-    device.poll(wgpu::Maintain::Wait);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
     receiver
         .recv()

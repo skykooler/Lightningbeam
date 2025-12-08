@@ -64,6 +64,7 @@ pub mod virtual_piano;
 pub mod node_editor;
 pub mod preset_browser;
 pub mod asset_library;
+pub mod shader_editor;
 
 /// Which color mode is active for the eyedropper tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +192,14 @@ pub struct SharedPaneState<'a> {
     pub waveform_image_cache: &'a mut crate::waveform_image_cache::WaveformImageCache,
     /// Audio pool indices that got new waveform data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
+    /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
+    pub effect_to_load: &'a mut Option<Uuid>,
+    /// Queue for effect thumbnail requests (effect IDs to generate thumbnails for)
+    pub effect_thumbnail_requests: &'a mut Vec<Uuid>,
+    /// Cache of generated effect thumbnails (effect_id -> RGBA data)
+    pub effect_thumbnail_cache: &'a std::collections::HashMap<Uuid, Vec<u8>>,
+    /// Effect IDs whose thumbnails should be invalidated (e.g., after shader edit)
+    pub effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
 }
 
 /// Trait for pane rendering
@@ -231,6 +240,7 @@ pub enum PaneInstance {
     NodeEditor(node_editor::NodeEditorPane),
     PresetBrowser(preset_browser::PresetBrowserPane),
     AssetLibrary(asset_library::AssetLibraryPane),
+    ShaderEditor(shader_editor::ShaderEditorPane),
 }
 
 impl PaneInstance {
@@ -251,6 +261,9 @@ impl PaneInstance {
             PaneType::AssetLibrary => {
                 PaneInstance::AssetLibrary(asset_library::AssetLibraryPane::new())
             }
+            PaneType::ShaderEditor => {
+                PaneInstance::ShaderEditor(shader_editor::ShaderEditorPane::new())
+            }
         }
     }
 
@@ -267,6 +280,7 @@ impl PaneInstance {
             PaneInstance::NodeEditor(_) => PaneType::NodeEditor,
             PaneInstance::PresetBrowser(_) => PaneType::PresetBrowser,
             PaneInstance::AssetLibrary(_) => PaneType::AssetLibrary,
+            PaneInstance::ShaderEditor(_) => PaneType::ShaderEditor,
         }
     }
 }
@@ -284,6 +298,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.render_header(ui, shared),
             PaneInstance::PresetBrowser(p) => p.render_header(ui, shared),
             PaneInstance::AssetLibrary(p) => p.render_header(ui, shared),
+            PaneInstance::ShaderEditor(p) => p.render_header(ui, shared),
         }
     }
 
@@ -305,6 +320,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::PresetBrowser(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::AssetLibrary(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::ShaderEditor(p) => p.render_content(ui, rect, path, shared),
         }
     }
 
@@ -320,6 +336,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.name(),
             PaneInstance::PresetBrowser(p) => p.name(),
             PaneInstance::AssetLibrary(p) => p.name(),
+            PaneInstance::ShaderEditor(p) => p.name(),
         }
     }
 }

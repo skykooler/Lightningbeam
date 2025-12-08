@@ -14,6 +14,7 @@ ffmpeg-next = { version = "8.0", features = ["static"] }
 eframe = { workspace = true }
 egui_extras = { workspace = true }
 egui-wgpu = { workspace = true }
+egui_code_editor = { workspace = true }
 
 # GPU
 wgpu = { workspace = true }

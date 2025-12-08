@@ -1173,6 +1173,254 @@ impl AssetLibraryPane {
         }
     }
 
+    /// Render a section header for effect categories
+    fn render_section_header(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
+        ui.add_space(4.0);
+        let (header_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 20.0),
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            header_rect.min + egui::vec2(8.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+        ui.add_space(2.0);
+    }
+
+    /// Render a grid of asset items
+    #[allow(clippy::too_many_arguments)]
+    fn render_grid_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        assets: &[&AssetEntry],
+        columns: usize,
+        item_height: f32,
+        content_width: f32,
+        shared: &mut SharedPaneState,
+        document: &Document,
+        text_color: egui::Color32,
+        secondary_text_color: egui::Color32,
+    ) {
+        if assets.is_empty() {
+            return;
+        }
+
+        let rows = (assets.len() + columns - 1) / columns;
+        // Grid height: matches the positioning formula used below
+        // Items are at: GRID_SPACING + row * (item_height + GRID_SPACING)
+        // Last item bottom: GRID_SPACING + (rows-1) * (item_height + GRID_SPACING) + item_height
+        //                 = GRID_SPACING + rows * item_height + (rows-1) * GRID_SPACING
+        //                 = rows * (item_height + GRID_SPACING) + GRID_SPACING - GRID_SPACING (for last row)
+        // Simplified: GRID_SPACING + rows * (item_height + GRID_SPACING)
+        let grid_height = GRID_SPACING + rows as f32 * (item_height + GRID_SPACING);
+
+        // Reserve space for this grid section
+        // We need to use allocate_space to properly advance the cursor by the full height,
+        // then calculate the rect ourselves
+        let cursor_before = ui.cursor().min;
+        let _ = ui.allocate_space(egui::vec2(content_width, grid_height));
+        let grid_rect = egui::Rect::from_min_size(cursor_before, egui::vec2(content_width, grid_height));
+
+        for (idx, asset) in assets.iter().enumerate() {
+            let col = idx % columns;
+            let row = idx / columns;
+
+            let item_x = grid_rect.min.x + GRID_SPACING + col as f32 * (GRID_ITEM_SIZE + GRID_SPACING);
+            let item_y = grid_rect.min.y + GRID_SPACING + row as f32 * (item_height + GRID_SPACING);
+
+            let item_rect = egui::Rect::from_min_size(
+                egui::pos2(item_x, item_y),
+                egui::vec2(GRID_ITEM_SIZE, item_height),
+            );
+
+            // Use interact() instead of allocate_rect() because we've already allocated the
+            // entire grid space via allocate_exact_size above - allocate_rect would double-count
+            let response = ui.interact(item_rect, egui::Id::new(("grid_item", asset.id)), egui::Sense::click_and_drag());
+
+            let is_selected = self.selected_asset == Some(asset.id);
+            let is_being_dragged = shared.dragging_asset.as_ref().map(|d| d.clip_id == asset.id).unwrap_or(false);
+
+            // Item background
+            let item_bg = if is_being_dragged {
+                egui::Color32::from_rgb(80, 100, 120)
+            } else if is_selected {
+                egui::Color32::from_rgb(60, 80, 100)
+            } else if response.hovered() {
+                egui::Color32::from_rgb(45, 45, 45)
+            } else {
+                egui::Color32::from_rgb(35, 35, 35)
+            };
+            ui.painter().rect_filled(item_rect, 4.0, item_bg);
+
+            // Thumbnail area
+            let thumbnail_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    item_rect.min.x + (GRID_ITEM_SIZE - THUMBNAIL_SIZE as f32) / 2.0,
+                    item_rect.min.y + 4.0,
+                ),
+                egui::vec2(THUMBNAIL_SIZE as f32, THUMBNAIL_SIZE as f32),
+            );
+
+            // Generate and display thumbnail
+            let asset_id = asset.id;
+            let asset_category = asset.category;
+            let ctx = ui.ctx().clone();
+
+            let prefetched_waveform: Option<Vec<(f32, f32)>> =
+                if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
+                    if let Some(clip) = document.audio_clips.get(&asset_id) {
+                        if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
+                            shared.waveform_cache.get(audio_pool_index)
+                                .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+            let texture = self.thumbnail_cache.get_or_create(&ctx, asset_id, || {
+                match asset_category {
+                    AssetCategory::Images => document.image_assets.get(&asset_id).and_then(generate_image_thumbnail),
+                    AssetCategory::Vector => {
+                        let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                        document.vector_clips.get(&asset_id).map(|clip| generate_vector_thumbnail(clip, bg_color))
+                    }
+                    AssetCategory::Video => generate_video_thumbnail(&asset_id, &shared.video_manager)
+                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200))),
+                    AssetCategory::Audio => {
+                        if let Some(clip) = document.audio_clips.get(&asset_id) {
+                            let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                            match &clip.clip_type {
+                                AudioClipType::Sampled { .. } => {
+                                    let wave_color = egui::Color32::from_rgb(100, 200, 100);
+                                    if let Some(ref peaks) = prefetched_waveform {
+                                        Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
+                                    } else {
+                                        Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                    }
+                                }
+                                AudioClipType::Midi { midi_clip_id } => {
+                                    let note_color = egui::Color32::from_rgb(100, 200, 100);
+                                    if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
+                                        Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                    } else {
+                                        Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                    }
+                                }
+                            }
+                        } else {
+                            Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                        }
+                    }
+                    AssetCategory::Effects => {
+                        // Use GPU-rendered effect thumbnail if available
+                        if let Some(rgba) = shared.effect_thumbnail_cache.get(&asset_id) {
+                            Some(rgba.clone())
+                        } else {
+                            // Request GPU thumbnail generation
+                            shared.effect_thumbnail_requests.push(asset_id);
+                            // Return None to avoid caching placeholder - will retry next frame
+                            None
+                        }
+                    }
+                    AssetCategory::All => None,
+                }
+            });
+
+            // Either use cached texture or render placeholder directly for effects
+            // Use painter().image() instead of ui.put() to avoid affecting the cursor
+            if let Some(texture) = texture {
+                ui.painter().image(
+                    texture.id(),
+                    thumbnail_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else if asset_category == AssetCategory::Effects {
+                // Render effect placeholder directly (not cached) until GPU thumbnail ready
+                let placeholder_rgba = generate_effect_thumbnail();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize],
+                    &placeholder_rgba,
+                );
+                let texture = ctx.load_texture(
+                    format!("effect_placeholder_{}", asset_id),
+                    color_image,
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.painter().image(
+                    texture.id(),
+                    thumbnail_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+
+            // Category color indicator
+            let indicator_rect = egui::Rect::from_min_size(
+                egui::pos2(thumbnail_rect.min.x, thumbnail_rect.max.y - 3.0),
+                egui::vec2(THUMBNAIL_SIZE as f32, 3.0),
+            );
+            ui.painter().rect_filled(indicator_rect, 0.0, asset.category.color());
+
+            // Asset name
+            let name_display = ellipsize(&asset.name, 12);
+            ui.painter().text(
+                egui::pos2(item_rect.center().x, thumbnail_rect.max.y + 8.0),
+                egui::Align2::CENTER_TOP,
+                &name_display,
+                egui::FontId::proportional(10.0),
+                text_color,
+            );
+
+            // Handle interactions
+            if response.clicked() {
+                self.selected_asset = Some(asset.id);
+            }
+
+            if response.secondary_clicked() {
+                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                    self.context_menu = Some(ContextMenuState { asset_id: asset.id, position: pos });
+                }
+            }
+
+            if response.double_clicked() {
+                if asset.category == AssetCategory::Effects {
+                    *shared.effect_to_load = Some(asset.id);
+                } else if !asset.is_builtin {
+                    self.rename_state = Some(RenameState {
+                        asset_id: asset.id,
+                        category: asset.category,
+                        edit_text: asset.name.clone(),
+                    });
+                }
+            }
+
+            if response.drag_started() {
+                let linked_audio_clip_id = if asset.drag_clip_type == DragClipType::Video {
+                    document.video_clips.get(&asset.id).and_then(|video| video.linked_audio_clip_id)
+                } else {
+                    None
+                };
+                *shared.dragging_asset = Some(DraggingAsset {
+                    clip_id: asset.id,
+                    clip_type: asset.drag_clip_type,
+                    name: asset.name.clone(),
+                    duration: asset.duration,
+                    dimensions: asset.dimensions,
+                    linked_audio_clip_id,
+                });
+            }
+        }
+    }
+
     /// Render assets based on current view mode
     fn render_assets(
         &mut self,
@@ -1244,7 +1492,60 @@ impl AssetLibraryPane {
                 .show(ui, |ui| {
                     ui.set_min_width(scroll_area_rect.width() - 16.0); // Account for scrollbar
 
-                    for asset in assets {
+                    // For Effects tab, reorder: built-in first, then custom, with headers
+                    let ordered_assets: Vec<&AssetEntry>;
+                    let show_effects_sections = self.selected_category == AssetCategory::Effects;
+
+                    let assets_to_render = if show_effects_sections {
+                        let builtin: Vec<_> = assets.iter().filter(|a| a.is_builtin).copied().collect();
+                        let custom: Vec<_> = assets.iter().filter(|a| !a.is_builtin).copied().collect();
+                        ordered_assets = builtin.into_iter().chain(custom.into_iter()).collect();
+                        &ordered_assets[..]
+                    } else {
+                        assets
+                    };
+
+                    // Track whether we need to render section headers
+                    let builtin_count = if show_effects_sections {
+                        assets.iter().filter(|a| a.is_builtin).count()
+                    } else {
+                        0
+                    };
+                    let custom_count = if show_effects_sections {
+                        assets.iter().filter(|a| !a.is_builtin).count()
+                    } else {
+                        0
+                    };
+                    let mut rendered_builtin_header = false;
+                    let mut rendered_custom_header = false;
+                    let mut builtin_rendered = 0;
+
+                    for asset in assets_to_render {
+                        // Render section headers for Effects tab
+                        if show_effects_sections {
+                            if asset.is_builtin && !rendered_builtin_header && builtin_count > 0 {
+                                Self::render_section_header(ui, "Built-in Effects", secondary_text_color);
+                                rendered_builtin_header = true;
+                            }
+                            if !asset.is_builtin && !rendered_custom_header && custom_count > 0 {
+                                // Add separator before custom section if there were built-in effects
+                                if builtin_count > 0 {
+                                    ui.add_space(8.0);
+                                    let separator_rect = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 1.0),
+                                        egui::Sense::hover(),
+                                    ).0;
+                                    ui.painter().rect_filled(separator_rect, 0.0, egui::Color32::from_gray(60));
+                                    ui.add_space(8.0);
+                                }
+                                Self::render_section_header(ui, "Custom Effects", secondary_text_color);
+                                rendered_custom_header = true;
+                            }
+                            if asset.is_builtin {
+                                builtin_rendered += 1;
+                            }
+                        }
+
                         let (item_rect, response) = ui.allocate_exact_size(
                             egui::vec2(ui.available_width(), ITEM_HEIGHT),
                             egui::Sense::click_and_drag(),
@@ -1413,14 +1714,38 @@ impl AssetLibraryPane {
                                     }
                                 }
                                 AssetCategory::Effects => {
-                                    Some(generate_effect_thumbnail())
+                                    // Use GPU-rendered effect thumbnail if available
+                                    if let Some(rgba) = shared.effect_thumbnail_cache.get(&asset.id) {
+                                        Some(rgba.clone())
+                                    } else {
+                                        // Request GPU thumbnail generation
+                                        shared.effect_thumbnail_requests.push(asset.id);
+                                        // Return None to avoid caching placeholder - will retry next frame
+                                        None
+                                    }
                                 }
                                 AssetCategory::All => None,
                             }
                         });
 
+                        // Either use cached texture or render placeholder directly for effects
                         if let Some(texture) = texture {
                             let image = egui::Image::new(texture)
+                                .fit_to_exact_size(egui::vec2(LIST_THUMBNAIL_SIZE, LIST_THUMBNAIL_SIZE));
+                            ui.put(thumbnail_rect, image);
+                        } else if asset.category == AssetCategory::Effects {
+                            // Render effect placeholder directly (not cached) until GPU thumbnail ready
+                            let placeholder_rgba = generate_effect_thumbnail();
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [THUMBNAIL_SIZE as usize, THUMBNAIL_SIZE as usize],
+                                &placeholder_rgba,
+                            );
+                            let texture = ctx.load_texture(
+                                format!("effect_placeholder_{}", asset.id),
+                                color_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            let image = egui::Image::new(&texture)
                                 .fit_to_exact_size(egui::vec2(LIST_THUMBNAIL_SIZE, LIST_THUMBNAIL_SIZE));
                             ui.put(thumbnail_rect, image);
                         }
@@ -1440,13 +1765,19 @@ impl AssetLibraryPane {
                             }
                         }
 
-                        // Handle double-click (start rename)
+                        // Handle double-click
                         if response.double_clicked() {
-                            self.rename_state = Some(RenameState {
-                                asset_id: asset.id,
-                                category: asset.category,
-                                edit_text: asset.name.clone(),
-                            });
+                            // For effects, open in shader editor
+                            if asset.category == AssetCategory::Effects {
+                                *shared.effect_to_load = Some(asset.id);
+                            } else if !asset.is_builtin {
+                                // For other non-builtin assets, start rename
+                                self.rename_state = Some(RenameState {
+                                    asset_id: asset.id,
+                                    category: asset.category,
+                                    edit_text: asset.name.clone(),
+                                });
+                            }
                         }
 
                         // Handle drag start
@@ -1568,219 +1899,74 @@ impl AssetLibraryPane {
             .floor()
             .max(1.0) as usize;
         let item_height = GRID_ITEM_SIZE + 20.0; // 20 for name below thumbnail
-        let rows = (assets.len() + columns - 1) / columns;
-        let total_height = GRID_SPACING + rows as f32 * (item_height + GRID_SPACING);
 
-        // Use egui's built-in ScrollArea for scrolling
+        // For Effects tab, reorder: built-in first, then custom
+        let ordered_assets: Vec<&AssetEntry>;
+        let show_effects_sections = self.selected_category == AssetCategory::Effects;
+
+        let assets_to_render: &[&AssetEntry] = if show_effects_sections {
+            let builtin: Vec<_> = assets.iter().filter(|a| a.is_builtin).copied().collect();
+            let custom: Vec<_> = assets.iter().filter(|a| !a.is_builtin).copied().collect();
+            ordered_assets = builtin.into_iter().chain(custom.into_iter()).collect();
+            &ordered_assets[..]
+        } else {
+            assets
+        };
+
+        let builtin_count = if show_effects_sections {
+            assets.iter().filter(|a| a.is_builtin).count()
+        } else {
+            0
+        };
+        let custom_count = if show_effects_sections {
+            assets.iter().filter(|a| !a.is_builtin).count()
+        } else {
+            0
+        };
+
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_grid_scroll", path))
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Reserve space for the entire grid
-                    let (grid_rect, _) = ui.allocate_exact_size(
-                        egui::vec2(content_width, total_height),
-                        egui::Sense::hover(),
-                    );
+                    ui.set_min_width(content_width);
 
-                    for (idx, asset) in assets.iter().enumerate() {
-                        let col = idx % columns;
-                        let row = idx / columns;
+                    // Render built-in section header
+                    if show_effects_sections && builtin_count > 0 {
+                        Self::render_section_header(ui, "Built-in Effects", secondary_text_color);
+                    }
 
-                        // Calculate item position with proper spacing
-                        let item_x = grid_rect.min.x + GRID_SPACING + col as f32 * (GRID_ITEM_SIZE + GRID_SPACING);
-                        let item_y = grid_rect.min.y + GRID_SPACING + row as f32 * (item_height + GRID_SPACING);
+                    // First pass: render built-in items
+                    let builtin_items: Vec<_> = assets_to_render.iter().filter(|a| a.is_builtin).copied().collect();
+                    if !builtin_items.is_empty() {
+                        self.render_grid_items(ui, &builtin_items, columns, item_height, content_width, shared, document, text_color, secondary_text_color);
+                    }
 
-                        let item_rect = egui::Rect::from_min_size(
-                            egui::pos2(item_x, item_y),
-                            egui::vec2(GRID_ITEM_SIZE, item_height),
-                        );
+                    // Separator between sections
+                    if show_effects_sections && builtin_count > 0 && custom_count > 0 {
+                        ui.add_space(8.0);
+                        let separator_rect = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), 1.0),
+                            egui::Sense::hover(),
+                        ).0;
+                        ui.painter().rect_filled(separator_rect, 0.0, egui::Color32::from_gray(60));
+                        ui.add_space(8.0);
+                    }
 
-                        // Allocate the response for this item
-                        let response = ui.allocate_rect(item_rect, egui::Sense::click_and_drag());
+                    // Render custom section header
+                    if show_effects_sections && custom_count > 0 {
+                        Self::render_section_header(ui, "Custom Effects", secondary_text_color);
+                    }
 
-                        let is_selected = self.selected_asset == Some(asset.id);
-                        let is_being_dragged = shared
-                            .dragging_asset
-                            .as_ref()
-                            .map(|d| d.clip_id == asset.id)
-                            .unwrap_or(false);
+                    // Second pass: render custom items
+                    let custom_items: Vec<_> = assets_to_render.iter().filter(|a| !a.is_builtin).copied().collect();
+                    if !custom_items.is_empty() {
+                        self.render_grid_items(ui, &custom_items, columns, item_height, content_width, shared, document, text_color, secondary_text_color);
+                    }
 
-                        // Item background
-                        let item_bg = if is_being_dragged {
-                            egui::Color32::from_rgb(80, 100, 120)
-                        } else if is_selected {
-                            egui::Color32::from_rgb(60, 80, 100)
-                        } else if response.hovered() {
-                            egui::Color32::from_rgb(45, 45, 45)
-                        } else {
-                            egui::Color32::from_rgb(35, 35, 35)
-                        };
-                        ui.painter().rect_filled(item_rect, 4.0, item_bg);
-
-                        // Thumbnail area (64x64 centered in 80px width)
-                        let thumbnail_rect = egui::Rect::from_min_size(
-                            egui::pos2(
-                                item_rect.min.x + (GRID_ITEM_SIZE - THUMBNAIL_SIZE as f32) / 2.0,
-                                item_rect.min.y + 4.0,
-                            ),
-                            egui::vec2(THUMBNAIL_SIZE as f32, THUMBNAIL_SIZE as f32),
-                        );
-
-                        // Generate and display thumbnail based on asset type
-                        let asset_id = asset.id;
-                        let asset_category = asset.category;
-                        let ctx = ui.ctx().clone();
-
-                        // Get waveform data from cache if thumbnail not already cached
-                        let prefetched_waveform: Option<Vec<(f32, f32)>> =
-                            if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
-                                if let Some(clip) = document.audio_clips.get(&asset_id) {
-                                    if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        // Use cached waveform data (populated by fetch_waveform in main.rs)
-                                        let waveform = shared.waveform_cache.get(audio_pool_index)
-                                            .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
-                                        if waveform.is_some() {
-                                            println!("🎵 Found waveform for pool {} (asset {})", audio_pool_index, asset_id);
-                                        } else {
-                                            println!("⚠️  No waveform yet for pool {} (asset {})", audio_pool_index, asset_id);
-                                        }
-                                        waveform
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-
-                        let texture = self.thumbnail_cache.get_or_create(&ctx, asset_id, || {
-                            match asset_category {
-                                AssetCategory::Images => {
-                                    document.image_assets.get(&asset_id)
-                                        .and_then(generate_image_thumbnail)
-                                }
-                                AssetCategory::Vector => {
-                                    // Render frame 0 of vector clip using tiny-skia
-                                    let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                                    document.vector_clips.get(&asset_id)
-                                        .map(|clip| generate_vector_thumbnail(clip, bg_color))
-                                }
-                                AssetCategory::Video => {
-                                    // Generate video thumbnail from first frame
-                                    generate_video_thumbnail(&asset_id, &shared.video_manager)
-                                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200)))
-                                }
-                                AssetCategory::Audio => {
-                                    if let Some(clip) = document.audio_clips.get(&asset_id) {
-                                        let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                                        match &clip.clip_type {
-                                            AudioClipType::Sampled { .. } => {
-                                                let wave_color = egui::Color32::from_rgb(100, 200, 100);
-                                                if let Some(ref peaks) = prefetched_waveform {
-                                                    println!("✅ Generating waveform thumbnail with {} peaks for asset {}", peaks.len(), asset_id);
-                                                    Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
-                                                } else {
-                                                    println!("📦 Generating placeholder thumbnail for asset {}", asset_id);
-                                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
-                                                }
-                                            }
-                                            AudioClipType::Midi { midi_clip_id } => {
-                                                let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                                                let note_color = egui::Color32::from_rgb(100, 200, 100);
-
-                                                if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
-                                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
-                                                } else {
-                                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
-                                    }
-                                }
-                                AssetCategory::Effects => {
-                                    Some(generate_effect_thumbnail())
-                                }
-                                AssetCategory::All => None,
-                            }
-                        });
-
-                        if let Some(texture) = texture {
-                            let image = egui::Image::new(texture)
-                                .fit_to_exact_size(egui::vec2(THUMBNAIL_SIZE as f32, THUMBNAIL_SIZE as f32));
-                            ui.put(thumbnail_rect, image);
-                        }
-
-                        // Category color indicator (small bar at bottom of thumbnail)
-                        let indicator_rect = egui::Rect::from_min_size(
-                            egui::pos2(thumbnail_rect.min.x, thumbnail_rect.max.y - 3.0),
-                            egui::vec2(THUMBNAIL_SIZE as f32, 3.0),
-                        );
-                        ui.painter().rect_filled(indicator_rect, 0.0, asset.category.color());
-
-                        // Asset name below thumbnail (ellipsized)
-                        let name_display = ellipsize(&asset.name, 12);
-                        let name_pos = egui::pos2(
-                            item_rect.center().x,
-                            thumbnail_rect.max.y + 8.0,
-                        );
-                        ui.painter().text(
-                            name_pos,
-                            egui::Align2::CENTER_TOP,
-                            &name_display,
-                            egui::FontId::proportional(10.0),
-                            text_color,
-                        );
-
-                        // Handle click (selection)
-                        if response.clicked() {
-                            self.selected_asset = Some(asset.id);
-                        }
-
-                        // Handle right-click (context menu)
-                        if response.secondary_clicked() {
-                            if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                                self.context_menu = Some(ContextMenuState {
-                                    asset_id: asset.id,
-                                    position: pos,
-                                });
-                            }
-                        }
-
-                        // Handle double-click (start rename)
-                        if response.double_clicked() {
-                            self.rename_state = Some(RenameState {
-                                asset_id: asset.id,
-                                category: asset.category,
-                                edit_text: asset.name.clone(),
-                            });
-                        }
-
-                        // Handle drag start
-                        if response.drag_started() {
-                            // For video clips, get the linked audio clip ID
-                            let linked_audio_clip_id = if asset.drag_clip_type == DragClipType::Video {
-                                let result = document.video_clips.get(&asset.id)
-                                    .and_then(|video| video.linked_audio_clip_id);
-                                eprintln!("DEBUG DRAG: Video clip {} has linked audio: {:?}", asset.id, result);
-                                result
-                            } else {
-                                None
-                            };
-
-                            *shared.dragging_asset = Some(DraggingAsset {
-                                clip_id: asset.id,
-                                clip_type: asset.drag_clip_type,
-                                name: asset.name.clone(),
-                                duration: asset.duration,
-                                dimensions: asset.dimensions,
-                                linked_audio_clip_id,
-                            });
-                        }
+                    // For non-Effects tabs, just render all items
+                    if !show_effects_sections {
+                        self.render_grid_items(ui, assets_to_render, columns, item_height, content_width, shared, document, text_color, secondary_text_color);
                     }
                 });
         });
@@ -1857,6 +2043,16 @@ impl PaneRenderer for AssetLibraryPane {
             }
         }
 
+        // Invalidate thumbnails for effects that were edited (shader code changed)
+        if !shared.effect_thumbnails_to_invalidate.is_empty() {
+            for effect_id in shared.effect_thumbnails_to_invalidate.iter() {
+                self.thumbnail_cache.invalidate(effect_id);
+            }
+            // Clear after processing - we've handled these
+            shared.effect_thumbnails_to_invalidate.clear();
+            ui.ctx().request_repaint();
+        }
+
         // Collect and filter assets
         let all_assets = self.collect_assets(&document_arc);
         let filtered_assets = self.filter_assets(&all_assets);
@@ -1904,6 +2100,15 @@ impl PaneRenderer for AssetLibraryPane {
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_min_width(120.0);
+
+                            // Add "Edit in Shader Editor" for effects
+                            if asset_category == AssetCategory::Effects {
+                                if ui.button("Edit in Shader Editor").clicked() {
+                                    *shared.effect_to_load = Some(context_asset_id);
+                                    self.context_menu = None;
+                                }
+                                ui.separator();
+                            }
 
                             // Built-in effects cannot be renamed or deleted
                             if asset_is_builtin {

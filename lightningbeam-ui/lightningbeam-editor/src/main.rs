@@ -28,6 +28,9 @@ mod default_instrument;
 
 mod export;
 
+mod effect_thumbnails;
+use effect_thumbnails::EffectThumbnailGenerator;
+
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
 #[command(name = "Lightningbeam Editor")]
@@ -535,6 +538,10 @@ struct EditorApp {
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
     // Asset drag-and-drop state
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
+    // Shader editor inter-pane communication
+    effect_to_load: Option<Uuid>, // Effect ID to load into shader editor (set by asset library)
+    // Effect thumbnail invalidation queue (persists across frames until processed)
+    effect_thumbnails_to_invalidate: Vec<Uuid>,
     // Import dialog state
     last_import_filter: ImportFilter, // Last used import filter (remembered across imports)
     // Tool-specific options (displayed in infopanel)
@@ -582,6 +589,8 @@ struct EditorApp {
     export_progress_dialog: export::dialog::ExportProgressDialog,
     /// Export orchestrator for background exports
     export_orchestrator: Option<export::ExportOrchestrator>,
+    /// GPU-rendered effect thumbnail generator
+    effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 }
 
 /// Import filter types for the file dialog
@@ -709,6 +718,8 @@ impl EditorApp {
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
             dragging_asset: None, // No asset being dragged initially
+            effect_to_load: None, // No effect to load initially
+            effect_thumbnails_to_invalidate: Vec::new(), // No thumbnails to invalidate initially
             last_import_filter: ImportFilter::default(), // Default to "All Supported"
             stroke_width: 3.0,               // Default stroke width
             fill_enabled: true,              // Default to filling shapes
@@ -729,6 +740,7 @@ impl EditorApp {
             export_dialog: export::dialog::ExportDialog::default(),
             export_progress_dialog: export::dialog::ExportProgressDialog::default(),
             export_orchestrator: None,
+            effect_thumbnail_generator: None, // Initialized when GPU available
         }
     }
 
@@ -2413,6 +2425,51 @@ impl eframe::App for EditorApp {
             self.fetch_waveform(pool_index);
         }
 
+        // Initialize and update effect thumbnail generator (GPU-based effect previews)
+        if let Some(render_state) = frame.wgpu_render_state() {
+            let device = &render_state.device;
+            let queue = &render_state.queue;
+
+            // Initialize on first GPU access
+            if self.effect_thumbnail_generator.is_none() {
+                self.effect_thumbnail_generator = Some(EffectThumbnailGenerator::new(device, queue));
+                println!("✅ Effect thumbnail generator initialized");
+            }
+
+            // Process effect thumbnail invalidations from previous frame
+            // This happens BEFORE UI rendering so asset library will see empty GPU cache
+            // We only invalidate GPU cache here - asset library will see the list during render
+            // and invalidate its own ThumbnailCache
+            if !self.effect_thumbnails_to_invalidate.is_empty() {
+                if let Some(generator) = &mut self.effect_thumbnail_generator {
+                    for effect_id in &self.effect_thumbnails_to_invalidate {
+                        generator.invalidate(effect_id);
+                    }
+                }
+                // DON'T clear here - asset library still needs to see these during render
+            }
+
+            // Generate pending effect thumbnails (up to 2 per frame to avoid stalls)
+            if let Some(generator) = &mut self.effect_thumbnail_generator {
+                // Combine built-in effects from registry with custom effects from document
+                let mut all_effects: HashMap<Uuid, lightningbeam_core::effect::EffectDefinition> = HashMap::new();
+                for def in lightningbeam_core::effect_registry::EffectRegistry::get_all() {
+                    all_effects.insert(def.id, def);
+                }
+                for (id, def) in &self.action_executor.document().effect_definitions {
+                    all_effects.insert(*id, def.clone());
+                }
+
+                let generated = generator.generate_pending(device, queue, &all_effects, 2);
+                if generated > 0 {
+                    // Request repaint to continue generating remaining thumbnails
+                    if generator.pending_count() > 0 {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        }
+
         // Handle file operation progress
         if let Some(ref mut operation) = self.file_operation {
             // Set wait cursor
@@ -2810,6 +2867,11 @@ impl eframe::App for EditorApp {
             // Registry for actions to execute after rendering (two-phase dispatch)
             let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
 
+            // Queue for effect thumbnail requests (collected during rendering)
+            let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
+            // Empty cache fallback if generator not initialized
+            let empty_thumbnail_cache: HashMap<Uuid, Vec<u8>> = HashMap::new();
+
             // Create render context
             let mut ctx = RenderContext {
                 tool_icon_cache: &mut self.tool_icon_cache,
@@ -2846,6 +2908,12 @@ impl eframe::App for EditorApp {
                 waveform_chunk_cache: &self.waveform_chunk_cache,
                 waveform_image_cache: &mut self.waveform_image_cache,
                 audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
+                effect_to_load: &mut self.effect_to_load,
+                effect_thumbnail_requests: &mut effect_thumbnail_requests,
+                effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
+                    .map(|g| g.thumbnail_cache())
+                    .unwrap_or(&empty_thumbnail_cache),
+                effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
             };
 
             render_layout_node(
@@ -2860,6 +2928,14 @@ impl eframe::App for EditorApp {
                 &Vec::new(), // Root path
                 &mut ctx,
             );
+
+            // Process collected effect thumbnail requests
+            if !effect_thumbnail_requests.is_empty() {
+                if let Some(generator) = &mut self.effect_thumbnail_generator {
+                    generator.request_thumbnails(&effect_thumbnail_requests);
+                }
+            }
+
 
             // Execute action on the best handler (two-phase dispatch)
             if let Some(action) = &self.pending_view_action {
@@ -3036,6 +3112,14 @@ struct RenderContext<'a> {
     waveform_image_cache: &'a mut waveform_image_cache::WaveformImageCache,
     /// Audio pool indices with new waveform data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: &'a HashSet<usize>,
+    /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
+    effect_to_load: &'a mut Option<Uuid>,
+    /// Queue for effect thumbnail requests
+    effect_thumbnail_requests: &'a mut Vec<Uuid>,
+    /// Cache of generated effect thumbnails
+    effect_thumbnail_cache: &'a HashMap<Uuid, Vec<u8>>,
+    /// Effect IDs whose thumbnails should be invalidated
+    effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
 }
 
 /// Recursively render a layout node with drag support
@@ -3400,47 +3484,41 @@ fn render_pane(
         );
     }
 
-    // Show pane type selector menu on left click
-    let menu_id = ui.id().with(("pane_type_menu", path));
-    if icon_response.clicked() {
-        ui.memory_mut(|mem| mem.toggle_popup(menu_id));
-    }
+    // Show pane type selector menu on left click using new Popup API
+    egui::containers::Popup::menu(&icon_response)
+        .show(|ui| {
+            ui.set_min_width(200.0);
+            ui.label("Select Pane Type:");
+            ui.separator();
 
-    egui::popup::popup_below_widget(ui, menu_id, &icon_response, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
-        ui.set_min_width(200.0);
-        ui.label("Select Pane Type:");
-        ui.separator();
+            for pane_type_option in PaneType::all() {
+                // Load icon for this pane type
+                if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option, ui.ctx()) {
+                    ui.horizontal(|ui| {
+                        // Show icon
+                        let icon_texture_id = icon.id();
+                        let icon_size = egui::vec2(16.0, 16.0);
+                        ui.add(egui::Image::new((icon_texture_id, icon_size)));
 
-        for pane_type_option in PaneType::all() {
-            // Load icon for this pane type
-            if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option, ui.ctx()) {
-                ui.horizontal(|ui| {
-                    // Show icon
-                    let icon_texture_id = icon.id();
-                    let icon_size = egui::vec2(16.0, 16.0);
-                    ui.add(egui::Image::new((icon_texture_id, icon_size)));
-
-                    // Show label with selection
+                        // Show label with selection
+                        if ui.selectable_label(
+                            pane_type == Some(*pane_type_option),
+                            pane_type_option.display_name()
+                        ).clicked() {
+                            *pane_name = pane_type_option.to_name().to_string();
+                        }
+                    });
+                } else {
+                    // Fallback if icon fails to load
                     if ui.selectable_label(
                         pane_type == Some(*pane_type_option),
                         pane_type_option.display_name()
                     ).clicked() {
                         *pane_name = pane_type_option.to_name().to_string();
-                        ui.memory_mut(|mem| mem.close_popup());
                     }
-                });
-            } else {
-                // Fallback if icon fails to load
-                if ui.selectable_label(
-                    pane_type == Some(*pane_type_option),
-                    pane_type_option.display_name()
-                ).clicked() {
-                    *pane_name = pane_type_option.to_name().to_string();
-                    ui.memory_mut(|mem| mem.close_popup());
                 }
             }
-        }
-    });
+        });
 
     // Draw pane title in header
     let title_text = if let Some(pane_type) = pane_type {
@@ -3512,6 +3590,10 @@ fn render_pane(
                 waveform_chunk_cache: ctx.waveform_chunk_cache,
                 waveform_image_cache: ctx.waveform_image_cache,
                 audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
+                effect_to_load: ctx.effect_to_load,
+                effect_thumbnail_requests: ctx.effect_thumbnail_requests,
+                effect_thumbnail_cache: ctx.effect_thumbnail_cache,
+                effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -3571,6 +3653,10 @@ fn render_pane(
                 waveform_chunk_cache: ctx.waveform_chunk_cache,
                 waveform_image_cache: ctx.waveform_image_cache,
                 audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
+                effect_to_load: ctx.effect_to_load,
+                effect_thumbnail_requests: ctx.effect_thumbnail_requests,
+                effect_thumbnail_cache: ctx.effect_thumbnail_cache,
+                effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
             };
 
             // Render pane content (header was already rendered above)
@@ -3788,6 +3874,7 @@ fn pane_color(pane_type: PaneType) -> egui::Color32 {
         PaneType::NodeEditor => egui::Color32::from_rgb(30, 45, 50),
         PaneType::PresetBrowser => egui::Color32::from_rgb(50, 45, 30),
         PaneType::AssetLibrary => egui::Color32::from_rgb(45, 50, 35),
+        PaneType::ShaderEditor => egui::Color32::from_rgb(35, 30, 55),
     }
 }
 

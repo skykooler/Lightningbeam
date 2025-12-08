@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use vello::kurbo::Rect;
-use vello::peniko::{Blob, Fill, Image, ImageFormat};
+use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use vello::Scene;
 
 /// Cache for decoded image data to avoid re-decoding every frame
 pub struct ImageCache {
-    cache: HashMap<Uuid, Arc<Image>>,
+    cache: HashMap<Uuid, Arc<ImageBrush>>,
 }
 
 impl ImageCache {
@@ -35,7 +35,7 @@ impl ImageCache {
     }
 
     /// Get or decode an image, caching the result
-    pub fn get_or_decode(&mut self, asset: &ImageAsset) -> Option<Arc<Image>> {
+    pub fn get_or_decode(&mut self, asset: &ImageAsset) -> Option<Arc<ImageBrush>> {
         if let Some(cached) = self.cache.get(&asset.id) {
             return Some(Arc::clone(cached));
         }
@@ -64,8 +64,8 @@ impl Default for ImageCache {
     }
 }
 
-/// Decode an image asset to peniko Image
-fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
+/// Decode an image asset to peniko ImageBrush
+fn decode_image_asset(asset: &ImageAsset) -> Option<ImageBrush> {
     // Get the raw file data
     let data = asset.data.as_ref()?;
 
@@ -73,13 +73,15 @@ fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
     let img = image::load_from_memory(data).ok()?;
     let rgba = img.to_rgba8();
 
-    // Create peniko Image
-    Some(Image::new(
-        Blob::from(rgba.into_raw()),
-        ImageFormat::Rgba8,
-        asset.width,
-        asset.height,
-    ))
+    // Create peniko ImageData then ImageBrush
+    let image_data = ImageData {
+        data: Blob::from(rgba.into_raw()),
+        format: ImageFormat::Rgba8,
+        width: asset.width,
+        height: asset.height,
+        alpha_type: ImageAlphaType::Alpha,
+    };
+    Some(ImageBrush::new(image_data))
 }
 
 // ============================================================================
@@ -720,15 +722,17 @@ fn render_video_layer(
         // Cascade opacity: layer_opacity × animated opacity
         let final_opacity = (layer_opacity * opacity) as f32;
 
-        // Create peniko Image from video frame data (zero-copy via Arc clone)
+        // Create peniko ImageBrush from video frame data (zero-copy via Arc clone)
         // Coerce Arc<Vec<u8>> to Arc<dyn AsRef<[u8]> + Send + Sync>
         let blob_data: Arc<dyn AsRef<[u8]> + Send + Sync> = frame.rgba_data.clone();
-        let image = Image::new(
-            vello::peniko::Blob::new(blob_data),
-            vello::peniko::ImageFormat::Rgba8,
-            frame.width,
-            frame.height,
-        );
+        let image_data = ImageData {
+            data: Blob::new(blob_data),
+            format: ImageFormat::Rgba8,
+            width: frame.width,
+            height: frame.height,
+            alpha_type: ImageAlphaType::Alpha,
+        };
+        let image = ImageBrush::new(image_data);
 
         // Apply opacity
         let image_with_alpha = image.with_alpha(final_opacity);

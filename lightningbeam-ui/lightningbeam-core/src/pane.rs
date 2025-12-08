@@ -33,6 +33,8 @@ pub enum PaneType {
     PresetBrowser,
     /// Asset library for browsing clips
     AssetLibrary,
+    /// WGSL shader code editor for custom effects
+    ShaderEditor,
 }
 
 impl PaneType {
@@ -49,6 +51,7 @@ impl PaneType {
             PaneType::NodeEditor => "Node Editor",
             PaneType::PresetBrowser => "Preset Browser",
             PaneType::AssetLibrary => "Asset Library",
+            PaneType::ShaderEditor => "Shader Editor",
         }
     }
 
@@ -67,6 +70,7 @@ impl PaneType {
             PaneType::NodeEditor => "node-editor.svg",
             PaneType::PresetBrowser => "stage.svg", // TODO: needs own icon
             PaneType::AssetLibrary => "stage.svg", // TODO: needs own icon
+            PaneType::ShaderEditor => "node-editor.svg", // TODO: needs own icon
         }
     }
 
@@ -84,6 +88,7 @@ impl PaneType {
             "nodeeditor" => Some(PaneType::NodeEditor),
             "presetbrowser" => Some(PaneType::PresetBrowser),
             "assetlibrary" => Some(PaneType::AssetLibrary),
+            "shadereditor" => Some(PaneType::ShaderEditor),
             _ => None,
         }
     }
@@ -101,6 +106,7 @@ impl PaneType {
             PaneType::VirtualPiano,
             PaneType::PresetBrowser,
             PaneType::AssetLibrary,
+            PaneType::ShaderEditor,
         ]
     }
 
@@ -117,6 +123,7 @@ impl PaneType {
             PaneType::NodeEditor => "nodeEditor",
             PaneType::PresetBrowser => "presetBrowser",
             PaneType::AssetLibrary => "assetLibrary",
+            PaneType::ShaderEditor => "shaderEditor",
         }
     }
 }

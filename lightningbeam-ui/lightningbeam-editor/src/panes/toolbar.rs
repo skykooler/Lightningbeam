@@ -151,19 +151,15 @@ impl PaneRenderer for ToolbarPane {
         // Draw fill color button with checkerboard for alpha
         draw_color_button(ui, fill_button_rect, *shared.fill_color);
 
-        if fill_response.clicked() {
-            // Open color picker popup
-            ui.memory_mut(|mem| mem.toggle_popup(fill_button_id));
-        }
-
-        // Show fill color picker popup
-        egui::popup::popup_below_widget(ui, fill_button_id, &fill_response, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui: &mut egui::Ui| {
-            let changed = egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
-            // Track that the user interacted with the fill color
-            if changed {
-                *shared.active_color_mode = super::ColorMode::Fill;
-            }
-        });
+        // Show fill color picker popup using new Popup API
+        egui::containers::Popup::from_toggle_button_response(&fill_response)
+            .show(|ui| {
+                let changed = egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
+                // Track that the user interacted with the fill color
+                if changed {
+                    *shared.active_color_mode = super::ColorMode::Fill;
+                }
+            });
 
         y += color_button_size + button_spacing;
 
@@ -187,19 +183,15 @@ impl PaneRenderer for ToolbarPane {
         // Draw stroke color button with checkerboard for alpha
         draw_color_button(ui, stroke_button_rect, *shared.stroke_color);
 
-        if stroke_response.clicked() {
-            // Open color picker popup
-            ui.memory_mut(|mem| mem.toggle_popup(stroke_button_id));
-        }
-
-        // Show stroke color picker popup
-        egui::popup::popup_below_widget(ui, stroke_button_id, &stroke_response, egui::popup::PopupCloseBehavior::CloseOnClickOutside, |ui: &mut egui::Ui| {
-            let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
-            // Track that the user interacted with the stroke color
-            if changed {
-                *shared.active_color_mode = super::ColorMode::Stroke;
-            }
-        });
+        // Show stroke color picker popup using new Popup API
+        egui::containers::Popup::from_toggle_button_response(&stroke_response)
+            .show(|ui| {
+                let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
+                // Track that the user interacted with the stroke color
+                if changed {
+                    *shared.active_color_mode = super::ColorMode::Stroke;
+                }
+            });
     }
 
     fn name(&self) -> &str {
