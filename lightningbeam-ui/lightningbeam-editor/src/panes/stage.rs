@@ -1,32 +1,50 @@
 /// Stage pane - main animation canvas with Vello rendering
 ///
 /// Renders composited layers using Vello GPU renderer via egui callbacks.
+/// Supports HDR compositing pipeline with per-layer buffers and effects.
 
 use eframe::egui;
 use lightningbeam_core::action::Action;
 use lightningbeam_core::clip::ClipInstance;
+use lightningbeam_core::gpu::{BufferPool, Compositor};
 use lightningbeam_core::layer::{AnyLayer, AudioLayer, AudioLayerType, VideoLayer, VectorLayer};
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
 use vello::kurbo::Shape;
+
+/// Enable HDR compositing pipeline (per-layer rendering with proper opacity)
+/// Set to true to use the new pipeline, false for legacy single-scene rendering
+const USE_HDR_COMPOSITING: bool = true; // Enabled for testing
 
 /// Shared Vello resources (created once, reused by all Stage panes)
 struct SharedVelloResources {
     renderer: Arc<Mutex<vello::Renderer>>,
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind_group_layout: wgpu::BindGroupLayout,
+    /// HDR to sRGB blit pipeline (linear→sRGB conversion for display)
+    hdr_blit_pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     /// Shared image cache for avoiding re-decoding images every frame
     image_cache: Mutex<lightningbeam_core::renderer::ImageCache>,
     /// Video manager for video decoding and frame caching
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
+    /// Buffer pool for HDR compositing pipeline
+    buffer_pool: Mutex<BufferPool>,
+    /// Compositor for layer blending
+    compositor: Compositor,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
 struct InstanceVelloResources {
+    /// Output texture (Rgba8Unorm for legacy, used for final blit)
     texture: Option<wgpu::Texture>,
     texture_view: Option<wgpu::TextureView>,
     blit_bind_group: Option<wgpu::BindGroup>,
+    /// HDR composite texture (Rgba16Float for internal compositing)
+    hdr_texture: Option<wgpu::Texture>,
+    hdr_texture_view: Option<wgpu::TextureView>,
+    /// Bind group for HDR to sRGB conversion
+    hdr_blit_bind_group: Option<wgpu::BindGroup>,
 }
 
 /// Container for all Vello instances, stored in egui's CallbackResources
@@ -118,6 +136,47 @@ impl SharedVelloResources {
             cache: None,
         });
 
+        // Create HDR blit pipeline (linear→sRGB conversion for display output)
+        // Uses linear_to_srgb.wgsl which reads from Rgba16Float HDR texture
+        let hdr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hdr_blit_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/linear_to_srgb.wgsl").into()),
+        });
+
+        let hdr_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hdr_blit_pipeline"),
+            layout: Some(&pipeline_layout), // Reuse same layout (texture + sampler)
+            vertex: wgpu::VertexState {
+                module: &hdr_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hdr_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm, // Output to display-ready texture
+                    blend: None, // No blending - direct replacement
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vello_blit_sampler"),
@@ -130,15 +189,25 @@ impl SharedVelloResources {
             ..Default::default()
         });
 
-        println!("✅ Vello shared resources initialized (renderer and shaders)");
+        // Initialize buffer pool for HDR compositing
+        let buffer_pool = BufferPool::new();
+
+        // Initialize compositor for layer blending
+        // Use HDR format for internal compositing
+        let compositor = Compositor::new(device, lightningbeam_core::gpu::HDR_FORMAT);
+
+        println!("✅ Vello shared resources initialized (renderer, shaders, and HDR compositor)");
 
         Ok(Self {
             renderer: Arc::new(Mutex::new(renderer)),
             blit_pipeline,
             blit_bind_group_layout,
+            hdr_blit_pipeline,
             sampler,
             image_cache: Mutex::new(lightningbeam_core::renderer::ImageCache::new()),
             video_manager,
+            buffer_pool: Mutex::new(buffer_pool),
+            compositor,
         })
     }
 }
@@ -149,6 +218,9 @@ impl InstanceVelloResources {
             texture: None,
             texture_view: None,
             blit_bind_group: None,
+            hdr_texture: None,
+            hdr_texture_view: None,
+            hdr_blit_bind_group: None,
         }
     }
 
@@ -172,7 +244,11 @@ impl InstanceVelloResources {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            // RENDER_ATTACHMENT needed for HDR blit, STORAGE_BINDING for Vello
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
 
@@ -197,6 +273,57 @@ impl InstanceVelloResources {
         self.texture = Some(texture);
         self.texture_view = Some(texture_view);
         self.blit_bind_group = Some(bind_group);
+    }
+
+    /// Ensure HDR texture exists for compositing pipeline
+    fn ensure_hdr_texture(&mut self, device: &wgpu::Device, shared: &SharedVelloResources, width: u32, height: u32) {
+        // Clamp to GPU limits
+        let max_texture_size = 8192;
+        let width = width.min(max_texture_size);
+        let height = height.min(max_texture_size);
+
+        // Only recreate if size changed
+        if let Some(tex) = &self.hdr_texture {
+            if tex.width() == width && tex.height() == height {
+                return;
+            }
+        }
+
+        // Create HDR texture (Rgba16Float for internal compositing)
+        let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hdr_composite_output"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: lightningbeam_core::gpu::HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let hdr_texture_view = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create bind group for HDR to sRGB conversion (uses same layout as blit)
+        let hdr_blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hdr_blit_bind_group"),
+            layout: &shared.blit_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shared.sampler),
+                },
+            ],
+        });
+
+        self.hdr_texture = Some(hdr_texture);
+        self.hdr_texture_view = Some(hdr_texture_view);
+        self.hdr_blit_bind_group = Some(hdr_blit_bind_group);
     }
 }
 
@@ -287,24 +414,144 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
         instance_resources.ensure_texture(device, &shared, width, height);
 
-        // Build Vello scene using the document renderer
-        let mut scene = vello::Scene::new();
-
         // Build camera transform: translate for pan, scale for zoom
         use vello::kurbo::Affine;
         let camera_transform = Affine::translate((self.pan_offset.x as f64, self.pan_offset.y as f64))
             * Affine::scale(self.zoom as f64);
 
-        // Render the document to the scene with camera transform
-        let mut image_cache = shared.image_cache.lock().unwrap();
-        lightningbeam_core::renderer::render_document_with_transform(
-            &self.document,
-            &mut scene,
-            camera_transform,
-            &mut image_cache,
-            &shared.video_manager,
-        );
-        drop(image_cache); // Explicitly release lock before other operations
+        // Choose rendering path based on HDR compositing flag
+        let mut scene = if USE_HDR_COMPOSITING {
+            // HDR Compositing Pipeline: render each layer separately for proper opacity
+            // Uses incremental compositing: render layer → composite onto accumulator → release buffer
+            // This means we only need 1 layer buffer at a time (plus the HDR accumulator)
+            instance_resources.ensure_hdr_texture(device, &shared, width, height);
+
+            let mut image_cache = shared.image_cache.lock().unwrap();
+            let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
+                &self.document,
+                camera_transform,
+                &mut image_cache,
+                &shared.video_manager,
+            );
+            drop(image_cache);
+
+            // Get buffer pool for layer rendering
+            let mut buffer_pool = shared.buffer_pool.lock().unwrap();
+
+            // Buffer spec for layer rendering (Vello outputs Rgba8)
+            let layer_spec = lightningbeam_core::gpu::BufferSpec::new(
+                width,
+                height,
+                lightningbeam_core::gpu::BufferFormat::Rgba8Srgb,
+            );
+
+            // Render parameters for Vello (transparent background for layers)
+            let layer_render_params = vello::RenderParams {
+                base_color: vello::peniko::Color::TRANSPARENT,
+                width,
+                height,
+                antialiasing_method: vello::AaConfig::Msaa16,
+            };
+
+            // First, render background and composite it
+            // The background scene contains only a rectangle at document bounds,
+            // so we use TRANSPARENT base_color to not fill the whole viewport
+            let bg_handle = buffer_pool.acquire(device, layer_spec);
+            if let (Some(bg_view), Some(hdr_view)) = (buffer_pool.get_view(bg_handle), &instance_resources.hdr_texture_view) {
+                // Render background scene with transparent base (scene has the bg rect)
+                let bg_render_params = vello::RenderParams {
+                    base_color: vello::peniko::Color::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: vello::AaConfig::Msaa16,
+                };
+
+                if let Ok(mut renderer) = shared.renderer.lock() {
+                    renderer.render_to_texture(device, queue, &composite_result.background, bg_view, &bg_render_params).ok();
+                }
+
+                // Composite background onto HDR texture (first layer, clears to dark gray for stage area)
+                let bg_compositor_layer = lightningbeam_core::gpu::CompositorLayer::normal(bg_handle, 1.0);
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bg_composite_encoder"),
+                });
+                // Clear to dark gray (stage background outside document bounds)
+                let stage_bg = [45.0 / 255.0, 45.0 / 255.0, 48.0 / 255.0, 1.0];
+                shared.compositor.composite(
+                    device,
+                    queue,
+                    &mut encoder,
+                    &[bg_compositor_layer],
+                    &buffer_pool,
+                    hdr_view,
+                    Some(stage_bg),
+                );
+                queue.submit(Some(encoder.finish()));
+            }
+            buffer_pool.release(bg_handle);
+
+            // Now render and composite each layer incrementally
+            for rendered_layer in &composite_result.layers {
+                if !rendered_layer.has_content {
+                    continue;
+                }
+
+                // Acquire a buffer for this layer
+                let layer_handle = buffer_pool.acquire(device, layer_spec);
+
+                if let (Some(layer_view), Some(hdr_view)) = (buffer_pool.get_view(layer_handle), &instance_resources.hdr_texture_view) {
+                    // Render layer scene to buffer
+                    if let Ok(mut renderer) = shared.renderer.lock() {
+                        renderer.render_to_texture(device, queue, &rendered_layer.scene, layer_view, &layer_render_params).ok();
+                    }
+
+                    // Composite this layer onto the HDR accumulator with its opacity
+                    let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                        layer_handle,
+                        rendered_layer.opacity,
+                        rendered_layer.blend_mode,
+                    );
+
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("layer_composite_encoder"),
+                    });
+                    shared.compositor.composite(
+                        device,
+                        queue,
+                        &mut encoder,
+                        &[compositor_layer],
+                        &buffer_pool,
+                        hdr_view,
+                        None, // Don't clear - blend onto existing content
+                    );
+                    queue.submit(Some(encoder.finish()));
+                }
+
+                // Release buffer immediately - it can be reused for next layer
+                buffer_pool.release(layer_handle);
+            }
+
+            // Advance frame counter for buffer cleanup
+            buffer_pool.next_frame();
+            drop(buffer_pool);
+
+            // For drag preview and other overlays, we still need a scene
+            // Create an empty scene - the composited result is already in hdr_texture
+            vello::Scene::new()
+        } else {
+            // Legacy single-scene rendering
+            let mut scene = vello::Scene::new();
+            let mut image_cache = shared.image_cache.lock().unwrap();
+            lightningbeam_core::renderer::render_document_with_transform(
+                &self.document,
+                &mut scene,
+                camera_transform,
+                &mut image_cache,
+                &shared.video_manager,
+            );
+            drop(image_cache);
+            scene
+        };
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.drag_delta, self.active_layer_id) {
@@ -1292,17 +1539,97 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
         // Render scene to texture using shared renderer
         if let Some(texture_view) = &instance_resources.texture_view {
-            let render_params = vello::RenderParams {
-                base_color: vello::peniko::Color::from_rgb8(45, 45, 48), // Dark background
-                width,
-                height,
-                antialiasing_method: vello::AaConfig::Msaa16,
-            };
+            if USE_HDR_COMPOSITING {
+                // HDR mode: First render overlays to HDR texture, then blit to output
 
-            if let Ok(mut renderer) = shared.renderer.lock() {
-                renderer
-                    .render_to_texture(device, queue, &scene, texture_view, &render_params)
-                    .ok();
+                // Step 1: Render overlay scene (selection handles, drag previews, etc.) to HDR texture
+                // The overlay scene was built above with all the UI elements
+                if let Some(hdr_view) = &instance_resources.hdr_texture_view {
+                    let mut buffer_pool = shared.buffer_pool.lock().unwrap();
+                    let overlay_spec = lightningbeam_core::gpu::BufferSpec::new(
+                        width,
+                        height,
+                        lightningbeam_core::gpu::BufferFormat::Rgba8Srgb,
+                    );
+                    let overlay_handle = buffer_pool.acquire(device, overlay_spec);
+
+                    if let Some(overlay_view) = buffer_pool.get_view(overlay_handle) {
+                        // Render overlay scene to temp buffer
+                        let overlay_params = vello::RenderParams {
+                            base_color: vello::peniko::Color::TRANSPARENT,
+                            width,
+                            height,
+                            antialiasing_method: vello::AaConfig::Msaa16,
+                        };
+
+                        if let Ok(mut renderer) = shared.renderer.lock() {
+                            renderer.render_to_texture(device, queue, &scene, overlay_view, &overlay_params).ok();
+                        }
+
+                        // Composite overlay onto HDR texture (sRGB→linear conversion happens in compositor)
+                        let overlay_layer = lightningbeam_core::gpu::CompositorLayer::normal(overlay_handle, 1.0);
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("overlay_composite_encoder"),
+                        });
+                        shared.compositor.composite(
+                            device,
+                            queue,
+                            &mut encoder,
+                            &[overlay_layer],
+                            &buffer_pool,
+                            hdr_view,
+                            None, // Don't clear - blend onto existing content
+                        );
+                        queue.submit(Some(encoder.finish()));
+                    }
+
+                    buffer_pool.release(overlay_handle);
+                    drop(buffer_pool);
+                }
+
+                // Step 2: Blit HDR texture to output with linear→sRGB conversion
+                if let Some(hdr_bind_group) = &instance_resources.hdr_blit_bind_group {
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("hdr_to_srgb_encoder"),
+                    });
+
+                    {
+                        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("hdr_to_srgb_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: texture_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        render_pass.set_pipeline(&shared.hdr_blit_pipeline);
+                        render_pass.set_bind_group(0, hdr_bind_group, &[]);
+                        render_pass.draw(0..3, 0..1); // Full-screen triangle (3 vertices)
+                    }
+
+                    queue.submit(Some(encoder.finish()));
+                }
+            } else {
+                // Legacy mode: Direct single-scene rendering
+                let render_params = vello::RenderParams {
+                    base_color: vello::peniko::Color::from_rgb8(45, 45, 48), // Dark background
+                    width,
+                    height,
+                    antialiasing_method: vello::AaConfig::Msaa16,
+                };
+
+                if let Ok(mut renderer) = shared.renderer.lock() {
+                    renderer
+                        .render_to_texture(device, queue, &scene, texture_view, &render_params)
+                        .ok();
+                }
             }
         }
 

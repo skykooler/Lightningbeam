@@ -10,6 +10,10 @@ serde_json = { workspace = true }
 # UI framework (for Color32 conversion)
 egui = "0.31"
 
+# GPU rendering infrastructure
+wgpu = { workspace = true }
+bytemuck = { version = "1.14", features = ["derive"] }
+
 # Geometry and rendering
 kurbo = { workspace = true }
 vello = { workspace = true }

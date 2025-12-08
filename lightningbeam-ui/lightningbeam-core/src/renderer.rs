@@ -1,10 +1,17 @@
 //! Rendering system for Lightningbeam documents
 //!
 //! Renders documents to Vello scenes for GPU-accelerated display.
+//!
+//! This module supports two rendering modes:
+//! 1. **Legacy mode**: All layers rendered to a single Scene (simple, fast)
+//! 2. **Compositing mode**: Each layer rendered to its own Scene for HDR compositing
+//!
+//! The compositing mode enables proper per-layer opacity, blend modes, and effects.
 
 use crate::animation::TransformProperty;
 use crate::clip::ImageAsset;
 use crate::document::Document;
+use crate::gpu::BlendMode;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
 use kurbo::{Affine, Shape};
 use std::collections::HashMap;
@@ -74,6 +81,225 @@ fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
         asset.height,
     ))
 }
+
+// ============================================================================
+// Per-Layer Rendering for HDR Compositing Pipeline
+// ============================================================================
+
+/// Metadata for a rendered layer, used for compositing
+pub struct RenderedLayer {
+    /// The layer's unique identifier
+    pub layer_id: Uuid,
+    /// The Vello scene containing the layer's rendered content
+    pub scene: Scene,
+    /// Layer opacity (0.0 to 1.0)
+    pub opacity: f32,
+    /// Blend mode for compositing
+    pub blend_mode: BlendMode,
+    /// Whether this layer has any visible content
+    pub has_content: bool,
+}
+
+impl RenderedLayer {
+    /// Create a new rendered layer with default settings
+    pub fn new(layer_id: Uuid) -> Self {
+        Self {
+            layer_id,
+            scene: Scene::new(),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            has_content: false,
+        }
+    }
+
+    /// Create with specific opacity and blend mode
+    pub fn with_settings(layer_id: Uuid, opacity: f32, blend_mode: BlendMode) -> Self {
+        Self {
+            layer_id,
+            scene: Scene::new(),
+            opacity,
+            blend_mode,
+            has_content: false,
+        }
+    }
+}
+
+/// Result of rendering a document for compositing
+pub struct CompositeRenderResult {
+    /// Background scene (rendered separately for potential optimization)
+    pub background: Scene,
+    /// Rendered layers in bottom-to-top order
+    pub layers: Vec<RenderedLayer>,
+    /// Document dimensions
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Render a document for the HDR compositing pipeline
+///
+/// Unlike `render_document_with_transform`, this function renders each visible
+/// layer to its own Scene, enabling proper per-layer opacity, blend modes,
+/// and effects in the GPU compositor.
+///
+/// Layers are returned in bottom-to-top order for compositing.
+pub fn render_document_for_compositing(
+    document: &Document,
+    base_transform: Affine,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) -> CompositeRenderResult {
+    let time = document.current_time;
+
+    // Render background to its own scene
+    let mut background = Scene::new();
+    render_background(document, &mut background, base_transform);
+
+    // Check if any layers are soloed
+    let any_soloed = document.visible_layers().any(|layer| layer.soloed());
+
+    // Collect layers to render
+    let layers_to_render: Vec<_> = document
+        .visible_layers()
+        .filter(|layer| {
+            if any_soloed {
+                layer.soloed()
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    // Render each layer to its own scene
+    let mut rendered_layers = Vec::with_capacity(layers_to_render.len());
+
+    for layer in layers_to_render {
+        let rendered = render_layer_isolated(
+            document,
+            time,
+            layer,
+            base_transform,
+            image_cache,
+            video_manager,
+        );
+        rendered_layers.push(rendered);
+    }
+
+    CompositeRenderResult {
+        background,
+        layers: rendered_layers,
+        width: document.width,
+        height: document.height,
+    }
+}
+
+/// Render a single layer to its own isolated Scene
+///
+/// The layer is rendered with full opacity in its scene; the actual opacity
+/// will be applied during compositing. This enables proper alpha blending
+/// for nested clips and complex layer hierarchies.
+pub fn render_layer_isolated(
+    document: &Document,
+    time: f64,
+    layer: &AnyLayer,
+    base_transform: Affine,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) -> RenderedLayer {
+    let layer_id = layer.id();
+    let opacity = layer.opacity() as f32;
+
+    // TODO: When we add blend mode support to layers, read it here
+    let blend_mode = BlendMode::Normal;
+
+    let mut rendered = RenderedLayer::with_settings(layer_id, opacity, blend_mode);
+
+    // Render layer content with full opacity (1.0) - opacity applied during compositing
+    match layer {
+        AnyLayer::Vector(vector_layer) => {
+            render_vector_layer_to_scene(
+                document,
+                time,
+                vector_layer,
+                &mut rendered.scene,
+                base_transform,
+                1.0, // Full opacity - layer opacity handled in compositing
+                image_cache,
+                video_manager,
+            );
+            rendered.has_content = !vector_layer.shape_instances.is_empty()
+                || !vector_layer.clip_instances.is_empty();
+        }
+        AnyLayer::Audio(_) => {
+            // Audio layers don't render visually
+            rendered.has_content = false;
+        }
+        AnyLayer::Video(video_layer) => {
+            let mut video_mgr = video_manager.lock().unwrap();
+            render_video_layer_to_scene(
+                document,
+                time,
+                video_layer,
+                &mut rendered.scene,
+                base_transform,
+                1.0, // Full opacity - layer opacity handled in compositing
+                &mut video_mgr,
+            );
+            rendered.has_content = !video_layer.clip_instances.is_empty();
+        }
+    }
+
+    rendered
+}
+
+/// Render a vector layer to an isolated scene (for compositing pipeline)
+fn render_vector_layer_to_scene(
+    document: &Document,
+    time: f64,
+    layer: &VectorLayer,
+    scene: &mut Scene,
+    base_transform: Affine,
+    parent_opacity: f64,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
+    // Render using the existing function but to this isolated scene
+    render_vector_layer(
+        document,
+        time,
+        layer,
+        scene,
+        base_transform,
+        parent_opacity,
+        image_cache,
+        video_manager,
+    );
+}
+
+/// Render a video layer to an isolated scene (for compositing pipeline)
+fn render_video_layer_to_scene(
+    document: &Document,
+    time: f64,
+    layer: &crate::layer::VideoLayer,
+    scene: &mut Scene,
+    base_transform: Affine,
+    parent_opacity: f64,
+    video_manager: &mut crate::video::VideoManager,
+) {
+    // Render using the existing function but to this isolated scene
+    render_video_layer(
+        document,
+        time,
+        layer,
+        scene,
+        base_transform,
+        parent_opacity,
+        video_manager,
+    );
+}
+
+// ============================================================================
+// Legacy Single-Scene Rendering (kept for backwards compatibility)
+// ============================================================================
 
 /// Render a document to a Vello scene
 pub fn render_document(
