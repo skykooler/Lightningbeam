@@ -68,6 +68,7 @@ fn can_drop_on_layer(layer: &AnyLayer, clip_type: DragClipType) -> bool {
         (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
             audio.audio_layer_type == AudioLayerType::Midi
         }
+        (AnyLayer::Effect(_), DragClipType::Effect) => true,
         _ => false,
     }
 }
@@ -171,6 +172,7 @@ impl TimelinePane {
             lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
             lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
             lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+            lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
         };
 
         // Check each clip instance
@@ -184,6 +186,9 @@ impl TimelinePane {
                 }
                 lightningbeam_core::layer::AnyLayer::Video(_) => {
                     document.get_video_clip(&clip_instance.clip_id).map(|c| c.duration)
+                }
+                lightningbeam_core::layer::AnyLayer::Effect(_) => {
+                    Some(lightningbeam_core::effect::EFFECT_DURATION)
                 }
             }?;
 
@@ -860,6 +865,7 @@ impl TimelinePane {
                     }
                 }
                 lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)), // Purple
+                lightningbeam_core::layer::AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)), // Pink
             };
 
             // Color indicator bar on the left edge
@@ -1154,6 +1160,7 @@ impl TimelinePane {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
             };
 
             for clip_instance in clip_instances {
@@ -1170,6 +1177,9 @@ impl TimelinePane {
                     lightningbeam_core::layer::AnyLayer::Video(_) => {
                         document.get_video_clip(&clip_instance.clip_id)
                             .map(|c| c.duration)
+                    }
+                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
+                        Some(lightningbeam_core::effect::EFFECT_DURATION)
                     }
                 };
 
@@ -1328,6 +1338,10 @@ impl TimelinePane {
                             lightningbeam_core::layer::AnyLayer::Video(_) => (
                                 egui::Color32::from_rgb(150, 80, 220), // Purple
                                 egui::Color32::from_rgb(200, 150, 255), // Bright purple
+                            ),
+                            lightningbeam_core::layer::AnyLayer::Effect(_) => (
+                                egui::Color32::from_rgb(220, 80, 160), // Pink
+                                egui::Color32::from_rgb(255, 120, 200), // Bright pink
                             ),
                         };
 
@@ -1552,6 +1566,7 @@ impl TimelinePane {
                                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
                             };
 
                             // Check if click is within any clip instance
@@ -1569,6 +1584,9 @@ impl TimelinePane {
                                     lightningbeam_core::layer::AnyLayer::Video(_) => {
                                         document.get_video_clip(&clip_instance.clip_id)
                                             .map(|c| c.duration)
+                                    }
+                                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
+                                        Some(lightningbeam_core::effect::EFFECT_DURATION)
                                     }
                                 };
 
@@ -1678,6 +1696,7 @@ impl TimelinePane {
                         lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                         lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                         lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                        lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
                     };
 
                     // Find selected clip instances in this layer
@@ -1734,6 +1753,9 @@ impl TimelinePane {
                                     lightningbeam_core::layer::AnyLayer::Video(vl) => {
                                         &vl.clip_instances
                                     }
+                                    lightningbeam_core::layer::AnyLayer::Effect(el) => {
+                                        &el.clip_instances
+                                    }
                                 };
 
                                 // Find selected clip instances in this layer
@@ -1755,6 +1777,9 @@ impl TimelinePane {
                                                 document
                                                     .get_video_clip(&clip_instance.clip_id)
                                                     .map(|c| c.duration)
+                                            }
+                                            lightningbeam_core::layer::AnyLayer::Effect(_) => {
+                                                Some(lightningbeam_core::effect::EFFECT_DURATION)
                                             }
                                         };
 
@@ -2113,6 +2138,7 @@ impl PaneRenderer for TimelinePane {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
             };
 
             for clip_instance in clip_instances {
@@ -2129,6 +2155,9 @@ impl PaneRenderer for TimelinePane {
                     lightningbeam_core::layer::AnyLayer::Video(_) => {
                         document.get_video_clip(&clip_instance.clip_id)
                             .map(|c| c.duration)
+                    }
+                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
+                        Some(lightningbeam_core::effect::EFFECT_DURATION)
                     }
                 };
 
@@ -2357,103 +2386,216 @@ impl PaneRenderer for TimelinePane {
                             let layer_id = layer.id();
                             let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
 
-                            // Get document dimensions for centering and create clip instance
-                            let (center_x, center_y, mut clip_instance) = {
-                                let doc = shared.action_executor.document();
-                                let center_x = doc.width / 2.0;
-                                let center_y = doc.height / 2.0;
+                            // Handle effect drops specially
+                            if dragging.clip_type == DragClipType::Effect {
+                                // Get effect definition from registry or document
+                                let effect_def = lightningbeam_core::effect_registry::EffectRegistry::get_by_id(&dragging.clip_id)
+                                    .or_else(|| shared.action_executor.document().get_effect_definition(&dragging.clip_id).cloned());
 
-                                let mut clip_instance = ClipInstance::new(dragging.clip_id)
-                                    .with_timeline_start(drop_time);
+                                if let Some(def) = effect_def {
+                                    // Ensure effect definition is in document (copy from registry if built-in)
+                                    if shared.action_executor.document().get_effect_definition(&def.id).is_none() {
+                                        shared.action_executor.document_mut().add_effect_definition(def.clone());
+                                    }
 
-                                // For video clips, scale to fill document dimensions
-                                if dragging.clip_type == DragClipType::Video {
-                                    if let Some((video_width, video_height)) = dragging.dimensions {
-                                        // Calculate scale to fill document
-                                        let scale_x = doc.width / video_width;
-                                        let scale_y = doc.height / video_height;
+                                    // Create clip instance for effect with 5 second default duration
+                                    let clip_instance = ClipInstance::new(def.id)
+                                        .with_timeline_start(drop_time)
+                                        .with_timeline_duration(5.0);
 
-                                        clip_instance.transform.scale_x = scale_x;
-                                        clip_instance.transform.scale_y = scale_y;
+                                    // Use AddEffectAction for effect layers
+                                    let action = lightningbeam_core::actions::AddEffectAction::new(
+                                        layer_id,
+                                        clip_instance,
+                                    );
+                                    shared.pending_actions.push(Box::new(action));
+                                }
 
-                                        // Position at (0, 0) to center the scaled video
-                                        // (scaled dimensions = document dimensions, so top-left at origin centers it)
-                                        clip_instance.transform.x = 0.0;
-                                        clip_instance.transform.y = 0.0;
+                                // Clear drag state
+                                *shared.dragging_asset = None;
+                            } else {
+                                // Get document dimensions for centering and create clip instance
+                                let (center_x, center_y, mut clip_instance) = {
+                                    let doc = shared.action_executor.document();
+                                    let center_x = doc.width / 2.0;
+                                    let center_y = doc.height / 2.0;
+
+                                    let mut clip_instance = ClipInstance::new(dragging.clip_id)
+                                        .with_timeline_start(drop_time);
+
+                                    // For video clips, scale to fill document dimensions
+                                    if dragging.clip_type == DragClipType::Video {
+                                        if let Some((video_width, video_height)) = dragging.dimensions {
+                                            // Calculate scale to fill document
+                                            let scale_x = doc.width / video_width;
+                                            let scale_y = doc.height / video_height;
+
+                                            clip_instance.transform.scale_x = scale_x;
+                                            clip_instance.transform.scale_y = scale_y;
+
+                                            // Position at (0, 0) to center the scaled video
+                                            // (scaled dimensions = document dimensions, so top-left at origin centers it)
+                                            clip_instance.transform.x = 0.0;
+                                            clip_instance.transform.y = 0.0;
+                                        } else {
+                                            // No dimensions available, use document center
+                                            clip_instance.transform.x = center_x;
+                                            clip_instance.transform.y = center_y;
+                                        }
                                     } else {
-                                        // No dimensions available, use document center
+                                        // Non-video clips: center at document center
                                         clip_instance.transform.x = center_x;
                                         clip_instance.transform.y = center_y;
                                     }
+
+                                    (center_x, center_y, clip_instance)
+                                }; // doc is dropped here
+
+                                // Save instance ID for potential grouping
+                                let video_instance_id = clip_instance.id;
+
+                                // Create and queue action for video
+                                let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                    layer_id,
+                                    clip_instance,
+                                );
+                                shared.pending_actions.push(Box::new(action));
+
+                                // If video has linked audio, auto-place it and create group
+                                if let Some(linked_audio_clip_id) = dragging.linked_audio_clip_id {
+                                    eprintln!("DEBUG: Video has linked audio clip: {}", linked_audio_clip_id);
+
+                                    // Find or create sampled audio track where the audio won't overlap
+                                    let audio_layer_id = {
+                                        let doc = shared.action_executor.document();
+                                        let result = find_sampled_audio_track_for_clip(doc, linked_audio_clip_id, drop_time);
+                                        if let Some(id) = result {
+                                            eprintln!("DEBUG: Found existing audio track without overlap: {}", id);
+                                        } else {
+                                            eprintln!("DEBUG: No suitable audio track found, will create new one");
+                                        }
+                                        result
+                                    }.unwrap_or_else(|| {
+                                        eprintln!("DEBUG: Creating new audio track");
+                                        // Create new sampled audio layer
+                                        let audio_layer = lightningbeam_core::layer::AudioLayer::new_sampled("Audio Track");
+                                        let layer_id = shared.action_executor.document_mut().root.add_child(
+                                            lightningbeam_core::layer::AnyLayer::Audio(audio_layer)
+                                        );
+                                        eprintln!("DEBUG: Created audio layer with ID: {}", layer_id);
+                                        layer_id
+                                    });
+
+                                    eprintln!("DEBUG: Using audio layer ID: {}", audio_layer_id);
+
+                                    // Create audio clip instance at same timeline position
+                                    let audio_instance = ClipInstance::new(linked_audio_clip_id)
+                                        .with_timeline_start(drop_time);
+                                    let audio_instance_id = audio_instance.id;
+
+                                    eprintln!("DEBUG: Created audio instance: {} for clip: {}", audio_instance_id, linked_audio_clip_id);
+
+                                    // Queue audio action
+                                    let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                        audio_layer_id,
+                                        audio_instance,
+                                    );
+                                    shared.pending_actions.push(Box::new(audio_action));
+                                    eprintln!("DEBUG: Queued audio action, total pending: {}", shared.pending_actions.len());
+
+                                    // Create instance group linking video and audio
+                                    let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
+                                    group.add_member(layer_id, video_instance_id);
+                                    group.add_member(audio_layer_id, audio_instance_id);
+                                    shared.action_executor.document_mut().add_instance_group(group);
+                                    eprintln!("DEBUG: Created instance group");
                                 } else {
-                                    // Non-video clips: center at document center
-                                    clip_instance.transform.x = center_x;
-                                    clip_instance.transform.y = center_y;
+                                    eprintln!("DEBUG: Video has NO linked audio clip!");
                                 }
 
-                                (center_x, center_y, clip_instance)
-                            }; // doc is dropped here
+                                // Clear drag state
+                                *shared.dragging_asset = None;
+                            }
+                        }
+                    } else {
+                        // No existing layer at this position - show "create new layer" indicator
+                        // and handle drop to create a new layer
+                        let layer_y = content_rect.min.y + hovered_layer_index as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+                        let highlight_rect = egui::Rect::from_min_size(
+                            egui::pos2(content_rect.min.x, layer_y),
+                            egui::vec2(content_rect.width(), LAYER_HEIGHT),
+                        );
 
-                            // Save instance ID for potential grouping
-                            let video_instance_id = clip_instance.id;
+                        // Blue highlight for "will create new layer"
+                        ui.painter().rect_filled(
+                            highlight_rect,
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(100, 150, 255, 40),
+                        );
 
-                            // Create and queue action for video
-                            let action = lightningbeam_core::actions::AddClipInstanceAction::new(
-                                layer_id,
-                                clip_instance,
+                        // Show drop time indicator
+                        let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
+                        let drop_x = self.time_to_x(drop_time);
+                        if drop_x >= 0.0 && drop_x <= content_rect.width() {
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(content_rect.min.x + drop_x, layer_y),
+                                    egui::pos2(content_rect.min.x + drop_x, layer_y + LAYER_HEIGHT),
+                                ],
+                                egui::Stroke::new(2.0, egui::Color32::WHITE),
                             );
-                            shared.pending_actions.push(Box::new(action));
+                        }
 
-                            // If video has linked audio, auto-place it and create group
-                            if let Some(linked_audio_clip_id) = dragging.linked_audio_clip_id {
-                                eprintln!("DEBUG: Video has linked audio clip: {}", linked_audio_clip_id);
+                        // Handle drop on mouse release - create new layer
+                        if ui.input(|i| i.pointer.any_released()) {
+                            let drop_time = self.x_to_time(pointer_pos.x - content_rect.min.x).max(0.0);
 
-                                // Find or create sampled audio track where the audio won't overlap
-                                let audio_layer_id = {
-                                    let doc = shared.action_executor.document();
-                                    let result = find_sampled_audio_track_for_clip(doc, linked_audio_clip_id, drop_time);
-                                    if let Some(id) = result {
-                                        eprintln!("DEBUG: Found existing audio track without overlap: {}", id);
-                                    } else {
-                                        eprintln!("DEBUG: No suitable audio track found, will create new one");
+                            // Create the appropriate layer type
+                            let layer_name = format!("{} Layer", match dragging.clip_type {
+                                DragClipType::Vector => "Vector",
+                                DragClipType::Video => "Video",
+                                DragClipType::AudioSampled => "Audio",
+                                DragClipType::AudioMidi => "MIDI",
+                                DragClipType::Image => "Image",
+                                DragClipType::Effect => "Effect",
+                            });
+                            let new_layer = super::create_layer_for_clip_type(dragging.clip_type, &layer_name);
+                            let new_layer_id = new_layer.id();
+
+                            // Add the layer
+                            shared.action_executor.document_mut().root.add_child(new_layer);
+
+                            // Now add the clip to the new layer
+                            if dragging.clip_type == DragClipType::Effect {
+                                // Handle effect drops
+                                let effect_def = lightningbeam_core::effect_registry::EffectRegistry::get_by_id(&dragging.clip_id)
+                                    .or_else(|| shared.action_executor.document().get_effect_definition(&dragging.clip_id).cloned());
+
+                                if let Some(def) = effect_def {
+                                    if shared.action_executor.document().get_effect_definition(&def.id).is_none() {
+                                        shared.action_executor.document_mut().add_effect_definition(def.clone());
                                     }
-                                    result
-                                }.unwrap_or_else(|| {
-                                    eprintln!("DEBUG: Creating new audio track");
-                                    // Create new sampled audio layer
-                                    let audio_layer = lightningbeam_core::layer::AudioLayer::new_sampled("Audio Track");
-                                    let layer_id = shared.action_executor.document_mut().root.add_child(
-                                        lightningbeam_core::layer::AnyLayer::Audio(audio_layer)
+
+                                    let clip_instance = ClipInstance::new(def.id)
+                                        .with_timeline_start(drop_time)
+                                        .with_timeline_duration(5.0);
+
+                                    let action = lightningbeam_core::actions::AddEffectAction::new(
+                                        new_layer_id,
+                                        clip_instance,
                                     );
-                                    eprintln!("DEBUG: Created audio layer with ID: {}", layer_id);
-                                    layer_id
-                                });
-
-                                eprintln!("DEBUG: Using audio layer ID: {}", audio_layer_id);
-
-                                // Create audio clip instance at same timeline position
-                                let audio_instance = ClipInstance::new(linked_audio_clip_id)
-                                    .with_timeline_start(drop_time);
-                                let audio_instance_id = audio_instance.id;
-
-                                eprintln!("DEBUG: Created audio instance: {} for clip: {}", audio_instance_id, linked_audio_clip_id);
-
-                                // Queue audio action
-                                let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
-                                    audio_layer_id,
-                                    audio_instance,
-                                );
-                                shared.pending_actions.push(Box::new(audio_action));
-                                eprintln!("DEBUG: Queued audio action, total pending: {}", shared.pending_actions.len());
-
-                                // Create instance group linking video and audio
-                                let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
-                                group.add_member(layer_id, video_instance_id);
-                                group.add_member(audio_layer_id, audio_instance_id);
-                                shared.action_executor.document_mut().add_instance_group(group);
-                                eprintln!("DEBUG: Created instance group");
+                                    shared.pending_actions.push(Box::new(action));
+                                }
                             } else {
-                                eprintln!("DEBUG: Video has NO linked audio clip!");
+                                // Handle other clip types
+                                let clip_instance = ClipInstance::new(dragging.clip_id)
+                                    .with_timeline_start(drop_time);
+
+                                let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                                    new_layer_id,
+                                    clip_instance,
+                                );
+                                shared.pending_actions.push(Box::new(action));
                             }
 
                             // Clear drag state

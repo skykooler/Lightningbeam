@@ -4,6 +4,7 @@
 
 use crate::animation::AnimationData;
 use crate::clip::ClipInstance;
+use crate::effect_layer::EffectLayer;
 use crate::object::ShapeInstance;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ pub enum LayerType {
     Video,
     /// Generic automation layer
     Automation,
+    /// Visual effects layer
+    Effect,
 }
 
 /// Common trait for all layer types
@@ -546,6 +549,7 @@ pub enum AnyLayer {
     Vector(VectorLayer),
     Audio(AudioLayer),
     Video(VideoLayer),
+    Effect(EffectLayer),
 }
 
 impl LayerTrait for AnyLayer {
@@ -554,6 +558,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.id(),
             AnyLayer::Audio(l) => l.id(),
             AnyLayer::Video(l) => l.id(),
+            AnyLayer::Effect(l) => l.id(),
         }
     }
 
@@ -562,6 +567,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.name(),
             AnyLayer::Audio(l) => l.name(),
             AnyLayer::Video(l) => l.name(),
+            AnyLayer::Effect(l) => l.name(),
         }
     }
 
@@ -570,6 +576,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_name(name),
             AnyLayer::Audio(l) => l.set_name(name),
             AnyLayer::Video(l) => l.set_name(name),
+            AnyLayer::Effect(l) => l.set_name(name),
         }
     }
 
@@ -578,6 +585,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.has_custom_name(),
             AnyLayer::Audio(l) => l.has_custom_name(),
             AnyLayer::Video(l) => l.has_custom_name(),
+            AnyLayer::Effect(l) => l.has_custom_name(),
         }
     }
 
@@ -586,6 +594,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_has_custom_name(custom),
             AnyLayer::Audio(l) => l.set_has_custom_name(custom),
             AnyLayer::Video(l) => l.set_has_custom_name(custom),
+            AnyLayer::Effect(l) => l.set_has_custom_name(custom),
         }
     }
 
@@ -594,6 +603,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.visible(),
             AnyLayer::Audio(l) => l.visible(),
             AnyLayer::Video(l) => l.visible(),
+            AnyLayer::Effect(l) => l.visible(),
         }
     }
 
@@ -602,6 +612,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_visible(visible),
             AnyLayer::Audio(l) => l.set_visible(visible),
             AnyLayer::Video(l) => l.set_visible(visible),
+            AnyLayer::Effect(l) => l.set_visible(visible),
         }
     }
 
@@ -610,6 +621,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.opacity(),
             AnyLayer::Audio(l) => l.opacity(),
             AnyLayer::Video(l) => l.opacity(),
+            AnyLayer::Effect(l) => l.opacity(),
         }
     }
 
@@ -618,6 +630,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_opacity(opacity),
             AnyLayer::Audio(l) => l.set_opacity(opacity),
             AnyLayer::Video(l) => l.set_opacity(opacity),
+            AnyLayer::Effect(l) => l.set_opacity(opacity),
         }
     }
 
@@ -626,6 +639,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.volume(),
             AnyLayer::Audio(l) => l.volume(),
             AnyLayer::Video(l) => l.volume(),
+            AnyLayer::Effect(l) => l.volume(),
         }
     }
 
@@ -634,6 +648,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_volume(volume),
             AnyLayer::Audio(l) => l.set_volume(volume),
             AnyLayer::Video(l) => l.set_volume(volume),
+            AnyLayer::Effect(l) => l.set_volume(volume),
         }
     }
 
@@ -642,6 +657,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.muted(),
             AnyLayer::Audio(l) => l.muted(),
             AnyLayer::Video(l) => l.muted(),
+            AnyLayer::Effect(l) => l.muted(),
         }
     }
 
@@ -650,6 +666,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_muted(muted),
             AnyLayer::Audio(l) => l.set_muted(muted),
             AnyLayer::Video(l) => l.set_muted(muted),
+            AnyLayer::Effect(l) => l.set_muted(muted),
         }
     }
 
@@ -658,6 +675,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.soloed(),
             AnyLayer::Audio(l) => l.soloed(),
             AnyLayer::Video(l) => l.soloed(),
+            AnyLayer::Effect(l) => l.soloed(),
         }
     }
 
@@ -666,6 +684,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_soloed(soloed),
             AnyLayer::Audio(l) => l.set_soloed(soloed),
             AnyLayer::Video(l) => l.set_soloed(soloed),
+            AnyLayer::Effect(l) => l.set_soloed(soloed),
         }
     }
 
@@ -674,6 +693,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.locked(),
             AnyLayer::Audio(l) => l.locked(),
             AnyLayer::Video(l) => l.locked(),
+            AnyLayer::Effect(l) => l.locked(),
         }
     }
 
@@ -682,6 +702,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Vector(l) => l.set_locked(locked),
             AnyLayer::Audio(l) => l.set_locked(locked),
             AnyLayer::Video(l) => l.set_locked(locked),
+            AnyLayer::Effect(l) => l.set_locked(locked),
         }
     }
 }
@@ -693,6 +714,7 @@ impl AnyLayer {
             AnyLayer::Vector(l) => &l.layer,
             AnyLayer::Audio(l) => &l.layer,
             AnyLayer::Video(l) => &l.layer,
+            AnyLayer::Effect(l) => &l.layer,
         }
     }
 
@@ -702,6 +724,7 @@ impl AnyLayer {
             AnyLayer::Vector(l) => &mut l.layer,
             AnyLayer::Audio(l) => &mut l.layer,
             AnyLayer::Video(l) => &mut l.layer,
+            AnyLayer::Effect(l) => &mut l.layer,
         }
     }
 

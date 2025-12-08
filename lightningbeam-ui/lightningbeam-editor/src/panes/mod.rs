@@ -33,6 +33,8 @@ pub enum DragClipType {
     AudioMidi,
     /// Static image asset
     Image,
+    /// Effect (shader-based visual effect)
+    Effect,
 }
 
 /// Information about an asset being dragged from the Asset Library
@@ -91,6 +93,7 @@ pub fn layer_matches_clip_type(layer: &lightningbeam_core::layer::AnyLayer, clip
         (AnyLayer::Audio(audio), DragClipType::AudioMidi) => {
             audio.audio_layer_type == AudioLayerType::Midi
         }
+        (AnyLayer::Effect(_), DragClipType::Effect) => true,
         _ => false,
     }
 }
@@ -98,6 +101,7 @@ pub fn layer_matches_clip_type(layer: &lightningbeam_core::layer::AnyLayer, clip
 /// Create a new layer of the appropriate type for a clip
 pub fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> lightningbeam_core::layer::AnyLayer {
     use lightningbeam_core::layer::*;
+    use lightningbeam_core::effect_layer::EffectLayer;
     match clip_type {
         DragClipType::Vector => AnyLayer::Vector(VectorLayer::new(name)),
         DragClipType::Video => AnyLayer::Video(VideoLayer::new(name)),
@@ -105,6 +109,7 @@ pub fn create_layer_for_clip_type(clip_type: DragClipType, name: &str) -> lightn
         DragClipType::AudioMidi => AnyLayer::Audio(AudioLayer::new_midi(name)),
         // Images are placed as shapes on vector layers, not their own layer type
         DragClipType::Image => AnyLayer::Vector(VectorLayer::new(name)),
+        DragClipType::Effect => AnyLayer::Effect(EffectLayer::new(name)),
     }
 }
 

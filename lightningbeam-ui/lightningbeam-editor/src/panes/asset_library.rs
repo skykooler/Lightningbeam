@@ -514,6 +514,82 @@ fn shape_color_to_tiny_skia(color: &ShapeColor) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
+/// Generate a simple effect thumbnail with a pink gradient
+fn generate_effect_thumbnail() -> Vec<u8> {
+    let size = THUMBNAIL_SIZE as usize;
+    let mut rgba = vec![0u8; size * size * 4];
+
+    // Pink gradient background with "FX" visual indicator
+    for y in 0..size {
+        for x in 0..size {
+            let brightness = 1.0 - (y as f32 / size as f32) * 0.3;
+            let idx = (y * size + x) * 4;
+            rgba[idx] = (220.0 * brightness) as u8;     // R
+            rgba[idx + 1] = (80.0 * brightness) as u8;  // G
+            rgba[idx + 2] = (160.0 * brightness) as u8; // B
+            rgba[idx + 3] = 200;                         // A
+        }
+    }
+
+    // Draw a simple "FX" pattern in the center using darker pixels
+    let center = size / 2;
+    let letter_size = size / 4;
+
+    // Draw "F" - vertical bar
+    for y in (center - letter_size)..(center + letter_size) {
+        let x = center - letter_size;
+        let idx = (y * size + x) * 4;
+        rgba[idx] = 255;
+        rgba[idx + 1] = 255;
+        rgba[idx + 2] = 255;
+        rgba[idx + 3] = 255;
+    }
+    // Draw "F" - top horizontal
+    for x in (center - letter_size)..(center - 2) {
+        let y = center - letter_size;
+        let idx = (y * size + x) * 4;
+        rgba[idx] = 255;
+        rgba[idx + 1] = 255;
+        rgba[idx + 2] = 255;
+        rgba[idx + 3] = 255;
+    }
+    // Draw "F" - middle horizontal
+    for x in (center - letter_size)..(center - 4) {
+        let y = center;
+        let idx = (y * size + x) * 4;
+        rgba[idx] = 255;
+        rgba[idx + 1] = 255;
+        rgba[idx + 2] = 255;
+        rgba[idx + 3] = 255;
+    }
+
+    // Draw "X" - diagonal lines
+    for i in 0..letter_size {
+        // Top-left to bottom-right
+        let x1 = center + 2 + i;
+        let y1 = center - letter_size + i * 2;
+        if x1 < size && y1 < size {
+            let idx = (y1 * size + x1) * 4;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 255;
+            rgba[idx + 2] = 255;
+            rgba[idx + 3] = 255;
+        }
+        // Top-right to bottom-left
+        let x2 = center + letter_size - i;
+        let y2 = center - letter_size + i * 2;
+        if x2 < size && y2 < size {
+            let idx = (y2 * size + x2) * 4;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 255;
+            rgba[idx + 2] = 255;
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    rgba
+}
+
 /// Ellipsize a string to fit within a maximum character count
 fn ellipsize(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -532,6 +608,7 @@ pub enum AssetCategory {
     Video,
     Audio,
     Images,
+    Effects,
 }
 
 impl AssetCategory {
@@ -542,6 +619,7 @@ impl AssetCategory {
             AssetCategory::Video => "Video",
             AssetCategory::Audio => "Audio",
             AssetCategory::Images => "Images",
+            AssetCategory::Effects => "Effects",
         }
     }
 
@@ -552,6 +630,7 @@ impl AssetCategory {
             AssetCategory::Video,
             AssetCategory::Audio,
             AssetCategory::Images,
+            AssetCategory::Effects,
         ]
     }
 
@@ -563,6 +642,7 @@ impl AssetCategory {
             AssetCategory::Video => egui::Color32::from_rgb(255, 150, 100),  // Orange
             AssetCategory::Audio => egui::Color32::from_rgb(100, 255, 150),  // Green
             AssetCategory::Images => egui::Color32::from_rgb(255, 200, 100), // Yellow/Gold
+            AssetCategory::Effects => egui::Color32::from_rgb(220, 80, 160), // Pink
         }
     }
 }
@@ -578,6 +658,8 @@ pub struct AssetEntry {
     pub duration: f64,
     pub dimensions: Option<(f64, f64)>,
     pub extra_info: String,
+    /// True for built-in effects from the registry (not editable/deletable)
+    pub is_builtin: bool,
 }
 
 /// Pending delete confirmation state
@@ -658,6 +740,7 @@ impl AssetLibraryPane {
                 duration: clip.duration,
                 dimensions: Some((clip.width, clip.height)),
                 extra_info: format!("{}x{}", clip.width as u32, clip.height as u32),
+                is_builtin: false,
             });
         }
 
@@ -671,6 +754,7 @@ impl AssetLibraryPane {
                 duration: clip.duration,
                 dimensions: Some((clip.width, clip.height)),
                 extra_info: format!("{:.0}fps", clip.frame_rate),
+                is_builtin: false,
             });
         }
 
@@ -699,6 +783,7 @@ impl AssetLibraryPane {
                 duration: clip.duration,
                 dimensions: None,
                 extra_info,
+                is_builtin: false,
             });
         }
 
@@ -712,7 +797,44 @@ impl AssetLibraryPane {
                 duration: 0.0, // Images don't have duration
                 dimensions: Some((asset.width as f64, asset.height as f64)),
                 extra_info: format!("{}x{}", asset.width, asset.height),
+                is_builtin: false,
             });
+        }
+
+        // Collect built-in effects from registry
+        for effect_def in lightningbeam_core::effect_registry::EffectRegistry::get_all() {
+            assets.push(AssetEntry {
+                id: effect_def.id,
+                name: effect_def.name.clone(),
+                category: AssetCategory::Effects,
+                drag_clip_type: DragClipType::Effect,
+                duration: 5.0, // Default duration when dropped
+                dimensions: None,
+                extra_info: format!("{:?}", effect_def.category),
+                is_builtin: true, // Built-in from registry
+            });
+        }
+
+        // Collect user-edited effects from document (that aren't in registry)
+        let registry_ids: HashSet<Uuid> = lightningbeam_core::effect_registry::EffectRegistry::get_all()
+            .iter()
+            .map(|e| e.id)
+            .collect();
+
+        for effect_def in document.effect_definitions.values() {
+            if !registry_ids.contains(&effect_def.id) {
+                // User-created/modified effect
+                assets.push(AssetEntry {
+                    id: effect_def.id,
+                    name: effect_def.name.clone(),
+                    category: AssetCategory::Effects,
+                    drag_clip_type: DragClipType::Effect,
+                    duration: 5.0,
+                    dimensions: None,
+                    extra_info: format!("{:?}", effect_def.category),
+                    is_builtin: false, // User effect
+                });
+            }
         }
 
         // Sort alphabetically by name
@@ -729,8 +851,13 @@ impl AssetLibraryPane {
             .iter()
             .filter(|asset| {
                 // Category filter
-                let category_matches = self.selected_category == AssetCategory::All
-                    || asset.category == self.selected_category;
+                let category_matches = if self.selected_category == AssetCategory::All {
+                    // "All" tab: show everything EXCEPT built-in effects
+                    // (built-in effects only appear in the Effects tab)
+                    !(asset.category == AssetCategory::Effects && asset.is_builtin)
+                } else {
+                    asset.category == self.selected_category
+                };
 
                 // Search filter
                 let search_matches =
@@ -773,6 +900,15 @@ impl AssetLibraryPane {
                         }
                     }
                 }
+                lightningbeam_core::layer::AnyLayer::Effect(el) => {
+                    if category == AssetCategory::Effects {
+                        for instance in &el.clip_instances {
+                            if instance.clip_id == asset_id {
+                                return true;
+                            }
+                        }
+                    }
+                }
             }
         }
         false
@@ -792,6 +928,9 @@ impl AssetLibraryPane {
             }
             AssetCategory::Images => {
                 document.remove_image_asset(&asset_id);
+            }
+            AssetCategory::Effects => {
+                document.effect_definitions.remove(&asset_id);
             }
             AssetCategory::All => {} // Not a real category for deletion
         }
@@ -818,6 +957,11 @@ impl AssetLibraryPane {
             AssetCategory::Images => {
                 if let Some(asset) = document.get_image_asset_mut(&asset_id) {
                     asset.name = new_name.to_string();
+                }
+            }
+            AssetCategory::Effects => {
+                if let Some(effect) = document.effect_definitions.get_mut(&asset_id) {
+                    effect.name = new_name.to_string();
                 }
             }
             AssetCategory::All => {} // Not a real category for renaming
@@ -1268,6 +1412,9 @@ impl AssetLibraryPane {
                                         Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                     }
                                 }
+                                AssetCategory::Effects => {
+                                    Some(generate_effect_thumbnail())
+                                }
                                 AssetCategory::All => None,
                             }
                         });
@@ -1555,6 +1702,9 @@ impl AssetLibraryPane {
                                         Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                     }
                                 }
+                                AssetCategory::Effects => {
+                                    Some(generate_effect_thumbnail())
+                                }
                                 AssetCategory::All => None,
                             }
                         });
@@ -1739,6 +1889,7 @@ impl PaneRenderer for AssetLibraryPane {
             if let Some(asset) = all_assets.iter().find(|a| a.id == context_asset_id) {
                 let asset_name = asset.name.clone();
                 let asset_category = asset.category;
+                let asset_is_builtin = asset.is_builtin;
                 let in_use = Self::is_asset_in_use(
                     shared.action_executor.document(),
                     context_asset_id,
@@ -1754,25 +1905,32 @@ impl PaneRenderer for AssetLibraryPane {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_min_width(120.0);
 
-                            if ui.button("Rename").clicked() {
-                                // Start inline rename
-                                self.rename_state = Some(RenameState {
-                                    asset_id: context_asset_id,
-                                    category: asset_category,
-                                    edit_text: asset_name.clone(),
-                                });
-                                self.context_menu = None;
-                            }
+                            // Built-in effects cannot be renamed or deleted
+                            if asset_is_builtin {
+                                ui.label(egui::RichText::new("Built-in effect")
+                                    .color(egui::Color32::from_gray(120))
+                                    .italics());
+                            } else {
+                                if ui.button("Rename").clicked() {
+                                    // Start inline rename
+                                    self.rename_state = Some(RenameState {
+                                        asset_id: context_asset_id,
+                                        category: asset_category,
+                                        edit_text: asset_name.clone(),
+                                    });
+                                    self.context_menu = None;
+                                }
 
-                            if ui.button("Delete").clicked() {
-                                // Set up pending delete confirmation
-                                self.pending_delete = Some(PendingDelete {
-                                    asset_id: context_asset_id,
-                                    asset_name: asset_name.clone(),
-                                    category: asset_category,
-                                    in_use,
-                                });
-                                self.context_menu = None;
+                                if ui.button("Delete").clicked() {
+                                    // Set up pending delete confirmation
+                                    self.pending_delete = Some(PendingDelete {
+                                        asset_id: context_asset_id,
+                                        asset_name: asset_name.clone(),
+                                        category: asset_category,
+                                        in_use,
+                                    });
+                                    self.context_menu = None;
+                                }
                             }
                         });
                     });

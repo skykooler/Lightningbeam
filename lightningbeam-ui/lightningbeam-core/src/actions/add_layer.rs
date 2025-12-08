@@ -76,6 +76,7 @@ impl Action for AddLayerAction {
             AnyLayer::Vector(_) => "Add vector layer",
             AnyLayer::Audio(_) => "Add audio layer",
             AnyLayer::Video(_) => "Add video layer",
+            AnyLayer::Effect(_) => "Add effect layer",
         }
         .to_string()
     }

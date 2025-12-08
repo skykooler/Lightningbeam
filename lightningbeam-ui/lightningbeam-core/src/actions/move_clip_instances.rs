@@ -3,6 +3,7 @@
 //! Handles moving one or more clip instances along the timeline.
 
 use crate::action::Action;
+use crate::clip::ClipInstance;
 use crate::document::Document;
 use crate::layer::AnyLayer;
 use std::collections::HashMap;
@@ -50,10 +51,11 @@ impl Action for MoveClipInstancesAction {
 
                             // Find member's current position
                             if let Some(layer) = document.get_layer(member_layer_id) {
-                                let clip_instances = match layer {
+                                let clip_instances: &[ClipInstance] = match layer {
                                     AnyLayer::Vector(vl) => &vl.clip_instances,
                                     AnyLayer::Audio(al) => &al.clip_instances,
                                     AnyLayer::Video(vl) => &vl.clip_instances,
+                                    AnyLayer::Effect(_) => continue, // Effect layers don't have clip instances
                                 };
 
                                 if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -88,10 +90,11 @@ impl Action for MoveClipInstancesAction {
 
             for (instance_id, old_start, new_start) in moves {
                 // Get the instance to calculate its duration
-                let clip_instances = match layer {
+                let clip_instances: &[ClipInstance] = match layer {
                     AnyLayer::Audio(al) => &al.clip_instances,
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Vector(vl) => &vl.clip_instances,
+                    AnyLayer::Effect(_) => continue, // Effect layers don't have clip instances
                 };
 
                 let instance = clip_instances.iter()
@@ -138,6 +141,7 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Vector(vl) => &mut vl.clip_instances,
                 AnyLayer::Audio(al) => &mut al.clip_instances,
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
+                AnyLayer::Effect(_) => continue, // Effect layers don't have clip instances
             };
 
             // Update timeline_start for each clip instance
@@ -162,6 +166,7 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Vector(vl) => &mut vl.clip_instances,
                 AnyLayer::Audio(al) => &mut al.clip_instances,
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
+                AnyLayer::Effect(_) => continue, // Effect layers don't have clip instances
             };
 
             // Restore original timeline_start for each clip instance

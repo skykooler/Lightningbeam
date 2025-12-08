@@ -7,10 +7,12 @@
 
 pub mod buffer_pool;
 pub mod compositor;
+pub mod effect_processor;
 
 // Re-export commonly used types
 pub use buffer_pool::{BufferHandle, BufferPool, BufferSpec, BufferFormat};
 pub use compositor::{Compositor, CompositorLayer, BlendMode};
+pub use effect_processor::{EffectProcessor, EffectUniforms};
 
 /// Standard HDR internal texture format (16-bit float per channel)
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;

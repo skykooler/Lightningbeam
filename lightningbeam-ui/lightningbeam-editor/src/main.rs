@@ -2055,6 +2055,7 @@ impl EditorApp {
                 panes::DragClipType::AudioSampled => "Audio",
                 panes::DragClipType::AudioMidi => "MIDI",
                 panes::DragClipType::Image => "Image",
+                panes::DragClipType::Effect => "Effect",
             });
             let new_layer = panes::create_layer_for_clip_type(asset_info.clip_type, &layer_name);
 

@@ -6,8 +6,9 @@
 use eframe::egui;
 use lightningbeam_core::action::Action;
 use lightningbeam_core::clip::ClipInstance;
-use lightningbeam_core::gpu::{BufferPool, Compositor};
+use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, HDR_FORMAT};
 use lightningbeam_core::layer::{AnyLayer, AudioLayer, AudioLayerType, VideoLayer, VectorLayer};
+use lightningbeam_core::renderer::RenderedLayerType;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
 use vello::kurbo::Shape;
@@ -32,6 +33,8 @@ struct SharedVelloResources {
     buffer_pool: Mutex<BufferPool>,
     /// Compositor for layer blending
     compositor: Compositor,
+    /// Effect processor for GPU shader effects
+    effect_processor: Mutex<EffectProcessor>,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -196,7 +199,10 @@ impl SharedVelloResources {
         // Use HDR format for internal compositing
         let compositor = Compositor::new(device, lightningbeam_core::gpu::HDR_FORMAT);
 
-        println!("✅ Vello shared resources initialized (renderer, shaders, and HDR compositor)");
+        // Initialize effect processor for GPU shader effects
+        let effect_processor = EffectProcessor::new(device, lightningbeam_core::gpu::HDR_FORMAT);
+
+        println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, and effect processor)");
 
         Ok(Self {
             renderer: Arc::new(Mutex::new(renderer)),
@@ -208,6 +214,7 @@ impl SharedVelloResources {
             video_manager,
             buffer_pool: Mutex::new(buffer_pool),
             compositor,
+            effect_processor: Mutex::new(effect_processor),
         })
     }
 }
@@ -490,46 +497,143 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             }
             buffer_pool.release(bg_handle);
 
+            // HDR buffer spec for effect processing
+            let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
+
+            // Lock effect processor
+            let mut effect_processor = shared.effect_processor.lock().unwrap();
+
             // Now render and composite each layer incrementally
             for rendered_layer in &composite_result.layers {
                 if !rendered_layer.has_content {
                     continue;
                 }
 
-                // Acquire a buffer for this layer
-                let layer_handle = buffer_pool.acquire(device, layer_spec);
+                match &rendered_layer.layer_type {
+                    RenderedLayerType::Content => {
+                        // Regular content layer - render and composite as before
+                        let layer_handle = buffer_pool.acquire(device, layer_spec);
 
-                if let (Some(layer_view), Some(hdr_view)) = (buffer_pool.get_view(layer_handle), &instance_resources.hdr_texture_view) {
-                    // Render layer scene to buffer
-                    if let Ok(mut renderer) = shared.renderer.lock() {
-                        renderer.render_to_texture(device, queue, &rendered_layer.scene, layer_view, &layer_render_params).ok();
+                        if let (Some(layer_view), Some(hdr_view)) = (buffer_pool.get_view(layer_handle), &instance_resources.hdr_texture_view) {
+                            // Render layer scene to buffer
+                            if let Ok(mut renderer) = shared.renderer.lock() {
+                                renderer.render_to_texture(device, queue, &rendered_layer.scene, layer_view, &layer_render_params).ok();
+                            }
+
+                            // Composite this layer onto the HDR accumulator with its opacity
+                            let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                                layer_handle,
+                                rendered_layer.opacity,
+                                rendered_layer.blend_mode,
+                            );
+
+                            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("layer_composite_encoder"),
+                            });
+                            shared.compositor.composite(
+                                device,
+                                queue,
+                                &mut encoder,
+                                &[compositor_layer],
+                                &buffer_pool,
+                                hdr_view,
+                                None, // Don't clear - blend onto existing content
+                            );
+                            queue.submit(Some(encoder.finish()));
+                        }
+
+                        buffer_pool.release(layer_handle);
                     }
+                    RenderedLayerType::Effect { effect_instances } => {
+                        // Effect layer - apply effects to the current HDR accumulator
+                        let current_time = self.document.current_time;
 
-                    // Composite this layer onto the HDR accumulator with its opacity
-                    let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
-                        layer_handle,
-                        rendered_layer.opacity,
-                        rendered_layer.blend_mode,
-                    );
+                        for effect_instance in effect_instances {
+                            // Get effect definition from document
+                            let Some(effect_def) = self.document.get_effect_definition(&effect_instance.clip_id) else {
+                                println!("Effect definition not found for clip_id: {:?}", effect_instance.clip_id);
+                                continue;
+                            };
 
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("layer_composite_encoder"),
-                    });
-                    shared.compositor.composite(
-                        device,
-                        queue,
-                        &mut encoder,
-                        &[compositor_layer],
-                        &buffer_pool,
-                        hdr_view,
-                        None, // Don't clear - blend onto existing content
-                    );
-                    queue.submit(Some(encoder.finish()));
+                            // Compile effect if needed
+                            if !effect_processor.is_compiled(&effect_def.id) {
+                                let success = effect_processor.compile_effect(device, effect_def);
+                                if !success {
+                                    eprintln!("Failed to compile effect: {}", effect_def.name);
+                                    continue;
+                                }
+                                println!("Compiled effect: {}", effect_def.name);
+                            }
+
+                            // Create EffectInstance from ClipInstance for the processor
+                            // For now, create a simple effect instance with default parameters
+                            let effect_inst = lightningbeam_core::effect::EffectInstance::new(
+                                effect_def,
+                                effect_instance.timeline_start,
+                                effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
+                            );
+
+                            // Acquire temp buffer for effect output (HDR format)
+                            let effect_output_handle = buffer_pool.acquire(device, hdr_spec);
+
+                            if let (Some(hdr_view), Some(effect_output_view)) = (
+                                &instance_resources.hdr_texture_view,
+                                buffer_pool.get_view(effect_output_handle),
+                            ) {
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("effect_encoder"),
+                                });
+
+                                // Apply effect: HDR accumulator → effect output buffer
+                                let applied = effect_processor.apply_effect(
+                                    device,
+                                    queue,
+                                    &mut encoder,
+                                    effect_def,
+                                    &effect_inst,
+                                    hdr_view,
+                                    effect_output_view,
+                                    width,
+                                    height,
+                                    current_time,
+                                );
+
+                                if applied {
+                                    queue.submit(Some(encoder.finish()));
+
+                                    // Copy effect output back to HDR accumulator
+                                    // We need to blit the effect result back to the HDR texture
+                                    let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("effect_copy_encoder"),
+                                    });
+
+                                    // Use compositor to copy (with opacity 1.0, replacing content)
+                                    let effect_layer = lightningbeam_core::gpu::CompositorLayer::normal(
+                                        effect_output_handle,
+                                        rendered_layer.opacity, // Apply effect layer opacity
+                                    );
+                                    shared.compositor.composite(
+                                        device,
+                                        queue,
+                                        &mut copy_encoder,
+                                        &[effect_layer],
+                                        &buffer_pool,
+                                        hdr_view,
+                                        Some([0.0, 0.0, 0.0, 0.0]), // Clear with transparent (we're replacing)
+                                    );
+                                    queue.submit(Some(copy_encoder.finish()));
+                                } else {
+                                    eprintln!("Effect {} failed to apply", effect_def.name);
+                                }
+                            }
+
+                            buffer_pool.release(effect_output_handle);
+                        }
+                    }
                 }
-
-                // Release buffer immediately - it can be reused for next layer
-                buffer_pool.release(layer_handle);
             }
+
+            drop(effect_processor);
 
             // Advance frame counter for buffer cleanup
             buffer_pool.next_frame();
@@ -4982,6 +5086,7 @@ impl PaneRenderer for StagePane {
                                 DragClipType::AudioSampled => "Audio",
                                 DragClipType::AudioMidi => "MIDI",
                                 DragClipType::Image => "Image",
+                                DragClipType::Effect => "Effect",
                             });
                             let new_layer = super::create_layer_for_clip_type(dragging.clip_type, &layer_name);
 
@@ -5030,6 +5135,30 @@ impl PaneRenderer for StagePane {
                                     shape_instance,
                                 );
                                 shared.pending_actions.push(Box::new(action));
+                            } else if dragging.clip_type == DragClipType::Effect {
+                                // Handle effect drops specially
+                                // Get effect definition from registry or document
+                                let effect_def = lightningbeam_core::effect_registry::EffectRegistry::get_by_id(&dragging.clip_id)
+                                    .or_else(|| shared.action_executor.document().get_effect_definition(&dragging.clip_id).cloned());
+
+                                if let Some(def) = effect_def {
+                                    // Ensure effect definition is in document (copy from registry if built-in)
+                                    if shared.action_executor.document().get_effect_definition(&def.id).is_none() {
+                                        shared.action_executor.document_mut().add_effect_definition(def.clone());
+                                    }
+
+                                    // Create clip instance for effect with 5 second default duration
+                                    let clip_instance = ClipInstance::new(def.id)
+                                        .with_timeline_start(drop_time)
+                                        .with_timeline_duration(5.0);
+
+                                    // Use AddEffectAction for effect layers
+                                    let action = lightningbeam_core::actions::AddEffectAction::new(
+                                        layer_id,
+                                        clip_instance,
+                                    );
+                                    shared.pending_actions.push(Box::new(action));
+                                }
                             } else {
                                 // For clips, create a clip instance
                                 let mut clip_instance = ClipInstance::new(dragging.clip_id)

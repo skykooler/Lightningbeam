@@ -98,6 +98,9 @@ impl Action for AddClipInstanceAction {
             AnyLayer::Video(video_layer) => {
                 video_layer.clip_instances.push(self.clip_instance.clone());
             }
+            AnyLayer::Effect(_) => {
+                return Err("Cannot add clip instances to effect layers".to_string());
+            }
         }
         self.executed = true;
 
@@ -129,6 +132,9 @@ impl Action for AddClipInstanceAction {
                 video_layer
                     .clip_instances
                     .retain(|ci| ci.id != instance_id);
+            }
+            AnyLayer::Effect(_) => {
+                // Effect layers don't have clip instances, nothing to rollback
             }
         }
         self.executed = false;

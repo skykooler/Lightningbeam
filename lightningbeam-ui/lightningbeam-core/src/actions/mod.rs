@@ -4,11 +4,13 @@
 //! through the action system.
 
 pub mod add_clip_instance;
+pub mod add_effect;
 pub mod add_layer;
 pub mod add_shape;
 pub mod move_clip_instances;
 pub mod move_objects;
 pub mod paint_bucket;
+pub mod remove_effect;
 pub mod set_document_properties;
 pub mod set_instance_properties;
 pub mod set_layer_properties;
@@ -18,11 +20,13 @@ pub mod transform_objects;
 pub mod trim_clip_instances;
 
 pub use add_clip_instance::AddClipInstanceAction;
+pub use add_effect::AddEffectAction;
 pub use add_layer::AddLayerAction;
 pub use add_shape::AddShapeAction;
 pub use move_clip_instances::MoveClipInstancesAction;
 pub use move_objects::MoveShapeInstancesAction;
 pub use paint_bucket::PaintBucketAction;
+pub use remove_effect::RemoveEffectAction;
 pub use set_document_properties::SetDocumentPropertiesAction;
 pub use set_instance_properties::{InstancePropertyChange, SetInstancePropertiesAction};
 pub use set_layer_properties::{LayerProperty, SetLayerPropertiesAction};

@@ -40,6 +40,7 @@ impl Action for TransformClipInstancesAction {
             AnyLayer::Vector(vl) => &mut vl.clip_instances,
             AnyLayer::Audio(al) => &mut al.clip_instances,
             AnyLayer::Video(vl) => &mut vl.clip_instances,
+            AnyLayer::Effect(_) => return Ok(()), // Effect layers don't have clip instances
         };
 
         // Apply new transforms
@@ -62,6 +63,7 @@ impl Action for TransformClipInstancesAction {
             AnyLayer::Vector(vl) => &mut vl.clip_instances,
             AnyLayer::Audio(al) => &mut al.clip_instances,
             AnyLayer::Video(vl) => &mut vl.clip_instances,
+            AnyLayer::Effect(_) => return Ok(()), // Effect layers don't have clip instances
         };
 
         // Restore old transforms

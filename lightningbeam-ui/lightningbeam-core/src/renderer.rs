@@ -9,7 +9,7 @@
 //! The compositing mode enables proper per-layer opacity, blend modes, and effects.
 
 use crate::animation::TransformProperty;
-use crate::clip::ImageAsset;
+use crate::clip::{ClipInstance, ImageAsset};
 use crate::document::Document;
 use crate::gpu::BlendMode;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
@@ -86,6 +86,18 @@ fn decode_image_asset(asset: &ImageAsset) -> Option<Image> {
 // Per-Layer Rendering for HDR Compositing Pipeline
 // ============================================================================
 
+/// Type of rendered layer for compositor handling
+#[derive(Clone, Debug)]
+pub enum RenderedLayerType {
+    /// Regular content layer (vector, video) - composite its scene
+    Content,
+    /// Effect layer - apply effects to current composite state
+    Effect {
+        /// Active effect instances at the current time
+        effect_instances: Vec<ClipInstance>,
+    },
+}
+
 /// Metadata for a rendered layer, used for compositing
 pub struct RenderedLayer {
     /// The layer's unique identifier
@@ -98,6 +110,8 @@ pub struct RenderedLayer {
     pub blend_mode: BlendMode,
     /// Whether this layer has any visible content
     pub has_content: bool,
+    /// Type of layer for compositor (content vs effect)
+    pub layer_type: RenderedLayerType,
 }
 
 impl RenderedLayer {
@@ -109,6 +123,7 @@ impl RenderedLayer {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             has_content: false,
+            layer_type: RenderedLayerType::Content,
         }
     }
 
@@ -120,6 +135,20 @@ impl RenderedLayer {
             opacity,
             blend_mode,
             has_content: false,
+            layer_type: RenderedLayerType::Content,
+        }
+    }
+
+    /// Create an effect layer with active effect instances
+    pub fn effect_layer(layer_id: Uuid, opacity: f32, effect_instances: Vec<ClipInstance>) -> Self {
+        let has_content = !effect_instances.is_empty();
+        Self {
+            layer_id,
+            scene: Scene::new(),
+            opacity,
+            blend_mode: BlendMode::Normal,
+            has_content,
+            layer_type: RenderedLayerType::Effect { effect_instances },
         }
     }
 }
@@ -245,6 +274,16 @@ pub fn render_layer_isolated(
                 &mut video_mgr,
             );
             rendered.has_content = !video_layer.clip_instances.is_empty();
+        }
+        AnyLayer::Effect(effect_layer) => {
+            // Effect layers are processed during compositing, not rendered to scene
+            // Return early with a dedicated effect layer type
+            let active_effects: Vec<ClipInstance> = effect_layer
+                .active_clip_instances_at(time)
+                .into_iter()
+                .cloned()
+                .collect();
+            return RenderedLayer::effect_layer(layer_id, opacity, active_effects);
         }
     }
 
@@ -394,6 +433,9 @@ fn render_layer(
         AnyLayer::Video(video_layer) => {
             let mut video_mgr = video_manager.lock().unwrap();
             render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr);
+        }
+        AnyLayer::Effect(_) => {
+            // Effect layers are processed during GPU compositing, not rendered to scene
         }
     }
 }

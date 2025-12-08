@@ -600,6 +600,15 @@ impl ClipInstance {
         self
     }
 
+    /// Set explicit timeline duration by setting trim_end
+    ///
+    /// For effect instances, this effectively sets the duration since
+    /// effects have infinite internal duration (trim_start defaults to 0).
+    pub fn with_timeline_duration(mut self, duration: f64) -> Self {
+        self.trim_end = Some(self.trim_start + duration);
+        self
+    }
+
     /// Get the effective duration of this instance (accounting for trimming and looping)
     /// If timeline_duration is set, returns that (enabling content looping)
     /// Otherwise returns the trimmed content duration

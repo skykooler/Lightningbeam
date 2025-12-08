@@ -4,6 +4,7 @@
 //! and a root graphics object containing the scene graph.
 
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
+use crate::effect::EffectDefinition;
 use crate::layer::AnyLayer;
 use crate::layout::LayoutNode;
 use crate::shape::ShapeColor;
@@ -110,6 +111,10 @@ pub struct Document {
     /// Instance groups for linked clip instances
     pub instance_groups: HashMap<Uuid, crate::instance_group::InstanceGroup>,
 
+    /// Effect definitions (all effects are embedded in the document)
+    #[serde(default)]
+    pub effect_definitions: HashMap<Uuid, EffectDefinition>,
+
     /// Current UI layout state (serialized for save/load)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layout: Option<LayoutNode>,
@@ -139,6 +144,7 @@ impl Default for Document {
             audio_clips: HashMap::new(),
             image_assets: HashMap::new(),
             instance_groups: HashMap::new(),
+            effect_definitions: HashMap::new(),
             ui_layout: None,
             ui_layout_base: None,
             current_time: 0.0,
@@ -232,6 +238,14 @@ impl Document {
                     for instance in &video_layer.clip_instances {
                         if let Some(clip) = self.video_clips.get(&instance.clip_id) {
                             let end_time = calculate_instance_end(instance, clip.duration);
+                            max_end_time = max_end_time.max(end_time);
+                        }
+                    }
+                }
+                crate::layer::AnyLayer::Effect(effect_layer) => {
+                    for instance in &effect_layer.clip_instances {
+                        if let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) {
+                            let end_time = calculate_instance_end(instance, clip_duration);
                             max_end_time = max_end_time.max(end_time);
                         }
                     }
@@ -393,11 +407,42 @@ impl Document {
         self.image_assets.remove(id)
     }
 
+    // === EFFECT DEFINITION METHODS ===
+
+    /// Add an effect definition to the document
+    pub fn add_effect_definition(&mut self, definition: EffectDefinition) -> Uuid {
+        let id = definition.id;
+        self.effect_definitions.insert(id, definition);
+        id
+    }
+
+    /// Get an effect definition by ID
+    pub fn get_effect_definition(&self, id: &Uuid) -> Option<&EffectDefinition> {
+        self.effect_definitions.get(id)
+    }
+
+    /// Get a mutable effect definition by ID
+    pub fn get_effect_definition_mut(&mut self, id: &Uuid) -> Option<&mut EffectDefinition> {
+        self.effect_definitions.get_mut(id)
+    }
+
+    /// Remove an effect definition from the document
+    pub fn remove_effect_definition(&mut self, id: &Uuid) -> Option<EffectDefinition> {
+        self.effect_definitions.remove(id)
+    }
+
+    /// Get all effect definitions
+    pub fn effect_definitions(&self) -> impl Iterator<Item = &EffectDefinition> {
+        self.effect_definitions.values()
+    }
+
     // === CLIP OVERLAP DETECTION METHODS ===
 
     /// Get the duration of any clip type by ID
     ///
-    /// Searches through all clip libraries to find the clip and return its duration
+    /// Searches through all clip libraries to find the clip and return its duration.
+    /// For effect definitions, returns `EFFECT_DURATION` (f64::MAX) since effects
+    /// have infinite internal duration.
     pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<f64> {
         if let Some(clip) = self.vector_clips.get(clip_id) {
             Some(clip.duration)
@@ -405,6 +450,10 @@ impl Document {
             Some(clip.duration)
         } else if let Some(clip) = self.audio_clips.get(clip_id) {
             Some(clip.duration)
+        } else if self.effect_definitions.contains_key(clip_id) {
+            // Effects have infinite internal duration - their timeline length
+            // is controlled by ClipInstance.trim_end
+            Some(crate::effect::EFFECT_DURATION)
         } else {
             None
         }
@@ -415,10 +464,11 @@ impl Document {
         let layer = self.get_layer(layer_id)?;
 
         // Find the clip instance
-        let instances = match layer {
+        let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
+            AnyLayer::Effect(effect) => &effect.clip_instances,
         };
 
         let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
@@ -435,7 +485,7 @@ impl Document {
     ///
     /// Returns (overlaps, conflicting_instance_id)
     ///
-    /// Only checks audio and video layers - vector/MIDI layers return false
+    /// Only checks audio, video, and effect layers - vector/MIDI layers return false
     pub fn check_overlap_on_layer(
         &self,
         layer_id: &Uuid,
@@ -447,15 +497,16 @@ impl Document {
             return (false, None);
         };
 
-        // Only check audio and video layers
-        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+        // Check audio, video, and effect layers (effects cannot overlap on same layer)
+        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_) | AnyLayer::Effect(_)) {
             return (false, None);
         }
 
-        let instances = match layer {
+        let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
+            AnyLayer::Effect(effect) => &effect.clip_instances,
         };
 
         for instance in instances {
@@ -502,8 +553,8 @@ impl Document {
         // Clamp to timeline start (can't go before 0)
         let desired_start = desired_start.max(0.0);
 
-        // Vector/MIDI layers don't need overlap adjustment, but still respect timeline start
-        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+        // Vector layers don't need overlap adjustment, but still respect timeline start
+        if matches!(layer, AnyLayer::Vector(_)) {
             return Some(desired_start);
         }
 
@@ -515,10 +566,11 @@ impl Document {
         }
 
         // Collect all existing clip time ranges on this layer
-        let instances = match layer {
+        let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
             AnyLayer::Video(video) => &video.clip_instances,
-            _ => return Some(desired_start), // Shouldn't reach here
+            AnyLayer::Effect(effect) => &effect.clip_instances,
+            AnyLayer::Vector(_) => return Some(desired_start), // Shouldn't reach here
         };
 
         let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
@@ -599,17 +651,18 @@ impl Document {
             return current_timeline_start; // No limit if layer not found
         };
 
-        // Only check audio and video layers
-        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+        // Only check audio, video, and effect layers
+        if matches!(layer, AnyLayer::Vector(_)) {
             return current_timeline_start; // No limit for vector layers
         };
 
         // Find the nearest clip to the left
         let mut nearest_end = 0.0; // Can extend to timeline start by default
 
-        let instances = match layer {
+        let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
             AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
         };
 
@@ -648,14 +701,15 @@ impl Document {
             return f64::MAX; // No limit if layer not found
         };
 
-        // Only check audio and video layers
-        if !matches!(layer, AnyLayer::Audio(_) | AnyLayer::Video(_)) {
+        // Only check audio, video, and effect layers
+        if matches!(layer, AnyLayer::Vector(_)) {
             return f64::MAX; // No limit for vector layers
         }
 
-        let instances = match layer {
+        let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
             AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
         };
 
