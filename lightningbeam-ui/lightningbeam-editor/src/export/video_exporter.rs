@@ -8,8 +8,12 @@
 use ffmpeg_next as ffmpeg;
 use std::sync::Arc;
 use lightningbeam_core::document::Document;
-use lightningbeam_core::renderer::ImageCache;
+use lightningbeam_core::renderer::{ImageCache, render_document_for_compositing, RenderedLayerType};
 use lightningbeam_core::video::VideoManager;
+use lightningbeam_core::gpu::{
+    BufferPool, BufferSpec, BufferFormat, Compositor, CompositorLayer,
+    SrgbToLinearConverter, EffectProcessor, HDR_FORMAT,
+};
 
 /// Reusable frame buffers to avoid allocations
 struct FrameBuffers {
@@ -38,6 +42,227 @@ impl FrameBuffers {
         }
     }
 }
+
+/// GPU resources for HDR export pipeline
+///
+/// This mirrors the resources in stage.rs SharedVelloResources but is owned
+/// by the export system to avoid lifetime/locking issues during export.
+pub struct ExportGpuResources {
+    /// Buffer pool for intermediate render targets
+    pub buffer_pool: BufferPool,
+    /// HDR compositor for layer blending
+    pub compositor: Compositor,
+    /// sRGB to linear color converter
+    pub srgb_to_linear: SrgbToLinearConverter,
+    /// Effect processor for shader effects
+    pub effect_processor: EffectProcessor,
+    /// HDR accumulator texture for compositing
+    pub hdr_texture: wgpu::Texture,
+    /// View for HDR texture
+    pub hdr_texture_view: wgpu::TextureView,
+    /// Linear to sRGB blit pipeline for final output
+    pub linear_to_srgb_pipeline: wgpu::RenderPipeline,
+    /// Bind group layout for linear to sRGB blit
+    pub linear_to_srgb_bind_group_layout: wgpu::BindGroupLayout,
+    /// Sampler for linear to sRGB conversion
+    pub linear_to_srgb_sampler: wgpu::Sampler,
+}
+
+impl ExportGpuResources {
+    /// Create new export GPU resources for the given dimensions
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let buffer_pool = BufferPool::new();
+        let compositor = Compositor::new(device, HDR_FORMAT);
+        let srgb_to_linear = SrgbToLinearConverter::new(device);
+        let effect_processor = EffectProcessor::new(device, HDR_FORMAT);
+
+        // Create HDR accumulator texture
+        let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export_hdr_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let hdr_texture_view = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create linear to sRGB blit pipeline
+        let linear_to_srgb_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("linear_to_srgb_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("linear_to_srgb_pipeline_layout"),
+            bind_group_layouts: &[&linear_to_srgb_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("linear_to_srgb_shader"),
+            source: wgpu::ShaderSource::Wgsl(LINEAR_TO_SRGB_SHADER.into()),
+        });
+
+        let linear_to_srgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("linear_to_srgb_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let linear_to_srgb_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear_to_srgb_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Self {
+            buffer_pool,
+            compositor,
+            srgb_to_linear,
+            effect_processor,
+            hdr_texture,
+            hdr_texture_view,
+            linear_to_srgb_pipeline,
+            linear_to_srgb_bind_group_layout,
+            linear_to_srgb_sampler,
+        }
+    }
+
+    /// Resize the HDR texture if dimensions changed
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export_hdr_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        self.hdr_texture_view = self.hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    }
+}
+
+/// WGSL shader for linear to sRGB conversion (for final export output)
+const LINEAR_TO_SRGB_SHADER: &str = r#"
+// Linear to sRGB color space conversion shader
+
+@group(0) @binding(0) var source_tex: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+// Fullscreen triangle strip
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var out: VertexOutput;
+
+    let x = f32((vertex_index & 1u) << 1u);
+    let y = f32(vertex_index & 2u);
+
+    out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    out.uv = vec2<f32>(x, y);
+
+    return out;
+}
+
+// Linear to sRGB color space conversion (per channel)
+fn linear_to_srgb_channel(c: f32) -> f32 {
+    return select(
+        1.055 * pow(c, 1.0 / 2.4) - 0.055,
+        c * 12.92,
+        c <= 0.0031308
+    );
+}
+
+fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        linear_to_srgb_channel(color.r),
+        linear_to_srgb_channel(color.g),
+        linear_to_srgb_channel(color.b)
+    );
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = textureSample(source_tex, source_sampler, in.uv);
+
+    // Convert linear HDR to sRGB
+    let srgb = linear_to_srgb(src.rgb);
+
+    // Alpha stays unchanged
+    return vec4<f32>(srgb, src.a);
+}
+"#;
 
 /// Convert RGBA8 pixels to YUV420p format using BT.709 color space
 ///
@@ -388,6 +613,375 @@ pub fn render_frame_to_rgba(
     );
 
     queue.submit(Some(encoder.finish()));
+
+    // Map buffer and read pixels (synchronous)
+    let buffer_slice = staging_buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        sender.send(result).ok();
+    });
+
+    device.poll(wgpu::Maintain::Wait);
+
+    receiver
+        .recv()
+        .map_err(|_| "Failed to receive buffer mapping result")?
+        .map_err(|e| format!("Failed to map buffer: {:?}", e))?;
+
+    // Copy data from mapped buffer to output, removing padding
+    let data = buffer_slice.get_mapped_range();
+    for y in 0..height as usize {
+        let src_offset = y * bytes_per_row as usize;
+        let dst_offset = y * unpadded_bytes_per_row as usize;
+        let row_bytes = unpadded_bytes_per_row as usize;
+        rgba_buffer[dst_offset..dst_offset + row_bytes]
+            .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+    }
+
+    drop(data);
+    staging_buffer.unmap();
+
+    Ok(())
+}
+
+/// Render a document frame using the HDR compositing pipeline with effects
+///
+/// This function uses the same rendering pipeline as the stage preview,
+/// ensuring effects are applied correctly during export.
+///
+/// # Arguments
+/// * `document` - Document to render (current_time will be modified)
+/// * `timestamp` - Time in seconds to render at
+/// * `width` - Frame width in pixels
+/// * `height` - Frame height in pixels
+/// * `device` - wgpu device
+/// * `queue` - wgpu queue
+/// * `renderer` - Vello renderer
+/// * `image_cache` - Image cache for rendering
+/// * `video_manager` - Video manager for video clips
+/// * `gpu_resources` - HDR GPU resources for compositing
+/// * `rgba_buffer` - Output buffer for RGBA pixels (must be width * height * 4 bytes)
+///
+/// # Returns
+/// Ok(()) on success, Err with message on failure
+pub fn render_frame_to_rgba_hdr(
+    document: &mut Document,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    image_cache: &mut ImageCache,
+    video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+    gpu_resources: &mut ExportGpuResources,
+    rgba_buffer: &mut [u8],
+) -> Result<(), String> {
+    use vello::kurbo::Affine;
+
+    // Set document time to the frame timestamp
+    document.current_time = timestamp;
+
+    // Use identity transform for export (document coordinates = pixel coordinates)
+    let base_transform = Affine::IDENTITY;
+
+    // Render document for compositing (returns per-layer scenes)
+    let composite_result = render_document_for_compositing(
+        document,
+        base_transform,
+        image_cache,
+        video_manager,
+    );
+
+    // Buffer specs for layer rendering
+    let layer_spec = BufferSpec::new(width, height, BufferFormat::Rgba8Srgb);
+    let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
+
+    // Render parameters for Vello (transparent background for layers)
+    let layer_render_params = vello::RenderParams {
+        base_color: vello::peniko::Color::TRANSPARENT,
+        width,
+        height,
+        antialiasing_method: vello::AaConfig::Area,
+    };
+
+    // First, render background and composite it
+    let bg_srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
+    let bg_hdr_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+
+    if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
+        gpu_resources.buffer_pool.get_view(bg_srgb_handle),
+        gpu_resources.buffer_pool.get_view(bg_hdr_handle),
+    ) {
+        // Render background scene
+        renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
+            .map_err(|e| format!("Failed to render background: {}", e))?;
+
+        // Convert sRGB to linear HDR
+        let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("export_bg_srgb_to_linear_encoder"),
+        });
+        gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, bg_srgb_view, bg_hdr_view);
+        queue.submit(Some(convert_encoder.finish()));
+
+        // Composite background onto HDR texture (first layer, clears to black for export)
+        let bg_compositor_layer = CompositorLayer::normal(bg_hdr_handle, 1.0);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("export_bg_composite_encoder"),
+        });
+        // Clear to black for export (unlike stage preview which has gray background)
+        gpu_resources.compositor.composite(
+            device,
+            queue,
+            &mut encoder,
+            &[bg_compositor_layer],
+            &gpu_resources.buffer_pool,
+            &gpu_resources.hdr_texture_view,
+            Some([0.0, 0.0, 0.0, 1.0]),
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+    gpu_resources.buffer_pool.release(bg_srgb_handle);
+    gpu_resources.buffer_pool.release(bg_hdr_handle);
+
+    // Now render and composite each layer incrementally
+    for rendered_layer in &composite_result.layers {
+        if !rendered_layer.has_content {
+            continue;
+        }
+
+        match &rendered_layer.layer_type {
+            RenderedLayerType::Content => {
+                // Regular content layer - render to sRGB, convert to linear, then composite
+                let srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
+                let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+
+                if let (Some(srgb_view), Some(hdr_layer_view)) = (
+                    gpu_resources.buffer_pool.get_view(srgb_handle),
+                    gpu_resources.buffer_pool.get_view(hdr_layer_handle),
+                ) {
+                    // Render layer scene to sRGB buffer
+                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params)
+                        .map_err(|e| format!("Failed to render layer: {}", e))?;
+
+                    // Convert sRGB to linear HDR
+                    let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("export_layer_srgb_to_linear_encoder"),
+                    });
+                    gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
+                    queue.submit(Some(convert_encoder.finish()));
+
+                    // Composite this layer onto the HDR accumulator with its opacity
+                    let compositor_layer = CompositorLayer::new(
+                        hdr_layer_handle,
+                        rendered_layer.opacity,
+                        rendered_layer.blend_mode,
+                    );
+
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("export_layer_composite_encoder"),
+                    });
+                    gpu_resources.compositor.composite(
+                        device,
+                        queue,
+                        &mut encoder,
+                        &[compositor_layer],
+                        &gpu_resources.buffer_pool,
+                        &gpu_resources.hdr_texture_view,
+                        None, // Don't clear - blend onto existing content
+                    );
+                    queue.submit(Some(encoder.finish()));
+                }
+
+                gpu_resources.buffer_pool.release(srgb_handle);
+                gpu_resources.buffer_pool.release(hdr_layer_handle);
+            }
+            RenderedLayerType::Effect { effect_instances } => {
+                // Effect layer - apply effects to the current HDR accumulator
+                let current_time = document.current_time;
+
+                for effect_instance in effect_instances {
+                    // Get effect definition from document
+                    let Some(effect_def) = document.get_effect_definition(&effect_instance.clip_id) else {
+                        continue;
+                    };
+
+                    // Compile effect if needed
+                    if !gpu_resources.effect_processor.is_compiled(&effect_def.id) {
+                        let success = gpu_resources.effect_processor.compile_effect(device, effect_def);
+                        if !success {
+                            eprintln!("Failed to compile effect: {}", effect_def.name);
+                            continue;
+                        }
+                    }
+
+                    // Create EffectInstance from ClipInstance for the processor
+                    let effect_inst = lightningbeam_core::effect::EffectInstance::new(
+                        effect_def,
+                        effect_instance.timeline_start,
+                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
+                    );
+
+                    // Acquire temp buffer for effect output (HDR format)
+                    let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+
+                    if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("export_effect_encoder"),
+                        });
+
+                        // Apply effect: HDR accumulator → effect output buffer
+                        let applied = gpu_resources.effect_processor.apply_effect(
+                            device,
+                            queue,
+                            &mut encoder,
+                            effect_def,
+                            &effect_inst,
+                            &gpu_resources.hdr_texture_view,
+                            effect_output_view,
+                            width,
+                            height,
+                            current_time,
+                        );
+
+                        if applied {
+                            queue.submit(Some(encoder.finish()));
+
+                            // Copy effect output back to HDR accumulator
+                            let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("export_effect_copy_encoder"),
+                            });
+
+                            // Use compositor to copy (replacing content)
+                            let effect_layer = CompositorLayer::normal(
+                                effect_output_handle,
+                                rendered_layer.opacity, // Apply effect layer opacity
+                            );
+                            gpu_resources.compositor.composite(
+                                device,
+                                queue,
+                                &mut copy_encoder,
+                                &[effect_layer],
+                                &gpu_resources.buffer_pool,
+                                &gpu_resources.hdr_texture_view,
+                                Some([0.0, 0.0, 0.0, 0.0]), // Clear with transparent (we're replacing)
+                            );
+                            queue.submit(Some(copy_encoder.finish()));
+                        }
+                    }
+
+                    gpu_resources.buffer_pool.release(effect_output_handle);
+                }
+            }
+        }
+    }
+
+    // Advance frame counter for buffer cleanup
+    gpu_resources.buffer_pool.next_frame();
+
+    // Create output texture for final sRGB output
+    let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("export_output_texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Convert HDR to sRGB for output
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("export_linear_to_srgb_bind_group"),
+        layout: &gpu_resources.linear_to_srgb_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&gpu_resources.hdr_texture_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&gpu_resources.linear_to_srgb_sampler),
+            },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("export_linear_to_srgb_encoder"),
+    });
+
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("export_linear_to_srgb_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+
+        render_pass.set_pipeline(&gpu_resources.linear_to_srgb_pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[]);
+        render_pass.draw(0..4, 0..1);
+    }
+
+    queue.submit(Some(encoder.finish()));
+
+    // GPU readback: Create staging buffer with proper alignment
+    let bytes_per_pixel = 4u32; // RGBA8
+    let bytes_per_row_alignment = 256u32;
+    let unpadded_bytes_per_row = width * bytes_per_pixel;
+    let bytes_per_row = ((unpadded_bytes_per_row + bytes_per_row_alignment - 1)
+        / bytes_per_row_alignment) * bytes_per_row_alignment;
+    let buffer_size = (bytes_per_row * height) as u64;
+
+    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("export_staging_buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Copy texture to staging buffer
+    let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("export_copy_encoder"),
+    });
+
+    copy_encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &output_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    queue.submit(Some(copy_encoder.finish()));
 
     // Map buffer and read pixels (synchronous)
     let buffer_slice = staging_buffer.slice(..);

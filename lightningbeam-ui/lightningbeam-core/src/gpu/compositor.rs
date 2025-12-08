@@ -406,25 +406,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// sRGB to linear color space conversion
-// Vello outputs sRGB-encoded colors, we need linear for correct HDR blending
-fn srgb_to_linear_channel(c: f32) -> f32 {
-    return select(
-        pow((c + 0.055) / 1.055, 2.4),
-        c / 12.92,
-        c <= 0.04045
-    );
-}
-
-fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        srgb_to_linear_channel(color.r),
-        srgb_to_linear_channel(color.g),
-        srgb_to_linear_channel(color.b)
-    );
-}
-
 // Blend mode implementations
+// NOTE: All inputs are expected to be in linear HDR color space.
+// sRGB to linear conversion happens in a separate pass before compositing.
 fn blend_normal(src: vec3<f32>, dst: vec3<f32>) -> vec3<f32> {
     return src;
 }
@@ -537,13 +521,11 @@ fn apply_blend(src: vec3<f32>, dst: vec3<f32>, mode: u32) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
 
-    // Convert Vello's sRGB output to linear for correct HDR blending
-    let linear_rgb = srgb_to_linear(src.rgb);
-
+    // Input is already in linear HDR color space (converted in separate pass)
     // Apply opacity
     let src_alpha = src.a * uniforms.opacity;
 
     // Output premultiplied alpha in linear color space
-    return vec4<f32>(linear_rgb * src_alpha, src_alpha);
+    return vec4<f32>(src.rgb * src_alpha, src_alpha);
 }
 "#;

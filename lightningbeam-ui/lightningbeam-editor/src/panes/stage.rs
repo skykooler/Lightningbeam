@@ -6,7 +6,7 @@
 use eframe::egui;
 use lightningbeam_core::action::Action;
 use lightningbeam_core::clip::ClipInstance;
-use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, HDR_FORMAT};
+use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, HDR_FORMAT, SrgbToLinearConverter};
 use lightningbeam_core::layer::{AnyLayer, AudioLayer, AudioLayerType, VideoLayer, VectorLayer};
 use lightningbeam_core::renderer::RenderedLayerType;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
@@ -35,6 +35,8 @@ struct SharedVelloResources {
     compositor: Compositor,
     /// Effect processor for GPU shader effects
     effect_processor: Mutex<EffectProcessor>,
+    /// sRGB to linear color converter (for Vello output)
+    srgb_to_linear: SrgbToLinearConverter,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -202,7 +204,10 @@ impl SharedVelloResources {
         // Initialize effect processor for GPU shader effects
         let effect_processor = EffectProcessor::new(device, lightningbeam_core::gpu::HDR_FORMAT);
 
-        println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, and effect processor)");
+        // Initialize sRGB to linear converter for Vello output
+        let srgb_to_linear = SrgbToLinearConverter::new(device);
+
+        println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, effect processor, and color converter)");
 
         Ok(Self {
             renderer: Arc::new(Mutex::new(renderer)),
@@ -215,6 +220,7 @@ impl SharedVelloResources {
             buffer_pool: Mutex::new(buffer_pool),
             compositor,
             effect_processor: Mutex::new(effect_processor),
+            srgb_to_linear,
         })
     }
 }
@@ -460,11 +466,19 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 antialiasing_method: vello::AaConfig::Msaa16,
             };
 
+            // HDR buffer spec for linear buffers
+            let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
+
             // First, render background and composite it
             // The background scene contains only a rectangle at document bounds,
             // so we use TRANSPARENT base_color to not fill the whole viewport
-            let bg_handle = buffer_pool.acquire(device, layer_spec);
-            if let (Some(bg_view), Some(hdr_view)) = (buffer_pool.get_view(bg_handle), &instance_resources.hdr_texture_view) {
+            let bg_srgb_handle = buffer_pool.acquire(device, layer_spec);
+            let bg_hdr_handle = buffer_pool.acquire(device, hdr_spec);
+            if let (Some(bg_srgb_view), Some(bg_hdr_view), Some(hdr_view)) = (
+                buffer_pool.get_view(bg_srgb_handle),
+                buffer_pool.get_view(bg_hdr_handle),
+                &instance_resources.hdr_texture_view,
+            ) {
                 // Render background scene with transparent base (scene has the bg rect)
                 let bg_render_params = vello::RenderParams {
                     base_color: vello::peniko::Color::TRANSPARENT,
@@ -474,15 +488,23 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 };
 
                 if let Ok(mut renderer) = shared.renderer.lock() {
-                    renderer.render_to_texture(device, queue, &composite_result.background, bg_view, &bg_render_params).ok();
+                    renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &bg_render_params).ok();
                 }
 
+                // Convert sRGB to linear HDR
+                let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bg_srgb_to_linear_encoder"),
+                });
+                shared.srgb_to_linear.convert(device, &mut convert_encoder, bg_srgb_view, bg_hdr_view);
+                queue.submit(Some(convert_encoder.finish()));
+
                 // Composite background onto HDR texture (first layer, clears to dark gray for stage area)
-                let bg_compositor_layer = lightningbeam_core::gpu::CompositorLayer::normal(bg_handle, 1.0);
+                let bg_compositor_layer = lightningbeam_core::gpu::CompositorLayer::normal(bg_hdr_handle, 1.0);
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("bg_composite_encoder"),
                 });
                 // Clear to dark gray (stage background outside document bounds)
+                // Note: stage_bg values are already in linear space for HDR compositing
                 let stage_bg = [45.0 / 255.0, 45.0 / 255.0, 48.0 / 255.0, 1.0];
                 shared.compositor.composite(
                     device,
@@ -495,10 +517,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 );
                 queue.submit(Some(encoder.finish()));
             }
-            buffer_pool.release(bg_handle);
-
-            // HDR buffer spec for effect processing
-            let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
+            buffer_pool.release(bg_srgb_handle);
+            buffer_pool.release(bg_hdr_handle);
 
             // Lock effect processor
             let mut effect_processor = shared.effect_processor.lock().unwrap();
@@ -511,18 +531,30 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                 match &rendered_layer.layer_type {
                     RenderedLayerType::Content => {
-                        // Regular content layer - render and composite as before
-                        let layer_handle = buffer_pool.acquire(device, layer_spec);
+                        // Regular content layer - render to sRGB, convert to linear, then composite
+                        let srgb_handle = buffer_pool.acquire(device, layer_spec);
+                        let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
 
-                        if let (Some(layer_view), Some(hdr_view)) = (buffer_pool.get_view(layer_handle), &instance_resources.hdr_texture_view) {
-                            // Render layer scene to buffer
+                        if let (Some(srgb_view), Some(hdr_layer_view), Some(hdr_view)) = (
+                            buffer_pool.get_view(srgb_handle),
+                            buffer_pool.get_view(hdr_layer_handle),
+                            &instance_resources.hdr_texture_view,
+                        ) {
+                            // Render layer scene to sRGB buffer
                             if let Ok(mut renderer) = shared.renderer.lock() {
-                                renderer.render_to_texture(device, queue, &rendered_layer.scene, layer_view, &layer_render_params).ok();
+                                renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
                             }
+
+                            // Convert sRGB to linear HDR
+                            let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("layer_srgb_to_linear_encoder"),
+                            });
+                            shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
+                            queue.submit(Some(convert_encoder.finish()));
 
                             // Composite this layer onto the HDR accumulator with its opacity
                             let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
-                                layer_handle,
+                                hdr_layer_handle,
                                 rendered_layer.opacity,
                                 rendered_layer.blend_mode,
                             );
@@ -542,7 +574,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             queue.submit(Some(encoder.finish()));
                         }
 
-                        buffer_pool.release(layer_handle);
+                        buffer_pool.release(srgb_handle);
+                        buffer_pool.release(hdr_layer_handle);
                     }
                     RenderedLayerType::Effect { effect_instances } => {
                         // Effect layer - apply effects to the current HDR accumulator

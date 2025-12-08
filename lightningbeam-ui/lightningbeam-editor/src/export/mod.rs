@@ -42,6 +42,8 @@ pub struct VideoExportState {
     height: u32,
     /// Channel to send rendered frames to encoder thread
     frame_tx: Option<Sender<VideoFrameMessage>>,
+    /// HDR GPU resources for compositing pipeline (effects, color conversion)
+    gpu_resources: Option<video_exporter::ExportGpuResources>,
 }
 
 /// Export orchestrator that manages the export process
@@ -619,6 +621,7 @@ impl ExportOrchestrator {
         self.thread_handle = Some(handle);
 
         // Initialize video export state
+        // GPU resources will be initialized lazily on first frame (needs device)
         self.video_state = Some(VideoExportState {
             current_frame: 0,
             total_frames,
@@ -628,6 +631,7 @@ impl ExportOrchestrator {
             width,
             height,
             frame_tx: Some(frame_tx),
+            gpu_resources: None,
         });
 
         println!("🎬 [VIDEO EXPORT] Encoder thread spawned, ready for frames");
@@ -741,6 +745,7 @@ impl ExportOrchestrator {
         });
 
         // Initialize video export state for incremental rendering
+        // GPU resources will be initialized lazily on first frame (needs device)
         self.video_state = Some(VideoExportState {
             current_frame: 0,
             total_frames,
@@ -750,6 +755,7 @@ impl ExportOrchestrator {
             width: video_width,
             height: video_height,
             frame_tx: Some(frame_tx),
+            gpu_resources: None,
         });
 
         // Initialize parallel export state
@@ -800,6 +806,8 @@ impl ExportOrchestrator {
             if let Some(tx) = state.frame_tx.take() {
                 tx.send(VideoFrameMessage::Done).ok();
             }
+            // Clean up GPU resources
+            state.gpu_resources = None;
             return Ok(false);
         }
 
@@ -810,9 +818,16 @@ impl ExportOrchestrator {
         let width = state.width;
         let height = state.height;
 
-        // Render frame to RGBA buffer
+        // Initialize GPU resources on first frame (needs device)
+        if state.gpu_resources.is_none() {
+            println!("🎬 [VIDEO EXPORT] Initializing HDR GPU resources for {}x{}", width, height);
+            state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, width, height));
+        }
+
+        // Render frame to RGBA buffer using HDR pipeline (with effects)
         let mut rgba_buffer = vec![0u8; (width * height * 4) as usize];
-        video_exporter::render_frame_to_rgba(
+        let gpu_resources = state.gpu_resources.as_mut().unwrap();
+        video_exporter::render_frame_to_rgba_hdr(
             document,
             timestamp,
             width,
@@ -822,6 +837,7 @@ impl ExportOrchestrator {
             renderer,
             image_cache,
             video_manager,
+            gpu_resources,
             &mut rgba_buffer,
         )?;
 
