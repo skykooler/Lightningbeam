@@ -823,6 +823,160 @@ impl EditorApp {
         }
     }
 
+    /// Split clip instances at the current playhead position
+    ///
+    /// Only splits clips on the active layer, plus any clips linked to them
+    /// via instance groups. For video clips with linked audio, the newly
+    /// created instances are added to a new group to maintain the link.
+    fn split_clips_at_playhead(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::SplitClipInstanceAction;
+        use lightningbeam_core::instance_group::InstanceGroup;
+        use std::collections::HashSet;
+
+        let split_time = self.playback_time;
+        let active_layer_id = match self.active_layer_id {
+            Some(id) => id,
+            None => return, // No active layer, nothing to split
+        };
+
+        let document = self.action_executor.document();
+
+        // Helper to find clips that span the playhead in a specific layer
+        fn find_splittable_clips(
+            clip_instances: &[lightningbeam_core::clip::ClipInstance],
+            split_time: f64,
+            document: &lightningbeam_core::document::Document,
+        ) -> Vec<uuid::Uuid> {
+            let mut result = Vec::new();
+            for instance in clip_instances {
+                if let Some(clip_duration) = document.get_clip_duration(&instance.clip_id) {
+                    let effective_duration = instance.effective_duration(clip_duration);
+                    let timeline_end = instance.timeline_start + effective_duration;
+
+                    const EPSILON: f64 = 0.001;
+                    if split_time > instance.timeline_start + EPSILON
+                        && split_time < timeline_end - EPSILON
+                    {
+                        result.push(instance.id);
+                    }
+                }
+            }
+            result
+        }
+
+        // First, find clips on the active layer that span the playhead
+        let mut clips_to_split: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
+        let mut processed_instances: HashSet<uuid::Uuid> = HashSet::new();
+
+        // Get clips on active layer
+        if let Some(layer) = document.get_layer(&active_layer_id) {
+            let active_layer_clips = match layer {
+                AnyLayer::Vector(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
+                AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
+                AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
+                AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
+            };
+
+            for instance_id in active_layer_clips {
+                clips_to_split.push((active_layer_id, instance_id));
+                processed_instances.insert(instance_id);
+
+                // Check if this instance is in a group - if so, add all group members
+                if let Some(group) = document.find_group_for_instance(&instance_id) {
+                    for (member_layer_id, member_instance_id) in group.get_members() {
+                        if !processed_instances.contains(member_instance_id) {
+                            // Verify this member also spans the playhead
+                            if let Some(member_layer) = document.get_layer(member_layer_id) {
+                                let member_splittable = match member_layer {
+                                    AnyLayer::Vector(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
+                                    AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
+                                    AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
+                                    AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
+                                };
+                                if member_splittable.contains(member_instance_id) {
+                                    clips_to_split.push((*member_layer_id, *member_instance_id));
+                                    processed_instances.insert(*member_instance_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if clips_to_split.is_empty() {
+            return;
+        }
+
+        // Track original instance IDs and which group they belong to (if any)
+        // Also pre-generate new instance IDs so we can create groups before executing
+        let mut split_info: Vec<(uuid::Uuid, uuid::Uuid, uuid::Uuid, Option<uuid::Uuid>)> = Vec::new();
+        // Format: (layer_id, original_instance_id, new_instance_id, original_group_id)
+
+        for (layer_id, instance_id) in &clips_to_split {
+            let group_id = document.find_group_for_instance(instance_id).map(|g| g.id);
+            let new_instance_id = uuid::Uuid::new_v4();
+            split_info.push((*layer_id, *instance_id, new_instance_id, group_id));
+        }
+
+        // Execute split actions with pre-generated new instance IDs
+        for (layer_id, instance_id, new_instance_id, _) in &split_info {
+            let action = SplitClipInstanceAction::with_new_instance_id(
+                *layer_id,
+                *instance_id,
+                split_time,
+                *new_instance_id,
+            );
+
+            // Execute with backend synchronization
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let mut backend_context = lightningbeam_core::action::BackendContext {
+                    audio_controller: Some(&mut *controller),
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                };
+
+                if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
+                    eprintln!("Split action failed: {}", e);
+                    continue;
+                }
+            } else {
+                let boxed_action: Box<dyn lightningbeam_core::action::Action> = Box::new(action);
+                if let Err(e) = self.action_executor.execute(boxed_action) {
+                    eprintln!("Split action failed: {}", e);
+                    continue;
+                }
+            }
+        }
+
+        // Now create groups for the newly created instances to maintain linking
+        // Group new instances by their original group membership
+        let mut groups_to_create: std::collections::HashMap<uuid::Uuid, Vec<(uuid::Uuid, uuid::Uuid)>> = std::collections::HashMap::new();
+
+        for (layer_id, _, new_instance_id, original_group_id) in &split_info {
+            if let Some(group_id) = original_group_id {
+                groups_to_create
+                    .entry(*group_id)
+                    .or_insert_with(Vec::new)
+                    .push((*layer_id, *new_instance_id));
+            }
+        }
+
+        // Create new groups for the split instances
+        let document = self.action_executor.document_mut();
+        for (_, members) in groups_to_create {
+            if members.len() > 1 {
+                let mut new_group = InstanceGroup::new();
+                for (layer_id, instance_id) in members {
+                    new_group.add_member(layer_id, instance_id);
+                }
+                document.add_instance_group(new_group);
+            }
+        }
+    }
+
     /// Fetch waveform data from backend for a specific audio pool index
     /// Returns cached data if available, otherwise tries to assemble from chunks
     /// For thumbnails, uses Level 0 (overview) chunks which are fast to generate
@@ -3017,6 +3171,16 @@ impl eframe::App for EditorApp {
         // Check keyboard shortcuts AFTER UI is rendered
         // This ensures text fields have had a chance to claim focus first
         let wants_keyboard = ctx.wants_keyboard_input();
+
+        // Check for Ctrl+K (split clip at playhead) - needs to be outside the input closure
+        // so we can mutate self
+        let split_clips_requested = ctx.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::K)
+        });
+
+        if split_clips_requested {
+            self.split_clips_at_playhead();
+        }
 
         ctx.input(|i| {
             // Check menu shortcuts that use modifiers (Cmd+S, etc.) - allow even when typing

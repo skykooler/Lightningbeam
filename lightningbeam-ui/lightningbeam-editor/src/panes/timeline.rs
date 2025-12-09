@@ -1605,6 +1605,8 @@ impl TimelinePane {
                                             // Regular click: select only this clip
                                             selection.select_only_clip_instance(clip_instance.id);
                                         }
+                                        // Also set this layer as the active layer
+                                        *active_layer_id = Some(layer.id());
                                         clicked_clip_instance = true;
                                         break;
                                     }
