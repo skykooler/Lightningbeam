@@ -39,3 +39,6 @@ resvg = "0.42"
 
 # Utilities
 pollster = "0.3"
+
+# Desktop notifications
+notify-rust = "4.11"

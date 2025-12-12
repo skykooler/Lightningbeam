@@ -48,3 +48,6 @@ rfd = "0.15"
 
 # Cross-platform config paths
 directories = "5.0"
+
+# Desktop notifications
+notify-rust = { workspace = true }

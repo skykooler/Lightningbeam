@@ -28,6 +28,8 @@ mod default_instrument;
 
 mod export;
 
+mod notifications;
+
 mod effect_thumbnails;
 use effect_thumbnails::EffectThumbnailGenerator;
 
@@ -2975,6 +2977,12 @@ impl eframe::App for EditorApp {
                         );
                         // Close the progress dialog after a brief delay
                         self.export_progress_dialog.close();
+
+                        // Send desktop notification
+                        if let Err(e) = notifications::notify_export_complete(output_path) {
+                            // Log but don't fail - notifications are non-critical
+                            eprintln!("⚠️  Could not send desktop notification: {}", e);
+                        }
                     }
                     lightningbeam_core::export::ExportProgress::Error { ref message } => {
                         eprintln!("❌ Export error: {}", message);
@@ -2983,6 +2991,12 @@ impl eframe::App for EditorApp {
                             0.0,
                         );
                         // Keep the dialog open to show the error
+
+                        // Send desktop notification for error
+                        if let Err(e) = notifications::notify_export_error(message) {
+                            // Log but don't fail - notifications are non-critical
+                            eprintln!("⚠️  Could not send desktop notification: {}", e);
+                        }
                     }
                 }
             }
