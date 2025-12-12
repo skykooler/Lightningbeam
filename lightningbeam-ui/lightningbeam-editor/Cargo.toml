@@ -51,3 +51,6 @@ directories = "5.0"
 
 # Desktop notifications
 notify-rust = { workspace = true }
+
+# Debug overlay - memory tracking
+memory-stats = "1.1"

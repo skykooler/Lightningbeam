@@ -33,6 +33,8 @@ mod notifications;
 mod effect_thumbnails;
 use effect_thumbnails::EffectThumbnailGenerator;
 
+mod debug_overlay;
+
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
 #[command(name = "Lightningbeam Editor")]
@@ -593,6 +595,11 @@ struct EditorApp {
     export_orchestrator: Option<export::ExportOrchestrator>,
     /// GPU-rendered effect thumbnail generator
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
+
+    /// Debug overlay (F3) state
+    debug_overlay_visible: bool,
+    debug_stats_collector: debug_overlay::DebugStatsCollector,
+    gpu_info: Option<wgpu::AdapterInfo>,
 }
 
 /// Import filter types for the file dialog
@@ -680,6 +687,9 @@ impl EditorApp {
         // Create audio extraction channel for background thread communication
         let (audio_extraction_tx, audio_extraction_rx) = std::sync::mpsc::channel();
 
+        // Extract GPU info for debug overlay
+        let gpu_info = cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info());
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -743,6 +753,11 @@ impl EditorApp {
             export_progress_dialog: export::dialog::ExportProgressDialog::default(),
             export_orchestrator: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
+
+            // Debug overlay (F3)
+            debug_overlay_visible: false,
+            debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
+            gpu_info,
         }
     }
 
@@ -3235,12 +3250,27 @@ impl eframe::App for EditorApp {
             }
         });
 
+        // F3 debug overlay toggle (works even when text input is active)
+        if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+            self.debug_overlay_visible = !self.debug_overlay_visible;
+        }
+
         // Clear the set of audio pools with new waveforms at the end of the frame
         // (Thumbnails have been invalidated above, so this can be cleared for next frame)
         if !self.audio_pools_with_new_waveforms.is_empty() {
             println!("🧹 [UPDATE] Clearing waveform update set: {:?}", self.audio_pools_with_new_waveforms);
         }
         self.audio_pools_with_new_waveforms.clear();
+
+        // Render F3 debug overlay on top of everything
+        if self.debug_overlay_visible {
+            let stats = self.debug_stats_collector.collect(
+                ctx,
+                &self.gpu_info,
+                self.audio_controller.as_ref(),
+            );
+            debug_overlay::render_debug_overlay(ctx, &stats);
+        }
     }
 
 }
