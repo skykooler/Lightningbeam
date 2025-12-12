@@ -6,6 +6,9 @@
 pub mod audio_exporter;
 pub mod dialog;
 pub mod video_exporter;
+pub mod readback_pipeline;
+pub mod perf_metrics;
+pub mod cpu_yuv_converter;
 
 use lightningbeam_core::export::{AudioExportSettings, VideoExportSettings, ExportProgress};
 use lightningbeam_core::document::Document;
@@ -18,8 +21,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Message sent from main thread to video encoder thread
 enum VideoFrameMessage {
-    /// RGBA frame data with frame number and timestamp
-    Frame { frame_num: usize, timestamp: f64, rgba_data: Vec<u8> },
+    /// YUV420p frame data with frame number and timestamp (GPU-converted)
+    Frame {
+        frame_num: usize,
+        timestamp: f64,
+        y_plane: Vec<u8>,
+        u_plane: Vec<u8>,
+        v_plane: Vec<u8>,
+    },
     /// Signal that all frames have been sent
     Done,
 }
@@ -44,6 +53,16 @@ pub struct VideoExportState {
     frame_tx: Option<Sender<VideoFrameMessage>>,
     /// HDR GPU resources for compositing pipeline (effects, color conversion)
     gpu_resources: Option<video_exporter::ExportGpuResources>,
+    /// Async triple-buffered readback pipeline for GPU RGBA frames
+    readback_pipeline: Option<readback_pipeline::ReadbackPipeline>,
+    /// CPU YUV converter for RGBA→YUV420p conversion
+    cpu_yuv_converter: Option<cpu_yuv_converter::CpuYuvConverter>,
+    /// Frames that have been submitted to GPU but not yet encoded
+    frames_in_flight: usize,
+    /// Next frame number to send to encoder (for ordering)
+    next_frame_to_encode: usize,
+    /// Performance metrics for instrumentation
+    perf_metrics: Option<perf_metrics::ExportMetrics>,
 }
 
 /// Export orchestrator that manages the export process
@@ -168,13 +187,11 @@ impl ExportOrchestrator {
 
         // Poll video progress
         while let Ok(progress) = parallel.video_progress_rx.try_recv() {
-            println!("📨 [PARALLEL] Video progress: {:?}", std::mem::discriminant(&progress));
             parallel.video_progress = Some(progress);
         }
 
         // Poll audio progress
         while let Ok(progress) = parallel.audio_progress_rx.try_recv() {
-            println!("📨 [PARALLEL] Audio progress: {:?}", std::mem::discriminant(&progress));
             parallel.audio_progress = Some(progress);
         }
 
@@ -621,7 +638,7 @@ impl ExportOrchestrator {
         self.thread_handle = Some(handle);
 
         // Initialize video export state
-        // GPU resources will be initialized lazily on first frame (needs device)
+        // GPU resources and readback pipeline will be initialized lazily on first frame (needs device)
         self.video_state = Some(VideoExportState {
             current_frame: 0,
             total_frames,
@@ -632,6 +649,11 @@ impl ExportOrchestrator {
             height,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
+            readback_pipeline: None,
+            cpu_yuv_converter: None,
+            frames_in_flight: 0,
+            next_frame_to_encode: 0,
+            perf_metrics: Some(perf_metrics::ExportMetrics::new()),
         });
 
         println!("🎬 [VIDEO EXPORT] Encoder thread spawned, ready for frames");
@@ -745,7 +767,7 @@ impl ExportOrchestrator {
         });
 
         // Initialize video export state for incremental rendering
-        // GPU resources will be initialized lazily on first frame (needs device)
+        // GPU resources and readback pipeline will be initialized lazily on first frame (needs device)
         self.video_state = Some(VideoExportState {
             current_frame: 0,
             total_frames,
@@ -756,6 +778,11 @@ impl ExportOrchestrator {
             height: video_height,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
+            readback_pipeline: None,
+            cpu_yuv_converter: None,
+            frames_in_flight: 0,
+            next_frame_to_encode: 0,
+            perf_metrics: Some(perf_metrics::ExportMetrics::new()),
         });
 
         // Initialize parallel export state
@@ -777,6 +804,7 @@ impl ExportOrchestrator {
 
     /// Render and send the next video frame (call from main thread)
     ///
+    /// Uses async triple-buffered pipeline for maximum throughput.
     /// Returns true if there are more frames to render, false if done.
     ///
     /// # Arguments
@@ -798,62 +826,143 @@ impl ExportOrchestrator {
         image_cache: &mut ImageCache,
         video_manager: &Arc<std::sync::Mutex<VideoManager>>,
     ) -> Result<bool, String> {
+        use std::time::Instant;
+
         let state = self.video_state.as_mut()
             .ok_or("No video export in progress")?;
 
-        if state.current_frame >= state.total_frames {
-            // All frames rendered, signal encoder thread
-            if let Some(tx) = state.frame_tx.take() {
-                tx.send(VideoFrameMessage::Done).ok();
-            }
-            // Clean up GPU resources
-            state.gpu_resources = None;
-            return Ok(false);
-        }
-
-        // Calculate timestamp for this frame
-        let timestamp = state.start_time + (state.current_frame as f64 / state.framerate);
-
-        // Get frame dimensions from export settings
         let width = state.width;
         let height = state.height;
 
-        // Initialize GPU resources on first frame (needs device)
+        // Initialize GPU resources and readback pipeline on first frame
         if state.gpu_resources.is_none() {
-            println!("🎬 [VIDEO EXPORT] Initializing HDR GPU resources for {}x{}", width, height);
+            println!("🎬 [VIDEO EXPORT] Initializing HDR GPU + async pipeline {}x{}", width, height);
             state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, width, height));
+            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height));
+            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height)?);
+            println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
+            println!("🚀 [CPU YUV] swscale converter initialized");
         }
 
-        // Render frame to RGBA buffer using HDR pipeline (with effects)
-        let mut rgba_buffer = vec![0u8; (width * height * 4) as usize];
+        let pipeline = state.readback_pipeline.as_mut().unwrap();
         let gpu_resources = state.gpu_resources.as_mut().unwrap();
-        video_exporter::render_frame_to_rgba_hdr(
-            document,
-            timestamp,
-            width,
-            height,
-            device,
-            queue,
-            renderer,
-            image_cache,
-            video_manager,
-            gpu_resources,
-            &mut rgba_buffer,
-        )?;
+        let cpu_converter = state.cpu_yuv_converter.as_mut().unwrap();
+        let mut metrics = state.perf_metrics.as_mut();
 
-        // Send frame to encoder thread
-        if let Some(tx) = &state.frame_tx {
-            tx.send(VideoFrameMessage::Frame {
-                frame_num: state.current_frame,
-                timestamp,
-                rgba_data: rgba_buffer,
-            }).map_err(|_| "Failed to send frame to encoder")?;
+        // Poll for completed async readbacks (non-blocking)
+        if let Some(m) = metrics.as_mut() {
+            m.poll_count += 1;
+        }
+        let completed_frames = pipeline.poll_nonblocking();
+        if let Some(m) = metrics.as_mut() {
+            m.completions_per_poll.push(completed_frames.len());
         }
 
-        state.current_frame += 1;
+        // Process completed frames IN ORDER
+        for result in completed_frames {
+            if result.frame_num == state.next_frame_to_encode {
+                // Record readback completion time
+                if let Some(m) = metrics.as_mut() {
+                    if let Some(frame_metrics) = m.frames.get_mut(result.frame_num) {
+                        frame_metrics.readback_complete = Some(Instant::now());
+                    }
+                }
 
-        // Return true if more frames remain
-        Ok(state.current_frame < state.total_frames)
+                // Extract RGBA data (timed)
+                let extraction_start = Instant::now();
+                let rgba_data = pipeline.extract_rgba_data(result.buffer_id);
+                let extraction_end = Instant::now();
+
+                // CPU YUV conversion (timed)
+                let conversion_start = Instant::now();
+                let (y, u, v) = cpu_converter.convert(&rgba_data)?;
+                let conversion_end = Instant::now();
+
+                if let Some(m) = metrics.as_mut() {
+                    if let Some(frame_metrics) = m.frames.get_mut(result.frame_num) {
+                        frame_metrics.extraction_start = Some(extraction_start);
+                        frame_metrics.extraction_end = Some(extraction_end);
+                        frame_metrics.conversion_start = Some(conversion_start);
+                        frame_metrics.conversion_end = Some(conversion_end);
+                    }
+                }
+
+                // Send to encoder
+                if let Some(tx) = &state.frame_tx {
+                    tx.send(VideoFrameMessage::Frame {
+                        frame_num: result.frame_num,
+                        timestamp: result.timestamp,
+                        y_plane: y,
+                        u_plane: u,
+                        v_plane: v,
+                    }).map_err(|_| "Failed to send frame")?;
+                }
+
+                pipeline.release(result.buffer_id);
+                state.frames_in_flight -= 1;
+                state.next_frame_to_encode += 1;
+            }
+        }
+
+        // Submit new frames (up to 3 in flight)
+        while state.current_frame < state.total_frames && state.frames_in_flight < 3 {
+            let timestamp = state.start_time + (state.current_frame as f64 / state.framerate);
+
+            if let Some(acquired) = pipeline.acquire(state.current_frame, timestamp) {
+                // Create frame metrics entry
+                if let Some(m) = metrics.as_mut() {
+                    m.frames.push(perf_metrics::FrameMetrics::new(state.current_frame));
+                }
+
+                // Render to GPU (timed)
+                let render_start = Instant::now();
+                let encoder = video_exporter::render_frame_to_gpu_rgba(
+                    document, timestamp, width, height,
+                    device, queue, renderer, image_cache, video_manager,
+                    gpu_resources, &acquired.rgba_texture_view,
+                )?;
+                let render_end = Instant::now();
+
+                // Record render timing
+                if let Some(m) = metrics.as_mut() {
+                    if let Some(frame_metrics) = m.frames.get_mut(state.current_frame) {
+                        frame_metrics.render_end = Some(render_end);
+                        frame_metrics.submit_time = Some(Instant::now());
+                    }
+                }
+
+                // Submit for async readback
+                pipeline.submit_and_readback(acquired.id, encoder);
+
+                state.current_frame += 1;
+                state.frames_in_flight += 1;
+            } else {
+                break; // All buffers in use
+            }
+        }
+
+        // Done when all submitted AND all completed
+        if state.current_frame >= state.total_frames && state.frames_in_flight == 0 {
+            println!("🎬 [VIDEO EXPORT] Complete: {} frames", state.total_frames);
+
+            // Print performance summary
+            if let Some(m) = &state.perf_metrics {
+                m.print_summary();
+                m.print_per_frame_details(10);
+            }
+
+            if let Some(tx) = state.frame_tx.take() {
+                tx.send(VideoFrameMessage::Done).ok();
+            }
+
+            state.gpu_resources = None;
+            state.readback_pipeline = None;
+            state.cpu_yuv_converter = None;
+            state.perf_metrics = None;
+            return Ok(false);
+        }
+
+        Ok(true) // More work to do
     }
 
     /// Background thread that receives frames and encodes them
@@ -925,9 +1034,9 @@ impl ExportOrchestrator {
 
         // Wait for first frame to determine dimensions
         let first_frame = match frame_rx.recv() {
-            Ok(VideoFrameMessage::Frame { frame_num, timestamp, rgba_data }) => {
-                println!("🧵 [ENCODER] Received first frame ({} bytes)", rgba_data.len());
-                Some((frame_num, timestamp, rgba_data))
+            Ok(VideoFrameMessage::Frame { frame_num, timestamp, y_plane, u_plane, v_plane }) => {
+                println!("🧵 [ENCODER] Received first YUV frame (Y: {} bytes)", y_plane.len());
+                Some((frame_num, timestamp, y_plane, u_plane, v_plane))
             }
             Ok(VideoFrameMessage::Done) => {
                 return Err("No frames to encode".to_string());
@@ -938,9 +1047,9 @@ impl ExportOrchestrator {
         };
 
         // Determine dimensions from first frame
-        let (width, height) = if let Some((_, _, ref rgba_data)) = first_frame {
-            // Calculate dimensions from buffer size (RGBA = 4 bytes per pixel)
-            let pixel_count = rgba_data.len() / 4;
+        let (width, height) = if let Some((_, _, ref y_plane, _, _)) = first_frame {
+            // Calculate dimensions from Y plane size (full resolution, 1 byte per pixel)
+            let pixel_count = y_plane.len();
             // Use settings dimensions if provided, otherwise infer from buffer
             let w = settings.width.unwrap_or(1920); // Default to 1920 if not specified
             let h = settings.height.unwrap_or(1080); // Default to 1080 if not specified
@@ -979,11 +1088,13 @@ impl ExportOrchestrator {
         println!("🧵 [ENCODER] Encoder initialized, ready to encode frames");
 
         // Process first frame
-        if let Some((frame_num, timestamp, rgba_data)) = first_frame {
+        if let Some((frame_num, timestamp, y_plane, u_plane, v_plane)) = first_frame {
             Self::encode_frame(
                 &mut encoder,
                 &mut output,
-                &rgba_data,
+                &y_plane,
+                &u_plane,
+                &v_plane,
                 width,
                 height,
                 timestamp,
@@ -994,8 +1105,6 @@ impl ExportOrchestrator {
                 frame: 1,
                 total: total_frames,
             }).ok();
-
-            println!("🧵 [ENCODER] Encoded frame {}", frame_num);
         }
 
         // Process remaining frames
@@ -1006,11 +1115,13 @@ impl ExportOrchestrator {
             }
 
             match frame_rx.recv() {
-                Ok(VideoFrameMessage::Frame { frame_num, timestamp, rgba_data }) => {
+                Ok(VideoFrameMessage::Frame { frame_num, timestamp, y_plane, u_plane, v_plane }) => {
                     Self::encode_frame(
                         &mut encoder,
                         &mut output,
-                        &rgba_data,
+                        &y_plane,
+                        &u_plane,
+                        &v_plane,
                         width,
                         height,
                         timestamp,
@@ -1023,10 +1134,6 @@ impl ExportOrchestrator {
                         frame: frames_encoded,
                         total: total_frames,
                     }).ok();
-
-                    if frames_encoded % 30 == 0 || frames_encoded == frame_num + 1 {
-                        println!("🧵 [ENCODER] Encoded frame {}/{}", frames_encoded, total_frames);
-                    }
                 }
                 Ok(VideoFrameMessage::Done) => {
                     println!("🧵 [ENCODER] All frames received, flushing encoder");
@@ -1052,17 +1159,18 @@ impl ExportOrchestrator {
         Ok(())
     }
 
-    /// Encode a single RGBA frame
+    /// Encode a single YUV420p frame (already converted by GPU)
     fn encode_frame(
         encoder: &mut ffmpeg_next::encoder::Video,
         output: &mut ffmpeg_next::format::context::Output,
-        rgba_data: &[u8],
+        y_plane: &[u8],
+        u_plane: &[u8],
+        v_plane: &[u8],
         width: u32,
         height: u32,
         timestamp: f64,
     ) -> Result<(), String> {
-        // Convert RGBA to YUV420p
-        let (y_plane, u_plane, v_plane) = video_exporter::rgba_to_yuv420p(rgba_data, width, height);
+        // YUV planes already converted by GPU (no CPU conversion needed)
 
         // Create FFmpeg video frame
         let mut video_frame = ffmpeg_next::frame::Video::new(
@@ -1087,8 +1195,6 @@ impl ExportOrchestrator {
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)
         let encoder_tb = encoder.time_base();
         let pts = (timestamp * encoder_tb.1 as f64) as i64;
-        println!("🎬 [ENCODE] Frame timestamp={:.3}s, encoder_tb={}/{}, calculated PTS={}",
-                 timestamp, encoder_tb.0, encoder_tb.1, pts);
         video_frame.set_pts(Some(pts));
 
         // Send frame to encoder

@@ -2936,7 +2936,6 @@ impl eframe::App for EditorApp {
                 }
             }
             if let Some(progress) = orchestrator.poll_progress() {
-                println!("📨 [MAIN] Received progress from orchestrator!");
                 match progress {
                     lightningbeam_core::export::ExportProgress::Started { total_frames } => {
                         println!("Export started: {} frames", total_frames);

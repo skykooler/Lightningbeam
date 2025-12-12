@@ -9,15 +9,18 @@ members = [
 # UI Framework (using eframe for simplified integration)
 # Note: Upgraded from 0.29 to 0.31 to fix Linux IME/keyboard input issues
 # See: https://github.com/emilk/egui/pull/5198
-eframe = { version = "0.31", default-features = true, features = ["wgpu"] }
-egui_extras = { version = "0.31", features = ["image", "svg"] }
-egui-wgpu = "0.31"
+# Upgraded to 0.33 for shader editor (egui_code_editor) and continued bug fixes
+egui = "0.33"
+eframe = { version = "0.33", default-features = true, features = ["wgpu"] }
+egui_extras = { version = "0.33", features = ["image", "svg", "syntect"] }
+egui-wgpu = "0.33"
+egui_code_editor = "0.2"
 
 # GPU Rendering
-# vello 0.5 uses wgpu 24, matching eframe 0.31
-vello = "0.5"
-wgpu = "24"
-kurbo = { version = "0.11", features = ["serde"] }
+# vello from git uses wgpu 27, matching eframe 0.33
+vello = { git = "https://github.com/linebender/vello", branch = "main" }
+wgpu = { version = "27", features = ["vulkan", "metal"] }
+kurbo = { version = "0.12", features = ["serde"] }
 peniko = "0.5"
 
 # Windowing
