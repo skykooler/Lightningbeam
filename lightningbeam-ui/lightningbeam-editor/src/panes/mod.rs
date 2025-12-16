@@ -62,6 +62,7 @@ pub mod outliner;
 pub mod piano_roll;
 pub mod virtual_piano;
 pub mod node_editor;
+pub mod node_graph;
 pub mod preset_browser;
 pub mod asset_library;
 pub mod shader_editor;
