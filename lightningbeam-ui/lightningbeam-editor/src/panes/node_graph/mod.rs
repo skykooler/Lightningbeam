@@ -99,7 +99,7 @@ impl NodeGraphPane {
 
         // Calculate zoom center (same as nodes - they zoom relative to viewport center)
         let half_size = rect.size() / 2.0;
-        let zoom_center = rect.min.to_vec2() + half_size - pan;
+        let zoom_center = rect.min.to_vec2() + half_size + pan;
 
         // Calculate grid bounds in graph space
         // Screen to graph: (screen_pos - zoom_center) / zoom
@@ -151,11 +151,30 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
         // Allocate the rect and render the graph editor within it
         ui.allocate_ui_at_rect(rect, |ui| {
+            // Disable debug warning for unaligned widgets (happens when zoomed)
+            ui.style_mut().debug.show_unaligned = false;
+
             // Check for scroll input to override library's default zoom behavior
-            let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
             let modifiers = ui.input(|i| i.modifiers);
-            let has_scroll = scroll_delta != egui::Vec2::ZERO;
             let has_ctrl = modifiers.ctrl || modifiers.command;
+
+            // When ctrl is held, check for raw scroll events in the events list
+            let scroll_delta = if has_ctrl {
+                // Sum up scroll events from the raw event list
+                ui.input(|i| {
+                    let mut total_scroll = egui::Vec2::ZERO;
+                    for event in &i.events {
+                        if let egui::Event::MouseWheel { delta, .. } = event {
+                            total_scroll += *delta;
+                        }
+                    }
+                    total_scroll
+                })
+            } else {
+                ui.input(|i| i.smooth_scroll_delta)
+            };
+            let has_scroll = scroll_delta != egui::Vec2::ZERO;
+
 
             // Save current zoom to detect if library changed it
             let zoom_before = self.state.pan_zoom.zoom;
@@ -176,8 +195,18 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             // Override library's default scroll behavior:
             // - Library uses scroll for zoom
             // - We want: scroll = pan, ctrl+scroll = zoom
-            if has_scroll && ui.rect_contains_pointer(rect) {
-                if !has_ctrl {
+            if has_scroll {
+                if has_ctrl {
+                    // Ctrl+scroll: zoom (explicitly handle it instead of relying on library)
+                    // First undo any zoom the library applied
+                    if self.state.pan_zoom.zoom != zoom_before {
+                        let undo_zoom = zoom_before / self.state.pan_zoom.zoom;
+                        self.state.zoom(ui, undo_zoom);
+                    }
+                    // Now apply zoom based on scroll
+                    let zoom_delta = (scroll_delta.y * 0.002).exp();
+                    self.state.zoom(ui, zoom_delta);
+                } else {
                     // Scroll without ctrl: library zoomed, but we want pan instead
                     // Undo the zoom and apply pan
                     if self.state.pan_zoom.zoom != zoom_before {
@@ -188,7 +217,6 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                     // Apply pan
                     self.state.pan_zoom.pan = pan_before + scroll_delta;
                 }
-                // If ctrl is held, library already zoomed correctly, so do nothing
             }
 
             // Draw menu button in top-left corner

@@ -28,10 +28,14 @@ pub enum NodeTemplate {
     // Effects
     Filter,
     Gain,
+    Delay,
 
     // Utilities
     Adsr,
     Lfo,
+    Mixer,
+    Splitter,
+    Constant,
 
     // Outputs
     AudioOutput,
@@ -101,8 +105,12 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::Noise => "Noise".into(),
             NodeTemplate::Filter => "Filter".into(),
             NodeTemplate::Gain => "Gain".into(),
+            NodeTemplate::Delay => "Delay".into(),
             NodeTemplate::Adsr => "ADSR".into(),
             NodeTemplate::Lfo => "LFO".into(),
+            NodeTemplate::Mixer => "Mixer".into(),
+            NodeTemplate::Splitter => "Splitter".into(),
+            NodeTemplate::Constant => "Constant".into(),
             NodeTemplate::AudioOutput => "Audio Output".into(),
         }
     }
@@ -111,8 +119,9 @@ impl NodeTemplateTrait for NodeTemplate {
         match self {
             NodeTemplate::MidiInput | NodeTemplate::AudioInput => vec!["Inputs"],
             NodeTemplate::Oscillator | NodeTemplate::Noise => vec!["Generators"],
-            NodeTemplate::Filter | NodeTemplate::Gain => vec!["Effects"],
-            NodeTemplate::Adsr | NodeTemplate::Lfo => vec!["Utilities"],
+            NodeTemplate::Filter | NodeTemplate::Gain | NodeTemplate::Delay => vec!["Effects"],
+            NodeTemplate::Adsr | NodeTemplate::Lfo | NodeTemplate::Mixer
+            | NodeTemplate::Splitter | NodeTemplate::Constant => vec!["Utilities"],
             NodeTemplate::AudioOutput => vec!["Outputs"],
         }
     }
@@ -133,34 +142,34 @@ impl NodeTemplateTrait for NodeTemplate {
     ) {
         match self {
             NodeTemplate::Oscillator => {
-                // FM input
+                // V/Oct input (pitch control voltage)
                 graph.add_input_param(
                     node_id,
-                    "FM".into(),
-                    DataType::Audio,
+                    "V/Oct".into(),
+                    DataType::CV,
                     ValueType::Float { value: 0.0 },
                     InputParamKind::ConnectionOnly,
                     true,
                 );
-                // Frequency parameter
+                // FM input (frequency modulation)
                 graph.add_input_param(
                     node_id,
-                    "Freq".into(),
+                    "FM".into(),
                     DataType::CV,
-                    ValueType::Float { value: 440.0 },
-                    InputParamKind::ConstantOnly,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
                     true,
                 );
                 // Audio output
-                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::Noise => {
-                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::Filter => {
                 graph.add_input_param(
                     node_id,
-                    "In".into(),
+                    "Audio In".into(),
                     DataType::Audio,
                     ValueType::Float { value: 0.0 },
                     InputParamKind::ConnectionOnly,
@@ -168,18 +177,18 @@ impl NodeTemplateTrait for NodeTemplate {
                 );
                 graph.add_input_param(
                     node_id,
-                    "Cutoff".into(),
+                    "Cutoff CV".into(),
                     DataType::CV,
-                    ValueType::Float { value: 1000.0 },
-                    InputParamKind::ConnectionOrConstant,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
                     true,
                 );
-                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::Gain => {
                 graph.add_input_param(
                     node_id,
-                    "In".into(),
+                    "Audio In".into(),
                     DataType::Audio,
                     ValueType::Float { value: 0.0 },
                     InputParamKind::ConnectionOnly,
@@ -187,32 +196,65 @@ impl NodeTemplateTrait for NodeTemplate {
                 );
                 graph.add_input_param(
                     node_id,
-                    "Gain".into(),
+                    "Gain CV".into(),
                     DataType::CV,
-                    ValueType::Float { value: 1.0 },
-                    InputParamKind::ConnectionOrConstant,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
                     true,
                 );
-                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::Adsr => {
                 graph.add_input_param(
                     node_id,
                     "Gate".into(),
-                    DataType::Midi,
+                    DataType::CV,
                     ValueType::Float { value: 0.0 },
                     InputParamKind::ConnectionOnly,
                     true,
                 );
-                graph.add_output_param(node_id, "Out".into(), DataType::CV);
+                // Parameters
+                graph.add_input_param(
+                    node_id,
+                    "Attack".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.01 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Decay".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.1 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Sustain".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.7 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Release".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.2 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Envelope Out".into(), DataType::CV);
             }
             NodeTemplate::Lfo => {
-                graph.add_output_param(node_id, "Out".into(), DataType::CV);
+                graph.add_output_param(node_id, "CV Out".into(), DataType::CV);
             }
             NodeTemplate::AudioOutput => {
                 graph.add_input_param(
                     node_id,
-                    "In".into(),
+                    "Audio In".into(),
                     DataType::Audio,
                     ValueType::Float { value: 0.0 },
                     InputParamKind::ConnectionOnly,
@@ -220,10 +262,107 @@ impl NodeTemplateTrait for NodeTemplate {
                 );
             }
             NodeTemplate::AudioInput => {
-                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::MidiInput => {
-                graph.add_output_param(node_id, "Out".into(), DataType::Midi);
+                graph.add_output_param(node_id, "MIDI Out".into(), DataType::Midi);
+            }
+            NodeTemplate::Delay => {
+                graph.add_input_param(
+                    node_id,
+                    "Audio In".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                // Parameters
+                graph.add_input_param(
+                    node_id,
+                    "Delay Time".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.5 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Feedback".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.5 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Wet/Dry".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.5 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Mixer => {
+                graph.add_input_param(
+                    node_id,
+                    "Input 1".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Input 2".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Input 3".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Input 4".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Mixed Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Splitter => {
+                graph.add_input_param(
+                    node_id,
+                    "Audio In".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Out 1".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Out 2".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Out 3".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Out 4".into(), DataType::Audio);
+            }
+            NodeTemplate::Constant => {
+                // No inputs - value is set via parameter
+                graph.add_input_param(
+                    node_id,
+                    "Value".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "CV Out".into(), DataType::CV);
             }
         }
     }
@@ -298,8 +437,12 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Noise,
             NodeTemplate::Filter,
             NodeTemplate::Gain,
+            NodeTemplate::Delay,
             NodeTemplate::Adsr,
             NodeTemplate::Lfo,
+            NodeTemplate::Mixer,
+            NodeTemplate::Splitter,
+            NodeTemplate::Constant,
             NodeTemplate::AudioOutput,
         ]
     }
