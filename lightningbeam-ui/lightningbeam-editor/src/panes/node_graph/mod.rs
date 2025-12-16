@@ -49,6 +49,9 @@ pub struct NodeGraphPane {
     /// Pending action to execute
     #[allow(dead_code)]
     pending_action: Option<Box<dyn lightningbeam_core::action::Action>>,
+
+    /// Counter for offsetting clicked nodes
+    click_node_offset: f32,
 }
 
 impl NodeGraphPane {
@@ -73,6 +76,7 @@ impl NodeGraphPane {
             node_id_map: HashMap::new(),
             track_id: None,
             pending_action: None,
+            click_node_offset: 0.0,
         }
     }
 
@@ -94,6 +98,7 @@ impl NodeGraphPane {
             node_id_map: HashMap::new(),
             track_id: Some(track_id),
             pending_action: None,
+            click_node_offset: 0.0,
         }
     }
 }
@@ -153,10 +158,15 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                         // Add clicked node at center only if we didn't handle a drop
                         if !handled_drop {
                             if let Some(ref node_type) = clicked_node {
-                                // Use center of the graph rect directly
-                                let center_pos = graph_rect.center();
-                                println!("Click detected! Adding {} at center {:?}", node_type, center_pos);
-                                self.add_node_at_position(node_type, center_pos);
+                                // Place at a fixed graph-space position (origin) with small offset to avoid stacking
+                                // This ensures nodes appear at a predictable location regardless of pan/zoom
+                                let pos = egui::pos2(self.click_node_offset, self.click_node_offset);
+                                self.click_node_offset += 30.0;
+                                if self.click_node_offset > 300.0 {
+                                    self.click_node_offset = 0.0;
+                                }
+                                println!("Click detected! Adding {} at graph origin with offset {:?}", node_type, pos);
+                                self.add_node_at_position(node_type, pos);
                             }
                         }
                     },
