@@ -1,207 +1,306 @@
-//! Graph Data Types for egui-snarl
+//! Graph Data Types for egui_node_graph2
 //!
-//! Node definitions and viewer implementation for audio/MIDI node graph
+//! Node definitions and trait implementations for audio/MIDI node graph
 
-use super::backend::BackendNodeId;
-use super::node_types::DataType as SignalType;
 use eframe::egui;
-use egui_snarl::ui::{PinInfo, SnarlStyle, SnarlViewer};
-use egui_snarl::{InPin, NodeId, OutPin, Snarl};
+use egui_node_graph2::*;
+use serde::{Deserialize, Serialize};
 
-/// Audio/MIDI node types
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum AudioNode {
-    /// Oscillator generator
-    Oscillator {
-        frequency: f32,
-        waveform: String,
-    },
-    /// Noise generator
-    Noise {
-        color: String,
-    },
-    /// Audio filter
-    Filter {
-        cutoff: f32,
-        resonance: f32,
-    },
-    /// Gain/volume control
-    Gain {
-        gain: f32,
-    },
-    /// ADSR envelope
-    Adsr {
-        attack: f32,
-        decay: f32,
-        sustain: f32,
-        release: f32,
-    },
-    /// LFO modulator
-    Lfo {
-        frequency: f32,
-        waveform: String,
-    },
-    /// Audio output
-    AudioOutput,
-    /// MIDI input
+/// Signal types for audio node graph
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataType {
+    Audio,
+    Midi,
+    CV,
+}
+
+/// Node templates - types of nodes that can be created
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeTemplate {
+    // Inputs
     MidiInput,
+    AudioInput,
+
+    // Generators
+    Oscillator,
+    Noise,
+
+    // Effects
+    Filter,
+    Gain,
+
+    // Utilities
+    Adsr,
+    Lfo,
+
+    // Outputs
+    AudioOutput,
 }
 
-impl AudioNode {
-    /// Get the display name for this node type
-    pub fn type_name(&self) -> &'static str {
+/// Custom node data - empty for now, can be extended
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeData;
+
+/// Custom graph state - can track selected nodes, etc.
+#[derive(Default)]
+pub struct GraphState {
+    pub active_node: Option<NodeId>,
+}
+
+/// User response type (empty for now)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserResponse {}
+
+impl UserResponseTrait for UserResponse {}
+
+/// Value types for inline parameters
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ValueType {
+    Float { value: f32 },
+    String { value: String },
+}
+
+impl Default for ValueType {
+    fn default() -> Self {
+        ValueType::Float { value: 0.0 }
+    }
+}
+
+// Implement DataTypeTrait for our signal types
+impl DataTypeTrait<GraphState> for DataType {
+    fn data_type_color(&self, _user_state: &mut GraphState) -> egui::Color32 {
         match self {
-            AudioNode::Oscillator { .. } => "Oscillator",
-            AudioNode::Noise { .. } => "Noise",
-            AudioNode::Filter { .. } => "Filter",
-            AudioNode::Gain { .. } => "Gain",
-            AudioNode::Adsr { .. } => "ADSR",
-            AudioNode::Lfo { .. } => "LFO",
-            AudioNode::AudioOutput => "Audio Output",
-            AudioNode::MidiInput => "MIDI Input",
+            DataType::Audio => egui::Color32::from_rgb(100, 150, 255),  // Blue
+            DataType::Midi => egui::Color32::from_rgb(100, 255, 100),   // Green
+            DataType::CV => egui::Color32::from_rgb(255, 150, 100),     // Orange
         }
     }
 
-    /// Get the signal type for an output pin
-    fn output_type(&self, _pin: usize) -> SignalType {
+    fn name(&self) -> std::borrow::Cow<'_, str> {
         match self {
-            AudioNode::MidiInput => SignalType::Midi,
-            AudioNode::Lfo { .. } => SignalType::CV,
-            AudioNode::Adsr { .. } => SignalType::CV,
-            _ => SignalType::Audio,
-        }
-    }
-
-    /// Get the signal type for an input pin
-    fn input_type(&self, pin: usize) -> SignalType {
-        match self {
-            AudioNode::Filter { .. } => {
-                if pin == 0 {
-                    SignalType::Audio
-                } else {
-                    SignalType::CV
-                }
-            }
-            AudioNode::Gain { .. } => {
-                if pin == 0 {
-                    SignalType::Audio
-                } else {
-                    SignalType::CV
-                }
-            }
-            _ => SignalType::Audio,
+            DataType::Audio => "Audio".into(),
+            DataType::Midi => "MIDI".into(),
+            DataType::CV => "CV".into(),
         }
     }
 }
 
-/// Viewer implementation for audio node graph
-pub struct AudioNodeViewer;
+// Implement NodeTemplateTrait for our node types
+impl NodeTemplateTrait for NodeTemplate {
+    type NodeData = NodeData;
+    type DataType = DataType;
+    type ValueType = ValueType;
+    type UserState = GraphState;
+    type CategoryType = &'static str;
 
-impl SnarlViewer<AudioNode> for AudioNodeViewer {
-    fn title(&mut self, node: &AudioNode) -> String {
-        node.type_name().to_string()
-    }
-
-    fn inputs(&mut self, node: &AudioNode) -> usize {
-        match node {
-            AudioNode::Oscillator { .. } => 1, // FM input
-            AudioNode::Noise { .. } => 0,
-            AudioNode::Filter { .. } => 2, // Audio + cutoff CV
-            AudioNode::Gain { .. } => 2,   // Audio + gain CV
-            AudioNode::Adsr { .. } => 1,   // Gate/trigger
-            AudioNode::Lfo { .. } => 0,
-            AudioNode::AudioOutput => 1,
-            AudioNode::MidiInput => 0,
+    fn node_finder_label(&self, _user_state: &mut Self::UserState) -> std::borrow::Cow<'_, str> {
+        match self {
+            NodeTemplate::MidiInput => "MIDI Input".into(),
+            NodeTemplate::AudioInput => "Audio Input".into(),
+            NodeTemplate::Oscillator => "Oscillator".into(),
+            NodeTemplate::Noise => "Noise".into(),
+            NodeTemplate::Filter => "Filter".into(),
+            NodeTemplate::Gain => "Gain".into(),
+            NodeTemplate::Adsr => "ADSR".into(),
+            NodeTemplate::Lfo => "LFO".into(),
+            NodeTemplate::AudioOutput => "Audio Output".into(),
         }
     }
 
-    fn outputs(&mut self, node: &AudioNode) -> usize {
-        match node {
-            AudioNode::AudioOutput => 0,
-            _ => 1,
+    fn node_finder_categories(&self, _user_state: &mut Self::UserState) -> Vec<&'static str> {
+        match self {
+            NodeTemplate::MidiInput | NodeTemplate::AudioInput => vec!["Inputs"],
+            NodeTemplate::Oscillator | NodeTemplate::Noise => vec!["Generators"],
+            NodeTemplate::Filter | NodeTemplate::Gain => vec!["Effects"],
+            NodeTemplate::Adsr | NodeTemplate::Lfo => vec!["Utilities"],
+            NodeTemplate::AudioOutput => vec!["Outputs"],
         }
     }
 
-    fn show_input(
-        &mut self,
-        pin: &InPin,
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<AudioNode>,
-    ) -> PinInfo {
-        let node = &snarl[pin.id.node];
-        let signal_type = node.input_type(pin.id.input);
-
-        ui.label(match pin.id.input {
-            0 => match node {
-                AudioNode::Oscillator { .. } => "FM",
-                AudioNode::Filter { .. } => "In",
-                AudioNode::Gain { .. } => "In",
-                AudioNode::Adsr { .. } => "Gate",
-                AudioNode::AudioOutput => "In",
-                _ => "In",
-            },
-            1 => match node {
-                AudioNode::Filter { .. } => "Cutoff",
-                AudioNode::Gain { .. } => "Gain",
-                _ => "In",
-            },
-            _ => "In",
-        });
-
-        PinInfo::square().with_fill(signal_type.color())
+    fn node_graph_label(&self, user_state: &mut Self::UserState) -> String {
+        self.node_finder_label(user_state).into()
     }
 
-    fn show_output(
-        &mut self,
-        pin: &OutPin,
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<AudioNode>,
-    ) -> PinInfo {
-        let node = &snarl[pin.id.node];
-        let signal_type = node.output_type(pin.id.output);
-
-        ui.label("Out");
-
-        PinInfo::square().with_fill(signal_type.color())
+    fn user_data(&self, _user_state: &mut Self::UserState) -> Self::NodeData {
+        NodeData
     }
 
-    fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<AudioNode>) {
-        let from_node = &snarl[from.id.node];
-        let to_node = &snarl[to.id.node];
-
-        let from_type = from_node.output_type(from.id.output);
-        let to_type = to_node.input_type(to.id.input);
-
-        // Only allow connections between compatible signal types
-        if from_type == to_type {
-            // Disconnect existing connection to this input
-            for remote_out in snarl.in_pin(to.id).remotes.iter().copied().collect::<Vec<_>>() {
-                snarl.disconnect(remote_out, to.id);
-            }
-            // Create new connection
-            snarl.connect(from.id, to.id);
-        }
-    }
-
-    fn has_graph_menu(&mut self, _pos: egui::Pos2, _snarl: &mut Snarl<AudioNode>) -> bool {
-        false // We use the palette instead
-    }
-
-    fn has_node_menu(&mut self, _node: &AudioNode) -> bool {
-        true
-    }
-
-    fn show_node_menu(
-        &mut self,
-        node: NodeId,
-        _inputs: &[InPin],
-        _outputs: &[OutPin],
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<AudioNode>,
+    fn build_node(
+        &self,
+        graph: &mut Graph<Self::NodeData, Self::DataType, Self::ValueType>,
+        _user_state: &mut Self::UserState,
+        node_id: NodeId,
     ) {
-        if ui.button("Remove").clicked() {
-            snarl.remove_node(node);
-            ui.close_menu();
+        match self {
+            NodeTemplate::Oscillator => {
+                // FM input
+                graph.add_input_param(
+                    node_id,
+                    "FM".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                // Frequency parameter
+                graph.add_input_param(
+                    node_id,
+                    "Freq".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 440.0 },
+                    InputParamKind::ConstantOnly,
+                    true,
+                );
+                // Audio output
+                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Noise => {
+                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Filter => {
+                graph.add_input_param(
+                    node_id,
+                    "In".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Cutoff".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 1000.0 },
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Gain => {
+                graph.add_input_param(
+                    node_id,
+                    "In".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_input_param(
+                    node_id,
+                    "Gain".into(),
+                    DataType::CV,
+                    ValueType::Float { value: 1.0 },
+                    InputParamKind::ConnectionOrConstant,
+                    true,
+                );
+                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Adsr => {
+                graph.add_input_param(
+                    node_id,
+                    "Gate".into(),
+                    DataType::Midi,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+                graph.add_output_param(node_id, "Out".into(), DataType::CV);
+            }
+            NodeTemplate::Lfo => {
+                graph.add_output_param(node_id, "Out".into(), DataType::CV);
+            }
+            NodeTemplate::AudioOutput => {
+                graph.add_input_param(
+                    node_id,
+                    "In".into(),
+                    DataType::Audio,
+                    ValueType::Float { value: 0.0 },
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+            }
+            NodeTemplate::AudioInput => {
+                graph.add_output_param(node_id, "Out".into(), DataType::Audio);
+            }
+            NodeTemplate::MidiInput => {
+                graph.add_output_param(node_id, "Out".into(), DataType::Midi);
+            }
         }
+    }
+}
+
+// Implement WidgetValueTrait for parameter editing
+impl WidgetValueTrait for ValueType {
+    type Response = UserResponse;
+    type UserState = GraphState;
+    type NodeData = NodeData;
+
+    fn value_widget(
+        &mut self,
+        param_name: &str,
+        _node_id: NodeId,
+        ui: &mut egui::Ui,
+        _user_state: &mut Self::UserState,
+        _node_data: &Self::NodeData,
+    ) -> Vec<Self::Response> {
+        match self {
+            ValueType::Float { value } => {
+                ui.horizontal(|ui| {
+                    ui.label(param_name);
+                    ui.add(egui::DragValue::new(value).speed(0.1));
+                });
+            }
+            ValueType::String { value } => {
+                ui.horizontal(|ui| {
+                    ui.label(param_name);
+                    ui.text_edit_singleline(value);
+                });
+            }
+        }
+        vec![]
+    }
+}
+
+// Implement NodeDataTrait for custom node UI (optional)
+impl NodeDataTrait for NodeData {
+    type Response = UserResponse;
+    type UserState = GraphState;
+    type DataType = DataType;
+    type ValueType = ValueType;
+
+    fn bottom_ui(
+        &self,
+        ui: &mut egui::Ui,
+        _node_id: NodeId,
+        _graph: &Graph<NodeData, DataType, ValueType>,
+        _user_state: &mut Self::UserState,
+    ) -> Vec<NodeResponse<Self::Response, NodeData>>
+    where
+        Self::Response: UserResponseTrait,
+    {
+        // No custom UI for now
+        ui.label("");
+        vec![]
+    }
+}
+
+// Iterator for all node templates
+pub struct AllNodeTemplates;
+
+impl NodeTemplateIter for AllNodeTemplates {
+    type Item = NodeTemplate;
+
+    fn all_kinds(&self) -> Vec<Self::Item> {
+        vec![
+            NodeTemplate::MidiInput,
+            NodeTemplate::AudioInput,
+            NodeTemplate::Oscillator,
+            NodeTemplate::Noise,
+            NodeTemplate::Filter,
+            NodeTemplate::Gain,
+            NodeTemplate::Adsr,
+            NodeTemplate::Lfo,
+            NodeTemplate::AudioOutput,
+        ]
     }
 }

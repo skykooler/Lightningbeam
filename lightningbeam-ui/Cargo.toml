@@ -10,10 +10,10 @@ members = [
 # Note: Upgraded from 0.29 to 0.31 to fix Linux IME/keyboard input issues
 # See: https://github.com/emilk/egui/pull/5198
 # Upgraded to 0.33 for shader editor (egui_code_editor) and continued bug fixes
-egui = "0.33"
-eframe = { version = "0.33", default-features = true, features = ["wgpu"] }
-egui_extras = { version = "0.33", features = ["image", "svg", "syntect"] }
-egui-wgpu = "0.33"
+egui = "0.33.3"
+eframe = { version = "0.33.3", default-features = true, features = ["wgpu"] }
+egui_extras = { version = "0.33.3", features = ["image", "svg", "syntect"] }
+egui-wgpu = "0.33.3"
 egui_code_editor = "0.2"
 
 # GPU Rendering
