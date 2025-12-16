@@ -120,12 +120,32 @@ impl AddNodeAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        // Add node to backend (using async API for now - TODO: use sync query)
+        // Get graph state before adding node to see what nodes exist
+        let before_json = controller.query_graph_state(*track_id)?;
+        let before_state: daw_backend::audio::node_graph::GraphPreset =
+            serde_json::from_str(&before_json)
+                .map_err(|e| format!("Failed to parse before graph state: {}", e))?;
+
+        // Add node to backend (using async API)
         controller.graph_add_node(*track_id, self.node_type.clone(), self.position.0, self.position.1);
 
-        // TODO: Get actual node ID from synchronous query
-        // For now, we can't track the backend ID properly with async API
-        // This will be fixed when we add synchronous query methods
+        // Query graph state after to find the new node ID
+        let after_json = controller.query_graph_state(*track_id)?;
+        let after_state: daw_backend::audio::node_graph::GraphPreset =
+            serde_json::from_str(&after_json)
+                .map_err(|e| format!("Failed to parse after graph state: {}", e))?;
+
+        // Find the new node by comparing before and after states
+        // The new node should have an ID that wasn't in the before state
+        let before_ids: std::collections::HashSet<_> = before_state.nodes.iter().map(|n| n.id).collect();
+        let new_node = after_state.nodes.iter()
+            .find(|n| !before_ids.contains(&n.id))
+            .ok_or("Failed to find newly added node in graph state")?;
+
+        // Store the backend node ID
+        self.backend_node_id = Some(BackendNodeId::Audio(
+            petgraph::stable_graph::NodeIndex::new(new_node.id as usize)
+        ));
 
         Ok(())
     }

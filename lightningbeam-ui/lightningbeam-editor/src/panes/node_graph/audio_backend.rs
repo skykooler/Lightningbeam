@@ -138,12 +138,34 @@ impl GraphBackend for AudioGraphBackend {
     }
 
     fn get_state(&self) -> Result<GraphState, String> {
-        // TODO: Implement graph state query
-        // For now, return empty state
-        Ok(GraphState {
-            nodes: vec![],
-            connections: vec![],
-        })
+        let mut controller = self.audio_controller.lock().unwrap();
+        let json = controller.query_graph_state(self.track_id)?;
+
+        // Parse the GraphPreset JSON from backend
+        let preset: daw_backend::audio::node_graph::GraphPreset =
+            serde_json::from_str(&json)
+                .map_err(|e| format!("Failed to parse graph state: {}", e))?;
+
+        // Convert to our GraphState format
+        let nodes = preset.nodes.iter().map(|n| {
+            super::backend::SerializedNode {
+                id: n.id,
+                node_type: n.node_type.clone(),
+                position: n.position,
+                parameters: n.parameters.iter().map(|(&k, &v)| (k, v as f64)).collect(),
+            }
+        }).collect();
+
+        let connections = preset.connections.iter().map(|c| {
+            super::backend::SerializedConnection {
+                from_node: c.from_node,
+                from_port: c.from_port,
+                to_node: c.to_node,
+                to_port: c.to_port,
+            }
+        }).collect();
+
+        Ok(GraphState { nodes, connections })
     }
 
     fn load_state(&mut self, _state: &GraphState) -> Result<(), String> {
