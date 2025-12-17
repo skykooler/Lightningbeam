@@ -511,6 +511,9 @@ impl SetParameterAction {
 
         let BackendNodeId::Audio(node_idx) = self.backend_node_id;
 
+        eprintln!("[DEBUG] Setting parameter: track {} node {} param {} = {}",
+            track_id, node_idx.index(), self.param_id, self.new_value);
+
         controller.graph_set_parameter(
             *track_id,
             node_idx.index() as u32,

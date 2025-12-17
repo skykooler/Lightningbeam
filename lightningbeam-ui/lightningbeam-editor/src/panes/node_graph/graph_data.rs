@@ -223,7 +223,7 @@ impl NodeTemplateTrait for NodeTemplate {
                     "V/Oct".into(),
                     DataType::CV,
                     ValueType::Float { value: 0.0 },
-                    InputParamKind::ConnectionOnly,
+                    InputParamKind::ConnectionOrConstant,
                     true,
                 );
                 // FM input (frequency modulation)

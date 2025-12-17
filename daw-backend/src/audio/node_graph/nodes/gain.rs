@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 
 const PARAM_GAIN: u32 = 0;
@@ -90,15 +90,11 @@ impl AudioNode for GainNode {
         let frames = input.len().min(output.len()) / 2;
 
         for frame in 0..frames {
-            // Calculate final gain
-            let mut final_gain = self.gain;
-
             // CV input acts as a VCA (voltage-controlled amplifier)
             // CV ranges from 0.0 (silence) to 1.0 (full gain parameter value)
-            if inputs.len() > 1 && frame < inputs[1].len() {
-                let cv = inputs[1][frame];
-                final_gain *= cv;  // Multiply gain by CV (0.0 = silence, 1.0 = full gain)
-            }
+            // When unconnected (NaN), defaults to 1.0 (no modulation, use gain parameter as-is)
+            let cv = cv_input_or_default(inputs, 1, frame, 1.0);
+            let final_gain = self.gain * cv;
 
             // Apply gain to both channels
             output[frame * 2] = input[frame * 2] * final_gain;         // Left

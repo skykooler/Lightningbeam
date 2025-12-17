@@ -7,12 +7,63 @@ pub struct AppConfig {
     /// Recent files list (newest first, max 10 items)
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+
+    // User Preferences
+    /// Default BPM for new projects
+    #[serde(default = "defaults::bpm")]
+    pub bpm: u32,
+
+    /// Default framerate for new projects
+    #[serde(default = "defaults::framerate")]
+    pub framerate: u32,
+
+    /// Default file width in pixels
+    #[serde(default = "defaults::file_width")]
+    pub file_width: u32,
+
+    /// Default file height in pixels
+    #[serde(default = "defaults::file_height")]
+    pub file_height: u32,
+
+    /// Scroll speed multiplier
+    #[serde(default = "defaults::scroll_speed")]
+    pub scroll_speed: f64,
+
+    /// Audio buffer size in samples (128, 256, 512, 1024, 2048, 4096)
+    #[serde(default = "defaults::audio_buffer_size")]
+    pub audio_buffer_size: u32,
+
+    /// Reopen last session on startup
+    #[serde(default = "defaults::reopen_last_session")]
+    pub reopen_last_session: bool,
+
+    /// Restore layout when opening files
+    #[serde(default = "defaults::restore_layout_from_file")]
+    pub restore_layout_from_file: bool,
+
+    /// Enable debug mode
+    #[serde(default = "defaults::debug")]
+    pub debug: bool,
+
+    /// Theme mode ("light", "dark", or "system")
+    #[serde(default = "defaults::theme_mode")]
+    pub theme_mode: String,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             recent_files: Vec::new(),
+            bpm: defaults::bpm(),
+            framerate: defaults::framerate(),
+            file_width: defaults::file_width(),
+            file_height: defaults::file_height(),
+            scroll_speed: defaults::scroll_speed(),
+            audio_buffer_size: defaults::audio_buffer_size(),
+            reopen_last_session: defaults::reopen_last_session(),
+            restore_layout_from_file: defaults::restore_layout_from_file(),
+            debug: defaults::debug(),
+            theme_mode: defaults::theme_mode(),
         }
     }
 }
@@ -126,4 +177,91 @@ impl AppConfig {
         self.recent_files.clear();
         self.save();
     }
+
+    /// Validate BPM range (20-300)
+    pub fn validate_bpm(&self) -> Result<(), String> {
+        if self.bpm >= 20 && self.bpm <= 300 {
+            Ok(())
+        } else {
+            Err(format!("BPM must be between 20 and 300 (got {})", self.bpm))
+        }
+    }
+
+    /// Validate framerate range (1-120)
+    pub fn validate_framerate(&self) -> Result<(), String> {
+        if self.framerate >= 1 && self.framerate <= 120 {
+            Ok(())
+        } else {
+            Err(format!("Framerate must be between 1 and 120 (got {})", self.framerate))
+        }
+    }
+
+    /// Validate file width range (100-10000)
+    pub fn validate_file_width(&self) -> Result<(), String> {
+        if self.file_width >= 100 && self.file_width <= 10000 {
+            Ok(())
+        } else {
+            Err(format!("File width must be between 100 and 10000 (got {})", self.file_width))
+        }
+    }
+
+    /// Validate file height range (100-10000)
+    pub fn validate_file_height(&self) -> Result<(), String> {
+        if self.file_height >= 100 && self.file_height <= 10000 {
+            Ok(())
+        } else {
+            Err(format!("File height must be between 100 and 10000 (got {})", self.file_height))
+        }
+    }
+
+    /// Validate scroll speed range (0.1-10.0)
+    pub fn validate_scroll_speed(&self) -> Result<(), String> {
+        if self.scroll_speed >= 0.1 && self.scroll_speed <= 10.0 {
+            Ok(())
+        } else {
+            Err(format!("Scroll speed must be between 0.1 and 10.0 (got {})", self.scroll_speed))
+        }
+    }
+
+    /// Validate audio buffer size (must be 128, 256, 512, 1024, 2048, or 4096)
+    pub fn validate_audio_buffer_size(&self) -> Result<(), String> {
+        match self.audio_buffer_size {
+            128 | 256 | 512 | 1024 | 2048 | 4096 => Ok(()),
+            _ => Err(format!("Audio buffer size must be 128, 256, 512, 1024, 2048, or 4096 (got {})", self.audio_buffer_size))
+        }
+    }
+
+    /// Validate theme mode (must be "light", "dark", or "system")
+    pub fn validate_theme_mode(&self) -> Result<(), String> {
+        match self.theme_mode.to_lowercase().as_str() {
+            "light" | "dark" | "system" => Ok(()),
+            _ => Err(format!("Theme mode must be 'light', 'dark', or 'system' (got '{}')", self.theme_mode))
+        }
+    }
+
+    /// Validate all preferences
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_bpm()?;
+        self.validate_framerate()?;
+        self.validate_file_width()?;
+        self.validate_file_height()?;
+        self.validate_scroll_speed()?;
+        self.validate_audio_buffer_size()?;
+        self.validate_theme_mode()?;
+        Ok(())
+    }
+}
+
+/// Default values for preferences (matches JS implementation)
+mod defaults {
+    pub fn bpm() -> u32 { 120 }
+    pub fn framerate() -> u32 { 24 }
+    pub fn file_width() -> u32 { 800 }
+    pub fn file_height() -> u32 { 600 }
+    pub fn scroll_speed() -> f64 { 1.0 }
+    pub fn audio_buffer_size() -> u32 { 256 }
+    pub fn reopen_last_session() -> bool { false }
+    pub fn restore_layout_from_file() -> bool { true }
+    pub fn debug() -> bool { false }
+    pub fn theme_mode() -> String { "system".to_string() }
 }

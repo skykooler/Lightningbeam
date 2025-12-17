@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::f32::consts::PI;
 
@@ -256,18 +256,11 @@ impl AudioNode for FMSynthNode {
         let frames = output.len() / 2;
 
         for frame in 0..frames {
-            // Read CV inputs
-            let voct = if inputs.len() > 0 && !inputs[0].is_empty() {
-                inputs[0][frame.min(inputs[0].len() / 2 - 1) * 2]
-            } else {
-                0.0
-            };
-
-            let gate = if inputs.len() > 1 && !inputs[1].is_empty() {
-                inputs[1][frame.min(inputs[1].len() / 2 - 1) * 2]
-            } else {
-                0.0
-            };
+            // Read CV inputs (both are mono signals)
+            // V/Oct: when unconnected, defaults to 0.0 (A4 440 Hz)
+            let voct = cv_input_or_default(inputs, 0, frame, 0.0);
+            // Gate: when unconnected, defaults to 0.0 (off)
+            let gate = cv_input_or_default(inputs, 1, frame, 0.0);
 
             // Update state
             self.current_frequency = Self::voct_to_freq(voct);

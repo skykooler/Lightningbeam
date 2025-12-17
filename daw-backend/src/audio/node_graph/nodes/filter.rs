@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use crate::dsp::biquad::BiquadFilter;
 
@@ -150,10 +150,19 @@ impl AudioNode for FilterNode {
         output[..len].copy_from_slice(&input[..len]);
 
         // Check for CV modulation (modulates cutoff)
-        if inputs.len() > 1 && !inputs[1].is_empty() {
-            // CV input modulates cutoff frequency
-            // For now, just use the base cutoff - per-sample modulation would be expensive
-            // TODO: Sample CV at frame rate and update filter periodically
+        // Sample CV at the start of the buffer - per-sample would be too expensive
+        let cutoff_cv = cv_input_or_default(inputs, 1, 0, self.cutoff);
+        if (cutoff_cv - self.cutoff).abs() > 0.01 {
+            // CV changed significantly, update filter
+            let new_cutoff = cutoff_cv.clamp(20.0, 20000.0);
+            match self.filter_type {
+                FilterType::Lowpass => {
+                    self.filter.set_lowpass(new_cutoff, self.resonance, self.sample_rate as f32);
+                }
+                FilterType::Highpass => {
+                    self.filter.set_highpass(new_cutoff, self.resonance, self.sample_rate as f32);
+                }
+            }
         }
 
         // Apply filter (processes stereo interleaved)

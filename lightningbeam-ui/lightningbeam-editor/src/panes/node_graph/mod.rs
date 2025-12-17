@@ -373,6 +373,11 @@ impl NodeGraphPane {
             }
         }
 
+        // Execute any pending action created during response handling
+        self.execute_pending_action(shared);
+    }
+
+    fn execute_pending_action(&mut self, shared: &mut crate::panes::SharedPaneState) {
         // Execute pending action if any
         if let Some(action) = self.pending_action.take() {
             // Node graph actions need to update the backend, so use execute_with_backend
@@ -423,21 +428,41 @@ impl NodeGraphPane {
 
     fn check_parameter_changes(&mut self) {
         // Check all input parameters for value changes
+        let mut checked_count = 0;
+        let mut connection_only_count = 0;
+        let mut non_float_count = 0;
+
         for (input_id, input_param) in &self.state.graph.inputs {
             // Only check parameters that can have constant values (not ConnectionOnly)
             if matches!(input_param.kind, InputParamKind::ConnectionOnly) {
+                connection_only_count += 1;
                 continue;
             }
 
             // Get current value
             let current_value = match &input_param.value {
-                ValueType::Float { value } => *value,
-                _ => continue, // Skip non-float values for now
+                ValueType::Float { value } => {
+                    checked_count += 1;
+                    *value
+                },
+                other => {
+                    non_float_count += 1;
+                    eprintln!("[DEBUG] Non-float parameter type: {:?}", std::mem::discriminant(other));
+                    continue;
+                }
             };
 
             // Check if value has changed
             let previous_value = self.parameter_values.get(&input_id).copied();
-            if previous_value.is_none() || (previous_value.unwrap() - current_value).abs() > 0.0001 {
+            let has_changed = if let Some(prev) = previous_value {
+                (prev - current_value).abs() > 0.0001
+            } else {
+                // First time seeing this parameter - don't send update, just store it
+                self.parameter_values.insert(input_id, current_value);
+                false
+            };
+
+            if has_changed {
                 // Value has changed, create SetParameterAction
                 if let Some(track_id) = self.track_id {
                     let node_id = input_param.node;
@@ -447,6 +472,8 @@ impl NodeGraphPane {
                         // Get parameter index (position in node's inputs array)
                         if let Some(node) = self.state.graph.nodes.get(node_id) {
                             if let Some(param_index) = node.inputs.iter().position(|(_, id)| *id == input_id) {
+                                eprintln!("[DEBUG] Parameter changed: node {:?} param {} from {:?} to {}",
+                                    backend_id, param_index, previous_value, current_value);
                                 // Create action to update backend
                                 let action = Box::new(actions::NodeGraphAction::SetParameter(
                                     actions::SetParameterAction::new(
@@ -465,6 +492,11 @@ impl NodeGraphPane {
                 // Update stored value
                 self.parameter_values.insert(input_id, current_value);
             }
+        }
+
+        if checked_count > 0 || connection_only_count > 0 || non_float_count > 0 {
+            eprintln!("[DEBUG] Parameter check: {} float params checked, {} connection-only, {} non-float",
+                checked_count, connection_only_count, non_float_count);
         }
     }
 
@@ -643,6 +675,9 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
             // Check for parameter value changes and send updates to backend
             self.check_parameter_changes();
+
+            // Execute any parameter change actions
+            self.execute_pending_action(shared);
 
             // Override library's default scroll behavior:
             // - Library uses scroll for zoom

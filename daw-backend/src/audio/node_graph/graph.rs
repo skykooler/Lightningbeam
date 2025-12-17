@@ -386,10 +386,19 @@ impl AudioGraph {
             let num_audio_cv_inputs = inputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
             let num_midi_inputs = inputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
 
-            // Clear audio/CV input buffers
-            for i in 0..num_audio_cv_inputs {
-                if i < self.input_buffers.len() {
-                    self.input_buffers[i].fill(0.0);
+            // Clear input buffers
+            // - Audio inputs: fill with 0.0 (silence) when unconnected
+            // - CV inputs: fill with NaN to indicate "no connection" (allows nodes to use parameter values)
+            let mut audio_cv_idx = 0;
+            for port in inputs.iter().filter(|p| p.signal_type != SignalType::Midi) {
+                if audio_cv_idx < self.input_buffers.len() {
+                    let fill_value = match port.signal_type {
+                        SignalType::Audio => 0.0,  // Silence for audio
+                        SignalType::CV => f32::NAN, // Sentinel for CV
+                        SignalType::Midi => unreachable!(), // Already filtered out
+                    };
+                    self.input_buffers[audio_cv_idx].fill(fill_value);
+                    audio_cv_idx += 1;
                 }
             }
 
@@ -419,7 +428,12 @@ impl AudioGraph {
                                 let source_buffer = &source_node.output_buffers[conn.from_port];
                                 if conn.to_port < self.input_buffers.len() {
                                     for (dst, src) in self.input_buffers[conn.to_port].iter_mut().zip(source_buffer.iter()) {
-                                        *dst += src;
+                                        // If dst is NaN (unconnected), replace it; otherwise add (for mixing)
+                                        if dst.is_nan() {
+                                            *dst = *src;
+                                        } else {
+                                            *dst += src;
+                                        }
                                     }
                                 }
                             }

@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::sync::{Arc, Mutex};
 
@@ -202,18 +202,11 @@ impl AudioNode for SimpleSamplerNode {
         let frames = output.len() / 2;
 
         for frame in 0..frames {
-            // Read CV inputs
-            let voct = if !inputs.is_empty() && !inputs[0].is_empty() {
-                inputs[0][frame.min(inputs[0].len() / 2 - 1) * 2]
-            } else {
-                0.0 // Default to original pitch
-            };
-
-            let gate = if inputs.len() > 1 && !inputs[1].is_empty() {
-                inputs[1][frame.min(inputs[1].len() / 2 - 1) * 2]
-            } else {
-                0.0
-            };
+            // Read CV inputs (both are mono signals)
+            // V/Oct: when unconnected, defaults to 0.0 (original pitch)
+            let voct = cv_input_or_default(inputs, 0, frame, 0.0);
+            // Gate: when unconnected, defaults to 0.0 (off)
+            let gate = cv_input_or_default(inputs, 1, frame, 0.0);
 
             // Detect gate trigger (rising edge)
             let gate_active = gate > 0.5;

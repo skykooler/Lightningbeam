@@ -28,6 +28,8 @@ mod default_instrument;
 
 mod export;
 
+mod preferences;
+
 mod notifications;
 
 mod effect_thumbnails;
@@ -55,13 +57,17 @@ fn main() -> eframe::Result {
     // Parse command line arguments
     let args = Args::parse();
 
-    // Determine theme mode from arguments
+    // Load config to get theme preference
+    let config = AppConfig::load();
+
+    // Determine theme mode: command-line args override config
     let theme_mode = if args.light {
         ThemeMode::Light
     } else if args.dark {
         ThemeMode::Dark
     } else {
-        ThemeMode::System
+        // Use theme from config
+        ThemeMode::from_string(&config.theme_mode)
     };
 
     // Load theme
@@ -591,6 +597,8 @@ struct EditorApp {
     export_dialog: export::dialog::ExportDialog,
     /// Export progress dialog
     export_progress_dialog: export::dialog::ExportProgressDialog,
+    /// Preferences dialog
+    preferences_dialog: preferences::dialog::PreferencesDialog,
     /// Export orchestrator for background exports
     export_orchestrator: Option<export::ExportOrchestrator>,
     /// GPU-rendered effect thumbnail generator
@@ -656,7 +664,7 @@ impl EditorApp {
 
         // Initialize audio system and destructure it for sharing
         let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx) =
-            match daw_backend::AudioSystem::new(None, 256) {
+            match daw_backend::AudioSystem::new(None, config.audio_buffer_size) {
                 Ok(audio_system) => {
                     println!("✅ Audio engine initialized successfully");
 
@@ -751,6 +759,7 @@ impl EditorApp {
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
             export_progress_dialog: export::dialog::ExportProgressDialog::default(),
+            preferences_dialog: preferences::dialog::PreferencesDialog::default(),
             export_orchestrator: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
 
@@ -1386,8 +1395,7 @@ impl EditorApp {
                 // TODO: Implement select none
             }
             MenuAction::Preferences => {
-                println!("Menu: Preferences");
-                // TODO: Implement preferences dialog
+                self.preferences_dialog.open(&self.config, &self.theme);
             }
 
             // Modify menu
@@ -2898,6 +2906,13 @@ impl eframe::App for EditorApp {
         // Keep requesting repaints while export progress dialog is open
         if self.export_progress_dialog.open {
             ctx.request_repaint();
+        }
+
+        // Render preferences dialog
+        if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme) {
+            if result.buffer_size_changed {
+                println!("⚠️  Audio buffer size will be applied on next app restart");
+            }
         }
 
         // Render video frames incrementally (if video export in progress)

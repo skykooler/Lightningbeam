@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 
 const PARAM_ATTACK: u32 = 0;
@@ -122,12 +122,9 @@ impl AudioNode for ADSRNode {
         let frames = output.len();
 
         for frame in 0..frames {
-            // Read gate input (if available)
-            let gate_high = if !inputs.is_empty() && frame < inputs[0].len() {
-                inputs[0][frame] > 0.5 // Gate is high if CV > 0.5
-            } else {
-                false
-            };
+            // Gate input: when unconnected, defaults to 0.0 (off)
+            let gate_cv = cv_input_or_default(inputs, 0, frame, 0.0);
+            let gate_high = gate_cv > 0.5;
 
             // Detect gate transitions
             if gate_high && !self.gate_was_high {

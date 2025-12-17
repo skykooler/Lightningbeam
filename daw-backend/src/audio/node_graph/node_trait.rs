@@ -77,3 +77,34 @@ pub trait AudioNode: Send {
     /// Downcast to `&dyn Any` for type-specific read-only operations
     fn as_any(&self) -> &dyn std::any::Any;
 }
+
+/// Helper function for CV inputs with optional connections
+///
+/// Returns the input value if connected (not NaN), otherwise returns the default value.
+/// This implements "Blender-style" input behavior where parameters are replaced by
+/// connected inputs.
+///
+/// # Arguments
+/// * `inputs` - Input buffer array from process()
+/// * `port` - Input port index
+/// * `frame` - Current frame index
+/// * `default` - Default value to use when input is unconnected
+///
+/// # Returns
+/// The input value if connected, otherwise the default value
+#[inline]
+pub fn cv_input_or_default(inputs: &[&[f32]], port: usize, frame: usize, default: f32) -> f32 {
+    if port < inputs.len() && frame < inputs[port].len() {
+        let value = inputs[port][frame];
+        if value.is_nan() {
+            // Unconnected: use default parameter value
+            default
+        } else {
+            // Connected: use input signal
+            value
+        }
+    } else {
+        // No input buffer: use default
+        default
+    }
+}

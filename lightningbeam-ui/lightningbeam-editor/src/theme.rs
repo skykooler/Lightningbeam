@@ -15,6 +15,26 @@ pub enum ThemeMode {
     System, // Follow system preference
 }
 
+impl ThemeMode {
+    /// Convert from string ("light", "dark", or "system")
+    pub fn from_string(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "light" => Self::Light,
+            "dark" => Self::Dark,
+            _ => Self::System,
+        }
+    }
+
+    /// Convert to lowercase string
+    pub fn to_string_lower(&self) -> String {
+        match self {
+            Self::Light => "light".to_string(),
+            Self::Dark => "dark".to_string(),
+            Self::System => "system".to_string(),
+        }
+    }
+}
+
 /// Style properties that can be applied to UI elements
 #[derive(Debug, Clone, Default)]
 pub struct Style {
