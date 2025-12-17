@@ -1523,7 +1523,7 @@ impl Engine {
                     pool_index, detail_level, chunk_indices);
                 // Get audio file data from pool
                 if let Some(audio_file) = self.audio_pool.get_file(pool_index) {
-                    println!("✅ [ENGINE] Found audio file in pool, spawning background thread");
+                    println!("✅ [ENGINE] Found audio file in pool, queuing work in thread pool");
                     // Clone necessary data for background thread
                     let data = audio_file.data.clone();
                     let channels = audio_file.channels;
@@ -1531,8 +1531,8 @@ impl Engine {
                     let path = audio_file.path.clone();
                     let chunk_tx = self.chunk_generation_tx.clone();
 
-                    // Generate chunks in background thread to avoid blocking audio thread
-                    std::thread::spawn(move || {
+                    // Generate chunks using rayon's thread pool to avoid spawning thousands of threads
+                    rayon::spawn(move || {
                         // Create temporary AudioFile for chunk generation
                         let temp_audio_file = crate::audio::pool::AudioFile::with_format(
                             path,
@@ -1563,6 +1563,9 @@ impl Engine {
                                 chunks: event_chunks,
                             });
                         }
+
+                        // Yield to other threads to reduce CPU contention with video playback
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     });
                 } else {
                     eprintln!("❌ [ENGINE] Pool index {} not found for waveform generation", pool_index);

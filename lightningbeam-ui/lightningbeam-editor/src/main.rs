@@ -54,6 +54,19 @@ struct Args {
 fn main() -> eframe::Result {
     println!("🚀 Starting Lightningbeam Editor...");
 
+    // Configure rayon thread pool to use fewer threads, leaving cores free for video playback
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let waveform_threads = (num_cpus.saturating_sub(2)).max(2); // Leave 2 cores free, minimum 2 threads
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(waveform_threads)
+        .thread_name(|i| format!("waveform-{}", i))
+        .build_global()
+        .expect("Failed to build rayon thread pool");
+    println!("✅ Configured waveform generation to use {} threads (leaving {} cores for video)",
+        waveform_threads, num_cpus - waveform_threads);
+
     // Parse command line arguments
     let args = Args::parse();
 
@@ -2095,7 +2108,7 @@ impl EditorApp {
 
         let clip_id = clip.id;
 
-        // Load video into VideoManager
+        // Load video into VideoManager (without building keyframe index)
         let doc_width = self.action_executor.document().width as u32;
         let doc_height = self.action_executor.document().height as u32;
 
@@ -2105,6 +2118,18 @@ impl EditorApp {
             return None;
         }
         drop(video_mgr);
+
+        // Spawn background thread to build keyframe index asynchronously
+        let video_manager_clone = Arc::clone(&self.video_manager);
+        let keyframe_clip_id = clip_id;
+        std::thread::spawn(move || {
+            let video_mgr = video_manager_clone.lock().unwrap();
+            if let Err(e) = video_mgr.build_keyframe_index(&keyframe_clip_id) {
+                eprintln!("Failed to build keyframe index: {}", e);
+            } else {
+                println!("  Built keyframe index for video clip {}", keyframe_clip_id);
+            }
+        });
 
         // Spawn background thread for audio extraction if video has audio
         if metadata.has_audio {
@@ -2180,15 +2205,61 @@ impl EditorApp {
         }
 
         // Spawn background thread for thumbnail generation
+        // Get decoder once, then generate thumbnails without holding VideoManager lock
         let video_manager_clone = Arc::clone(&self.video_manager);
         let duration = metadata.duration;
+        let thumb_clip_id = clip_id;
         std::thread::spawn(move || {
-            let mut video_mgr = video_manager_clone.lock().unwrap();
-            if let Err(e) = video_mgr.generate_thumbnails(&clip_id, duration) {
-                eprintln!("Failed to generate video thumbnails: {}", e);
-            } else {
-                println!("  Generated thumbnails for video clip {}", clip_id);
+            // Get decoder Arc with brief lock
+            let decoder_arc = {
+                let video_mgr = video_manager_clone.lock().unwrap();
+                match video_mgr.get_decoder(&thumb_clip_id) {
+                    Some(arc) => arc,
+                    None => {
+                        eprintln!("Failed to get decoder for thumbnail generation");
+                        return;
+                    }
+                }
+            };
+            // VideoManager lock released - video can now be displayed!
+
+            let interval = 5.0;
+            let mut t = 0.0;
+            let mut thumbnail_count = 0;
+
+            while t < duration {
+                // Decode frame WITHOUT holding VideoManager lock
+                let thumb_opt = {
+                    let mut decoder = decoder_arc.lock().unwrap();
+                    match decoder.decode_frame(t) {
+                        Ok(rgba_data) => {
+                            let w = decoder.get_output_width();
+                            let h = decoder.get_output_height();
+                            Some((rgba_data, w, h))
+                        }
+                        Err(_) => None,
+                    }
+                };
+
+                // Downsample without any locks
+                if let Some((rgba_data, w, h)) = thumb_opt {
+                    use lightningbeam_core::video::downsample_rgba_public;
+                    let thumb_w = 128u32;
+                    let thumb_h = (h as f32 / w as f32 * thumb_w as f32) as u32;
+                    let thumb_data = downsample_rgba_public(&rgba_data, w, h, thumb_w, thumb_h);
+
+                    // Brief lock just to insert
+                    {
+                        let mut video_mgr = video_manager_clone.lock().unwrap();
+                        video_mgr.insert_thumbnail(&thumb_clip_id, t, Arc::new(thumb_data));
+                    }
+                    thumbnail_count += 1;
+                }
+
+                t += interval;
             }
+
+            println!("  Generated {} thumbnails for video clip {}", thumbnail_count, thumb_clip_id);
         });
 
         // Add clip to document

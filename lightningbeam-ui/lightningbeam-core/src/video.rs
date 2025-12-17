@@ -21,7 +21,7 @@ pub struct VideoMetadata {
 }
 
 /// Video decoder with LRU frame caching
-struct VideoDecoder {
+pub struct VideoDecoder {
     path: String,
     width: u32,          // Original video width
     height: u32,         // Original video height
@@ -43,7 +43,9 @@ impl VideoDecoder {
     ///
     /// `max_width` and `max_height` specify the maximum output dimensions.
     /// Video will be scaled down if larger, preserving aspect ratio.
-    fn new(path: String, cache_size: usize, max_width: Option<u32>, max_height: Option<u32>) -> Result<Self, String> {
+    /// `build_keyframes` controls whether to build the keyframe index immediately (slow)
+    /// or defer it for async building later.
+    fn new(path: String, cache_size: usize, max_width: Option<u32>, max_height: Option<u32>, build_keyframes: bool) -> Result<Self, String> {
         ffmpeg::init().map_err(|e| e.to_string())?;
 
         let input = ffmpeg::format::input(&path)
@@ -92,11 +94,16 @@ impl VideoDecoder {
 
         let fps = f64::from(video_stream.avg_frame_rate());
 
-        // Build keyframe index for fast seeking
-        // This scans the video once to find all keyframe positions
-        eprintln!("[Video Decoder] Building keyframe index for {}", path);
-        let keyframe_positions = Self::build_keyframe_index(&path, stream_index)?;
-        eprintln!("[Video Decoder] Found {} keyframes", keyframe_positions.len());
+        // Optionally build keyframe index for fast seeking
+        let keyframe_positions = if build_keyframes {
+            eprintln!("[Video Decoder] Building keyframe index for {}", path);
+            let positions = Self::build_keyframe_index(&path, stream_index)?;
+            eprintln!("[Video Decoder] Found {} keyframes", positions.len());
+            positions
+        } else {
+            eprintln!("[Video Decoder] Deferring keyframe index building for {}", path);
+            Vec::new()
+        };
 
         Ok(Self {
             path,
@@ -116,6 +123,31 @@ impl VideoDecoder {
             last_decoded_ts: -1,
             keyframe_positions,
         })
+    }
+
+    /// Build keyframe index for this decoder
+    /// This can be called asynchronously after decoder creation
+    fn build_and_set_keyframe_index(&mut self) -> Result<(), String> {
+        eprintln!("[Video Decoder] Building keyframe index for {}", self.path);
+        let positions = Self::build_keyframe_index(&self.path, self.stream_index)?;
+        eprintln!("[Video Decoder] Found {} keyframes", positions.len());
+        self.keyframe_positions = positions;
+        Ok(())
+    }
+
+    /// Get the output width (scaled dimensions)
+    pub fn get_output_width(&self) -> u32 {
+        self.output_width
+    }
+
+    /// Get the output height (scaled dimensions)
+    pub fn get_output_height(&self) -> u32 {
+        self.output_height
+    }
+
+    /// Decode a frame at the specified timestamp (public wrapper)
+    pub fn decode_frame(&mut self, timestamp: f64) -> Result<Vec<u8>, String> {
+        self.get_frame(timestamp)
     }
 
     /// Build an index of all keyframe positions in the video
@@ -407,6 +439,9 @@ impl VideoManager {
     ///
     /// `target_width` and `target_height` specify the maximum dimensions
     /// for decoded frames. Video will be scaled down if larger.
+    ///
+    /// The keyframe index is NOT built during this call - use `build_keyframe_index_async`
+    /// in a background thread to build it asynchronously.
     pub fn load_video(
         &mut self,
         clip_id: Uuid,
@@ -417,18 +452,33 @@ impl VideoManager {
         // First probe the video for metadata
         let metadata = probe_video(&path)?;
 
-        // Create decoder with target dimensions
+        // Create decoder with target dimensions, without building keyframe index
         let decoder = VideoDecoder::new(
             path,
             self.cache_size,
             Some(target_width),
             Some(target_height),
+            false, // Don't build keyframe index synchronously
         )?;
 
         // Store decoder in pool
         self.decoders.insert(clip_id, Arc::new(Mutex::new(decoder)));
 
         Ok(metadata)
+    }
+
+    /// Build keyframe index for a loaded video asynchronously
+    ///
+    /// This should be called from a background thread after load_video()
+    /// to avoid blocking the UI during import.
+    pub fn build_keyframe_index(&self, clip_id: &Uuid) -> Result<(), String> {
+        let decoder_arc = self.decoders.get(clip_id)
+            .ok_or_else(|| format!("Video clip {} not found", clip_id))?;
+
+        let mut decoder = decoder_arc.lock()
+            .map_err(|e| format!("Failed to lock decoder: {}", e))?;
+
+        decoder.build_and_set_keyframe_index()
     }
 
     /// Get a decoded frame for a specific clip at a specific timestamp
@@ -467,10 +517,14 @@ impl VideoManager {
         Some(frame)
     }
 
-    /// Generate thumbnails for a video clip
+    /// Generate thumbnails for a video clip (single batch version - use generate_thumbnails_progressive instead)
     ///
-    /// Thumbnails are generated every 5 seconds at 64px width.
+    /// Thumbnails are generated every 5 seconds at 128px width.
     /// This should be called in a background thread to avoid blocking.
+    /// Thumbnails are inserted into the cache progressively as they're generated,
+    /// allowing the UI to display them immediately.
+    ///
+    /// DEPRECATED: Use generate_thumbnails_progressive which releases the lock between thumbnails.
     pub fn generate_thumbnails(&mut self, clip_id: &Uuid, duration: f64) -> Result<(), String> {
         let decoder_arc = self.decoders.get(clip_id)
             .ok_or("Clip not loaded")?
@@ -479,7 +533,9 @@ impl VideoManager {
         let mut decoder = decoder_arc.lock()
             .map_err(|e| format!("Failed to lock decoder: {}", e))?;
 
-        let mut thumbnails = Vec::new();
+        // Initialize thumbnail cache entry with empty vec
+        self.thumbnail_cache.insert(*clip_id, Vec::new());
+
         let interval = 5.0; // Generate thumbnail every 5 seconds
         let mut t = 0.0;
 
@@ -505,16 +561,30 @@ impl VideoManager {
                     thumb_height,
                 );
 
-                thumbnails.push((t, Arc::new(thumb_data)));
+                // Insert thumbnail into cache immediately so UI can display it
+                if let Some(thumbnails) = self.thumbnail_cache.get_mut(clip_id) {
+                    thumbnails.push((t, Arc::new(thumb_data)));
+                }
             }
 
             t += interval;
         }
 
-        // Store thumbnails in cache
-        self.thumbnail_cache.insert(*clip_id, thumbnails);
-
         Ok(())
+    }
+
+    /// Get the decoder Arc for a clip (for external thumbnail generation)
+    /// This allows external code to decode frames without holding the VideoManager lock
+    pub fn get_decoder(&self, clip_id: &Uuid) -> Option<Arc<Mutex<VideoDecoder>>> {
+        self.decoders.get(clip_id).cloned()
+    }
+
+    /// Insert a thumbnail into the cache (for external thumbnail generation)
+    pub fn insert_thumbnail(&mut self, clip_id: &Uuid, timestamp: f64, data: Arc<Vec<u8>>) {
+        self.thumbnail_cache
+            .entry(*clip_id)
+            .or_insert_with(Vec::new)
+            .push((timestamp, data));
     }
 
     /// Get the thumbnail closest to the specified timestamp
@@ -582,6 +652,17 @@ impl Default for VideoManager {
 }
 
 /// Simple nearest-neighbor downsampling for RGBA images
+pub fn downsample_rgba_public(
+    src: &[u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+) -> Vec<u8> {
+    downsample_rgba(src, src_width, src_height, dst_width, dst_height)
+}
+
+/// Simple nearest-neighbor downsampling for RGBA images (internal)
 fn downsample_rgba(
     src: &[u8],
     src_width: u32,

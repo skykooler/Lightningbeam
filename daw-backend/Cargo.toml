@@ -15,6 +15,7 @@ crossterm = "0.27"
 rand = "0.8"
 base64 = "0.22"
 pathdiff = "0.2"
+rayon = "1.10"
 
 # Audio export
 hound = "3.5"
