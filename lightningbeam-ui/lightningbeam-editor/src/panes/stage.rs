@@ -2063,9 +2063,10 @@ impl StagePane {
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
-        // Mouse down: start interaction (use drag_started for immediate feedback)
+        // Mouse down: start interaction (check on initial press, not after drag starts)
         // Scope this section to drop vector_layer borrow before drag handling
-        if response.drag_started() || response.clicked() {
+        let mouse_pressed = ui.input(|i| i.pointer.primary_pressed());
+        if mouse_pressed {
             // VECTOR EDITING: Check for vertex/curve editing first (higher priority than selection)
             let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
             let vector_hit = hit_test_vector_editing(
@@ -2746,8 +2747,9 @@ impl StagePane {
             true, // BezierEdit tool shows control points
         );
 
-        // Mouse down: start interaction
-        if response.drag_started() || response.clicked() {
+        // Mouse down: start interaction (check on initial press, not after drag starts)
+        let mouse_pressed = ui.input(|i| i.pointer.primary_pressed());
+        if mouse_pressed {
             // Priority 1: Vector editing (control points, vertices, and curves)
             if let Some(hit) = vector_hit {
                 match hit {

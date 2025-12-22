@@ -449,15 +449,25 @@ pub fn hit_test_vector_editing(
         let inverse_transform = combined_transform.inverse();
         let local_point = inverse_transform * point;
 
+        // Calculate the scale factor to transform screen-space tolerances to local space
+        // We need the inverse scale because we're in local space
+        // Affine coefficients are [a, b, c, d, e, f] representing matrix [[a, c, e], [b, d, f]]
+        let coeffs = combined_transform.as_coeffs();
+        let scale_x = (coeffs[0].powi(2) + coeffs[1].powi(2)).sqrt();
+        let scale_y = (coeffs[2].powi(2) + coeffs[3].powi(2)).sqrt();
+        let avg_scale = (scale_x + scale_y) / 2.0;
+        let local_tolerance_factor = 1.0 / avg_scale.max(0.001); // Avoid division by zero
+
         // Extract editable curves and vertices from the shape's path
         let editable = extract_editable_curves(shape.path());
 
         // Priority 1: Control points (only in BezierEdit mode)
         if show_control_points {
+            let local_cp_tolerance = tolerance.control_point * local_tolerance_factor;
             for (i, curve) in editable.curves.iter().enumerate() {
                 // Test p1 (first control point)
                 let dist_p1 = (curve.p1 - local_point).hypot();
-                if dist_p1 < tolerance.control_point {
+                if dist_p1 < local_cp_tolerance {
                     return Some(VectorEditHit::ControlPoint {
                         shape_instance_id: object.id,
                         curve_index: i,
@@ -467,7 +477,7 @@ pub fn hit_test_vector_editing(
 
                 // Test p2 (second control point)
                 let dist_p2 = (curve.p2 - local_point).hypot();
-                if dist_p2 < tolerance.control_point {
+                if dist_p2 < local_cp_tolerance {
                     return Some(VectorEditHit::ControlPoint {
                         shape_instance_id: object.id,
                         curve_index: i,
@@ -478,9 +488,10 @@ pub fn hit_test_vector_editing(
         }
 
         // Priority 2: Vertices (anchor points)
+        let local_vertex_tolerance = tolerance.vertex * local_tolerance_factor;
         for (i, vertex) in editable.vertices.iter().enumerate() {
             let dist = (vertex.point - local_point).hypot();
-            if dist < tolerance.vertex {
+            if dist < local_vertex_tolerance {
                 return Some(VectorEditHit::Vertex {
                     shape_instance_id: object.id,
                     vertex_index: i,
@@ -489,11 +500,12 @@ pub fn hit_test_vector_editing(
         }
 
         // Priority 3: Curves
+        let local_curve_tolerance = tolerance.curve * local_tolerance_factor;
         for (i, curve) in editable.curves.iter().enumerate() {
             let nearest = curve.nearest(local_point, 1e-6);
             let nearest_point = curve.eval(nearest.t);
             let dist = (nearest_point - local_point).hypot();
-            if dist < tolerance.curve {
+            if dist < local_curve_tolerance {
                 return Some(VectorEditHit::Curve {
                     shape_instance_id: object.id,
                     curve_index: i,
