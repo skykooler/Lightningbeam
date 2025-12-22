@@ -344,6 +344,175 @@ pub fn hit_test_clip_instances_in_rect(
     hits
 }
 
+/// Result of a vector editing hit test
+///
+/// Represents different types of hits in order of priority:
+/// ControlPoint > Vertex > Curve > Fill
+#[derive(Debug, Clone, Copy)]
+pub enum VectorEditHit {
+    /// Hit a control point (BezierEdit tool only)
+    ControlPoint {
+        shape_instance_id: Uuid,
+        curve_index: usize,
+        point_index: u8, // 1 or 2 (p1 or p2 of cubic bezier)
+    },
+    /// Hit a vertex (anchor point)
+    Vertex {
+        shape_instance_id: Uuid,
+        vertex_index: usize,
+    },
+    /// Hit a curve segment
+    Curve {
+        shape_instance_id: Uuid,
+        curve_index: usize,
+        parameter_t: f64, // Where on the curve (0.0 to 1.0)
+    },
+    /// Hit shape fill
+    Fill { shape_instance_id: Uuid },
+}
+
+/// Tolerances for vector editing hit testing (in screen pixels)
+#[derive(Debug, Clone, Copy)]
+pub struct EditingHitTolerance {
+    /// Tolerance for hitting control points
+    pub control_point: f64,
+    /// Tolerance for hitting vertices
+    pub vertex: f64,
+    /// Tolerance for hitting curves
+    pub curve: f64,
+    /// Tolerance for hitting fill (usually 0.0 for exact containment)
+    pub fill: f64,
+}
+
+impl Default for EditingHitTolerance {
+    fn default() -> Self {
+        Self {
+            control_point: 10.0,
+            vertex: 15.0,
+            curve: 15.0,
+            fill: 0.0,
+        }
+    }
+}
+
+impl EditingHitTolerance {
+    /// Create tolerances scaled by zoom factor
+    ///
+    /// When zoomed in, hit targets appear larger in screen pixels,
+    /// so we divide by zoom to maintain consistent screen-space sizes.
+    pub fn scaled_by_zoom(zoom: f64) -> Self {
+        Self {
+            control_point: 10.0 / zoom,
+            vertex: 15.0 / zoom,
+            curve: 15.0 / zoom,
+            fill: 0.0,
+        }
+    }
+}
+
+/// Hit test for vector editing with priority-based detection
+///
+/// Tests objects in reverse order (front to back) and returns the first hit.
+/// Priority order: Control points > Vertices > Curves > Fill
+///
+/// # Arguments
+///
+/// * `layer` - The vector layer to test
+/// * `point` - The point to test in screen/canvas space
+/// * `tolerance` - Hit tolerances for different element types
+/// * `parent_transform` - Transform from parent GraphicsObject(s)
+/// * `show_control_points` - Whether to test control points (BezierEdit tool)
+///
+/// # Returns
+///
+/// The first hit in priority order, or None if no hit
+pub fn hit_test_vector_editing(
+    layer: &VectorLayer,
+    point: Point,
+    tolerance: &EditingHitTolerance,
+    parent_transform: Affine,
+    show_control_points: bool,
+) -> Option<VectorEditHit> {
+    use crate::bezpath_editing::extract_editable_curves;
+    use vello::kurbo::{ParamCurve, ParamCurveNearest};
+
+    // Test objects in reverse order (front to back for hit testing)
+    for object in layer.shape_instances.iter().rev() {
+        // Get the shape for this object
+        let shape = match layer.get_shape(&object.shape_id) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // Combine parent transform with object transform
+        let combined_transform = parent_transform * object.to_affine();
+        let inverse_transform = combined_transform.inverse();
+        let local_point = inverse_transform * point;
+
+        // Extract editable curves and vertices from the shape's path
+        let editable = extract_editable_curves(shape.path());
+
+        // Priority 1: Control points (only in BezierEdit mode)
+        if show_control_points {
+            for (i, curve) in editable.curves.iter().enumerate() {
+                // Test p1 (first control point)
+                let dist_p1 = (curve.p1 - local_point).hypot();
+                if dist_p1 < tolerance.control_point {
+                    return Some(VectorEditHit::ControlPoint {
+                        shape_instance_id: object.id,
+                        curve_index: i,
+                        point_index: 1,
+                    });
+                }
+
+                // Test p2 (second control point)
+                let dist_p2 = (curve.p2 - local_point).hypot();
+                if dist_p2 < tolerance.control_point {
+                    return Some(VectorEditHit::ControlPoint {
+                        shape_instance_id: object.id,
+                        curve_index: i,
+                        point_index: 2,
+                    });
+                }
+            }
+        }
+
+        // Priority 2: Vertices (anchor points)
+        for (i, vertex) in editable.vertices.iter().enumerate() {
+            let dist = (vertex.point - local_point).hypot();
+            if dist < tolerance.vertex {
+                return Some(VectorEditHit::Vertex {
+                    shape_instance_id: object.id,
+                    vertex_index: i,
+                });
+            }
+        }
+
+        // Priority 3: Curves
+        for (i, curve) in editable.curves.iter().enumerate() {
+            let nearest = curve.nearest(local_point, 1e-6);
+            let nearest_point = curve.eval(nearest.t);
+            let dist = (nearest_point - local_point).hypot();
+            if dist < tolerance.curve {
+                return Some(VectorEditHit::Curve {
+                    shape_instance_id: object.id,
+                    curve_index: i,
+                    parameter_t: nearest.t,
+                });
+            }
+        }
+
+        // Priority 4: Fill
+        if shape.fill_color.is_some() && shape.path().contains(local_point) {
+            return Some(VectorEditHit::Fill {
+                shape_instance_id: object.id,
+            });
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

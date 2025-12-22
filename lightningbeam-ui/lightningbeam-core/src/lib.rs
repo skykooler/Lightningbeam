@@ -9,6 +9,8 @@ pub mod animation;
 pub mod path_interpolation;
 pub mod path_fitting;
 pub mod shape;
+pub mod bezier_vertex;
+pub mod bezpath_editing;
 pub mod object;
 pub mod layer;
 pub mod layer_tree;

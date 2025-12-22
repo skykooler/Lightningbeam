@@ -1911,6 +1911,24 @@ pub struct StagePane {
     pending_eyedropper_sample: Option<(egui::Pos2, super::ColorMode)>,
     // Last known viewport rect (for zoom-to-fit calculation)
     last_viewport_rect: Option<egui::Rect>,
+    // Vector editing cache
+    shape_editing_cache: Option<ShapeEditingCache>,
+}
+
+/// Cached data for editing a shape
+struct ShapeEditingCache {
+    /// The shape ID being edited
+    shape_id: uuid::Uuid,
+    /// The shape instance ID being edited
+    instance_id: uuid::Uuid,
+    /// Extracted editable curves and vertices
+    editable_data: lightningbeam_core::bezier_vertex::EditableBezierCurves,
+    /// The version index of the shape being edited
+    version_index: usize,
+    /// Transform from shape-local to world space
+    local_to_world: vello::kurbo::Affine,
+    /// Transform from world to shape-local space
+    world_to_local: vello::kurbo::Affine,
 }
 
 // Global counter for generating unique instance IDs
@@ -1930,6 +1948,7 @@ impl StagePane {
             instance_id,
             pending_eyedropper_sample: None,
             last_viewport_rect: None,
+            shape_editing_cache: None,
         }
     }
 
@@ -2021,11 +2040,12 @@ impl StagePane {
     ) {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::hit_test;
+        use lightningbeam_core::hit_test::{self, hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
+        use lightningbeam_core::bezpath_editing::{extract_editable_curves, mold_curve};
         use vello::kurbo::{Point, Rect as KurboRect, Affine};
 
         // Check if we have an active vector layer
-        let active_layer_id = match shared.active_layer_id {
+        let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return, // No active layer
         };
@@ -2044,7 +2064,37 @@ impl StagePane {
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
         // Mouse down: start interaction (use drag_started for immediate feedback)
+        // Scope this section to drop vector_layer borrow before drag handling
         if response.drag_started() || response.clicked() {
+            // VECTOR EDITING: Check for vertex/curve editing first (higher priority than selection)
+            let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
+            let vector_hit = hit_test_vector_editing(
+                vector_layer,
+                point,
+                &tolerance,
+                Affine::IDENTITY,
+                false, // Select tool doesn't show control points
+            );
+            // Priority 1: Vector editing (vertices and curves)
+            if let Some(hit) = vector_hit {
+                match hit {
+                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
+                        // Start editing a vertex
+                        self.start_vertex_editing(shape_instance_id, vertex_index, point, active_layer_id, shared);
+                        return;
+                    }
+                    VectorEditHit::Curve { shape_instance_id, curve_index, parameter_t } => {
+                        // Start editing a curve
+                        self.start_curve_editing(shape_instance_id, curve_index, parameter_t, point, active_layer_id, shared);
+                        return;
+                    }
+                    _ => {
+                        // Fill hit - fall through to normal selection
+                    }
+                }
+            }
+
+            // Priority 2: Normal selection/dragging (no vector element hit)
             // Hit test at click position
             // Test clip instances first (they're on top of shapes)
             let document = shared.action_executor.document();
@@ -2149,6 +2199,10 @@ impl StagePane {
         // Mouse drag: update tool state
         if response.dragged() {
             match shared.tool_state {
+                ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } => {
+                    // Vector editing - update happens in helper method
+                    self.update_vector_editing(point, shared);
+                }
                 ToolState::DraggingSelection { .. } => {
                     // Update current position (visual feedback only)
                     // Actual move happens on mouse up
@@ -2168,9 +2222,14 @@ impl StagePane {
         let drag_stopped = response.drag_stopped();
         let pointer_released = ui.input(|i| i.pointer.any_released());
         let is_drag_or_marquee = matches!(shared.tool_state, ToolState::DraggingSelection { .. } | ToolState::MarqueeSelecting { .. });
+        let is_vector_editing = matches!(shared.tool_state, ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. });
 
-        if drag_stopped || (pointer_released && is_drag_or_marquee) {
+        if drag_stopped || (pointer_released && (is_drag_or_marquee || is_vector_editing)) {
             match shared.tool_state.clone() {
+                ToolState::EditingVertex { shape_id, .. } | ToolState::EditingCurve { shape_id, .. } | ToolState::EditingControlPoint { shape_id, .. } => {
+                    // Finish vector editing - create action
+                    self.finish_vector_editing(shape_id, active_layer_id, shared);
+                }
                 ToolState::DraggingSelection { start_mouse, original_positions, .. } => {
                     // Calculate total delta
                     let delta = point - start_mouse;
@@ -2178,6 +2237,17 @@ impl StagePane {
                     if delta.x.abs() > 0.01 || delta.y.abs() > 0.01 {
                         // Create move actions with new positions
                         use std::collections::HashMap;
+
+                        // Get vector layer again (to avoid holding borrow from earlier)
+                        let document = shared.action_executor.document();
+                        let layer = match document.get_layer(&active_layer_id) {
+                            Some(l) => l,
+                            None => return,
+                        };
+                        let vector_layer = match layer {
+                            AnyLayer::Vector(vl) => vl,
+                            _ => return,
+                        };
 
                         // Separate shape instances from clip instances
                         let mut shape_instance_positions = HashMap::new();
@@ -2213,14 +2283,14 @@ impl StagePane {
                         // Create and submit move action for shape instances
                         if !shape_instance_positions.is_empty() {
                             use lightningbeam_core::actions::MoveShapeInstancesAction;
-                            let action = MoveShapeInstancesAction::new(*active_layer_id, shape_instance_positions);
+                            let action = MoveShapeInstancesAction::new(active_layer_id, shape_instance_positions);
                             shared.pending_actions.push(Box::new(action));
                         }
 
                         // Create and submit transform action for clip instances
                         if !clip_instance_transforms.is_empty() {
                             use lightningbeam_core::actions::TransformClipInstancesAction;
-                            let action = TransformClipInstancesAction::new(*active_layer_id, clip_instance_transforms);
+                            let action = TransformClipInstancesAction::new(active_layer_id, clip_instance_transforms);
                             shared.pending_actions.push(Box::new(action));
                         }
                     }
@@ -2237,8 +2307,18 @@ impl StagePane {
 
                     let selection_rect = KurboRect::new(min_x, min_y, max_x, max_y);
 
-                    // Hit test clip instances in rectangle
+                    // Get vector layer again (to avoid holding borrow from earlier)
                     let document = shared.action_executor.document();
+                    let layer = match document.get_layer(&active_layer_id) {
+                        Some(l) => l,
+                        None => return,
+                    };
+                    let vector_layer = match layer {
+                        AnyLayer::Vector(vl) => vl,
+                        _ => return,
+                    };
+
+                    // Hit test clip instances in rectangle
                     let clip_hits = hit_test::hit_test_clip_instances_in_rect(
                         &vector_layer.clip_instances,
                         document,
@@ -2290,6 +2370,515 @@ impl StagePane {
                 _ => {}
             }
         }
+    }
+
+    /// Start editing a vertex - called when user clicks on a vertex
+    fn start_vertex_editing(
+        &mut self,
+        shape_instance_id: uuid::Uuid,
+        vertex_index: usize,
+        mouse_pos: vello::kurbo::Point,
+        active_layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::extract_editable_curves;
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Affine;
+
+        // Get the vector layer
+        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let vector_layer = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        // Get the shape instance
+        let shape_instance = match vector_layer.get_object(&shape_instance_id) {
+            Some(obj) => obj,
+            None => return,
+        };
+
+        // Get the shape definition
+        let shape = match vector_layer.get_shape(&shape_instance.shape_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Extract editable curves
+        let editable_data = extract_editable_curves(shape.path());
+
+        // Validate vertex index
+        if vertex_index >= editable_data.vertices.len() {
+            return;
+        }
+
+        let vertex = &editable_data.vertices[vertex_index];
+
+        // Build transform matrices
+        let local_to_world = Affine::translate((shape_instance.transform.x, shape_instance.transform.y))
+            * Affine::rotate(shape_instance.transform.rotation)
+            * Affine::scale_non_uniform(shape_instance.transform.scale_x, shape_instance.transform.scale_y);
+        let world_to_local = local_to_world.inverse();
+
+        // Store editing cache
+        self.shape_editing_cache = Some(ShapeEditingCache {
+            shape_id: shape_instance.shape_id,
+            instance_id: shape_instance_id,
+            editable_data: editable_data.clone(),
+            version_index: shape.versions.len() - 1,
+            local_to_world,
+            world_to_local,
+        });
+
+        // Set tool state
+        *shared.tool_state = ToolState::EditingVertex {
+            shape_id: shape_instance.shape_id,
+            vertex_index,
+            start_pos: vertex.point,
+            start_mouse: mouse_pos,
+            affected_curve_indices: vertex.start_curves.iter()
+                .chain(vertex.end_curves.iter())
+                .copied()
+                .collect(),
+        };
+    }
+
+    /// Start editing a curve - called when user clicks on a curve
+    fn start_curve_editing(
+        &mut self,
+        shape_instance_id: uuid::Uuid,
+        curve_index: usize,
+        parameter_t: f64,
+        mouse_pos: vello::kurbo::Point,
+        active_layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::extract_editable_curves;
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Affine;
+
+        // Get the vector layer
+        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let vector_layer = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        // Get the shape instance
+        let shape_instance = match vector_layer.get_object(&shape_instance_id) {
+            Some(obj) => obj,
+            None => return,
+        };
+
+        // Get the shape definition
+        let shape = match vector_layer.get_shape(&shape_instance.shape_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Extract editable curves
+        let editable_data = extract_editable_curves(shape.path());
+
+        // Validate curve index
+        if curve_index >= editable_data.curves.len() {
+            return;
+        }
+
+        let original_curve = editable_data.curves[curve_index];
+
+        // Build transform matrices
+        let local_to_world = Affine::translate((shape_instance.transform.x, shape_instance.transform.y))
+            * Affine::rotate(shape_instance.transform.rotation)
+            * Affine::scale_non_uniform(shape_instance.transform.scale_x, shape_instance.transform.scale_y);
+        let world_to_local = local_to_world.inverse();
+
+        // Store editing cache
+        self.shape_editing_cache = Some(ShapeEditingCache {
+            shape_id: shape_instance.shape_id,
+            instance_id: shape_instance_id,
+            editable_data,
+            version_index: shape.versions.len() - 1,
+            local_to_world,
+            world_to_local,
+        });
+
+        // Set tool state
+        *shared.tool_state = ToolState::EditingCurve {
+            shape_id: shape_instance.shape_id,
+            curve_index,
+            original_curve,
+            start_mouse: mouse_pos,
+            parameter_t,
+        };
+    }
+
+    /// Update vector editing during drag
+    fn update_vector_editing(
+        &mut self,
+        mouse_pos: vello::kurbo::Point,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::{mold_curve, rebuild_bezpath};
+        use lightningbeam_core::tool::ToolState;
+        use vello::kurbo::Point;
+
+        // Clone tool state to get owned values
+        let tool_state = shared.tool_state.clone();
+
+        let cache = match &mut self.shape_editing_cache {
+            Some(c) => c,
+            None => return,
+        };
+
+        match tool_state {
+            ToolState::EditingVertex { vertex_index, start_pos, start_mouse, affected_curve_indices, .. } => {
+                // Transform mouse position to local space
+                let local_mouse = cache.world_to_local * mouse_pos;
+                let local_start_mouse = cache.world_to_local * start_mouse;
+
+                // Calculate delta in local space
+                let delta = local_mouse - local_start_mouse;
+                let new_vertex_pos = start_pos + delta;
+
+                // Update the vertex position
+                if vertex_index < cache.editable_data.vertices.len() {
+                    cache.editable_data.vertices[vertex_index].point = new_vertex_pos;
+                }
+
+                // Update all affected curves
+                for &curve_idx in affected_curve_indices.iter() {
+                    if curve_idx >= cache.editable_data.curves.len() {
+                        continue;
+                    }
+
+                    let curve = &mut cache.editable_data.curves[curve_idx];
+                    let vertex = &cache.editable_data.vertices[vertex_index];
+
+                    // Check if this curve starts at this vertex
+                    if vertex.start_curves.contains(&curve_idx) {
+                        // Update endpoint p0 and adjacent control point p1
+                        let endpoint_delta = new_vertex_pos - curve.p0;
+                        curve.p0 = new_vertex_pos;
+                        curve.p1 = curve.p1 + endpoint_delta;
+                    }
+
+                    // Check if this curve ends at this vertex
+                    if vertex.end_curves.contains(&curve_idx) {
+                        // Update endpoint p3 and adjacent control point p2
+                        let endpoint_delta = new_vertex_pos - curve.p3;
+                        curve.p3 = new_vertex_pos;
+                        curve.p2 = curve.p2 + endpoint_delta;
+                    }
+                }
+
+                // Note: We're only updating the cache here. The actual shape path will be updated
+                // via ModifyShapePathAction when the user releases the mouse button.
+                // For now, we'll skip live preview since we can't mutate through the vector_layer reference.
+            }
+            ToolState::EditingCurve { curve_index, original_curve, start_mouse, .. } => {
+                // Transform mouse positions to local space
+                let local_mouse = cache.world_to_local * mouse_pos;
+                let local_start_mouse = cache.world_to_local * start_mouse;
+
+                // Apply moldCurve algorithm
+                let molded_curve = mold_curve(&original_curve, &local_mouse, &local_start_mouse);
+
+                // Update the curve in the cache
+                if curve_index < cache.editable_data.curves.len() {
+                    cache.editable_data.curves[curve_index] = molded_curve;
+                }
+
+                // Note: We're only updating the cache here. The actual shape path will be updated
+                // via ModifyShapePathAction when the user releases the mouse button.
+            }
+            ToolState::EditingControlPoint { curve_index, point_index, .. } => {
+                // Transform mouse position to local space
+                let local_mouse = cache.world_to_local * mouse_pos;
+
+                // Calculate new control point position
+                let new_control_point = local_mouse;
+
+                // Update the control point in the cache
+                if curve_index < cache.editable_data.curves.len() {
+                    let curve = &mut cache.editable_data.curves[curve_index];
+                    match point_index {
+                        1 => curve.p1 = new_control_point,
+                        2 => curve.p2 = new_control_point,
+                        _ => {} // Invalid point index
+                    }
+                }
+
+                // Note: We're only updating the cache here. The actual shape path will be updated
+                // via ModifyShapePathAction when the user releases the mouse button.
+            }
+            _ => {}
+        }
+    }
+
+    /// Finish vector editing and create action for undo/redo
+    fn finish_vector_editing(
+        &mut self,
+        shape_id: uuid::Uuid,
+        layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::rebuild_bezpath;
+        use lightningbeam_core::actions::ModifyShapePathAction;
+        use lightningbeam_core::tool::ToolState;
+
+        let cache = match self.shape_editing_cache.take() {
+            Some(c) => c,
+            None => {
+                *shared.tool_state = ToolState::Idle;
+                return;
+            }
+        };
+
+        // Get the original shape to retrieve the old path
+        let document = shared.action_executor.document();
+        let layer = match document.get_layer(&layer_id) {
+            Some(l) => l,
+            None => {
+                *shared.tool_state = ToolState::Idle;
+                return;
+            }
+        };
+
+        let vector_layer = match layer {
+            lightningbeam_core::layer::AnyLayer::Vector(vl) => vl,
+            _ => {
+                *shared.tool_state = ToolState::Idle;
+                return;
+            }
+        };
+
+        let old_path = match vector_layer.get_shape(&shape_id) {
+            Some(shape) => {
+                if cache.version_index < shape.versions.len() {
+                    // The shape has been temporarily updated during dragging
+                    // We need to get the original path from history or recreate it
+                    // For now, we'll use the version_index we stored
+                    if let Some(version) = shape.versions.get(cache.version_index) {
+                        version.path.clone()
+                    } else {
+                        // Fallback: use current path
+                        shape.path().clone()
+                    }
+                } else {
+                    shape.path().clone()
+                }
+            }
+            None => {
+                *shared.tool_state = ToolState::Idle;
+                return;
+            }
+        };
+
+        // Rebuild the new path from edited curves
+        let new_path = rebuild_bezpath(&cache.editable_data);
+
+        // Only create action if the path actually changed
+        if old_path != new_path {
+            let action = ModifyShapePathAction::with_old_path(
+                layer_id,
+                shape_id,
+                cache.version_index,
+                old_path,
+                new_path,
+            );
+            shared.pending_actions.push(Box::new(action));
+        }
+
+        // Reset tool state
+        *shared.tool_state = ToolState::Idle;
+    }
+
+    /// Handle BezierEdit tool - similar to Select but with control point editing
+    fn handle_bezier_edit_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shift_held: bool,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::hit_test::{self, hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
+        use vello::kurbo::{Point, Affine};
+
+        // Check if we have an active vector layer
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(layer) => layer,
+            None => return,
+        };
+
+        // Only work on VectorLayer
+        let vector_layer = match active_layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // VECTOR EDITING: Check for control points, vertices, and curves (higher priority than selection)
+        let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
+        let vector_hit = hit_test_vector_editing(
+            vector_layer,
+            point,
+            &tolerance,
+            Affine::IDENTITY,
+            true, // BezierEdit tool shows control points
+        );
+
+        // Mouse down: start interaction
+        if response.drag_started() || response.clicked() {
+            // Priority 1: Vector editing (control points, vertices, and curves)
+            if let Some(hit) = vector_hit {
+                match hit {
+                    VectorEditHit::ControlPoint { shape_instance_id, curve_index, point_index } => {
+                        // Start editing a control point
+                        self.start_control_point_editing(shape_instance_id, curve_index, point_index, point, active_layer_id, shared);
+                        return;
+                    }
+                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
+                        // Start editing a vertex
+                        self.start_vertex_editing(shape_instance_id, vertex_index, point, active_layer_id, shared);
+                        return;
+                    }
+                    VectorEditHit::Curve { shape_instance_id, curve_index, parameter_t } => {
+                        // Start editing a curve
+                        self.start_curve_editing(shape_instance_id, curve_index, parameter_t, point, active_layer_id, shared);
+                        return;
+                    }
+                    _ => {
+                        // Fill hit - no selection in BezierEdit mode, just ignore
+                    }
+                }
+            }
+        }
+
+        // Mouse drag: update tool state
+        if response.dragged() {
+            match shared.tool_state {
+                ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. } => {
+                    // Vector editing - update happens in helper method
+                    self.update_vector_editing(point, shared);
+                }
+                _ => {}
+            }
+        }
+
+        // Mouse up: finish interaction
+        let drag_stopped = response.drag_stopped();
+        let pointer_released = ui.input(|i| i.pointer.any_released());
+        let is_vector_editing = matches!(shared.tool_state, ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. });
+
+        if drag_stopped || (pointer_released && is_vector_editing) {
+            match shared.tool_state.clone() {
+                ToolState::EditingVertex { shape_id, .. } | ToolState::EditingCurve { shape_id, .. } | ToolState::EditingControlPoint { shape_id, .. } => {
+                    // Finish vector editing - create action
+                    self.finish_vector_editing(shape_id, active_layer_id, shared);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Start editing a control point - called when user clicks on a control point
+    fn start_control_point_editing(
+        &mut self,
+        shape_instance_id: uuid::Uuid,
+        curve_index: usize,
+        point_index: u8,
+        mouse_pos: vello::kurbo::Point,
+        active_layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::extract_editable_curves;
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Affine;
+
+        // Get the vector layer
+        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+
+        let vector_layer = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        // Get the shape instance
+        let shape_instance = match vector_layer.get_object(&shape_instance_id) {
+            Some(obj) => obj,
+            None => return,
+        };
+
+        // Get the shape definition
+        let shape = match vector_layer.get_shape(&shape_instance.shape_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Extract editable curves
+        let editable_data = extract_editable_curves(shape.path());
+
+        // Validate curve index
+        if curve_index >= editable_data.curves.len() {
+            return;
+        }
+
+        let original_curve = editable_data.curves[curve_index];
+
+        // Get the control point position
+        let start_pos = match point_index {
+            1 => original_curve.p1,
+            2 => original_curve.p2,
+            _ => return, // Invalid point index
+        };
+
+        // Build transform matrices
+        let local_to_world = Affine::translate((shape_instance.transform.x, shape_instance.transform.y))
+            * Affine::rotate(shape_instance.transform.rotation)
+            * Affine::scale_non_uniform(shape_instance.transform.scale_x, shape_instance.transform.scale_y);
+        let world_to_local = local_to_world.inverse();
+
+        // Store editing cache
+        self.shape_editing_cache = Some(ShapeEditingCache {
+            shape_id: shape_instance.shape_id,
+            instance_id: shape_instance_id,
+            editable_data,
+            version_index: shape.versions.len() - 1,
+            local_to_world,
+            world_to_local,
+        });
+
+        // Set tool state
+        *shared.tool_state = ToolState::EditingControlPoint {
+            shape_id: shape_instance.shape_id,
+            curve_index,
+            point_index,
+            original_curve,
+            start_pos,
+        };
     }
 
     fn handle_rectangle_tool(
@@ -4922,6 +5511,9 @@ impl StagePane {
                 Tool::Select => {
                     self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
                 }
+                Tool::BezierEdit => {
+                    self.handle_bezier_edit_tool(ui, &response, world_pos, shift_held, shared);
+                }
                 Tool::Rectangle => {
                     self.handle_rectangle_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
@@ -5007,7 +5599,250 @@ impl StagePane {
         }
     }
 
+    /// Render vector editing overlays (vertices, control points, handles)
+    fn render_vector_editing_overlays(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        shared: &SharedPaneState,
+    ) {
+        use lightningbeam_core::bezpath_editing::extract_editable_curves;
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::tool::{Tool, ToolState};
+        use lightningbeam_core::hit_test::{hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
+        use vello::kurbo::{Affine, Point};
+
+        // Only show overlays for Select and BezierEdit tools
+        let is_bezier_edit_mode = matches!(*shared.selected_tool, Tool::BezierEdit);
+        let show_overlays = matches!(*shared.selected_tool, Tool::Select | Tool::BezierEdit);
+
+        if !show_overlays {
+            return;
+        }
+
+        // Get active layer
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(AnyLayer::Vector(layer)) => layer,
+            _ => return,
+        };
+
+        // Get mouse position in world coordinates
+        let mouse_screen_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+        let mouse_canvas_pos = mouse_screen_pos - rect.min;
+        let mouse_world_pos = Point::new(
+            ((mouse_canvas_pos.x - self.pan_offset.x) / self.zoom) as f64,
+            ((mouse_canvas_pos.y - self.pan_offset.y) / self.zoom) as f64,
+        );
+
+        // Helper to convert world coordinates to screen coordinates
+        let world_to_screen = |world_pos: Point| -> egui::Pos2 {
+            let screen_x = (world_pos.x as f32 * self.zoom) + self.pan_offset.x + rect.min.x;
+            let screen_y = (world_pos.y as f32 * self.zoom) + self.pan_offset.y + rect.min.y;
+            egui::pos2(screen_x, screen_y)
+        };
+
+        let painter = ui.painter();
+
+        // Perform hit testing to find what's under the mouse
+        let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
+        let hit = hit_test_vector_editing(
+            layer,
+            mouse_world_pos,
+            &tolerance,
+            Affine::IDENTITY,
+            is_bezier_edit_mode,
+        );
+
+        if is_bezier_edit_mode {
+            // BezierEdit mode: Show all vertices and control points for all shapes
+            // Also highlight the element under the mouse
+            let (hover_vertex, hover_control_point) = match hit {
+                Some(VectorEditHit::Vertex { shape_instance_id, vertex_index }) => {
+                    (Some((shape_instance_id, vertex_index)), None)
+                }
+                Some(VectorEditHit::ControlPoint { shape_instance_id, curve_index, point_index }) => {
+                    (None, Some((shape_instance_id, curve_index, point_index)))
+                }
+                _ => (None, None),
+            };
+
+            for instance in &layer.shape_instances {
+                let shape = match layer.get_shape(&instance.shape_id) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                let local_to_world = instance.to_affine();
+                let editable = extract_editable_curves(shape.path());
+
+                // Determine active element from tool state (being dragged)
+                let (active_vertex, active_control_point) = match &*shared.tool_state {
+                    ToolState::EditingVertex { shape_id, vertex_index, .. } if *shape_id == instance.shape_id => {
+                        (Some(*vertex_index), None)
+                    }
+                    ToolState::EditingControlPoint { shape_id, curve_index, point_index, .. }
+                        if *shape_id == instance.shape_id => {
+                        (None, Some((*curve_index, *point_index)))
+                    }
+                    _ => (None, None),
+                };
+
+                // Render all vertices
+                for (i, vertex) in editable.vertices.iter().enumerate() {
+                    let world_pos = local_to_world * vertex.point;
+                    let screen_pos = world_to_screen(world_pos);
+                    let vertex_size = 10.0;
+
+                    let rect = egui::Rect::from_center_size(
+                        screen_pos,
+                        egui::vec2(vertex_size, vertex_size),
+                    );
+
+                    // Determine color: orange if active (dragging), yellow if hover, black otherwise
+                    let (fill_color, stroke_width) = if Some(i) == active_vertex {
+                        (egui::Color32::from_rgb(255, 200, 0), 2.0) // Orange if being dragged
+                    } else if hover_vertex == Some((instance.id, i)) {
+                        (egui::Color32::from_rgb(255, 255, 100), 2.0) // Yellow if hovering
+                    } else {
+                        (egui::Color32::from_rgba_premultiplied(0, 0, 0, 170), 1.0)
+                    };
+
+                    painter.rect_filled(rect, 0.0, fill_color);
+                    painter.rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(stroke_width, egui::Color32::WHITE),
+                        egui::StrokeKind::Middle,
+                    );
+                }
+
+                // Render all control points
+                for (i, curve) in editable.curves.iter().enumerate() {
+                    let p0_world = local_to_world * curve.p0;
+                    let p1_world = local_to_world * curve.p1;
+                    let p2_world = local_to_world * curve.p2;
+                    let p3_world = local_to_world * curve.p3;
+
+                    let p0_screen = world_to_screen(p0_world);
+                    let p1_screen = world_to_screen(p1_world);
+                    let p2_screen = world_to_screen(p2_world);
+                    let p3_screen = world_to_screen(p3_world);
+
+                    // Draw handle lines
+                    painter.line_segment(
+                        [p0_screen, p1_screen],
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 255)),
+                    );
+                    painter.line_segment(
+                        [p2_screen, p3_screen],
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 255)),
+                    );
+
+                    let radius = 6.0;
+
+                    // p1 control point
+                    let (p1_fill, p1_stroke_width) = if active_control_point == Some((i, 1)) {
+                        (egui::Color32::from_rgb(255, 150, 0), 2.0) // Orange if being dragged
+                    } else if hover_control_point == Some((instance.id, i, 1)) {
+                        (egui::Color32::from_rgb(150, 150, 255), 2.0) // Lighter blue if hovering
+                    } else {
+                        (egui::Color32::from_rgb(100, 100, 255), 1.0)
+                    };
+                    painter.circle_filled(p1_screen, radius, p1_fill);
+                    painter.circle_stroke(p1_screen, radius, egui::Stroke::new(p1_stroke_width, egui::Color32::WHITE));
+
+                    // p2 control point
+                    let (p2_fill, p2_stroke_width) = if active_control_point == Some((i, 2)) {
+                        (egui::Color32::from_rgb(255, 150, 0), 2.0) // Orange if being dragged
+                    } else if hover_control_point == Some((instance.id, i, 2)) {
+                        (egui::Color32::from_rgb(150, 150, 255), 2.0) // Lighter blue if hovering
+                    } else {
+                        (egui::Color32::from_rgb(100, 100, 255), 1.0)
+                    };
+                    painter.circle_filled(p2_screen, radius, p2_fill);
+                    painter.circle_stroke(p2_screen, radius, egui::Stroke::new(p2_stroke_width, egui::Color32::WHITE));
+                }
+            }
+        } else {
+            // Select mode: Only show hover highlights based on hit testing
+            if let Some(hit_result) = hit {
+                match hit_result {
+                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
+                        // Highlight the vertex under the mouse
+                        if let Some(instance) = layer.shape_instances.iter().find(|i| i.id == shape_instance_id) {
+                            if let Some(shape) = layer.get_shape(&instance.shape_id) {
+                                let local_to_world = instance.to_affine();
+                                let editable = extract_editable_curves(shape.path());
+
+                                if vertex_index < editable.vertices.len() {
+                                    let vertex = &editable.vertices[vertex_index];
+                                    let world_pos = local_to_world * vertex.point;
+                                    let screen_pos = world_to_screen(world_pos);
+                                    let vertex_size = 10.0;
+
+                                    let rect = egui::Rect::from_center_size(
+                                        screen_pos,
+                                        egui::vec2(vertex_size, vertex_size),
+                                    );
+
+                                    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(255, 200, 0));
+                                    painter.rect_stroke(
+                                        rect,
+                                        0.0,
+                                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                        egui::StrokeKind::Middle,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    VectorEditHit::Curve { shape_instance_id, curve_index, .. } => {
+                        // Highlight the curve under the mouse
+                        if let Some(instance) = layer.shape_instances.iter().find(|i| i.id == shape_instance_id) {
+                            if let Some(shape) = layer.get_shape(&instance.shape_id) {
+                                let local_to_world = instance.to_affine();
+                                let editable = extract_editable_curves(shape.path());
+
+                                if curve_index < editable.curves.len() {
+                                    let curve = &editable.curves[curve_index];
+                                    let num_samples = 20;
+
+                                    for j in 0..num_samples {
+                                        let t1 = j as f64 / num_samples as f64;
+                                        let t2 = (j + 1) as f64 / num_samples as f64;
+
+                                        use vello::kurbo::ParamCurve;
+                                        let p1_local = curve.eval(t1);
+                                        let p2_local = curve.eval(t2);
+
+                                        let p1_world = local_to_world * p1_local;
+                                        let p2_world = local_to_world * p2_local;
+
+                                        let p1_screen = world_to_screen(p1_world);
+                                        let p2_screen = world_to_screen(p2_world);
+
+                                        painter.line_segment(
+                                            [p1_screen, p2_screen],
+                                            egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 255)),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
+
+
 
 impl PaneRenderer for StagePane {
     fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
@@ -5407,6 +6242,9 @@ impl PaneRenderer for StagePane {
             egui::FontId::proportional(14.0),
             egui::Color32::from_gray(200),
         );
+
+        // Render vector editing overlays (vertices, control points, etc.)
+        self.render_vector_editing_overlays(ui, rect, shared);
     }
 
     fn name(&self) -> &str {

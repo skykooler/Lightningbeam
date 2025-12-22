@@ -98,6 +98,33 @@ pub enum ToolState {
         current_point: Point,  // Current mouse position (determines radius)
         num_sides: u32,        // Number of sides (from properties, default 5)
     },
+
+    /// Editing a vertex (dragging it and connected curves)
+    EditingVertex {
+        shape_id: Uuid,                   // Which shape is being edited
+        vertex_index: usize,              // Which vertex in the vertices array
+        start_pos: Point,                 // Vertex position when drag started
+        start_mouse: Point,               // Mouse position when drag started
+        affected_curve_indices: Vec<usize>, // Which curves connect to this vertex
+    },
+
+    /// Editing a curve (reshaping with moldCurve algorithm)
+    EditingCurve {
+        shape_id: Uuid,            // Which shape is being edited
+        curve_index: usize,        // Which curve in the curves array
+        original_curve: vello::kurbo::CubicBez, // The curve when drag started
+        start_mouse: Point,        // Mouse position when drag started
+        parameter_t: f64,          // Parameter where the drag started (0.0-1.0)
+    },
+
+    /// Editing a control point (BezierEdit tool only)
+    EditingControlPoint {
+        shape_id: Uuid,            // Which shape is being edited
+        curve_index: usize,        // Which curve owns this control point
+        point_index: u8,           // 1 or 2 (p1 or p2 of the cubic bezier)
+        original_curve: vello::kurbo::CubicBez, // The curve when drag started
+        start_pos: Point,          // Control point position when drag started
+    },
 }
 
 /// Path simplification mode for the draw tool
