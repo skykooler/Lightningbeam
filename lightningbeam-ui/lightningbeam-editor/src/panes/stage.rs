@@ -358,6 +358,7 @@ struct VelloCallback {
     eyedropper_request: Option<(egui::Pos2, super::ColorMode)>, // Pending eyedropper sample
     playback_time: f64, // Current playback time for animation evaluation
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
+    shape_editing_cache: Option<ShapeEditingCache>, // Cache for vector editing preview
 }
 
 impl VelloCallback {
@@ -378,8 +379,9 @@ impl VelloCallback {
         eyedropper_request: Option<(egui::Pos2, super::ColorMode)>,
         playback_time: f64,
         video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
+        shape_editing_cache: Option<ShapeEditingCache>,
     ) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time, video_manager }
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time, video_manager, shape_editing_cache }
     }
 }
 
@@ -440,11 +442,16 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             instance_resources.ensure_hdr_texture(device, &shared, width, height);
 
             let mut image_cache = shared.image_cache.lock().unwrap();
+
+            // Skip rendering the shape instance being edited (for vector editing preview)
+            let skip_instance_id = self.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
+
             let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
                 &self.document,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
+                skip_instance_id,
             );
             drop(image_cache);
 
@@ -679,12 +686,17 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Legacy single-scene rendering
             let mut scene = vello::Scene::new();
             let mut image_cache = shared.image_cache.lock().unwrap();
+
+            // Skip rendering the shape instance being edited (for vector editing preview)
+            let skip_instance_id = self.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
+
             lightningbeam_core::renderer::render_document_with_transform(
                 &self.document,
                 &mut scene,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
+                skip_instance_id,
             );
             drop(image_cache);
             scene
@@ -1199,6 +1211,59 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
                     }
 
+                    // 8. Draw vector editing preview
+                    if let Some(cache) = &self.shape_editing_cache {
+                        use lightningbeam_core::bezpath_editing::rebuild_bezpath;
+
+                        // Rebuild the path from the modified editable curves
+                        let preview_path = rebuild_bezpath(&cache.editable_data);
+
+                        // Get the layer first, then the shape from the layer
+                        if let Some(layer) = (*self.document).root.get_child(&cache.layer_id) {
+                            if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
+                                if let Some(shape) = vector_layer.get_shape(&cache.shape_id) {
+                                    let transform = camera_transform * cache.local_to_world;
+
+                                    // Render fill with FULL OPACITY (same as original)
+                                    if let Some(fill_color) = &shape.fill_color {
+                                        scene.fill(
+                                            shape.fill_rule.into(),
+                                            transform,
+                                            fill_color.to_peniko(),
+                                            None,
+                                            &preview_path,
+                                        );
+                                    }
+
+                                    // Render stroke with FULL OPACITY (same as original)
+                                    if let Some(stroke_color) = &shape.stroke_color {
+                                        if let Some(stroke_style) = &shape.stroke_style {
+                                            scene.stroke(
+                                                &stroke_style.to_stroke(),
+                                                transform,
+                                                stroke_color.to_peniko(),
+                                                None,
+                                                &preview_path,
+                                            );
+                                        }
+                                    }
+
+                                    // If shape has neither fill nor stroke, render with default stroke
+                                    if shape.fill_color.is_none() && shape.stroke_color.is_none() {
+                                        let default_stroke = vello::kurbo::Stroke::new(2.0);
+                                        scene.stroke(
+                                            &default_stroke,
+                                            transform,
+                                            vello::peniko::Color::from_rgba8(100, 150, 255, 255),
+                                            None,
+                                            &preview_path,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 6. Draw transform tool handles (when Transform tool is active)
                     use lightningbeam_core::tool::Tool;
                     let should_draw_transform_handles = matches!(self.selected_tool, Tool::Transform) && !self.selection.is_empty();
@@ -1683,15 +1748,24 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 // The overlay scene was built above with all the UI elements
                 if let Some(hdr_view) = &instance_resources.hdr_texture_view {
                     let mut buffer_pool = shared.buffer_pool.lock().unwrap();
-                    let overlay_spec = lightningbeam_core::gpu::BufferSpec::new(
+                    let overlay_srgb_spec = lightningbeam_core::gpu::BufferSpec::new(
                         width,
                         height,
                         lightningbeam_core::gpu::BufferFormat::Rgba8Srgb,
                     );
-                    let overlay_handle = buffer_pool.acquire(device, overlay_spec);
+                    let overlay_hdr_spec = lightningbeam_core::gpu::BufferSpec::new(
+                        width,
+                        height,
+                        lightningbeam_core::gpu::BufferFormat::Rgba16Float,
+                    );
+                    let overlay_srgb_handle = buffer_pool.acquire(device, overlay_srgb_spec);
+                    let overlay_hdr_handle = buffer_pool.acquire(device, overlay_hdr_spec);
 
-                    if let Some(overlay_view) = buffer_pool.get_view(overlay_handle) {
-                        // Render overlay scene to temp buffer
+                    if let (Some(overlay_srgb_view), Some(overlay_hdr_view)) = (
+                        buffer_pool.get_view(overlay_srgb_handle),
+                        buffer_pool.get_view(overlay_hdr_handle),
+                    ) {
+                        // Render overlay scene to sRGB buffer
                         let overlay_params = vello::RenderParams {
                             base_color: vello::peniko::Color::TRANSPARENT,
                             width,
@@ -1700,11 +1774,18 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         };
 
                         if let Ok(mut renderer) = shared.renderer.lock() {
-                            renderer.render_to_texture(device, queue, &scene, overlay_view, &overlay_params).ok();
+                            renderer.render_to_texture(device, queue, &scene, overlay_srgb_view, &overlay_params).ok();
                         }
 
-                        // Composite overlay onto HDR texture (sRGB→linear conversion happens in compositor)
-                        let overlay_layer = lightningbeam_core::gpu::CompositorLayer::normal(overlay_handle, 1.0);
+                        // Convert sRGB to linear HDR (same as main document layers)
+                        let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("overlay_srgb_to_linear_encoder"),
+                        });
+                        shared.srgb_to_linear.convert(device, &mut convert_encoder, overlay_srgb_view, overlay_hdr_view);
+                        queue.submit(Some(convert_encoder.finish()));
+
+                        // Composite overlay onto HDR texture
+                        let overlay_layer = lightningbeam_core::gpu::CompositorLayer::normal(overlay_hdr_handle, 1.0);
                         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("overlay_composite_encoder"),
                         });
@@ -1720,7 +1801,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         queue.submit(Some(encoder.finish()));
                     }
 
-                    buffer_pool.release(overlay_handle);
+                    buffer_pool.release(overlay_srgb_handle);
+                    buffer_pool.release(overlay_hdr_handle);
                     drop(buffer_pool);
                 }
 
@@ -1916,7 +1998,10 @@ pub struct StagePane {
 }
 
 /// Cached data for editing a shape
+#[derive(Clone)]
 struct ShapeEditingCache {
+    /// The layer ID containing the shape being edited
+    layer_id: uuid::Uuid,
     /// The shape ID being edited
     shape_id: uuid::Uuid,
     /// The shape instance ID being edited
@@ -2428,6 +2513,7 @@ impl StagePane {
 
         // Store editing cache
         self.shape_editing_cache = Some(ShapeEditingCache {
+            layer_id: active_layer_id,
             shape_id: shape_instance.shape_id,
             instance_id: shape_instance_id,
             editable_data: editable_data.clone(),
@@ -2505,6 +2591,7 @@ impl StagePane {
 
         // Store editing cache
         self.shape_editing_cache = Some(ShapeEditingCache {
+            layer_id: active_layer_id,
             shape_id: shape_instance.shape_id,
             instance_id: shape_instance_id,
             editable_data,
@@ -2865,6 +2952,7 @@ impl StagePane {
 
         // Store editing cache
         self.shape_editing_cache = Some(ShapeEditingCache {
+            layer_id: active_layer_id,
             shape_id: shape_instance.shape_id,
             instance_id: shape_instance_id,
             editable_data,
@@ -5680,7 +5768,17 @@ impl StagePane {
                 };
 
                 let local_to_world = instance.to_affine();
-                let editable = extract_editable_curves(shape.path());
+
+                // Use modified curves from cache if this instance is being edited
+                let editable = if let Some(cache) = &self.shape_editing_cache {
+                    if cache.instance_id == instance.id {
+                        cache.editable_data.clone()
+                    } else {
+                        extract_editable_curves(shape.path())
+                    }
+                } else {
+                    extract_editable_curves(shape.path())
+                };
 
                 // Determine active element from tool state (being dragged)
                 let (active_vertex, active_control_point) = match &*shared.tool_state {
@@ -5779,7 +5877,17 @@ impl StagePane {
                         if let Some(instance) = layer.shape_instances.iter().find(|i| i.id == shape_instance_id) {
                             if let Some(shape) = layer.get_shape(&instance.shape_id) {
                                 let local_to_world = instance.to_affine();
-                                let editable = extract_editable_curves(shape.path());
+
+                                // Use modified curves from cache if this instance is being edited
+                                let editable = if let Some(cache) = &self.shape_editing_cache {
+                                    if cache.instance_id == instance.id {
+                                        cache.editable_data.clone()
+                                    } else {
+                                        extract_editable_curves(shape.path())
+                                    }
+                                } else {
+                                    extract_editable_curves(shape.path())
+                                };
 
                                 if vertex_index < editable.vertices.len() {
                                     let vertex = &editable.vertices[vertex_index];
@@ -5808,7 +5916,17 @@ impl StagePane {
                         if let Some(instance) = layer.shape_instances.iter().find(|i| i.id == shape_instance_id) {
                             if let Some(shape) = layer.get_shape(&instance.shape_id) {
                                 let local_to_world = instance.to_affine();
-                                let editable = extract_editable_curves(shape.path());
+
+                                // Use modified curves from cache if this instance is being edited
+                                let editable = if let Some(cache) = &self.shape_editing_cache {
+                                    if cache.instance_id == instance.id {
+                                        cache.editable_data.clone()
+                                    } else {
+                                        extract_editable_curves(shape.path())
+                                    }
+                                } else {
+                                    extract_editable_curves(shape.path())
+                                };
 
                                 if curve_index < editable.curves.len() {
                                     let curve = &editable.curves[curve_index];
@@ -6226,6 +6344,7 @@ impl PaneRenderer for StagePane {
             self.pending_eyedropper_sample,
             *shared.playback_time,
             shared.video_manager.clone(),
+            self.shape_editing_cache.clone(),
         );
 
         let cb = egui_wgpu::Callback::new_paint_callback(

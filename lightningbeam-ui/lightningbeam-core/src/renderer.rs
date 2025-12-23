@@ -178,6 +178,7 @@ pub fn render_document_for_compositing(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) -> CompositeRenderResult {
     let time = document.current_time;
 
@@ -211,6 +212,7 @@ pub fn render_document_for_compositing(
             base_transform,
             image_cache,
             video_manager,
+            skip_instance_id,
         );
         rendered_layers.push(rendered);
     }
@@ -235,6 +237,7 @@ pub fn render_layer_isolated(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) -> RenderedLayer {
     let layer_id = layer.id();
     let opacity = layer.opacity() as f32;
@@ -256,6 +259,7 @@ pub fn render_layer_isolated(
                 1.0, // Full opacity - layer opacity handled in compositing
                 image_cache,
                 video_manager,
+                skip_instance_id,
             );
             rendered.has_content = !vector_layer.shape_instances.is_empty()
                 || !vector_layer.clip_instances.is_empty();
@@ -302,6 +306,7 @@ fn render_vector_layer_to_scene(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // Render using the existing function but to this isolated scene
     render_vector_layer(
@@ -313,6 +318,7 @@ fn render_vector_layer_to_scene(
         parent_opacity,
         image_cache,
         video_manager,
+        skip_instance_id,
     );
 }
 
@@ -349,7 +355,7 @@ pub fn render_document(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
 ) {
-    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache, video_manager);
+    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache, video_manager, None);
 }
 
 /// Render a document to a Vello scene with a base transform
@@ -360,13 +366,14 @@ pub fn render_document_with_transform(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // 1. Draw background
     render_background(document, scene, base_transform);
 
     // 2. Recursively render the root graphics object at current time
     let time = document.current_time;
-    render_graphics_object(document, time, scene, base_transform, image_cache, video_manager);
+    render_graphics_object(document, time, scene, base_transform, image_cache, video_manager, skip_instance_id);
 }
 
 /// Draw the document background
@@ -393,6 +400,7 @@ fn render_graphics_object(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // Check if any layers are soloed
     let any_soloed = document.visible_layers().any(|layer| layer.soloed());
@@ -405,11 +413,11 @@ fn render_graphics_object(
         if any_soloed {
             // Only render soloed layers when solo is active
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
             }
         } else {
             // Render all visible layers when no solo is active
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
         }
     }
 }
@@ -424,10 +432,11 @@ fn render_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) {
     match layer {
         AnyLayer::Vector(vector_layer) => {
-            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager)
+            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager, skip_instance_id)
         }
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
@@ -580,7 +589,7 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager, None);
     }
 }
 
@@ -761,6 +770,7 @@ fn render_vector_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
@@ -772,6 +782,11 @@ fn render_vector_layer(
 
     // Render each shape instance in the layer
     for shape_instance in &layer.shape_instances {
+        // Skip this instance if it's being edited
+        if Some(shape_instance.id) == skip_instance_id {
+            continue;
+        }
+
         // Get the shape for this instance
         let Some(shape) = layer.get_shape(&shape_instance.shape_id) else {
             continue;

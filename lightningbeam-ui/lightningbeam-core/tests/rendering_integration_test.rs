@@ -54,9 +54,10 @@ fn test_render_empty_document() {
     let document = Document::new("Empty");
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
 
     // Should not panic
-    render_document(&document, &mut scene, &mut image_cache);
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -64,9 +65,10 @@ fn test_render_document_with_shapes() {
     let (document, _ids) = setup_rendering_document();
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
 
     // Should render all 3 layers without error
-    render_document(&document, &mut scene, &mut image_cache);
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -74,10 +76,11 @@ fn test_render_with_transform() {
     let (document, _ids) = setup_rendering_document();
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
 
     // Render with zoom and pan
     let transform = Affine::translate((100.0, 50.0)) * Affine::scale(2.0);
-    render_document_with_transform(&document, &mut scene, transform, &mut image_cache);
+    render_document_with_transform(&document, &mut scene, transform, &mut image_cache, &video_manager, None);
 }
 
 #[test]
@@ -102,7 +105,8 @@ fn test_render_solo_single_layer() {
     // Render should work
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -126,7 +130,8 @@ fn test_render_solo_multiple_layers() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -143,7 +148,8 @@ fn test_render_hidden_layer_not_rendered() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -168,7 +174,8 @@ fn test_render_with_layer_opacity() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -206,7 +213,8 @@ fn test_render_with_clip_instances() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -232,7 +240,8 @@ fn test_render_clip_instance_outside_time_range() {
     // Clip shouldn't render (it hasn't started yet)
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -252,7 +261,8 @@ fn test_render_all_layers_hidden() {
     // Should still render (just background)
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -280,7 +290,8 @@ fn test_render_solo_hidden_layer_interaction() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
@@ -290,18 +301,20 @@ fn test_render_background_color() {
 
     let mut scene = Scene::new();
     let mut image_cache = ImageCache::new();
-    render_document(&document, &mut scene, &mut image_cache);
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
+    render_document(&document, &mut scene, &mut image_cache, &video_manager);
 }
 
 #[test]
 fn test_render_at_different_times() {
     let (mut document, _ids) = setup_rendering_document();
     let mut image_cache = ImageCache::new();
+    let video_manager = std::sync::Arc::new(std::sync::Mutex::new(lightningbeam_core::video::VideoManager::new()));
 
     // Render at different times
     for time in [0.0, 0.5, 1.0, 2.5, 5.0, 10.0] {
         document.set_time(time);
         let mut scene = Scene::new();
-        render_document(&document, &mut scene, &mut image_cache);
+        render_document(&document, &mut scene, &mut image_cache, &video_manager);
     }
 }
