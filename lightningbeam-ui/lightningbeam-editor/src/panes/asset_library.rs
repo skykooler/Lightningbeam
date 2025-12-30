@@ -24,6 +24,7 @@ const THUMBNAIL_PREVIEW_SECONDS: f64 = 10.0;
 // Layout constants
 const SEARCH_BAR_HEIGHT: f32 = 30.0;
 const CATEGORY_TAB_HEIGHT: f32 = 28.0;
+const BREADCRUMB_HEIGHT: f32 = 24.0;
 const ITEM_HEIGHT: f32 = 40.0;
 const ITEM_PADDING: f32 = 4.0;
 const LIST_THUMBNAIL_SIZE: f32 = 32.0;
@@ -662,6 +663,38 @@ pub struct AssetEntry {
     pub is_builtin: bool,
 }
 
+/// Folder entry for display
+#[derive(Debug, Clone)]
+pub struct FolderEntry {
+    pub id: Uuid,
+    pub name: String,
+    pub category: AssetCategory,
+    pub item_count: usize,
+}
+
+/// Library item - either a folder or an asset
+#[derive(Debug, Clone)]
+pub enum LibraryItem {
+    Folder(FolderEntry),
+    Asset(AssetEntry),
+}
+
+impl LibraryItem {
+    pub fn id(&self) -> Uuid {
+        match self {
+            LibraryItem::Folder(f) => f.id,
+            LibraryItem::Asset(a) => a.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            LibraryItem::Folder(f) => &f.name,
+            LibraryItem::Asset(a) => &a.name,
+        }
+    }
+}
+
 /// Pending delete confirmation state
 #[derive(Debug, Clone)]
 struct PendingDelete {
@@ -696,8 +729,11 @@ pub struct AssetLibraryPane {
     /// Currently selected asset ID (for future drag-to-timeline)
     selected_asset: Option<Uuid>,
 
-    /// Context menu state with position
+    /// Context menu state with position (for assets)
     context_menu: Option<ContextMenuState>,
+
+    /// Pane context menu position (for background right-click)
+    pane_context_menu: Option<egui::Pos2>,
 
     /// Pending delete confirmation
     pending_delete: Option<PendingDelete>,
@@ -710,7 +746,20 @@ pub struct AssetLibraryPane {
 
     /// Thumbnail texture cache
     thumbnail_cache: ThumbnailCache,
+
+    /// Current folder navigation per category (category index -> current folder ID)
+    /// None means at root level
+    current_folders: HashMap<u8, Option<Uuid>>,
+
+    /// Set of expanded folder IDs (for tree view - future enhancement)
+    expanded_folders: HashSet<Uuid>,
+
+    /// Cached folder icon texture
+    folder_icon: Option<egui::TextureHandle>,
 }
+
+// Embedded folder icon SVG
+const FOLDER_ICON_SVG: &[u8] = include_bytes!("../../../../src/assets/folder.svg");
 
 impl AssetLibraryPane {
     pub fn new() -> Self {
@@ -719,10 +768,88 @@ impl AssetLibraryPane {
             selected_category: AssetCategory::All,
             selected_asset: None,
             context_menu: None,
+            pane_context_menu: None,
             pending_delete: None,
             rename_state: None,
             view_mode: AssetViewMode::default(),
             thumbnail_cache: ThumbnailCache::new(),
+            current_folders: HashMap::new(),
+            expanded_folders: HashSet::new(),
+            folder_icon: None,
+        }
+    }
+
+    /// Get or load the folder icon texture
+    fn get_folder_icon(&mut self, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
+        if self.folder_icon.is_none() {
+            // Rasterize the embedded SVG
+            let render_size = 32; // Render at 32px for list/grid views
+
+            if let Ok(tree) = resvg::usvg::Tree::from_data(FOLDER_ICON_SVG, &resvg::usvg::Options::default()) {
+                let pixmap_size = tree.size().to_int_size();
+                let scale_x = render_size as f32 / pixmap_size.width() as f32;
+                let scale_y = render_size as f32 / pixmap_size.height() as f32;
+                let scale = scale_x.min(scale_y);
+
+                if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(render_size, render_size) {
+                    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+                    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+                    let rgba_data = pixmap.data();
+                    let size = [pixmap.width() as usize, pixmap.height() as usize];
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
+
+                    let texture = ctx.load_texture(
+                        "folder_icon",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    );
+
+                    self.folder_icon = Some(texture);
+                }
+            }
+        }
+
+        self.folder_icon.as_ref()
+    }
+
+    /// Get the current folder for the selected category
+    fn get_current_folder(&self) -> Option<Uuid> {
+        let category_index = match self.selected_category {
+            AssetCategory::All => return None, // All category doesn't have folders
+            AssetCategory::Vector => 1,
+            AssetCategory::Video => 2,
+            AssetCategory::Audio => 3,
+            AssetCategory::Images => 4,
+            AssetCategory::Effects => 5,
+        };
+
+        self.current_folders.get(&category_index).copied().flatten()
+    }
+
+    /// Set the current folder for the selected category
+    fn set_current_folder(&mut self, folder_id: Option<Uuid>) {
+        let category_index = match self.selected_category {
+            AssetCategory::All => return, // All category doesn't have folders
+            AssetCategory::Vector => 1,
+            AssetCategory::Video => 2,
+            AssetCategory::Audio => 3,
+            AssetCategory::Images => 4,
+            AssetCategory::Effects => 5,
+        };
+
+        self.current_folders.insert(category_index, folder_id);
+    }
+
+    /// Convert UI AssetCategory to core AssetCategory
+    fn to_core_category(category: AssetCategory) -> Option<lightningbeam_core::document::AssetCategory> {
+        match category {
+            AssetCategory::All => None,
+            AssetCategory::Vector => Some(lightningbeam_core::document::AssetCategory::Vector),
+            AssetCategory::Video => Some(lightningbeam_core::document::AssetCategory::Video),
+            AssetCategory::Audio => Some(lightningbeam_core::document::AssetCategory::Audio),
+            AssetCategory::Images => Some(lightningbeam_core::document::AssetCategory::Images),
+            AssetCategory::Effects => Some(lightningbeam_core::document::AssetCategory::Effects),
         }
     }
 
@@ -841,6 +968,216 @@ impl AssetLibraryPane {
         assets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
         assets
+    }
+
+    /// Collect folders and assets for the current view (folder-aware)
+    fn collect_items(&self, document: &Document) -> Vec<LibraryItem> {
+        let mut items = Vec::new();
+
+        // For "All" category, return all assets except built-in effects (no folders)
+        if self.selected_category == AssetCategory::All {
+            let assets = self.collect_assets(document);
+            return assets.into_iter()
+                .filter(|asset| {
+                    // Exclude built-in effects from "All" category
+                    !(asset.category == AssetCategory::Effects && asset.is_builtin)
+                })
+                .map(LibraryItem::Asset)
+                .collect();
+        }
+
+        // Get the core category and folder tree
+        let Some(core_category) = Self::to_core_category(self.selected_category) else {
+            return items;
+        };
+
+        let folder_tree = document.get_folder_tree(core_category);
+        let current_folder = self.get_current_folder();
+
+        // Collect folders at the current level
+        let folders = if let Some(parent_id) = current_folder {
+            folder_tree.children_of(&parent_id)
+        } else {
+            folder_tree.root_folders()
+        };
+
+        for folder in folders {
+            // Count items in this folder (subfolders + assets)
+            let subfolder_count = folder_tree.children_of(&folder.id).len();
+
+            // Count assets in this folder
+            let asset_count = match self.selected_category {
+                AssetCategory::Vector => document
+                    .vector_clips
+                    .values()
+                    .filter(|c| c.folder_id == Some(folder.id))
+                    .count(),
+                AssetCategory::Video => document
+                    .video_clips
+                    .values()
+                    .filter(|c| c.folder_id == Some(folder.id))
+                    .count(),
+                AssetCategory::Audio => document
+                    .audio_clips
+                    .values()
+                    .filter(|c| c.folder_id == Some(folder.id))
+                    .count(),
+                AssetCategory::Images => document
+                    .image_assets
+                    .values()
+                    .filter(|a| a.folder_id == Some(folder.id))
+                    .count(),
+                AssetCategory::Effects => document
+                    .effect_definitions
+                    .values()
+                    .filter(|e| e.folder_id == Some(folder.id))
+                    .count(),
+                AssetCategory::All => 0,
+            };
+
+            items.push(LibraryItem::Folder(FolderEntry {
+                id: folder.id,
+                name: folder.name.clone(),
+                category: self.selected_category,
+                item_count: subfolder_count + asset_count,
+            }));
+        }
+
+        // Collect assets at the current level
+        match self.selected_category {
+            AssetCategory::Vector => {
+                for (id, clip) in &document.vector_clips {
+                    if clip.folder_id == current_folder {
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: *id,
+                            name: clip.name.clone(),
+                            category: AssetCategory::Vector,
+                            drag_clip_type: DragClipType::Vector,
+                            duration: clip.duration,
+                            dimensions: Some((clip.width, clip.height)),
+                            extra_info: format!("{}x{}", clip.width as u32, clip.height as u32),
+                            is_builtin: false,
+                        }));
+                    }
+                }
+            }
+            AssetCategory::Video => {
+                for (id, clip) in &document.video_clips {
+                    if clip.folder_id == current_folder {
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: *id,
+                            name: clip.name.clone(),
+                            category: AssetCategory::Video,
+                            drag_clip_type: DragClipType::Video,
+                            duration: clip.duration,
+                            dimensions: Some((clip.width, clip.height)),
+                            extra_info: format!("{:.0}fps", clip.frame_rate),
+                            is_builtin: false,
+                        }));
+                    }
+                }
+            }
+            AssetCategory::Audio => {
+                // Build set of linked audio IDs to skip
+                let linked_audio_ids: HashSet<Uuid> = document
+                    .video_clips
+                    .values()
+                    .filter_map(|v| v.linked_audio_clip_id)
+                    .collect();
+
+                for (id, clip) in &document.audio_clips {
+                    if !linked_audio_ids.contains(id) && clip.folder_id == current_folder {
+                        let (extra_info, drag_clip_type) = match &clip.clip_type {
+                            AudioClipType::Sampled { .. } => {
+                                ("Sampled".to_string(), DragClipType::AudioSampled)
+                            }
+                            AudioClipType::Midi { .. } => {
+                                ("MIDI".to_string(), DragClipType::AudioMidi)
+                            }
+                        };
+
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: *id,
+                            name: clip.name.clone(),
+                            category: AssetCategory::Audio,
+                            drag_clip_type,
+                            duration: clip.duration,
+                            dimensions: None,
+                            extra_info,
+                            is_builtin: false,
+                        }));
+                    }
+                }
+            }
+            AssetCategory::Images => {
+                for (id, asset) in &document.image_assets {
+                    if asset.folder_id == current_folder {
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: *id,
+                            name: asset.name.clone(),
+                            category: AssetCategory::Images,
+                            drag_clip_type: DragClipType::Image,
+                            duration: 0.0,
+                            dimensions: Some((asset.width as f64, asset.height as f64)),
+                            extra_info: format!("{}x{}", asset.width, asset.height),
+                            is_builtin: false,
+                        }));
+                    }
+                }
+            }
+            AssetCategory::Effects => {
+                // Built-in effects always appear at root level
+                if current_folder.is_none() {
+                    for effect_def in lightningbeam_core::effect_registry::EffectRegistry::get_all() {
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: effect_def.id,
+                            name: effect_def.name.clone(),
+                            category: AssetCategory::Effects,
+                            drag_clip_type: DragClipType::Effect,
+                            duration: 0.0,
+                            dimensions: None,
+                            extra_info: format!("{:?}", effect_def.category),
+                            is_builtin: true,
+                        }));
+                    }
+                }
+
+                // User effects
+                for (id, effect) in &document.effect_definitions {
+                    if effect.folder_id == current_folder {
+                        items.push(LibraryItem::Asset(AssetEntry {
+                            id: *id,
+                            name: effect.name.clone(),
+                            category: AssetCategory::Effects,
+                            drag_clip_type: DragClipType::Effect,
+                            duration: 0.0,
+                            dimensions: None,
+                            extra_info: format!("{:?}", effect.category),
+                            is_builtin: false,
+                        }));
+                    }
+                }
+            }
+            AssetCategory::All => {
+                // Already handled above
+            }
+        }
+
+        // Sort: folders first (alphabetically), then assets (alphabetically)
+        items.sort_by(|a, b| {
+            match (a, b) {
+                (LibraryItem::Folder(f1), LibraryItem::Folder(f2)) => {
+                    f1.name.to_lowercase().cmp(&f2.name.to_lowercase())
+                }
+                (LibraryItem::Asset(a1), LibraryItem::Asset(a2)) => {
+                    a1.name.to_lowercase().cmp(&a2.name.to_lowercase())
+                }
+                (LibraryItem::Folder(_), LibraryItem::Asset(_)) => std::cmp::Ordering::Less,
+                (LibraryItem::Asset(_), LibraryItem::Folder(_)) => std::cmp::Ordering::Greater,
+            }
+        });
+
+        items
     }
 
     /// Filter assets based on current category and search text
@@ -1173,6 +1510,120 @@ impl AssetLibraryPane {
         }
     }
 
+    /// Render breadcrumb navigation showing current folder path
+    fn render_breadcrumbs(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        document: &Document,
+        shared: &SharedPaneState,
+    ) {
+        // Only show breadcrumbs for specific categories (not "All")
+        if self.selected_category == AssetCategory::All {
+            return;
+        }
+
+        let Some(core_category) = Self::to_core_category(self.selected_category) else {
+            return;
+        };
+
+        // Background
+        let bg_style = shared.theme.style(".panel-header", ui.ctx());
+        let bg_color = bg_style
+            .background_color
+            .unwrap_or(egui::Color32::from_rgb(25, 25, 25));
+        ui.painter().rect_filled(rect, 0.0, bg_color);
+
+        // Get folder tree and build path
+        let folder_tree = document.get_folder_tree(core_category);
+        let current_folder = self.get_current_folder();
+
+        // Build path: category name -> folder1 -> folder2 -> ...
+        let mut path_items = vec![self.selected_category.display_name().to_string()];
+        let mut path_folder_ids = Vec::new();
+
+        if let Some(folder_id) = current_folder {
+            let folder_path_ids = folder_tree.path_to_folder(&folder_id);
+            for fid in &folder_path_ids {
+                if let Some(folder) = folder_tree.folders.get(fid) {
+                    path_items.push(folder.name.clone());
+                    path_folder_ids.push(*fid);
+                }
+            }
+        }
+
+        // Render breadcrumb items
+        let mut x_offset = rect.min.x + 8.0;
+        let y_center = rect.min.y + BREADCRUMB_HEIGHT / 2.0;
+
+        for (i, item_name) in path_items.iter().enumerate() {
+            let is_last = i == path_items.len() - 1;
+
+            // Calculate text size
+            let font_id = egui::FontId::proportional(12.0);
+            let text_galley = ui.painter().layout_no_wrap(
+                item_name.clone(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+            );
+
+            let text_width = text_galley.size().x;
+            let item_rect = egui::Rect::from_min_size(
+                egui::pos2(x_offset, rect.min.y),
+                egui::vec2(text_width + 8.0, BREADCRUMB_HEIGHT),
+            );
+
+            // Make clickable if not the last item
+            let response = ui.allocate_rect(item_rect, egui::Sense::click());
+
+            // Determine color based on state
+            let text_color = if is_last {
+                egui::Color32::WHITE
+            } else if response.hovered() {
+                egui::Color32::from_rgb(100, 150, 255)
+            } else {
+                egui::Color32::from_rgb(150, 150, 150)
+            };
+
+            // Draw text
+            ui.painter().text(
+                egui::pos2(x_offset, y_center),
+                egui::Align2::LEFT_CENTER,
+                item_name,
+                font_id,
+                text_color,
+            );
+
+            // Handle click to navigate up the hierarchy
+            if response.clicked() && !is_last {
+                if i == 0 {
+                    // Clicked on category root - go to root
+                    self.set_current_folder(None);
+                } else {
+                    // Clicked on a folder - navigate to it
+                    // Get the folder at this index (i-1 because category is at 0)
+                    if i - 1 < path_folder_ids.len() {
+                        self.set_current_folder(Some(path_folder_ids[i - 1]));
+                    }
+                }
+            }
+
+            x_offset += text_width + 8.0;
+
+            // Draw separator (>) if not last
+            if !is_last {
+                ui.painter().text(
+                    egui::pos2(x_offset, y_center),
+                    egui::Align2::LEFT_CENTER,
+                    ">",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::from_rgb(100, 100, 100),
+                );
+                x_offset += 16.0;
+            }
+        }
+    }
+
     /// Render a section header for effect categories
     fn render_section_header(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
         ui.add_space(4.0);
@@ -1419,6 +1870,577 @@ impl AssetLibraryPane {
                 });
             }
         }
+    }
+
+    /// Render items (folders and assets) based on current view mode
+    fn render_items(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+        items: &[&LibraryItem],
+        document: &Document,
+    ) {
+        match self.view_mode {
+            AssetViewMode::List => {
+                self.render_items_list_view(ui, rect, path, shared, items, document);
+            }
+            AssetViewMode::Grid => {
+                self.render_items_grid_view(ui, rect, path, shared, items, document);
+            }
+        }
+    }
+
+    /// Render items in list view (folders + assets)
+    fn render_items_list_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+        items: &[&LibraryItem],
+        document: &Document,
+    ) {
+        // Load folder icon if needed
+        let folder_icon = self.get_folder_icon(ui.ctx()).cloned();
+
+        let _scroll_area = egui::ScrollArea::vertical()
+            .id_source("asset_library_scroll")
+            .show_viewport(ui, |ui, viewport| {
+                ui.set_min_width(rect.width());
+
+                for item in items {
+                    match item {
+                        LibraryItem::Folder(folder) => {
+                            // Render folder item
+                            let item_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.min.x, ui.cursor().top()),
+                                egui::vec2(rect.width(), ITEM_HEIGHT),
+                            );
+
+                            if viewport.intersects(item_rect) {
+                                let response = ui.allocate_rect(item_rect, egui::Sense::click());
+
+                                // Background
+                                let bg_color = if response.hovered() {
+                                    egui::Color32::from_rgb(50, 50, 50)
+                                } else {
+                                    egui::Color32::from_rgb(35, 35, 35)
+                                };
+                                ui.painter().rect_filled(item_rect, 0.0, bg_color);
+
+                                // Folder icon
+                                if let Some(ref icon) = folder_icon {
+                                    let icon_size = LIST_THUMBNAIL_SIZE;
+                                    let icon_rect = egui::Rect::from_min_size(
+                                        item_rect.min + egui::vec2(4.0, (ITEM_HEIGHT - icon_size) / 2.0),
+                                        egui::vec2(icon_size, icon_size),
+                                    );
+                                    ui.painter().image(
+                                        icon.id(),
+                                        icon_rect,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+
+                                // Folder name
+                                ui.painter().text(
+                                    item_rect.min + egui::vec2(LIST_THUMBNAIL_SIZE + 12.0, ITEM_HEIGHT / 2.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    &folder.name,
+                                    egui::FontId::proportional(13.0),
+                                    egui::Color32::WHITE,
+                                );
+
+                                // Item count
+                                let count_text = format!("{} items", folder.item_count);
+                                ui.painter().text(
+                                    item_rect.max - egui::vec2(8.0, ITEM_HEIGHT / 2.0),
+                                    egui::Align2::RIGHT_CENTER,
+                                    count_text,
+                                    egui::FontId::proportional(11.0),
+                                    egui::Color32::from_rgb(150, 150, 150),
+                                );
+
+                                // Handle double-click to navigate into folder
+                                if response.double_clicked() {
+                                    self.set_current_folder(Some(folder.id));
+                                }
+                            } else {
+                                ui.allocate_space(egui::vec2(rect.width(), ITEM_HEIGHT));
+                            }
+                        }
+                        LibraryItem::Asset(asset) => {
+                            // Render asset item
+                            let item_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.min.x, ui.cursor().top()),
+                                egui::vec2(rect.width(), ITEM_HEIGHT),
+                            );
+
+                            if viewport.intersects(item_rect) {
+                                self.render_single_asset_list(ui, asset, item_rect, document, shared);
+                            } else {
+                                ui.allocate_space(egui::vec2(rect.width(), ITEM_HEIGHT));
+                            }
+                        }
+                    }
+                }
+            });
+    }
+
+    /// Render items in grid view (folders + assets)
+    fn render_items_grid_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+        items: &[&LibraryItem],
+        document: &Document,
+    ) {
+        // Load folder icon if needed
+        let folder_icon = self.get_folder_icon(ui.ctx()).cloned();
+
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("asset_library_grid_scroll", path))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(rect.width() - 16.0); // Account for scrollbar
+
+                let items_per_row =
+                    ((rect.width() - GRID_SPACING) / (GRID_ITEM_SIZE + GRID_SPACING)).floor() as usize;
+                let items_per_row = items_per_row.max(1);
+
+                for row_start in (0..items.len()).step_by(items_per_row) {
+                    ui.horizontal(|ui| {
+                        for i in 0..items_per_row {
+                            let index = row_start + i;
+                            if index >= items.len() {
+                                break;
+                            }
+
+                            let item = items[index];
+                            match item {
+                                LibraryItem::Folder(folder) => {
+                                    // Render folder in grid (with space for name and count below)
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(GRID_ITEM_SIZE, GRID_ITEM_SIZE + 20.0),
+                                        egui::Sense::click(),
+                                    );
+
+                                    // Background
+                                    let bg_color = if response.hovered() {
+                                        egui::Color32::from_rgb(50, 50, 50)
+                                    } else {
+                                        egui::Color32::from_rgb(35, 35, 35)
+                                    };
+                                    ui.painter().rect_filled(rect, 4.0, bg_color);
+
+                                    // Folder icon (centered)
+                                    if let Some(ref icon) = folder_icon {
+                                        let icon_size = 48.0;
+                                        let icon_rect = egui::Rect::from_center_size(
+                                            rect.center() - egui::vec2(0.0, 8.0),
+                                            egui::vec2(icon_size, icon_size),
+                                        );
+                                        ui.painter().image(
+                                            icon.id(),
+                                            icon_rect,
+                                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                            egui::Color32::WHITE,
+                                        );
+                                    }
+
+                                    // Folder name (bottom, truncated)
+                                    let name = if folder.name.len() > 12 {
+                                        format!("{}...", &folder.name[..9])
+                                    } else {
+                                        folder.name.clone()
+                                    };
+                                    ui.painter().text(
+                                        rect.center() + egui::vec2(0.0, 20.0),
+                                        egui::Align2::CENTER_CENTER,
+                                        name,
+                                        egui::FontId::proportional(10.0),
+                                        egui::Color32::WHITE,
+                                    );
+
+                                    // Item count
+                                    ui.painter().text(
+                                        rect.center() + egui::vec2(0.0, 32.0),
+                                        egui::Align2::CENTER_CENTER,
+                                        format!("{} items", folder.item_count),
+                                        egui::FontId::proportional(9.0),
+                                        egui::Color32::from_rgb(150, 150, 150),
+                                    );
+
+                                    // Handle double-click to navigate into folder
+                                    if response.double_clicked() {
+                                        self.set_current_folder(Some(folder.id));
+                                    }
+                                }
+                                LibraryItem::Asset(asset) => {
+                                    // Allocate rect for asset grid item (with space for name below)
+                                    let (item_rect, _response) = ui.allocate_exact_size(
+                                        egui::vec2(GRID_ITEM_SIZE, GRID_ITEM_SIZE + 20.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    self.render_single_asset_grid(ui, asset, item_rect, document, shared);
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(GRID_SPACING);
+                }
+            });
+        });
+    }
+
+    /// Helper to render a single asset in list view
+    fn render_single_asset_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        asset: &AssetEntry,
+        item_rect: egui::Rect,
+        document: &Document,
+        shared: &mut SharedPaneState,
+    ) -> egui::Response {
+        let response = ui.allocate_rect(item_rect, egui::Sense::click_and_drag());
+
+        let is_selected = self.selected_asset == Some(asset.id);
+        let is_being_dragged = shared
+            .dragging_asset
+            .as_ref()
+            .map(|d| d.clip_id == asset.id)
+            .unwrap_or(false);
+
+        // Text colors
+        let text_color = egui::Color32::from_gray(200);
+        let secondary_text_color = egui::Color32::from_gray(120);
+
+        // Item background
+        let item_bg = if is_being_dragged {
+            egui::Color32::from_rgb(80, 100, 120)
+        } else if is_selected {
+            egui::Color32::from_rgb(60, 80, 100)
+        } else if response.hovered() {
+            egui::Color32::from_rgb(45, 45, 45)
+        } else {
+            egui::Color32::from_rgb(35, 35, 35)
+        };
+        ui.painter().rect_filled(item_rect, 3.0, item_bg);
+
+        // Category color indicator bar
+        let indicator_color = asset.category.color();
+        let indicator_rect = egui::Rect::from_min_size(
+            item_rect.min,
+            egui::vec2(4.0, ITEM_HEIGHT),
+        );
+        ui.painter().rect_filled(indicator_rect, 0.0, indicator_color);
+
+        // Asset name
+        ui.painter().text(
+            item_rect.min + egui::vec2(12.0, 8.0),
+            egui::Align2::LEFT_TOP,
+            &asset.name,
+            egui::FontId::proportional(13.0),
+            text_color,
+        );
+
+        // Metadata line
+        let metadata = if asset.category == AssetCategory::Images {
+            asset.extra_info.clone()
+        } else if let Some((w, h)) = asset.dimensions {
+            format!(
+                "{:.1}s | {}x{} | {}",
+                asset.duration, w as u32, h as u32, asset.extra_info
+            )
+        } else {
+            format!("{:.1}s | {}", asset.duration, asset.extra_info)
+        };
+
+        ui.painter().text(
+            item_rect.min + egui::vec2(12.0, 24.0),
+            egui::Align2::LEFT_TOP,
+            &metadata,
+            egui::FontId::proportional(10.0),
+            secondary_text_color,
+        );
+
+        // Thumbnail on the right side
+        let thumbnail_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                item_rect.max.x - LIST_THUMBNAIL_SIZE - 4.0,
+                item_rect.min.y + (ITEM_HEIGHT - LIST_THUMBNAIL_SIZE) / 2.0,
+            ),
+            egui::vec2(LIST_THUMBNAIL_SIZE, LIST_THUMBNAIL_SIZE),
+        );
+
+        // Generate and display thumbnail
+        let asset_id = asset.id;
+        let asset_category = asset.category;
+        let ctx = ui.ctx().clone();
+
+        let texture = self.thumbnail_cache.get_or_create(&ctx, asset_id, || {
+            match asset_category {
+                AssetCategory::Images => {
+                    document.image_assets.get(&asset_id)
+                        .and_then(generate_image_thumbnail)
+                }
+                AssetCategory::Vector => {
+                    let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                    document.vector_clips.get(&asset_id)
+                        .map(|clip| generate_vector_thumbnail(clip, bg_color))
+                }
+                AssetCategory::Video => {
+                    generate_video_thumbnail(&asset_id, &shared.video_manager)
+                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200)))
+                }
+                AssetCategory::Audio => {
+                    if let Some(clip) = document.audio_clips.get(&asset_id) {
+                        let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                        match &clip.clip_type {
+                            AudioClipType::Sampled { audio_pool_index } => {
+                                let wave_color = egui::Color32::from_rgb(100, 200, 100);
+                                let waveform: Option<Vec<(f32, f32)>> = shared.waveform_cache.get(audio_pool_index)
+                                    .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                if let Some(ref peaks) = waveform {
+                                    Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
+                                } else {
+                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                }
+                            }
+                            AudioClipType::Midi { midi_clip_id } => {
+                                let note_color = egui::Color32::from_rgb(100, 200, 100);
+                                if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
+                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                } else {
+                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                AssetCategory::Effects => {
+                    if let Some(rgba) = shared.effect_thumbnail_cache.get(&asset_id) {
+                        Some(rgba.clone())
+                    } else {
+                        shared.effect_thumbnail_requests.push(asset_id);
+                        None
+                    }
+                }
+                AssetCategory::All => None,
+            }
+        });
+
+        if let Some(texture) = texture {
+            ui.painter().image(
+                texture.id(),
+                thumbnail_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        // Handle drag start
+        if response.drag_started() {
+            let linked_audio_clip_id = if asset_category == AssetCategory::Video {
+                document.video_clips.get(&asset_id)
+                    .and_then(|clip| clip.linked_audio_clip_id)
+            } else {
+                None
+            };
+
+            *shared.dragging_asset = Some(DraggingAsset {
+                clip_type: asset.drag_clip_type,
+                clip_id: asset_id,
+                name: asset.name.clone(),
+                duration: asset.duration,
+                dimensions: asset.dimensions,
+                linked_audio_clip_id,
+            });
+        }
+
+        // Handle right-click for context menu
+        if response.secondary_clicked() {
+            self.context_menu = Some(ContextMenuState {
+                asset_id: asset.id,
+                position: ui.ctx().pointer_interact_pos().unwrap_or(egui::pos2(0.0, 0.0)),
+            });
+        }
+
+        // Handle selection
+        if response.clicked() {
+            self.selected_asset = Some(asset.id);
+        }
+
+        response
+    }
+
+    /// Helper to render a single asset in grid view
+    fn render_single_asset_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        asset: &AssetEntry,
+        rect: egui::Rect,
+        document: &Document,
+        shared: &mut SharedPaneState,
+    ) -> egui::Response {
+        let response = ui.interact(rect, egui::Id::new(("grid_asset", asset.id)), egui::Sense::click_and_drag());
+
+        let is_selected = self.selected_asset == Some(asset.id);
+        let is_being_dragged = shared
+            .dragging_asset
+            .as_ref()
+            .map(|d| d.clip_id == asset.id)
+            .unwrap_or(false);
+
+        // Background
+        let bg_color = if is_being_dragged {
+            egui::Color32::from_rgb(80, 100, 120)
+        } else if is_selected {
+            egui::Color32::from_rgb(60, 80, 100)
+        } else if response.hovered() {
+            egui::Color32::from_rgb(50, 50, 50)
+        } else {
+            egui::Color32::from_rgb(35, 35, 35)
+        };
+        ui.painter().rect_filled(rect, 4.0, bg_color);
+
+        // Thumbnail
+        let thumbnail_size = 64.0;
+        let thumbnail_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.center().x - thumbnail_size / 2.0,
+                rect.min.y + 8.0,
+            ),
+            egui::vec2(thumbnail_size, thumbnail_size),
+        );
+
+        let asset_id = asset.id;
+        let asset_category = asset.category;
+        let ctx = ui.ctx().clone();
+
+        let texture = self.thumbnail_cache.get_or_create(&ctx, asset_id, || {
+            match asset_category {
+                AssetCategory::Images => {
+                    document.image_assets.get(&asset_id)
+                        .and_then(generate_image_thumbnail)
+                }
+                AssetCategory::Vector => {
+                    let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                    document.vector_clips.get(&asset_id)
+                        .map(|clip| generate_vector_thumbnail(clip, bg_color))
+                }
+                AssetCategory::Video => {
+                    generate_video_thumbnail(&asset_id, &shared.video_manager)
+                        .or_else(|| Some(generate_placeholder_thumbnail(AssetCategory::Video, 200)))
+                }
+                AssetCategory::Audio => {
+                    if let Some(clip) = document.audio_clips.get(&asset_id) {
+                        let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
+                        match &clip.clip_type {
+                            AudioClipType::Sampled { audio_pool_index } => {
+                                let wave_color = egui::Color32::from_rgb(100, 200, 100);
+                                let waveform: Option<Vec<(f32, f32)>> = shared.waveform_cache.get(audio_pool_index)
+                                    .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                if let Some(ref peaks) = waveform {
+                                    Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
+                                } else {
+                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                }
+                            }
+                            AudioClipType::Midi { midi_clip_id } => {
+                                let note_color = egui::Color32::from_rgb(100, 200, 100);
+                                if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
+                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                } else {
+                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                }
+                AssetCategory::Effects => {
+                    if let Some(rgba) = shared.effect_thumbnail_cache.get(&asset_id) {
+                        Some(rgba.clone())
+                    } else {
+                        shared.effect_thumbnail_requests.push(asset_id);
+                        None
+                    }
+                }
+                AssetCategory::All => None,
+            }
+        });
+
+        if let Some(texture) = texture {
+            ui.painter().image(
+                texture.id(),
+                thumbnail_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        // Category indicator
+        let indicator_rect = egui::Rect::from_min_size(
+            egui::pos2(thumbnail_rect.min.x, thumbnail_rect.max.y - 3.0),
+            egui::vec2(thumbnail_size, 3.0),
+        );
+        ui.painter().rect_filled(indicator_rect, 0.0, asset.category.color());
+
+        // Asset name
+        let name = if asset.name.len() > 12 {
+            format!("{}...", &asset.name[..9])
+        } else {
+            asset.name.clone()
+        };
+        ui.painter().text(
+            rect.center() + egui::vec2(0.0, 40.0),
+            egui::Align2::CENTER_CENTER,
+            name,
+            egui::FontId::proportional(10.0),
+            egui::Color32::WHITE,
+        );
+
+        // Handle interactions
+        if response.clicked() {
+            self.selected_asset = Some(asset.id);
+        }
+
+        if response.secondary_clicked() {
+            self.context_menu = Some(ContextMenuState {
+                asset_id: asset.id,
+                position: ui.ctx().pointer_interact_pos().unwrap_or(egui::pos2(0.0, 0.0)),
+            });
+        }
+
+        if response.drag_started() {
+            let linked_audio_clip_id = if asset_category == AssetCategory::Video {
+                document.video_clips.get(&asset_id)
+                    .and_then(|clip| clip.linked_audio_clip_id)
+            } else {
+                None
+            };
+
+            *shared.dragging_asset = Some(DraggingAsset {
+                clip_type: asset.drag_clip_type,
+                clip_id: asset_id,
+                name: asset.name.clone(),
+                duration: asset.duration,
+                dimensions: asset.dimensions,
+                linked_audio_clip_id,
+            });
+        }
+
+        response
     }
 
     /// Render assets based on current view mode
@@ -2053,11 +3075,23 @@ impl PaneRenderer for AssetLibraryPane {
             ui.ctx().request_repaint();
         }
 
-        // Collect and filter assets
-        let all_assets = self.collect_assets(&document_arc);
-        let filtered_assets = self.filter_assets(&all_assets);
+        // Collect items (folders and assets)
+        let all_items = self.collect_items(&document_arc);
 
-        // Layout: Search bar -> Category tabs -> Asset list
+        // Filter items by search text
+        let search_lower = self.search_filter.to_lowercase();
+        let filtered_items: Vec<&LibraryItem> = all_items
+            .iter()
+            .filter(|item| {
+                if search_lower.is_empty() {
+                    true
+                } else {
+                    item.name().to_lowercase().contains(&search_lower)
+                }
+            })
+            .collect();
+
+        // Layout: Search bar -> Category tabs -> Breadcrumbs -> Asset list
         let search_rect =
             egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), SEARCH_BAR_HEIGHT));
 
@@ -2066,23 +3100,48 @@ impl PaneRenderer for AssetLibraryPane {
             egui::vec2(rect.width(), CATEGORY_TAB_HEIGHT),
         );
 
-        let list_rect = egui::Rect::from_min_max(
+        let breadcrumb_rect = egui::Rect::from_min_size(
             rect.min + egui::vec2(0.0, SEARCH_BAR_HEIGHT + CATEGORY_TAB_HEIGHT),
+            egui::vec2(rect.width(), BREADCRUMB_HEIGHT),
+        );
+
+        let list_rect = egui::Rect::from_min_max(
+            rect.min + egui::vec2(0.0, SEARCH_BAR_HEIGHT + CATEGORY_TAB_HEIGHT + BREADCRUMB_HEIGHT),
             rect.max,
         );
 
         // Render components
         self.render_search_bar(ui, search_rect, shared);
         self.render_category_tabs(ui, tabs_rect, shared);
-        self.render_assets(ui, list_rect, path, shared, &filtered_assets, &document_arc);
+        self.render_breadcrumbs(ui, breadcrumb_rect, &document_arc, shared);
+        self.render_items(ui, list_rect, path, shared, &filtered_items, &document_arc);
+
+        // Detect right-click on pane background (not on items)
+        // Only allow folder creation in categories with folder support (not "All")
+        if self.selected_category != AssetCategory::All {
+            if ui.input(|i| i.pointer.secondary_clicked()) {
+                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                    if list_rect.contains(pos) {
+                        self.pane_context_menu = Some(pos);
+                    }
+                }
+            }
+        }
 
         // Context menu handling
         if let Some(ref context_state) = self.context_menu.clone() {
             let context_asset_id = context_state.asset_id;
             let menu_pos = context_state.position;
 
-            // Find the asset info
-            if let Some(asset) = all_assets.iter().find(|a| a.id == context_asset_id) {
+            // Find the asset info from all_items
+            let asset_opt = all_items.iter().find_map(|item| {
+                match item {
+                    LibraryItem::Asset(asset) if asset.id == context_asset_id => Some(asset),
+                    _ => None,
+                }
+            });
+
+            if let Some(asset) = asset_opt {
                 let asset_name = asset.name.clone();
                 let asset_category = asset.category;
                 let asset_is_builtin = asset.is_builtin;
@@ -2156,6 +3215,50 @@ impl PaneRenderer for AssetLibraryPane {
                 }
             } else {
                 self.context_menu = None;
+            }
+        }
+
+        // Pane context menu (for creating folders)
+        if let Some(menu_pos) = self.pane_context_menu {
+            let menu_id = egui::Id::new("pane_context_menu");
+            let menu_response = egui::Area::new(menu_id)
+                .order(egui::Order::Foreground)
+                .fixed_pos(menu_pos)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(150.0);
+
+                        if ui.button("New Folder").clicked() {
+                            // Get the current folder for this category
+                            let parent_folder_id = self.get_current_folder();
+
+                            // Get the core category
+                            if let Some(core_category) = Self::to_core_category(self.selected_category) {
+                                // Create folder action
+                                let action = lightningbeam_core::actions::CreateFolderAction::new(
+                                    core_category,
+                                    "New Folder",
+                                    parent_folder_id,
+                                );
+
+                                if shared.action_executor.execute(Box::new(action)).is_ok() {
+                                    // Successfully created folder
+                                }
+                            }
+
+                            self.pane_context_menu = None;
+                        }
+                    })
+                });
+
+            // Close menu if clicked outside
+            if menu_response.response.clicked_elsewhere() {
+                self.pane_context_menu = None;
+            }
+
+            // Also close on Escape
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.pane_context_menu = None;
             }
         }
 

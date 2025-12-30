@@ -20,6 +20,10 @@ pub mod split_clip_instance;
 pub mod transform_clip_instances;
 pub mod transform_objects;
 pub mod trim_clip_instances;
+pub mod create_folder;
+pub mod rename_folder;
+pub mod delete_folder;
+pub mod move_asset_to_folder;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -38,3 +42,7 @@ pub use split_clip_instance::SplitClipInstanceAction;
 pub use transform_clip_instances::TransformClipInstancesAction;
 pub use transform_objects::TransformShapeInstancesAction;
 pub use trim_clip_instances::{TrimClipInstancesAction, TrimData, TrimType};
+pub use create_folder::CreateFolderAction;
+pub use rename_folder::RenameFolderAction;
+pub use delete_folder::{DeleteFolderAction, DeleteStrategy};
+pub use move_asset_to_folder::MoveAssetToFolderAction;

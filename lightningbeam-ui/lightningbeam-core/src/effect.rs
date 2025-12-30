@@ -284,6 +284,10 @@ pub struct EffectDefinition {
     pub inputs: Vec<EffectInput>,
     /// Parameter definitions
     pub parameters: Vec<EffectParameterDef>,
+
+    /// Folder this effect belongs to (None = root of category)
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 impl EffectDefinition {
@@ -302,6 +306,7 @@ impl EffectDefinition {
             shader_code: shader_code.into(),
             inputs: vec![EffectInput::composition("source")],
             parameters,
+            folder_id: None,
         }
     }
 
@@ -315,6 +320,7 @@ impl EffectDefinition {
             shader_code: shader_code.into(),
             inputs: vec![EffectInput::composition("source")],
             parameters,
+            folder_id: None,
         }
     }
 

@@ -15,6 +15,7 @@ pub mod object;
 pub mod layer;
 pub mod layer_tree;
 pub mod clip;
+pub mod asset_folder;
 pub mod instance_group;
 pub mod effect;
 pub mod effect_layer;

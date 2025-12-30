@@ -43,6 +43,10 @@ pub struct VectorClip {
 
     /// Nested layer hierarchy
     pub layers: LayerTree<AnyLayer>,
+
+    /// Folder this clip belongs to (None = root of category)
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 impl VectorClip {
@@ -55,6 +59,7 @@ impl VectorClip {
             height,
             duration,
             layers: LayerTree::new(),
+            folder_id: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl VectorClip {
             height,
             duration,
             layers: LayerTree::new(),
+            folder_id: None,
         }
     }
 
@@ -185,6 +191,10 @@ pub struct ImageAsset {
     /// If None, the image will be loaded from path when needed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Vec<u8>>,
+
+    /// Folder this asset belongs to (None = root of category)
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 impl ImageAsset {
@@ -202,6 +212,7 @@ impl ImageAsset {
             width,
             height,
             data: None,
+            folder_id: None,
         }
     }
 
@@ -220,6 +231,7 @@ impl ImageAsset {
             width,
             height,
             data: Some(data),
+            folder_id: None,
         }
     }
 }
@@ -252,6 +264,10 @@ pub struct VideoClip {
     /// When set, the audio clip should be moved/trimmed in sync with this video clip
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_audio_clip_id: Option<Uuid>,
+
+    /// Folder this clip belongs to (None = root of category)
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 impl VideoClip {
@@ -273,6 +289,7 @@ impl VideoClip {
             duration,
             frame_rate,
             linked_audio_clip_id: None,
+            folder_id: None,
         }
     }
 }
@@ -366,6 +383,10 @@ pub struct AudioClip {
 
     /// Audio clip type (sampled or MIDI)
     pub clip_type: AudioClipType,
+
+    /// Folder this clip belongs to (None = root of category)
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
 }
 
 impl AudioClip {
@@ -381,6 +402,7 @@ impl AudioClip {
             name: name.into(),
             duration,
             clip_type: AudioClipType::Sampled { audio_pool_index },
+            folder_id: None,
         }
     }
 
@@ -400,6 +422,7 @@ impl AudioClip {
             name: name.into(),
             duration,
             clip_type: AudioClipType::Midi { midi_clip_id },
+            folder_id: None,
         }
     }
 

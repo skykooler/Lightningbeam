@@ -3,6 +3,7 @@
 //! The Document represents a complete animation project with settings
 //! and a root graphics object containing the scene graph.
 
+use crate::asset_folder::AssetFolderTree;
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
 use crate::effect::EffectDefinition;
 use crate::layer::AnyLayer;
@@ -68,6 +69,16 @@ impl Default for GraphicsObject {
     }
 }
 
+/// Asset category for folder tree access
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetCategory {
+    Vector,
+    Video,
+    Audio,
+    Images,
+    Effects,
+}
+
 /// Document settings and scene
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Document {
@@ -115,6 +126,26 @@ pub struct Document {
     #[serde(default)]
     pub effect_definitions: HashMap<Uuid, EffectDefinition>,
 
+    /// Folder organization for vector clips
+    #[serde(default)]
+    pub vector_folders: AssetFolderTree,
+
+    /// Folder organization for video clips
+    #[serde(default)]
+    pub video_folders: AssetFolderTree,
+
+    /// Folder organization for audio clips
+    #[serde(default)]
+    pub audio_folders: AssetFolderTree,
+
+    /// Folder organization for image assets
+    #[serde(default)]
+    pub image_folders: AssetFolderTree,
+
+    /// Folder organization for effect definitions
+    #[serde(default)]
+    pub effect_folders: AssetFolderTree,
+
     /// Current UI layout state (serialized for save/load)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layout: Option<LayoutNode>,
@@ -145,6 +176,11 @@ impl Default for Document {
             image_assets: HashMap::new(),
             instance_groups: HashMap::new(),
             effect_definitions: HashMap::new(),
+            vector_folders: AssetFolderTree::new(),
+            video_folders: AssetFolderTree::new(),
+            audio_folders: AssetFolderTree::new(),
+            image_folders: AssetFolderTree::new(),
+            effect_folders: AssetFolderTree::new(),
             ui_layout: None,
             ui_layout_base: None,
             current_time: 0.0,
@@ -192,6 +228,28 @@ impl Document {
     /// Get the aspect ratio
     pub fn aspect_ratio(&self) -> f64 {
         self.width / self.height
+    }
+
+    /// Get the folder tree for a specific asset category
+    pub fn get_folder_tree(&self, category: AssetCategory) -> &AssetFolderTree {
+        match category {
+            AssetCategory::Vector => &self.vector_folders,
+            AssetCategory::Video => &self.video_folders,
+            AssetCategory::Audio => &self.audio_folders,
+            AssetCategory::Images => &self.image_folders,
+            AssetCategory::Effects => &self.effect_folders,
+        }
+    }
+
+    /// Get a mutable reference to the folder tree for a specific asset category
+    pub fn get_folder_tree_mut(&mut self, category: AssetCategory) -> &mut AssetFolderTree {
+        match category {
+            AssetCategory::Vector => &mut self.vector_folders,
+            AssetCategory::Video => &mut self.video_folders,
+            AssetCategory::Audio => &mut self.audio_folders,
+            AssetCategory::Images => &mut self.image_folders,
+            AssetCategory::Effects => &mut self.effect_folders,
+        }
     }
 
     /// Calculate the actual timeline endpoint based on the last clip
