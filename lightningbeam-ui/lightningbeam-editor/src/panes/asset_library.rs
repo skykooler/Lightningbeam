@@ -3551,6 +3551,59 @@ impl PaneRenderer for AssetLibraryPane {
             }
         }
 
+        // Draw drag preview at cursor when dragging an asset
+        if let Some(dragging) = shared.dragging_asset.as_ref() {
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                // Draw a semi-transparent preview near the cursor
+                let preview_rect = egui::Rect::from_min_size(
+                    pos + egui::vec2(12.0, 12.0), // Offset from cursor
+                    egui::vec2(160.0, 32.0),
+                );
+
+                // Use top layer for drag preview so it appears above everything
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Tooltip,
+                    egui::Id::new("asset_drag_preview"),
+                ));
+
+                // Background with rounded corners
+                painter.rect_filled(
+                    preview_rect,
+                    4.0,
+                    egui::Color32::from_rgba_unmultiplied(50, 80, 120, 230),
+                );
+
+                // Border
+                painter.rect_stroke(
+                    preview_rect,
+                    4.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 160, 220)),
+                    egui::StrokeKind::Inside,
+                );
+
+                // Asset name
+                painter.text(
+                    preview_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &dragging.name,
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+
+        // Clear drag state when mouse is released within the asset library
+        // (dropped back on library without hitting a valid folder target)
+        if ui.input(|i| i.pointer.any_released()) {
+            if shared.dragging_asset.is_some() {
+                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                    if rect.contains(pos) {
+                        *shared.dragging_asset = None;
+                    }
+                }
+            }
+        }
+
         // Delete confirmation dialog
         if let Some(ref pending) = self.pending_delete.clone() {
             let window_id = egui::Id::new("delete_confirm_dialog");
