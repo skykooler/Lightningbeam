@@ -59,7 +59,7 @@ pub struct VelloResourcesMap {
 }
 
 impl SharedVelloResources {
-    pub fn new(device: &wgpu::Device, video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>) -> Result<Self, String> {
+    pub fn new(device: &wgpu::Device, video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, target_format: wgpu::TextureFormat) -> Result<Self, String> {
         let renderer = vello::Renderer::new(
             device,
             vello::RendererOptions {
@@ -120,7 +120,7 @@ impl SharedVelloResources {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm, // egui's target format
+                    format: target_format, // Use egui's actual target format
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -161,7 +161,7 @@ impl SharedVelloResources {
                 module: &hdr_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm, // Output to display-ready texture
+                    format: wgpu::TextureFormat::Rgba8Unorm, // Intermediate texture format (not swapchain)
                     blend: None, // No blending - direct replacement
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -359,6 +359,7 @@ struct VelloCallback {
     playback_time: f64, // Current playback time for animation evaluation
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     shape_editing_cache: Option<ShapeEditingCache>, // Cache for vector editing preview
+    target_format: wgpu::TextureFormat, // Surface format for blit pipelines
 }
 
 impl VelloCallback {
@@ -380,8 +381,9 @@ impl VelloCallback {
         playback_time: f64,
         video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
         shape_editing_cache: Option<ShapeEditingCache>,
+        target_format: wgpu::TextureFormat,
     ) -> Self {
-        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time, video_manager, shape_editing_cache }
+        Self { rect, pan_offset, zoom, instance_id, document, tool_state, active_layer_id, drag_delta, selection, fill_color, stroke_color, stroke_width, selected_tool, eyedropper_request, playback_time, video_manager, shape_editing_cache, target_format }
     }
 }
 
@@ -407,7 +409,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Initialize shared resources if not yet created (only happens once for first Stage pane)
         if map.shared.is_none() {
             map.shared = Some(Arc::new(
-                SharedVelloResources::new(device, self.video_manager.clone()).expect("Failed to initialize shared Vello resources")
+                SharedVelloResources::new(device, self.video_manager.clone(), self.target_format).expect("Failed to initialize shared Vello resources")
             ));
         }
 
@@ -6345,6 +6347,7 @@ impl PaneRenderer for StagePane {
             *shared.playback_time,
             shared.video_manager.clone(),
             self.shape_editing_cache.clone(),
+            shared.target_format,
         );
 
         let cb = egui_wgpu::Callback::new_paint_callback(

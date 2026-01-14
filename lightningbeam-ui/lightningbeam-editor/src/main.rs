@@ -621,6 +621,8 @@ struct EditorApp {
     debug_overlay_visible: bool,
     debug_stats_collector: debug_overlay::DebugStatsCollector,
     gpu_info: Option<wgpu::AdapterInfo>,
+    /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
+    target_format: wgpu::TextureFormat,
 }
 
 /// Import filter types for the file dialog
@@ -711,6 +713,11 @@ impl EditorApp {
         // Extract GPU info for debug overlay
         let gpu_info = cc.wgpu_render_state.as_ref().map(|rs| rs.adapter.get_info());
 
+        // Get surface format (defaults to Rgba8Unorm if render_state not available)
+        let target_format = cc.wgpu_render_state.as_ref()
+            .map(|rs| rs.target_format)
+            .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -780,6 +787,7 @@ impl EditorApp {
             debug_overlay_visible: false,
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
+            target_format,
         }
     }
 
@@ -3182,6 +3190,7 @@ impl eframe::App for EditorApp {
                     .map(|g| g.thumbnail_cache())
                     .unwrap_or(&empty_thumbnail_cache),
                 effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
+                target_format: self.target_format,
             };
 
             render_layout_node(
@@ -3413,6 +3422,8 @@ struct RenderContext<'a> {
     effect_thumbnail_cache: &'a HashMap<Uuid, Vec<u8>>,
     /// Effect IDs whose thumbnails should be invalidated
     effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
+    /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
+    target_format: wgpu::TextureFormat,
 }
 
 /// Recursively render a layout node with drag support
@@ -3887,6 +3898,7 @@ fn render_pane(
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
+                target_format: ctx.target_format,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -3950,6 +3962,7 @@ fn render_pane(
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
+                target_format: ctx.target_format,
             };
 
             // Render pane content (header was already rendered above)

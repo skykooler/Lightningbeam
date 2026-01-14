@@ -629,9 +629,6 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
         // Allocate the rect and render the graph editor within it
         ui.allocate_ui_at_rect(rect, |ui| {
-            // Disable debug warning for unaligned widgets (happens when zoomed)
-            ui.style_mut().debug.show_unaligned = false;
-
             // Check for scroll input to override library's default zoom behavior
             let modifiers = ui.input(|i| i.modifiers);
             let has_ctrl = modifiers.ctrl || modifiers.command;

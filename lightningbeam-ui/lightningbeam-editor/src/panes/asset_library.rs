@@ -661,6 +661,8 @@ pub struct AssetEntry {
     pub extra_info: String,
     /// True for built-in effects from the registry (not editable/deletable)
     pub is_builtin: bool,
+    /// Folder this asset belongs to (None = root)
+    pub folder_id: Option<Uuid>,
 }
 
 /// Folder entry for display
@@ -712,10 +714,24 @@ struct RenameState {
     edit_text: String,
 }
 
+/// Inline folder rename editing state
+#[derive(Debug, Clone)]
+struct FolderRenameState {
+    folder_id: Uuid,
+    category: AssetCategory,
+    edit_text: String,
+}
+
 /// Context menu state with position
 #[derive(Debug, Clone)]
 struct ContextMenuState {
     asset_id: Uuid,
+    position: egui::Pos2,
+}
+
+#[derive(Debug, Clone)]
+struct FolderContextMenuState {
+    folder_id: Uuid,
     position: egui::Pos2,
 }
 
@@ -732,14 +748,20 @@ pub struct AssetLibraryPane {
     /// Context menu state with position (for assets)
     context_menu: Option<ContextMenuState>,
 
+    /// Folder context menu state (for folders)
+    folder_context_menu: Option<FolderContextMenuState>,
+
     /// Pane context menu position (for background right-click)
     pane_context_menu: Option<egui::Pos2>,
 
     /// Pending delete confirmation
     pending_delete: Option<PendingDelete>,
 
-    /// Active rename state
+    /// Active rename state (for assets)
     rename_state: Option<RenameState>,
+
+    /// Active folder rename state
+    folder_rename_state: Option<FolderRenameState>,
 
     /// Current view mode (list or grid)
     view_mode: AssetViewMode,
@@ -768,9 +790,11 @@ impl AssetLibraryPane {
             selected_category: AssetCategory::All,
             selected_asset: None,
             context_menu: None,
+            folder_context_menu: None,
             pane_context_menu: None,
             pending_delete: None,
             rename_state: None,
+            folder_rename_state: None,
             view_mode: AssetViewMode::default(),
             thumbnail_cache: ThumbnailCache::new(),
             current_folders: HashMap::new(),
@@ -853,6 +877,28 @@ impl AssetLibraryPane {
         }
     }
 
+    /// Convert DragClipType to core AssetCategory
+    fn drag_clip_type_to_core_category(clip_type: DragClipType) -> lightningbeam_core::document::AssetCategory {
+        match clip_type {
+            DragClipType::Vector => lightningbeam_core::document::AssetCategory::Vector,
+            DragClipType::Video => lightningbeam_core::document::AssetCategory::Video,
+            DragClipType::AudioSampled | DragClipType::AudioMidi => lightningbeam_core::document::AssetCategory::Audio,
+            DragClipType::Image => lightningbeam_core::document::AssetCategory::Images,
+            DragClipType::Effect => lightningbeam_core::document::AssetCategory::Effects,
+        }
+    }
+
+    /// Convert DragClipType to UI AssetCategory
+    fn drag_clip_type_to_category(clip_type: DragClipType) -> AssetCategory {
+        match clip_type {
+            DragClipType::Vector => AssetCategory::Vector,
+            DragClipType::Video => AssetCategory::Video,
+            DragClipType::AudioSampled | DragClipType::AudioMidi => AssetCategory::Audio,
+            DragClipType::Image => AssetCategory::Images,
+            DragClipType::Effect => AssetCategory::Effects,
+        }
+    }
+
     /// Collect all assets from the document into a unified list
     fn collect_assets(&self, document: &Document) -> Vec<AssetEntry> {
         let mut assets = Vec::new();
@@ -868,6 +914,7 @@ impl AssetLibraryPane {
                 dimensions: Some((clip.width, clip.height)),
                 extra_info: format!("{}x{}", clip.width as u32, clip.height as u32),
                 is_builtin: false,
+                folder_id: clip.folder_id,
             });
         }
 
@@ -882,6 +929,7 @@ impl AssetLibraryPane {
                 dimensions: Some((clip.width, clip.height)),
                 extra_info: format!("{:.0}fps", clip.frame_rate),
                 is_builtin: false,
+                folder_id: clip.folder_id,
             });
         }
 
@@ -911,6 +959,7 @@ impl AssetLibraryPane {
                 dimensions: None,
                 extra_info,
                 is_builtin: false,
+                folder_id: clip.folder_id,
             });
         }
 
@@ -925,6 +974,7 @@ impl AssetLibraryPane {
                 dimensions: Some((asset.width as f64, asset.height as f64)),
                 extra_info: format!("{}x{}", asset.width, asset.height),
                 is_builtin: false,
+                folder_id: asset.folder_id,
             });
         }
 
@@ -939,6 +989,7 @@ impl AssetLibraryPane {
                 dimensions: None,
                 extra_info: format!("{:?}", effect_def.category),
                 is_builtin: true, // Built-in from registry
+                folder_id: None, // Built-in effects are at root
             });
         }
 
@@ -960,6 +1011,7 @@ impl AssetLibraryPane {
                     dimensions: None,
                     extra_info: format!("{:?}", effect_def.category),
                     is_builtin: false, // User effect
+                    folder_id: effect_def.folder_id,
                 });
             }
         }
@@ -1057,6 +1109,7 @@ impl AssetLibraryPane {
                             dimensions: Some((clip.width, clip.height)),
                             extra_info: format!("{}x{}", clip.width as u32, clip.height as u32),
                             is_builtin: false,
+                            folder_id: clip.folder_id,
                         }));
                     }
                 }
@@ -1073,6 +1126,7 @@ impl AssetLibraryPane {
                             dimensions: Some((clip.width, clip.height)),
                             extra_info: format!("{:.0}fps", clip.frame_rate),
                             is_builtin: false,
+                            folder_id: clip.folder_id,
                         }));
                     }
                 }
@@ -1105,6 +1159,7 @@ impl AssetLibraryPane {
                             dimensions: None,
                             extra_info,
                             is_builtin: false,
+                            folder_id: clip.folder_id,
                         }));
                     }
                 }
@@ -1121,6 +1176,7 @@ impl AssetLibraryPane {
                             dimensions: Some((asset.width as f64, asset.height as f64)),
                             extra_info: format!("{}x{}", asset.width, asset.height),
                             is_builtin: false,
+                            folder_id: asset.folder_id,
                         }));
                     }
                 }
@@ -1138,6 +1194,7 @@ impl AssetLibraryPane {
                             dimensions: None,
                             extra_info: format!("{:?}", effect_def.category),
                             is_builtin: true,
+                            folder_id: None, // Built-in effects are always at root
                         }));
                     }
                 }
@@ -1154,6 +1211,7 @@ impl AssetLibraryPane {
                             dimensions: None,
                             extra_info: format!("{:?}", effect.category),
                             is_builtin: false,
+                            folder_id: effect.folder_id,
                         }));
                     }
                 }
@@ -1922,13 +1980,34 @@ impl AssetLibraryPane {
                             if viewport.intersects(item_rect) {
                                 let response = ui.allocate_rect(item_rect, egui::Sense::click());
 
+                                // Check if an asset is being dragged and matches this folder's category
+                                let is_valid_drop_target = shared.dragging_asset.as_ref().map(|drag| {
+                                    let drag_category = Self::drag_clip_type_to_category(drag.clip_type);
+                                    drag_category == self.selected_category
+                                }).unwrap_or(false);
+
+                                let is_drop_hover = is_valid_drop_target && response.hovered();
+
                                 // Background
-                                let bg_color = if response.hovered() {
+                                let bg_color = if is_drop_hover {
+                                    // Highlight as drop target
+                                    egui::Color32::from_rgb(60, 100, 140)
+                                } else if response.hovered() {
                                     egui::Color32::from_rgb(50, 50, 50)
                                 } else {
                                     egui::Color32::from_rgb(35, 35, 35)
                                 };
                                 ui.painter().rect_filled(item_rect, 0.0, bg_color);
+
+                                // Draw drop target indicator border
+                                if is_drop_hover {
+                                    ui.painter().rect_stroke(
+                                        item_rect,
+                                        0.0,
+                                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                                        egui::StrokeKind::Middle,
+                                    );
+                                }
 
                                 // Folder icon
                                 if let Some(ref icon) = folder_icon {
@@ -1945,14 +2024,33 @@ impl AssetLibraryPane {
                                     );
                                 }
 
-                                // Folder name
-                                ui.painter().text(
-                                    item_rect.min + egui::vec2(LIST_THUMBNAIL_SIZE + 12.0, ITEM_HEIGHT / 2.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    &folder.name,
-                                    egui::FontId::proportional(13.0),
-                                    egui::Color32::WHITE,
-                                );
+                                // Folder name (or inline edit field)
+                                let is_renaming = self.folder_rename_state.as_ref().map(|s| s.folder_id == folder.id).unwrap_or(false);
+
+                                if is_renaming {
+                                    // Inline rename text field
+                                    let name_rect = egui::Rect::from_min_size(
+                                        item_rect.min + egui::vec2(LIST_THUMBNAIL_SIZE + 8.0, (ITEM_HEIGHT - 22.0) / 2.0),
+                                        egui::vec2(200.0, 22.0),
+                                    );
+
+                                    if let Some(ref mut state) = self.folder_rename_state {
+                                        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(name_rect));
+                                        ImeTextField::new(&mut state.edit_text)
+                                            .font_size(13.0)
+                                            .desired_width(name_rect.width())
+                                            .request_focus()
+                                            .show(&mut child_ui);
+                                    }
+                                } else {
+                                    ui.painter().text(
+                                        item_rect.min + egui::vec2(LIST_THUMBNAIL_SIZE + 12.0, ITEM_HEIGHT / 2.0),
+                                        egui::Align2::LEFT_CENTER,
+                                        &folder.name,
+                                        egui::FontId::proportional(13.0),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
 
                                 // Item count
                                 let count_text = format!("{} items", folder.item_count);
@@ -1964,9 +2062,31 @@ impl AssetLibraryPane {
                                     egui::Color32::from_rgb(150, 150, 150),
                                 );
 
+                                // Handle drop: move asset to folder
+                                if is_drop_hover && ui.input(|i| i.pointer.any_released()) {
+                                    if let Some(ref drag) = shared.dragging_asset.clone() {
+                                        let core_category = Self::drag_clip_type_to_core_category(drag.clip_type);
+                                        let action = lightningbeam_core::actions::MoveAssetToFolderAction::new(
+                                            core_category,
+                                            drag.clip_id,
+                                            Some(folder.id),
+                                        );
+                                        let _ = shared.action_executor.execute(Box::new(action));
+                                        *shared.dragging_asset = None;
+                                    }
+                                }
+
                                 // Handle double-click to navigate into folder
                                 if response.double_clicked() {
                                     self.set_current_folder(Some(folder.id));
+                                }
+
+                                // Handle right-click for context menu
+                                if response.secondary_clicked() {
+                                    self.folder_context_menu = Some(FolderContextMenuState {
+                                        folder_id: folder.id,
+                                        position: ui.ctx().pointer_interact_pos().unwrap_or(egui::pos2(0.0, 0.0)),
+                                    });
                                 }
                             } else {
                                 ui.allocate_space(egui::vec2(rect.width(), ITEM_HEIGHT));
@@ -2031,13 +2151,34 @@ impl AssetLibraryPane {
                                         egui::Sense::click(),
                                     );
 
+                                    // Check if an asset is being dragged and matches this folder's category
+                                    let is_valid_drop_target = shared.dragging_asset.as_ref().map(|drag| {
+                                        let drag_category = Self::drag_clip_type_to_category(drag.clip_type);
+                                        drag_category == self.selected_category
+                                    }).unwrap_or(false);
+
+                                    let is_drop_hover = is_valid_drop_target && response.hovered();
+
                                     // Background
-                                    let bg_color = if response.hovered() {
+                                    let bg_color = if is_drop_hover {
+                                        // Highlight as drop target
+                                        egui::Color32::from_rgb(60, 100, 140)
+                                    } else if response.hovered() {
                                         egui::Color32::from_rgb(50, 50, 50)
                                     } else {
                                         egui::Color32::from_rgb(35, 35, 35)
                                     };
                                     ui.painter().rect_filled(rect, 4.0, bg_color);
+
+                                    // Draw drop target indicator border
+                                    if is_drop_hover {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            4.0,
+                                            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                                            egui::StrokeKind::Middle,
+                                        );
+                                    }
 
                                     // Folder icon (centered)
                                     if let Some(ref icon) = folder_icon {
@@ -2077,9 +2218,31 @@ impl AssetLibraryPane {
                                         egui::Color32::from_rgb(150, 150, 150),
                                     );
 
+                                    // Handle drop: move asset to folder
+                                    if is_drop_hover && ui.input(|i| i.pointer.any_released()) {
+                                        if let Some(ref drag) = shared.dragging_asset.clone() {
+                                            let core_category = Self::drag_clip_type_to_core_category(drag.clip_type);
+                                            let action = lightningbeam_core::actions::MoveAssetToFolderAction::new(
+                                                core_category,
+                                                drag.clip_id,
+                                                Some(folder.id),
+                                            );
+                                            let _ = shared.action_executor.execute(Box::new(action));
+                                            *shared.dragging_asset = None;
+                                        }
+                                    }
+
                                     // Handle double-click to navigate into folder
                                     if response.double_clicked() {
                                         self.set_current_folder(Some(folder.id));
+                                    }
+
+                                    // Handle right-click for context menu
+                                    if response.secondary_clicked() {
+                                        self.folder_context_menu = Some(FolderContextMenuState {
+                                            folder_id: folder.id,
+                                            position: ui.ctx().pointer_interact_pos().unwrap_or(egui::pos2(0.0, 0.0)),
+                                        });
                                     }
                                 }
                                 LibraryItem::Asset(asset) => {
@@ -3118,11 +3281,14 @@ impl PaneRenderer for AssetLibraryPane {
 
         // Detect right-click on pane background (not on items)
         // Only allow folder creation in categories with folder support (not "All")
+        // Don't trigger if we already opened a folder or asset context menu
         if self.selected_category != AssetCategory::All {
             if ui.input(|i| i.pointer.secondary_clicked()) {
-                if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                    if list_rect.contains(pos) {
-                        self.pane_context_menu = Some(pos);
+                if self.folder_context_menu.is_none() && self.context_menu.is_none() {
+                    if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                        if list_rect.contains(pos) {
+                            self.pane_context_menu = Some(pos);
+                        }
                     }
                 }
             }
@@ -3145,11 +3311,22 @@ impl PaneRenderer for AssetLibraryPane {
                 let asset_name = asset.name.clone();
                 let asset_category = asset.category;
                 let asset_is_builtin = asset.is_builtin;
+                let asset_folder_id = asset.folder_id;
                 let in_use = Self::is_asset_in_use(
                     shared.action_executor.document(),
                     context_asset_id,
                     asset_category,
                 );
+
+                // Get folders for this category (for Move to Folder submenu)
+                let folders: Vec<(Uuid, String)> = if let Some(core_cat) = Self::to_core_category(asset_category) {
+                    let tree = document_arc.get_folder_tree(core_cat);
+                    tree.folders.iter()
+                        .map(|(id, f)| (*id, f.name.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
                 // Show context menu popup at the stored position
                 let menu_id = egui::Id::new("asset_context_menu");
@@ -3194,6 +3371,47 @@ impl PaneRenderer for AssetLibraryPane {
                                         in_use,
                                     });
                                     self.context_menu = None;
+                                }
+
+                                // Move to Folder submenu (only show if there are folders or asset is not at root)
+                                if !folders.is_empty() || asset_folder_id.is_some() {
+                                    ui.separator();
+                                    ui.menu_button("Move to Folder", |ui| {
+                                        // Move to Root option (if not already at root)
+                                        if asset_folder_id.is_some() {
+                                            if ui.button("Root").clicked() {
+                                                if let Some(core_cat) = Self::to_core_category(asset_category) {
+                                                    let action = lightningbeam_core::actions::MoveAssetToFolderAction::new(
+                                                        core_cat,
+                                                        context_asset_id,
+                                                        None,
+                                                    );
+                                                    let _ = shared.action_executor.execute(Box::new(action));
+                                                }
+                                                self.context_menu = None;
+                                            }
+                                            if !folders.is_empty() {
+                                                ui.separator();
+                                            }
+                                        }
+
+                                        // List all folders (except current folder)
+                                        for (folder_id, folder_name) in &folders {
+                                            if asset_folder_id != Some(*folder_id) {
+                                                if ui.button(folder_name).clicked() {
+                                                    if let Some(core_cat) = Self::to_core_category(asset_category) {
+                                                        let action = lightningbeam_core::actions::MoveAssetToFolderAction::new(
+                                                            core_cat,
+                                                            context_asset_id,
+                                                            Some(*folder_id),
+                                                        );
+                                                        let _ = shared.action_executor.execute(Box::new(action));
+                                                    }
+                                                    self.context_menu = None;
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -3251,14 +3469,85 @@ impl PaneRenderer for AssetLibraryPane {
                     })
                 });
 
-            // Close menu if clicked outside
-            if menu_response.response.clicked_elsewhere() {
-                self.pane_context_menu = None;
+            // Close menu on click outside (using primary button release to avoid first-frame issue)
+            let menu_rect = menu_response.response.rect;
+            if ui.input(|i| i.pointer.primary_released()) {
+                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                    if !menu_rect.contains(pos) {
+                        self.pane_context_menu = None;
+                    }
+                }
             }
 
             // Also close on Escape
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.pane_context_menu = None;
+            }
+        }
+
+        // Folder context menu (for rename/delete/etc)
+        if let Some(ref folder_state) = self.folder_context_menu.clone() {
+            let folder_id = folder_state.folder_id;
+            let menu_pos = folder_state.position;
+
+            // Get the folder from the document
+            if let Some(core_category) = Self::to_core_category(self.selected_category) {
+                let folder_tree = document_arc.get_folder_tree(core_category);
+
+                if let Some(folder) = folder_tree.folders.get(&folder_id) {
+                    let folder_name = folder.name.clone();
+
+                    let menu_id = egui::Id::new("folder_context_menu");
+                    let menu_response = egui::Area::new(menu_id)
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(menu_pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(150.0);
+
+                                if ui.button("Rename").clicked() {
+                                    // Enter rename mode for folder
+                                    self.folder_rename_state = Some(FolderRenameState {
+                                        folder_id,
+                                        category: self.selected_category,
+                                        edit_text: folder_name.clone(),
+                                    });
+                                    self.folder_context_menu = None;
+                                }
+
+                                if ui.button("Delete").clicked() {
+                                    // Execute delete folder action
+                                    let action = lightningbeam_core::actions::DeleteFolderAction::new(
+                                        core_category,
+                                        folder_id,
+                                        lightningbeam_core::actions::DeleteStrategy::MoveToParent,
+                                    );
+
+                                    let _ = shared.action_executor.execute(Box::new(action));
+                                    self.folder_context_menu = None;
+                                }
+                            })
+                        });
+
+                    // Close menu on click outside (using primary button release to avoid first-frame issue)
+                    let menu_rect = menu_response.response.rect;
+                    if ui.input(|i| i.pointer.primary_released()) {
+                        if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                            if !menu_rect.contains(pos) {
+                                self.folder_context_menu = None;
+                            }
+                        }
+                    }
+
+                    // Also close on Escape
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.folder_context_menu = None;
+                    }
+                } else {
+                    self.folder_context_menu = None;
+                }
+            } else {
+                self.folder_context_menu = None;
             }
         }
 
@@ -3343,6 +3632,39 @@ impl PaneRenderer for AssetLibraryPane {
                 self.rename_state = None;
             } else if should_cancel {
                 self.rename_state = None;
+            }
+        }
+
+        // Handle folder rename state (Enter to confirm, Escape to cancel)
+        if let Some(ref state) = self.folder_rename_state.clone() {
+            let mut should_confirm = false;
+            let mut should_cancel = false;
+
+            // Check for Enter or Escape
+            ui.input(|i| {
+                if i.key_pressed(egui::Key::Enter) {
+                    should_confirm = true;
+                } else if i.key_pressed(egui::Key::Escape) {
+                    should_cancel = true;
+                }
+            });
+
+            if should_confirm {
+                let new_name = state.edit_text.trim();
+                if !new_name.is_empty() {
+                    // Execute rename folder action
+                    if let Some(core_category) = Self::to_core_category(state.category) {
+                        let action = lightningbeam_core::actions::RenameFolderAction::new(
+                            core_category,
+                            state.folder_id,
+                            new_name.to_string(),
+                        );
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
+                }
+                self.folder_rename_state = None;
+            } else if should_cancel {
+                self.folder_rename_state = None;
             }
         }
     }
