@@ -310,6 +310,83 @@ impl ToolIconCache {
     }
 }
 
+/// Icon cache for focus card icons (start screen)
+struct FocusIconCache {
+    icons: HashMap<FocusIcon, egui::TextureHandle>,
+    assets_path: std::path::PathBuf,
+}
+
+impl FocusIconCache {
+    fn new() -> Self {
+        let assets_path = std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/home/skyler".to_string())
+        ).join("Dev/Lightningbeam-2/src/assets");
+
+        Self {
+            icons: HashMap::new(),
+            assets_path,
+        }
+    }
+
+    fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
+        if !self.icons.contains_key(&icon) {
+            // Determine which SVG file to load
+            let svg_filename = match icon {
+                FocusIcon::Animation => "focus-animation.svg",
+                FocusIcon::Music => "focus-music.svg",
+                FocusIcon::Video => "focus-video.svg",
+            };
+
+            let icon_path = self.assets_path.join(svg_filename);
+            if let Ok(svg_data) = std::fs::read_to_string(&icon_path) {
+                // Replace currentColor with the actual color
+                let color_hex = format!(
+                    "#{:02x}{:02x}{:02x}",
+                    icon_color.r(), icon_color.g(), icon_color.b()
+                );
+                let svg_with_color = svg_data.replace("currentColor", &color_hex);
+
+                // Rasterize at 2x size for crisp display
+                let render_size = 120;
+
+                if let Ok(tree) = resvg::usvg::Tree::from_data(svg_with_color.as_bytes(), &resvg::usvg::Options::default()) {
+                    let pixmap_size = tree.size().to_int_size();
+                    let scale_x = render_size as f32 / pixmap_size.width() as f32;
+                    let scale_y = render_size as f32 / pixmap_size.height() as f32;
+                    let scale = scale_x.min(scale_y);
+
+                    let final_size = resvg::usvg::Size::from_wh(
+                        pixmap_size.width() as f32 * scale,
+                        pixmap_size.height() as f32 * scale,
+                    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
+
+                    if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(
+                        final_size.width() as u32,
+                        final_size.height() as u32,
+                    ) {
+                        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+                        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+                        // Convert RGBA8 to egui ColorImage
+                        let rgba_data = pixmap.data();
+                        let size = [pixmap.width() as usize, pixmap.height() as usize];
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
+
+                        // Upload to GPU
+                        let texture = ctx.load_texture(
+                            svg_filename,
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.icons.insert(icon, texture);
+                    }
+                }
+            }
+        }
+        self.icons.get(&icon)
+    }
+}
+
 /// Command sent to file operations worker thread
 enum FileCommand {
     Save {
@@ -516,6 +593,33 @@ enum AudioExtractionResult {
     },
 }
 
+/// Application mode - controls whether to show start screen or editor
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    /// Show the start screen (recent projects, new project options)
+    StartScreen,
+    /// Show the main editor interface
+    Editor,
+}
+
+/// Icons for the focus cards on the start screen
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FocusIcon {
+    Animation,
+    Music,
+    Video,
+}
+
+/// Recording arm mode - determines how tracks are armed for recording
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RecordingArmMode {
+    /// Armed state follows active track (simple single-track workflow)
+    #[default]
+    Auto,
+    /// User explicitly arms tracks (multi-track recording workflow)
+    Manual,
+}
+
 struct EditorApp {
     layouts: Vec<LayoutDefinition>,
     current_layout_index: usize,
@@ -526,6 +630,7 @@ struct EditorApp {
     split_preview_mode: SplitPreviewMode,
     icon_cache: IconCache,
     tool_icon_cache: ToolIconCache,
+    focus_icon_cache: FocusIconCache, // Focus card icons (start screen)
     selected_tool: Tool, // Currently selected drawing tool
     fill_color: egui::Color32, // Fill color for drawing
     stroke_color: egui::Color32, // Stroke color for drawing
@@ -559,6 +664,13 @@ struct EditorApp {
     // Playback state (global for all panes)
     playback_time: f64, // Current playback position in seconds (persistent - save with document)
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
+    // Recording state
+    recording_arm_mode: RecordingArmMode, // How tracks are armed for recording
+    armed_layers: HashSet<Uuid>,          // Explicitly armed layers (used in Manual mode)
+    is_recording: bool,                   // Whether recording is currently active
+    recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
+    recording_start_time: f64,            // Playback time when recording started
+    recording_layer_id: Option<Uuid>,     // Layer being recorded to (for creating clips)
     // Asset drag-and-drop state
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
     // Shader editor inter-pane communication
@@ -623,6 +735,10 @@ struct EditorApp {
     gpu_info: Option<wgpu::AdapterInfo>,
     /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
     target_format: wgpu::TextureFormat,
+    /// Current application mode (start screen vs editor)
+    app_mode: AppMode,
+    /// Pending auto-reopen file path (set on startup if reopen_last_session is enabled)
+    pending_auto_reopen: Option<std::path::PathBuf>,
 }
 
 /// Import filter types for the file dialog
@@ -642,6 +758,13 @@ impl EditorApp {
 
         // Load application config
         let config = AppConfig::load();
+
+        // Check if we should auto-reopen last session
+        let pending_auto_reopen = if config.reopen_last_session {
+            config.get_recent_files().into_iter().next()
+        } else {
+            None
+        };
 
         // Initialize native menu system
         let mut menu_system = MenuSystem::new().ok();
@@ -728,6 +851,7 @@ impl EditorApp {
             split_preview_mode: SplitPreviewMode::default(),
             icon_cache: IconCache::new(),
             tool_icon_cache: ToolIconCache::new(),
+            focus_icon_cache: FocusIconCache::new(),
             selected_tool: Tool::Select, // Default tool
             fill_color: egui::Color32::from_rgb(100, 100, 255), // Default blue fill
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
@@ -757,6 +881,12 @@ impl EditorApp {
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
+            recording_arm_mode: RecordingArmMode::default(), // Auto mode by default
+            armed_layers: HashSet::new(),     // No layers explicitly armed
+            is_recording: false,              // Not recording initially
+            recording_clips: HashMap::new(),  // No active recording clips
+            recording_start_time: 0.0,        // Will be set when recording starts
+            recording_layer_id: None,         // Will be set when recording starts
             dragging_asset: None, // No asset being dragged initially
             effect_to_load: None, // No effect to load initially
             effect_thumbnails_to_invalidate: Vec::new(), // No thumbnails to invalidate initially
@@ -788,7 +918,318 @@ impl EditorApp {
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
             target_format,
+            // Start screen vs editor mode
+            app_mode: AppMode::StartScreen, // Always start with start screen (auto-reopen handled separately)
+            pending_auto_reopen,
         }
+    }
+
+    /// Render the start screen with recent projects and new project options
+    fn render_start_screen(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let available = ui.available_rect_before_wrap();
+
+            // Calculate content dimensions
+            let card_size: f32 = 180.0;
+            let card_spacing: f32 = 24.0;
+            let left_width: f32 = 350.0;
+            let right_width = (card_size * 3.0) + (card_spacing * 2.0);
+            let content_width = (left_width + right_width + 80.0).min(available.width() - 100.0);
+            let content_height: f32 = 450.0; // Approximate height of content
+
+            // Center content both horizontally and vertically
+            let content_rect = egui::Rect::from_center_size(
+                available.center(),
+                egui::vec2(content_width, content_height),
+            );
+
+            ui.allocate_ui_at_rect(content_rect, |ui| {
+                ui.vertical_centered(|ui| {
+                    // Title
+                    ui.heading(egui::RichText::new("Welcome to Lightningbeam!")
+                        .size(42.0)
+                        .strong());
+
+                    ui.add_space(50.0);
+
+                    // Main content area - two columns side by side
+                    let recent_files = self.config.get_recent_files();
+
+                    // Use columns for proper two-column layout
+                    ui.columns(2, |columns| {
+                        // Left column: Recent projects (stacked vertically)
+                        columns[0].vertical(|ui| {
+                            // Reopen last session section
+                            ui.label(egui::RichText::new("Reopen last session")
+                                .size(18.0)
+                                .strong());
+                            ui.add_space(16.0);
+
+                            if let Some(last_file) = recent_files.first() {
+                                let file_name = last_file.file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "Unknown".to_string());
+                                if self.render_file_item(ui, &file_name, left_width) {
+                                    self.load_from_file(last_file.clone());
+                                    self.app_mode = AppMode::Editor;
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("No recent session")
+                                    .color(egui::Color32::from_gray(120)));
+                            }
+
+                            ui.add_space(32.0);
+
+                            // Recent projects section
+                            ui.label(egui::RichText::new("Recent projects")
+                                .size(18.0)
+                                .strong());
+                            ui.add_space(16.0);
+
+                            if recent_files.len() > 1 {
+                                for file in recent_files.iter().skip(1).take(5) {
+                                    let file_name = file.file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "Unknown".to_string());
+                                    if self.render_file_item(ui, &file_name, left_width) {
+                                        self.load_from_file(file.clone());
+                                        self.app_mode = AppMode::Editor;
+                                    }
+                                    ui.add_space(8.0);
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("No other recent projects")
+                                    .color(egui::Color32::from_gray(120)));
+                            }
+                        });
+
+                        // Right column: Create new project
+                        columns[1].vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("Create a new project")
+                                .size(18.0)
+                                .strong());
+                            ui.add_space(24.0);
+
+                            // Focus cards in a horizontal row
+                            ui.horizontal(|ui| {
+                                // Animation
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(card_size, card_size + 40.0),
+                                    egui::Sense::click(),
+                                );
+                                self.render_focus_card_with_icon(ui, rect, response.hovered(), "Animation", FocusIcon::Animation);
+                                if response.clicked() {
+                                    self.create_new_project_with_focus(0);
+                                }
+
+                                ui.add_space(card_spacing);
+
+                                // Music
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(card_size, card_size + 40.0),
+                                    egui::Sense::click(),
+                                );
+                                self.render_focus_card_with_icon(ui, rect, response.hovered(), "Music", FocusIcon::Music);
+                                if response.clicked() {
+                                    self.create_new_project_with_focus(2);
+                                }
+
+                                ui.add_space(card_spacing);
+
+                                // Video editing
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(card_size, card_size + 40.0),
+                                    egui::Sense::click(),
+                                );
+                                self.render_focus_card_with_icon(ui, rect, response.hovered(), "Video editing", FocusIcon::Video);
+                                if response.clicked() {
+                                    self.create_new_project_with_focus(1);
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+        });
+    }
+
+    /// Render a clickable file item (for recent projects list)
+    fn render_file_item(&self, ui: &mut egui::Ui, name: &str, width: f32) -> bool {
+        let height = 36.0;
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+
+        let bg_color = if response.hovered() {
+            egui::Color32::from_rgb(70, 75, 85)
+        } else {
+            egui::Color32::from_rgb(55, 60, 70)
+        };
+
+        let painter = ui.painter();
+        painter.rect_filled(rect, 4.0, bg_color);
+
+        painter.text(
+            rect.left_center() + egui::vec2(12.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            name,
+            egui::FontId::proportional(14.0),
+            egui::Color32::from_gray(220),
+        );
+
+        response.clicked()
+    }
+
+    /// Render a focus card with icon for project creation
+    fn render_focus_card_with_icon(&mut self, ui: &egui::Ui, rect: egui::Rect, hovered: bool, title: &str, icon: FocusIcon) {
+        let bg_color = if hovered {
+            egui::Color32::from_rgb(55, 60, 70)
+        } else {
+            egui::Color32::from_rgb(45, 50, 58)
+        };
+
+        let border_color = egui::Color32::from_rgb(80, 85, 95);
+
+        let painter = ui.painter();
+
+        // Card background
+        painter.rect_filled(rect, 8.0, bg_color);
+        painter.rect_stroke(rect, 8.0, egui::Stroke::new(1.5, border_color), egui::StrokeKind::Inside);
+
+        // Icon area - render SVG texture
+        let icon_color = egui::Color32::from_gray(200);
+        let icon_center = rect.center_top() + egui::vec2(0.0, 50.0);
+        let icon_display_size = 60.0;
+
+        // Get or load the SVG icon texture
+        let ctx = ui.ctx().clone();
+        if let Some(texture) = self.focus_icon_cache.get_or_load(icon, icon_color, &ctx) {
+            let texture_size = texture.size_vec2();
+            let scale = icon_display_size / texture_size.x.max(texture_size.y);
+            let scaled_size = texture_size * scale;
+
+            let icon_rect = egui::Rect::from_center_size(icon_center, scaled_size);
+            painter.image(
+                texture.id(),
+                icon_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        // Title at bottom
+        painter.text(
+            rect.center_bottom() - egui::vec2(0.0, 20.0),
+            egui::Align2::CENTER_CENTER,
+            title,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+    }
+
+    /// Render a focus card for project creation (legacy, kept for compatibility)
+    #[allow(dead_code)]
+    fn render_focus_card(&self, ui: &mut egui::Ui, rect: egui::Rect, hovered: bool, title: &str, description: &str, _layout_index: usize) {
+        let bg_color = if hovered {
+            egui::Color32::from_rgb(60, 70, 90)
+        } else {
+            egui::Color32::from_rgb(45, 50, 60)
+        };
+
+        let painter = ui.painter();
+
+        // Background with rounded corners
+        painter.rect_filled(rect, 8.0, bg_color);
+
+        // Border
+        if hovered {
+            painter.rect_stroke(
+                rect,
+                8.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 140, 200)),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        // Title
+        painter.text(
+            rect.center_top() + egui::vec2(0.0, 40.0),
+            egui::Align2::CENTER_CENTER,
+            title,
+            egui::FontId::proportional(18.0),
+            egui::Color32::WHITE,
+        );
+
+        // Description
+        painter.text(
+            rect.center_top() + egui::vec2(0.0, 70.0),
+            egui::Align2::CENTER_CENTER,
+            description,
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_gray(180),
+        );
+    }
+
+    /// Create a new project with the specified focus/layout
+    fn create_new_project_with_focus(&mut self, layout_index: usize) {
+        use lightningbeam_core::layer::{AnyLayer, AudioLayer, VectorLayer, VideoLayer};
+
+        // Create a new blank document
+        let mut document = lightningbeam_core::document::Document::with_size(
+            "Untitled",
+            self.config.file_width as f64,
+            self.config.file_height as f64,
+        )
+        .with_duration(60.0) // 1 minute default
+        .with_framerate(self.config.framerate as f64);
+
+        // Add default layer based on focus type
+        // Layout indices: 0 = Animation, 1 = Video editing, 2 = Music
+        let layer_id = match layout_index {
+            0 => {
+                // Animation focus -> VectorLayer
+                let layer = VectorLayer::new("Layer 1");
+                document.root.add_child(AnyLayer::Vector(layer))
+            }
+            1 => {
+                // Video editing focus -> VideoLayer
+                let layer = VideoLayer::new("Video 1");
+                document.root.add_child(AnyLayer::Video(layer))
+            }
+            2 => {
+                // Music focus -> MIDI AudioLayer
+                let layer = AudioLayer::new_midi("MIDI 1");
+                document.root.add_child(AnyLayer::Audio(layer))
+            }
+            _ => {
+                // Fallback to VectorLayer
+                let layer = VectorLayer::new("Layer 1");
+                document.root.add_child(AnyLayer::Vector(layer))
+            }
+        };
+
+        // Reset action executor with new document
+        self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
+
+        // Apply the layout
+        if layout_index < self.layouts.len() {
+            self.current_layout_index = layout_index;
+            self.current_layout = self.layouts[layout_index].layout.clone();
+            self.pane_instances.clear(); // Clear old pane instances
+        }
+
+        // Clear file path (new unsaved document)
+        self.current_file_path = None;
+
+        // Reset selection and set active layer to the newly created one
+        self.selection = lightningbeam_core::selection::Selection::new();
+        self.active_layer_id = Some(layer_id);
+
+        // For Music focus, sync the MIDI layer with daw-backend
+        if layout_index == 2 {
+            self.sync_audio_layers_to_backend();
+        }
+
+        // Switch to editor mode
+        self.app_mode = AppMode::Editor;
     }
 
     /// Synchronize all existing MIDI layers in the document with daw-backend tracks
@@ -2660,6 +3101,12 @@ impl eframe::App for EditorApp {
             }
         }
 
+        // Handle pending auto-reopen (first frame only)
+        if let Some(path) = self.pending_auto_reopen.take() {
+            self.load_from_file(path);
+            // Will switch to editor mode when file finishes loading
+        }
+
         // Fetch missing waveforms on-demand (for lazy loading after project load)
         // Collect pool indices that need waveforms
         let missing_waveforms: Vec<usize> = self.action_executor.document()
@@ -2823,6 +3270,8 @@ impl eframe::App for EditorApp {
             // Apply loaded project data if available
             if let Some((loaded_project, path)) = loaded_project_data {
                 self.apply_loaded_project(loaded_project, path);
+                // Switch to editor mode after loading a project
+                self.app_mode = AppMode::Editor;
             }
 
             // Update recent files menu if needed
@@ -2884,6 +3333,188 @@ impl eframe::App for EditorApp {
                             // (The waveform tiles will be regenerated with new chunk data)
                             self.waveform_image_cache.invalidate_audio(pool_index);
 
+                            ctx.request_repaint();
+                        }
+                        // Recording events
+                        AudioEvent::RecordingStarted(track_id, backend_clip_id) => {
+                            println!("🎤 Recording started on track {:?}, backend_clip_id={}", track_id, backend_clip_id);
+
+                            // Create clip in document and add instance to layer
+                            if let Some(layer_id) = self.recording_layer_id {
+                                use lightningbeam_core::clip::{AudioClip, ClipInstance};
+
+                                // Create a recording-in-progress clip (no pool index yet)
+                                let clip = AudioClip::new_recording("Recording...");
+                                let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+
+                                // Create clip instance on the layer
+                                let clip_instance = ClipInstance::new(doc_clip_id)
+                                    .with_timeline_start(self.recording_start_time);
+
+                                // Add instance to layer
+                                if let Some(layer) = self.action_executor.document_mut().root.children.iter_mut()
+                                    .find(|l| l.id() == layer_id)
+                                {
+                                    if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                        audio_layer.clip_instances.push(clip_instance);
+                                        println!("✅ Created recording clip instance on layer {}", layer_id);
+                                    }
+                                }
+
+                                // Store mapping for later updates
+                                self.recording_clips.insert(layer_id, backend_clip_id);
+                            }
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::RecordingProgress(_clip_id, duration) => {
+                            // Update clip duration as recording progresses
+                            if let Some(layer_id) = self.recording_layer_id {
+                                // First, find the clip_id from the layer (read-only borrow)
+                                let clip_id = {
+                                    let document = self.action_executor.document();
+                                    document.root.children.iter()
+                                        .find(|l| l.id() == layer_id)
+                                        .and_then(|layer| {
+                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                audio_layer.clip_instances.last().map(|i| i.clip_id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                };
+
+                                // Then update the clip duration (mutable borrow)
+                                if let Some(clip_id) = clip_id {
+                                    if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
+                                        if clip.is_recording() {
+                                            clip.duration = duration;
+                                        }
+                                    }
+                                }
+                            }
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::RecordingStopped(_backend_clip_id, pool_index, waveform) => {
+                            println!("🎤 Recording stopped: pool_index={}, {} peaks", pool_index, waveform.len());
+
+                            // Store waveform for the recorded clip
+                            if !waveform.is_empty() {
+                                self.waveform_cache.insert(pool_index, waveform.clone());
+                                self.audio_pools_with_new_waveforms.insert(pool_index);
+                            }
+
+                            // Invalidate waveform image cache so tiles are regenerated
+                            self.waveform_image_cache.invalidate_audio(pool_index);
+
+                            // Get accurate duration from backend (not calculated from waveform peaks)
+                            let duration = if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                match controller.get_pool_file_info(pool_index) {
+                                    Ok((dur, _, _)) => {
+                                        println!("✅ Got duration from backend: {:.2}s", dur);
+                                        self.audio_duration_cache.insert(pool_index, dur);
+                                        dur
+                                    }
+                                    Err(e) => {
+                                        eprintln!("⚠️  Failed to get pool file info: {}", e);
+                                        0.0
+                                    }
+                                }
+                            } else {
+                                0.0
+                            };
+
+                            // Finalize the recording clip with real pool_index and duration
+                            // and sync to backend for playback
+                            if let Some(layer_id) = self.recording_layer_id {
+                                // First, find the clip instance and clip id
+                                let (clip_id, instance_id, timeline_start, trim_start) = {
+                                    let document = self.action_executor.document();
+                                    document.root.children.iter()
+                                        .find(|l| l.id() == layer_id)
+                                        .and_then(|layer| {
+                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                audio_layer.clip_instances.last().map(|instance| {
+                                                    (instance.clip_id, instance.id, instance.timeline_start, instance.trim_start)
+                                                })
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), 0.0, 0.0))
+                                };
+
+                                if !clip_id.is_nil() {
+                                    // Finalize the clip (update pool_index and duration)
+                                    if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
+                                        if clip.finalize_recording(pool_index, duration) {
+                                            clip.name = format!("Recording {}", pool_index);
+                                            println!("✅ Finalized recording clip: pool={}, duration={:.2}s", pool_index, duration);
+                                        }
+                                    }
+
+                                    // Sync the clip instance to backend for playback
+                                    if let Some(backend_track_id) = self.layer_to_track_map.get(&layer_id) {
+                                        if let Some(ref controller_arc) = self.audio_controller {
+                                            let mut controller = controller_arc.lock().unwrap();
+                                            use daw_backend::command::{Query, QueryResponse};
+
+                                            let query = Query::AddAudioClipSync(
+                                                *backend_track_id,
+                                                pool_index,
+                                                timeline_start,
+                                                duration,
+                                                trim_start
+                                            );
+
+                                            match controller.send_query(query) {
+                                                Ok(QueryResponse::AudioClipInstanceAdded(Ok(backend_instance_id))) => {
+                                                    // Store the mapping
+                                                    self.clip_instance_to_backend_map.insert(
+                                                        instance_id,
+                                                        lightningbeam_core::action::BackendClipInstanceId::Audio(backend_instance_id)
+                                                    );
+                                                    println!("✅ Synced recording to backend: instance_id={}", backend_instance_id);
+                                                }
+                                                Ok(QueryResponse::AudioClipInstanceAdded(Err(e))) => {
+                                                    eprintln!("❌ Failed to sync recording to backend: {}", e);
+                                                }
+                                                Ok(_) => {
+                                                    eprintln!("❌ Unexpected query response when syncing recording");
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("❌ Failed to send query to backend: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Clear recording state
+                            self.is_recording = false;
+                            self.recording_clips.clear();
+                            self.recording_layer_id = None;
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::RecordingError(message) => {
+                            eprintln!("❌ Recording error: {}", message);
+                            self.is_recording = false;
+                            self.recording_clips.clear();
+                            self.recording_layer_id = None;
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::MidiRecordingProgress(_track_id, _clip_id, duration, _notes) => {
+                            println!("🎹 MIDI recording progress: {:.2}s", duration);
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count) => {
+                            println!("🎹 MIDI recording stopped: track={:?}, clip_id={}, {} notes",
+                                     track_id, clip_id, note_count);
+                            // Clear recording state
+                            self.is_recording = false;
+                            self.recording_clips.clear();
+                            self.recording_layer_id = None;
                             ctx.request_repaint();
                         }
                         _ => {} // Ignore other events for now
@@ -3126,7 +3757,13 @@ impl eframe::App for EditorApp {
             }
         });
 
-        // Main pane area
+        // Render start screen or editor based on app mode
+        if self.app_mode == AppMode::StartScreen {
+            self.render_start_screen(ctx);
+            return; // Skip editor rendering
+        }
+
+        // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
@@ -3173,6 +3810,10 @@ impl eframe::App for EditorApp {
                 video_manager: &self.video_manager,
                 playback_time: &mut self.playback_time,
                 is_playing: &mut self.is_playing,
+                is_recording: &mut self.is_recording,
+                recording_clips: &mut self.recording_clips,
+                recording_start_time: &mut self.recording_start_time,
+                recording_layer_id: &mut self.recording_layer_id,
                 dragging_asset: &mut self.dragging_asset,
                 stroke_width: &mut self.stroke_width,
                 fill_enabled: &mut self.fill_enabled,
@@ -3396,6 +4037,11 @@ struct RenderContext<'a> {
     video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     playback_time: &'a mut f64,
     is_playing: &'a mut bool,
+    // Recording state
+    is_recording: &'a mut bool,
+    recording_clips: &'a mut HashMap<Uuid, u32>,
+    recording_start_time: &'a mut f64,
+    recording_layer_id: &'a mut Option<Uuid>,
     dragging_asset: &'a mut Option<panes::DraggingAsset>,
     // Tool-specific options for infopanel
     stroke_width: &'a mut f64,
@@ -3884,6 +4530,10 @@ fn render_pane(
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
+                is_recording: ctx.is_recording,
+                recording_clips: ctx.recording_clips,
+                recording_start_time: ctx.recording_start_time,
+                recording_layer_id: ctx.recording_layer_id,
                 dragging_asset: ctx.dragging_asset,
                 stroke_width: ctx.stroke_width,
                 fill_enabled: ctx.fill_enabled,
@@ -3948,6 +4598,10 @@ fn render_pane(
                 layer_to_track_map: ctx.layer_to_track_map,
                 playback_time: ctx.playback_time,
                 is_playing: ctx.is_playing,
+                is_recording: ctx.is_recording,
+                recording_clips: ctx.recording_clips,
+                recording_start_time: ctx.recording_start_time,
+                recording_layer_id: ctx.recording_layer_id,
                 dragging_asset: ctx.dragging_asset,
                 stroke_width: ctx.stroke_width,
                 fill_enabled: ctx.fill_enabled,

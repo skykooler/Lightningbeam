@@ -171,6 +171,11 @@ pub struct SharedPaneState<'a> {
     /// Global playback state
     pub playback_time: &'a mut f64,  // Current playback position in seconds
     pub is_playing: &'a mut bool,    // Whether playback is currently active
+    /// Recording state
+    pub is_recording: &'a mut bool,  // Whether recording is currently active
+    pub recording_clips: &'a mut std::collections::HashMap<uuid::Uuid, u32>, // layer_id -> clip_id
+    pub recording_start_time: &'a mut f64,  // Playback time when recording started
+    pub recording_layer_id: &'a mut Option<uuid::Uuid>,  // Layer being recorded to
     /// Asset being dragged from Asset Library (for cross-pane drag-and-drop)
     pub dragging_asset: &'a mut Option<DraggingAsset>,
     // Tool-specific options for infopanel

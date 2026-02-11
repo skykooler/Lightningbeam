@@ -12,7 +12,7 @@ pub struct RecordingState {
     pub clip_id: ClipId,
     /// Path to temporary WAV file
     pub temp_file_path: PathBuf,
-    /// WAV file writer
+    /// WAV file writer (only used at finalization, not during recording)
     pub writer: WavWriter,
     /// Sample rate of recording
     pub sample_rate: u32,
@@ -20,12 +20,8 @@ pub struct RecordingState {
     pub channels: u32,
     /// Timeline start position in seconds
     pub start_time: f64,
-    /// Total frames written to disk
+    /// Total frames recorded
     pub frames_written: usize,
-    /// Accumulation buffer for next flush
-    pub buffer: Vec<f32>,
-    /// Number of frames to accumulate before flushing
-    pub flush_interval_frames: usize,
     /// Whether recording is currently paused
     pub paused: bool,
     /// Number of samples remaining to skip (to discard stale buffer data)
@@ -36,7 +32,7 @@ pub struct RecordingState {
     pub waveform_buffer: Vec<f32>,
     /// Number of frames per waveform peak
     pub frames_per_peak: usize,
-    /// All recorded audio data accumulated in memory (for fast finalization)
+    /// All recorded audio data accumulated in memory (written to disk at finalization)
     pub audio_data: Vec<f32>,
 }
 
@@ -50,10 +46,8 @@ impl RecordingState {
         sample_rate: u32,
         channels: u32,
         start_time: f64,
-        flush_interval_seconds: f64,
+        _flush_interval_seconds: f64, // No longer used - kept for API compatibility
     ) -> Self {
-        let flush_interval_frames = (sample_rate as f64 * flush_interval_seconds) as usize;
-
         // Calculate frames per waveform peak
         // Target ~300 peaks per second with minimum 1000 samples per peak
         let target_peaks_per_second = 300;
@@ -68,8 +62,6 @@ impl RecordingState {
             channels,
             start_time,
             frames_written: 0,
-            buffer: Vec::new(),
-            flush_interval_frames,
             paused: false,
             samples_to_skip: 0, // Will be set by engine when it knows buffer size
             waveform: Vec::new(),
@@ -102,22 +94,16 @@ impl RecordingState {
             samples
         };
 
-        // Add to disk buffer
-        self.buffer.extend_from_slice(samples_to_process);
-
-        // Add to audio data (accumulate in memory for fast finalization)
+        // Add to audio data (accumulate in memory - disk write happens at finalization only)
         self.audio_data.extend_from_slice(samples_to_process);
 
         // Add to waveform buffer and generate peaks incrementally
         self.waveform_buffer.extend_from_slice(samples_to_process);
         self.generate_waveform_peaks();
 
-        // Check if we should flush to disk
-        let frames_in_buffer = self.buffer.len() / self.channels as usize;
-        if frames_in_buffer >= self.flush_interval_frames {
-            self.flush()?;
-            return Ok(true);
-        }
+        // Track frames for duration calculation (no disk I/O in audio callback!)
+        let frames_added = samples_to_process.len() / self.channels as usize;
+        self.frames_written += frames_added;
 
         Ok(false)
     }
@@ -144,37 +130,17 @@ impl RecordingState {
         }
     }
 
-    /// Flush accumulated samples to disk
-    pub fn flush(&mut self) -> Result<(), std::io::Error> {
-        if self.buffer.is_empty() {
-            return Ok(());
-        }
-
-        // Write to WAV file
-        self.writer.write_samples(&self.buffer)?;
-
-        // Update frames written
-        let frames_flushed = self.buffer.len() / self.channels as usize;
-        self.frames_written += frames_flushed;
-
-        // Clear buffer
-        self.buffer.clear();
-
-        Ok(())
-    }
-
     /// Get current recording duration in seconds
-    /// Includes both flushed frames and buffered frames
     pub fn duration(&self) -> f64 {
-        let buffered_frames = self.buffer.len() / self.channels as usize;
-        let total_frames = self.frames_written + buffered_frames;
-        total_frames as f64 / self.sample_rate as f64
+        self.frames_written as f64 / self.sample_rate as f64
     }
 
     /// Finalize the recording and return the temp file path, waveform, and audio data
     pub fn finalize(mut self) -> Result<(PathBuf, Vec<WaveformPeak>, Vec<f32>), std::io::Error> {
-        // Flush any remaining samples to disk
-        self.flush()?;
+        // Write all audio data to disk at once (outside audio callback - safe to do I/O)
+        if !self.audio_data.is_empty() {
+            self.writer.write_samples(&self.audio_data)?;
+        }
 
         // Generate final waveform peak from any remaining samples
         if !self.waveform_buffer.is_empty() {

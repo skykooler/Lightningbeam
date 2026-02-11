@@ -494,10 +494,6 @@ impl NodeGraphPane {
             }
         }
 
-        if checked_count > 0 || connection_only_count > 0 || non_float_count > 0 {
-            eprintln!("[DEBUG] Parameter check: {} float params checked, {} connection-only, {} non-float",
-                checked_count, connection_only_count, non_float_count);
-        }
     }
 
     fn draw_dot_grid_background(

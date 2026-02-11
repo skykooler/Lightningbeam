@@ -250,6 +250,9 @@ impl Action for MoveClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
+                    AudioClipType::Recording => {
+                        // Recording clips cannot be moved - skip
+                    }
                 }
             }
         }
@@ -316,6 +319,9 @@ impl Action for MoveClipInstancesAction {
                             }
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
+                    }
+                    AudioClipType::Recording => {
+                        // Recording clips cannot be moved - skip
                     }
                 }
             }

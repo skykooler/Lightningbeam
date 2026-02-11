@@ -948,6 +948,10 @@ impl AssetLibraryPane {
             let (extra_info, drag_clip_type) = match &clip.clip_type {
                 AudioClipType::Sampled { .. } => ("Sampled".to_string(), DragClipType::AudioSampled),
                 AudioClipType::Midi { .. } => ("MIDI".to_string(), DragClipType::AudioMidi),
+                AudioClipType::Recording => {
+                    // Skip recording-in-progress clips from asset library
+                    continue;
+                }
             };
 
             assets.push(AssetEntry {
@@ -1147,6 +1151,10 @@ impl AssetLibraryPane {
                             }
                             AudioClipType::Midi { .. } => {
                                 ("MIDI".to_string(), DragClipType::AudioMidi)
+                            }
+                            AudioClipType::Recording => {
+                                // Skip recording-in-progress clips
+                                continue;
                             }
                         };
 
@@ -1823,6 +1831,10 @@ impl AssetLibraryPane {
                                         Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                     }
                                 }
+                                AudioClipType::Recording => {
+                                    // Recording in progress - show placeholder
+                                    Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                                }
                             }
                         } else {
                             Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
@@ -2384,6 +2396,9 @@ impl AssetLibraryPane {
                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                 }
                             }
+                            AudioClipType::Recording => {
+                                Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
+                            }
                         }
                     } else {
                         None
@@ -2525,6 +2540,9 @@ impl AssetLibraryPane {
                                 } else {
                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                 }
+                            }
+                            AudioClipType::Recording => {
+                                Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                             }
                         }
                     } else {
@@ -2892,6 +2910,9 @@ impl AssetLibraryPane {
                                                 } else {
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }
+                                            }
+                                            AudioClipType::Recording => {
+                                                Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                             }
                                         }
                                     } else {

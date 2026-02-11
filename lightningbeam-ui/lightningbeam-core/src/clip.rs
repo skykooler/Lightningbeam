@@ -362,6 +362,11 @@ pub enum AudioClipType {
         /// This allows sharing MIDI data between multiple clip instances
         midi_clip_id: u32,
     },
+    /// Recording in progress
+    ///
+    /// Placeholder for a clip that is currently being recorded.
+    /// The audio_pool_index will be assigned when recording stops.
+    Recording,
 }
 
 /// Audio clip
@@ -424,6 +429,38 @@ impl AudioClip {
             clip_type: AudioClipType::Midi { midi_clip_id },
             folder_id: None,
         }
+    }
+
+    /// Create a new recording-in-progress clip
+    ///
+    /// This is a placeholder clip for audio currently being recorded.
+    /// Call `finalize_recording` when recording stops to set the pool index.
+    pub fn new_recording(name: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            duration: 0.0, // Will be updated as recording progresses
+            clip_type: AudioClipType::Recording,
+            folder_id: None,
+        }
+    }
+
+    /// Finalize a recording clip with the actual audio pool index and duration
+    ///
+    /// Returns true if the clip was a Recording type and was successfully finalized.
+    pub fn finalize_recording(&mut self, audio_pool_index: usize, duration: f64) -> bool {
+        if matches!(self.clip_type, AudioClipType::Recording) {
+            self.clip_type = AudioClipType::Sampled { audio_pool_index };
+            self.duration = duration;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if this clip is a recording in progress
+    pub fn is_recording(&self) -> bool {
+        matches!(self.clip_type, AudioClipType::Recording)
     }
 
     /// Get the audio pool index if this is a sampled audio clip

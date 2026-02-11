@@ -250,6 +250,10 @@ impl Action for AddClipInstanceAction {
                     _ => Err("Unexpected query response".to_string()),
                 }
             }
+            AudioClipType::Recording => {
+                // Recording clips are not synced to backend until finalized
+                Ok(())
+            }
         }
     }
 

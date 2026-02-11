@@ -443,6 +443,10 @@ impl Action for SplitClipInstanceAction {
                     _ => Err("Unexpected query response".to_string()),
                 }
             }
+            AudioClipType::Recording => {
+                // Recording clips cannot be split
+                Err("Cannot split a clip that is currently recording".to_string())
+            }
         }
     }
 
@@ -491,6 +495,9 @@ impl Action for SplitClipInstanceAction {
                                     {
                                         controller.trim_clip(track_id, *orig_backend_id, orig_internal_start, orig_internal_end);
                                     }
+                                }
+                                AudioClipType::Recording => {
+                                    // Recording clips - nothing to rollback
                                 }
                             }
                         }

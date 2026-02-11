@@ -136,6 +136,119 @@ impl TimelinePane {
         }
     }
 
+    /// Toggle recording on/off
+    /// In Auto mode, records to the active audio layer
+    fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
+        if *shared.is_recording {
+            // Stop recording
+            self.stop_recording(shared);
+        } else {
+            // Start recording on active layer
+            self.start_recording(shared);
+        }
+    }
+
+    /// Start recording on the active audio layer
+    fn start_recording(&mut self, shared: &mut SharedPaneState) {
+        let Some(active_layer_id) = *shared.active_layer_id else {
+            println!("⚠️  No active layer selected for recording");
+            return;
+        };
+
+        // Get the active layer and check if it's an audio layer
+        let document = shared.action_executor.document();
+        let Some(layer) = document.root.children.iter().find(|l| l.id() == active_layer_id) else {
+            println!("⚠️  Active layer not found in document");
+            return;
+        };
+
+        let AnyLayer::Audio(audio_layer) = layer else {
+            println!("⚠️  Active layer is not an audio layer - cannot record");
+            return;
+        };
+
+        // Get the backend track ID for this layer
+        let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) else {
+            println!("⚠️  No backend track mapped for layer {}", active_layer_id);
+            return;
+        };
+
+        let start_time = *shared.playback_time;
+
+        // Start recording based on layer type
+        if let Some(controller_arc) = shared.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+
+            match audio_layer.audio_layer_type {
+                AudioLayerType::Midi => {
+                    // For MIDI recording, we need to create a clip first
+                    // The backend will emit MidiRecordingStarted with the clip_id
+                    let clip_id = controller.create_midi_clip(track_id, start_time, 4.0);
+                    controller.start_midi_recording(track_id, clip_id, start_time);
+                    shared.recording_clips.insert(active_layer_id, clip_id);
+                    println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
+                             track_id, start_time, clip_id);
+                }
+                AudioLayerType::Sampled => {
+                    // For audio recording, backend creates the clip
+                    controller.start_recording(track_id, start_time);
+                    println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
+                }
+            }
+
+            // Auto-start playback if not already playing
+            if !*shared.is_playing {
+                controller.play();
+                *shared.is_playing = true;
+                println!("▶ Auto-started playback for recording");
+            }
+
+            // Store recording state for clip creation when RecordingStarted event arrives
+            *shared.is_recording = true;
+            *shared.recording_start_time = start_time;
+            *shared.recording_layer_id = Some(active_layer_id);
+        } else {
+            println!("⚠️  No audio controller available");
+        }
+    }
+
+    /// Stop the current recording
+    fn stop_recording(&mut self, shared: &mut SharedPaneState) {
+        // Determine if this is MIDI or audio recording by checking the layer type
+        let is_midi_recording = if let Some(layer_id) = *shared.recording_layer_id {
+            shared.action_executor.document().root.children.iter()
+                .find(|l| l.id() == layer_id)
+                .map(|layer| {
+                    if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                        matches!(audio_layer.audio_layer_type, lightningbeam_core::layer::AudioLayerType::Midi)
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if let Some(controller_arc) = shared.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+
+            if is_midi_recording {
+                controller.stop_midi_recording();
+                println!("🎹 Stopped MIDI recording");
+            } else {
+                controller.stop_recording();
+                println!("🎤 Stopped audio recording");
+            }
+        }
+
+        // Note: Don't clear recording_layer_id here!
+        // The RecordingStopped/MidiRecordingStopped event handler in main.rs
+        // needs it to finalize the clip. It will clear the state after processing.
+        // Only clear is_recording to update UI state immediately.
+        *shared.is_recording = false;
+    }
+
     /// Detect which clip is under the pointer and what type of drag would occur
     ///
     /// Returns (drag_type, clip_id) if pointer is over a clip, None otherwise
@@ -1434,6 +1547,10 @@ impl TimelinePane {
                                             );
                                         }
                                     }
+                                    // Recording in progress: no visualization yet
+                                    lightningbeam_core::clip::AudioClipType::Recording => {
+                                        // Could show a pulsing "Recording..." indicator here
+                                    }
                                 }
                             }
                         }
@@ -2061,6 +2178,12 @@ impl PaneRenderer for TimelinePane {
                 // Play/Pause toggle
                 let play_pause_text = if *shared.is_playing { "⏸" } else { "▶" };
                 if ui.add_sized(button_size, egui::Button::new(play_pause_text)).clicked() {
+                    // If pausing while recording, stop recording first
+                    if *shared.is_playing && *shared.is_recording {
+                        self.stop_recording(shared);
+                        println!("⏹ Stopped recording (playback paused)");
+                    }
+
                     *shared.is_playing = !*shared.is_playing;
                     println!("🔘 Play/Pause button clicked! is_playing = {}", *shared.is_playing);
 
@@ -2095,6 +2218,31 @@ impl PaneRenderer for TimelinePane {
                         let mut controller = controller_arc.lock().unwrap();
                         controller.seek(self.duration);
                     }
+                }
+
+                // Small separator before record button
+                ui.add_space(8.0);
+
+                // Record button - red circle, pulsing when recording
+                let record_color = if *shared.is_recording {
+                    // Pulsing red when recording (vary alpha based on time)
+                    let pulse = (ui.ctx().input(|i| i.time) * 2.0).sin() * 0.3 + 0.7;
+                    egui::Color32::from_rgba_unmultiplied(220, 50, 50, (pulse * 255.0) as u8)
+                } else {
+                    egui::Color32::from_rgb(180, 60, 60)
+                };
+
+                let record_button = egui::Button::new(
+                    egui::RichText::new("⏺").color(record_color).size(16.0)
+                );
+
+                if ui.add_sized(button_size, record_button).clicked() {
+                    self.toggle_recording(shared);
+                }
+
+                // Request repaint while recording for pulse animation
+                if *shared.is_recording {
+                    ui.ctx().request_repaint();
                 }
             });
         });

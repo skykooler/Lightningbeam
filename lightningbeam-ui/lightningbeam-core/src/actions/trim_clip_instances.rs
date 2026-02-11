@@ -404,6 +404,9 @@ impl Action for TrimClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
+                    AudioClipType::Recording => {
+                        // Recording clips cannot be trimmed - skip
+                    }
                 }
             }
         }
@@ -480,6 +483,9 @@ impl Action for TrimClipInstancesAction {
                             }
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
+                    }
+                    AudioClipType::Recording => {
+                        // Recording clips cannot be trimmed - skip
                     }
                 }
             }
