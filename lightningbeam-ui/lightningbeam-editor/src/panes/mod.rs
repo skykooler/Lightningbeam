@@ -189,15 +189,12 @@ pub struct SharedPaneState<'a> {
     pub polygon_sides: &'a mut u32,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
     pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
-    /// Cache of waveform data for rendering (keyed by audio_pool_index)
-    pub waveform_cache: &'a std::collections::HashMap<usize, Vec<daw_backend::WaveformPeak>>,
-    /// Chunk-based waveform cache for multi-resolution waveforms
-    /// Format: (pool_index, detail_level, chunk_index) -> Vec<WaveformPeak>
-    pub waveform_chunk_cache: &'a std::collections::HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
-    /// Cache of rendered waveform images (GPU textures) for fast blitting
-    pub waveform_image_cache: &'a mut crate::waveform_image_cache::WaveformImageCache,
-    /// Audio pool indices that got new waveform data this frame (for thumbnail invalidation)
+    /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
+    /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
+    pub raw_audio_cache: &'a std::collections::HashMap<usize, (Vec<f32>, u32, u32)>,
+    /// Pool indices needing GPU waveform texture upload
+    pub waveform_gpu_dirty: &'a mut std::collections::HashSet<usize>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
     pub effect_to_load: &'a mut Option<Uuid>,
     /// Queue for effect thumbnail requests (effect IDs to generate thumbnails for)

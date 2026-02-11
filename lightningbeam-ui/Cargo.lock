@@ -2867,6 +2867,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",
@@ -3433,6 +3434,7 @@ dependencies = [
 name = "lightningbeam-editor"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "clap",
  "cpal",
  "daw-backend",
@@ -3443,6 +3445,7 @@ dependencies = [
  "egui_extras",
  "egui_node_graph2",
  "ffmpeg-next",
+ "half",
  "image",
  "kurbo 0.12.0",
  "lightningbeam-core",

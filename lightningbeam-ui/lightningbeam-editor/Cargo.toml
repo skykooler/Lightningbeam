@@ -20,6 +20,8 @@ egui_node_graph2 = { git = "https://github.com/PVDoriginal/egui_node_graph2" }
 # GPU
 wgpu = { workspace = true }
 vello = { workspace = true }
+half = { version = "2.4", features = ["bytemuck"] }
+bytemuck = { version = "1.14", features = ["derive"] }
 kurbo = { workspace = true }
 peniko = { workspace = true }
 

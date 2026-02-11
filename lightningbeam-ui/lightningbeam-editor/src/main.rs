@@ -19,7 +19,7 @@ use menu::{MenuAction, MenuSystem};
 mod theme;
 use theme::{Theme, ThemeMode};
 
-mod waveform_image_cache;
+mod waveform_gpu;
 
 mod config;
 use config::AppConfig;
@@ -689,21 +689,16 @@ struct EditorApp {
     /// Prevents repeated backend queries for the same MIDI clip
     /// Format: (timestamp, note_number, is_note_on)
     midi_event_cache: HashMap<u32, Vec<(f64, u8, bool)>>,
-    /// Cache for audio waveform data (keyed by audio_pool_index)
-    /// Prevents repeated backend queries for the same audio file
-    /// Format: Vec of WaveformPeak (min/max pairs)
-    waveform_cache: HashMap<usize, Vec<daw_backend::WaveformPeak>>,
-    /// Chunk-based waveform cache for multi-resolution waveforms
-    /// Format: (pool_index, detail_level, chunk_index) -> Vec<WaveformPeak>
-    waveform_chunk_cache: HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
     /// Cache for audio file durations to avoid repeated queries
     /// Format: pool_index -> duration in seconds
     audio_duration_cache: HashMap<usize, f64>,
-    /// Track which audio pool indices got new waveform data this frame (for thumbnail invalidation)
+    /// Track which audio pool indices got new raw audio data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: HashSet<usize>,
-    /// Cache for rendered waveform images (GPU textures)
-    /// Stores pre-rendered waveform tiles at various zoom levels for fast blitting
-    waveform_image_cache: waveform_image_cache::WaveformImageCache,
+    /// Raw audio sample cache for GPU waveform rendering
+    /// Format: pool_index -> (samples, sample_rate, channels)
+    raw_audio_cache: HashMap<usize, (Vec<f32>, u32, u32)>,
+    /// Pool indices that need GPU texture upload (set when raw audio arrives, cleared after upload)
+    waveform_gpu_dirty: HashSet<usize>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
     /// Application configuration (recent files, etc.)
@@ -896,11 +891,10 @@ impl EditorApp {
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
-            waveform_cache: HashMap::new(), // Initialize empty waveform cache
-            waveform_chunk_cache: HashMap::new(), // Initialize empty chunk-based waveform cache
             audio_duration_cache: HashMap::new(), // Initialize empty audio duration cache
-            audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new waveforms
-            waveform_image_cache: waveform_image_cache::WaveformImageCache::new(), // Initialize waveform image cache
+            audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
+            raw_audio_cache: HashMap::new(),
+            waveform_gpu_dirty: HashSet::new(),
             current_file_path: None, // No file loaded initially
             config,
             file_command_tx,
@@ -1463,78 +1457,6 @@ impl EditorApp {
                 document.add_instance_group(new_group);
             }
         }
-    }
-
-    /// Fetch waveform data from backend for a specific audio pool index
-    /// Returns cached data if available, otherwise tries to assemble from chunks
-    /// For thumbnails, uses Level 0 (overview) chunks which are fast to generate
-    fn fetch_waveform(&mut self, pool_index: usize) -> Option<Vec<daw_backend::WaveformPeak>> {
-        // Check if already cached in old waveform cache
-        if let Some(waveform) = self.waveform_cache.get(&pool_index) {
-            return Some(waveform.clone());
-        }
-
-        // Try to assemble from Level 0 (overview) chunks - perfect for thumbnails
-        // Level 0 = 1 peak/sec, so a 200s file only needs 200 peaks (very fast)
-
-        // Get audio file duration (use cached value to avoid repeated queries)
-        let audio_file_duration = if let Some(&duration) = self.audio_duration_cache.get(&pool_index) {
-            duration
-        } else {
-            // Duration not cached - query it once and cache
-            if let Some(ref controller_arc) = self.audio_controller {
-                let mut controller = controller_arc.lock().unwrap();
-                match controller.get_pool_file_info(pool_index) {
-                    Ok((duration, _, _)) => {
-                        self.audio_duration_cache.insert(pool_index, duration);
-                        duration
-                    }
-                    Err(_) => return None,
-                }
-            } else {
-                return None;
-            }
-        };
-
-        // Assemble Level 0 chunks for the entire file
-        let detail_level = 0; // Level 0 (overview)
-        let chunk_time_span = 60.0; // 60 seconds per chunk
-        let total_chunks = (audio_file_duration / chunk_time_span).ceil() as u32;
-
-        let mut assembled_peaks = Vec::new();
-        let mut missing_chunks = Vec::new();
-
-        // Check if all required chunks are available
-        for chunk_idx in 0..total_chunks {
-            let key = (pool_index, detail_level, chunk_idx);
-            if let Some(chunk_peaks) = self.waveform_chunk_cache.get(&key) {
-                assembled_peaks.extend_from_slice(chunk_peaks);
-            } else {
-                missing_chunks.push(chunk_idx);
-            }
-        }
-
-        // If any chunks are missing, request them (but only if we have a controller)
-        if !missing_chunks.is_empty() {
-            if let Some(ref controller_arc) = self.audio_controller {
-                let mut controller = controller_arc.lock().unwrap();
-                let _ = controller.generate_waveform_chunks(
-                    pool_index,
-                    detail_level,
-                    missing_chunks,
-                    2, // High priority for thumbnails
-                );
-            }
-            return None; // Will retry next frame when chunks arrive
-        }
-
-        // All chunks available - cache and return
-        if !assembled_peaks.is_empty() {
-            self.waveform_cache.insert(pool_index, assembled_peaks.clone());
-            return Some(assembled_peaks);
-        }
-
-        None
     }
 
     fn switch_layout(&mut self, index: usize) {
@@ -2299,9 +2221,8 @@ impl EditorApp {
         self.sync_audio_layers_to_backend();
         eprintln!("📊 [APPLY] Step 6: Sync audio layers took {:.2}ms", step6_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Fetch waveforms for all audio clips in the loaded project
+        // Fetch raw audio for all audio clips in the loaded project
         let step7_start = std::time::Instant::now();
-        // Collect pool indices first to avoid borrowing issues
         let pool_indices: Vec<usize> = self.action_executor.document()
             .audio_clips.values()
             .filter_map(|clip| {
@@ -2313,13 +2234,23 @@ impl EditorApp {
             })
             .collect();
 
-        let mut waveforms_fetched = 0;
+        let mut raw_fetched = 0;
         for pool_index in pool_indices {
-            if self.fetch_waveform(pool_index).is_some() {
-                waveforms_fetched += 1;
+            if !self.raw_audio_cache.contains_key(&pool_index) {
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    match controller.get_pool_audio_samples(pool_index) {
+                        Ok((samples, sr, ch)) => {
+                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                            self.waveform_gpu_dirty.insert(pool_index);
+                            raw_fetched += 1;
+                        }
+                        Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
+                    }
+                }
             }
         }
-        eprintln!("📊 [APPLY] Step 7: Fetched {} waveforms in {:.2}ms", waveforms_fetched, step7_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!("📊 [APPLY] Step 7: Fetched {} raw audio samples in {:.2}ms", raw_fetched, step7_start.elapsed().as_secs_f64() * 1000.0);
 
         // Reset playback state
         self.playback_time = 0.0;
@@ -2427,9 +2358,17 @@ impl EditorApp {
                     let clip = AudioClip::new_sampled(&name, pool_index, duration);
                     let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                    // Fetch waveform from backend and cache it for rendering
-                    if let Some(waveform) = self.fetch_waveform(pool_index) {
-                        println!("✅ Cached waveform with {} peaks", waveform.len());
+                    // Fetch raw audio samples for GPU waveform rendering
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        match controller.get_pool_audio_samples(pool_index) {
+                            Ok((samples, sr, ch)) => {
+                                println!("✅ Cached {} raw audio samples for GPU waveform", samples.len());
+                                self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                self.waveform_gpu_dirty.insert(pool_index);
+                            }
+                            Err(e) => eprintln!("Failed to fetch raw audio: {}", e),
+                        }
                     }
 
                     println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {}",
@@ -3053,9 +2992,16 @@ impl EditorApp {
                         audio_clip_id
                     );
 
-                    // Fetch waveform from backend and cache it for rendering
-                    if let Some(waveform) = self.fetch_waveform(pool_index) {
-                        println!("   Cached waveform with {} peaks", waveform.len());
+                    // Fetch raw audio samples for GPU waveform rendering
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        match controller.get_pool_audio_samples(pool_index) {
+                            Ok((samples, sr, ch)) => {
+                                self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                self.waveform_gpu_dirty.insert(pool_index);
+                            }
+                            Err(e) => eprintln!("Failed to fetch raw audio for extracted audio: {}", e),
+                        }
                     }
 
                     // Auto-place extracted audio if the video was auto-placed
@@ -3107,14 +3053,13 @@ impl eframe::App for EditorApp {
             // Will switch to editor mode when file finishes loading
         }
 
-        // Fetch missing waveforms on-demand (for lazy loading after project load)
-        // Collect pool indices that need waveforms
-        let missing_waveforms: Vec<usize> = self.action_executor.document()
+        // Fetch missing raw audio on-demand (for lazy loading after project load)
+        // Collect pool indices that need raw audio data
+        let missing_raw_audio: Vec<usize> = self.action_executor.document()
             .audio_clips.values()
             .filter_map(|clip| {
                 if let lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                    // Check if not already cached
-                    if !self.waveform_cache.contains_key(audio_pool_index) {
+                    if !self.raw_audio_cache.contains_key(audio_pool_index) {
                         Some(*audio_pool_index)
                     } else {
                         None
@@ -3125,9 +3070,19 @@ impl eframe::App for EditorApp {
             })
             .collect();
 
-        // Fetch missing waveforms
-        for pool_index in missing_waveforms {
-            self.fetch_waveform(pool_index);
+        // Fetch missing raw audio samples
+        for pool_index in missing_raw_audio {
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                match controller.get_pool_audio_samples(pool_index) {
+                    Ok((samples, sr, ch)) => {
+                        self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                        self.waveform_gpu_dirty.insert(pool_index);
+                        self.audio_pools_with_new_waveforms.insert(pool_index);
+                    }
+                    Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
+                }
+            }
         }
 
         // Initialize and update effect thumbnail generator (GPU-based effect previews)
@@ -3310,28 +3265,21 @@ impl eframe::App for EditorApp {
                             );
                             ctx.request_repaint();
                         }
-                        AudioEvent::WaveformChunksReady { pool_index, detail_level, chunks } => {
-                            // Store waveform chunks in the cache
-                            let mut all_peaks = Vec::new();
-                            for (chunk_index, _time_range, peaks) in chunks {
-                                let key = (pool_index, detail_level, chunk_index);
-                                self.waveform_chunk_cache.insert(key, peaks.clone());
-                                all_peaks.extend(peaks);
+                        AudioEvent::WaveformChunksReady { pool_index, .. } => {
+                            // Fetch raw audio for GPU waveform if not already cached
+                            if !self.raw_audio_cache.contains_key(&pool_index) {
+                                if let Some(ref controller_arc) = self.audio_controller {
+                                    let mut controller = controller_arc.lock().unwrap();
+                                    match controller.get_pool_audio_samples(pool_index) {
+                                        Ok((samples, sr, ch)) => {
+                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                            self.waveform_gpu_dirty.insert(pool_index);
+                                            self.audio_pools_with_new_waveforms.insert(pool_index);
+                                        }
+                                        Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
+                                    }
+                                }
                             }
-
-                            // If this is Level 0 (overview), also populate the old waveform_cache
-                            // so asset library thumbnails can use it immediately
-                            if detail_level == 0 && !all_peaks.is_empty() {
-                                println!("💾 [EVENT] Storing {} Level 0 peaks for pool {} in waveform_cache", all_peaks.len(), pool_index);
-                                self.waveform_cache.insert(pool_index, all_peaks);
-                                // Mark this pool index as having new waveform data (for thumbnail invalidation)
-                                self.audio_pools_with_new_waveforms.insert(pool_index);
-                                println!("🔔 [EVENT] Marked pool {} for thumbnail invalidation", pool_index);
-                            }
-
-                            // Invalidate image cache for this pool index
-                            // (The waveform tiles will be regenerated with new chunk data)
-                            self.waveform_image_cache.invalidate_audio(pool_index);
 
                             ctx.request_repaint();
                         }
@@ -3394,17 +3342,21 @@ impl eframe::App for EditorApp {
                             }
                             ctx.request_repaint();
                         }
-                        AudioEvent::RecordingStopped(_backend_clip_id, pool_index, waveform) => {
-                            println!("🎤 Recording stopped: pool_index={}, {} peaks", pool_index, waveform.len());
+                        AudioEvent::RecordingStopped(_backend_clip_id, pool_index, _waveform) => {
+                            println!("🎤 Recording stopped: pool_index={}", pool_index);
 
-                            // Store waveform for the recorded clip
-                            if !waveform.is_empty() {
-                                self.waveform_cache.insert(pool_index, waveform.clone());
-                                self.audio_pools_with_new_waveforms.insert(pool_index);
+                            // Fetch raw audio samples for GPU waveform rendering
+                            if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                match controller.get_pool_audio_samples(pool_index) {
+                                    Ok((samples, sr, ch)) => {
+                                        self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                        self.waveform_gpu_dirty.insert(pool_index);
+                                        self.audio_pools_with_new_waveforms.insert(pool_index);
+                                    }
+                                    Err(e) => eprintln!("Failed to fetch raw audio after recording: {}", e),
+                                }
                             }
-
-                            // Invalidate waveform image cache so tiles are regenerated
-                            self.waveform_image_cache.invalidate_audio(pool_index);
 
                             // Get accurate duration from backend (not calculated from waveform peaks)
                             let duration = if let Some(ref controller_arc) = self.audio_controller {
@@ -3821,10 +3773,9 @@ impl eframe::App for EditorApp {
                 polygon_sides: &mut self.polygon_sides,
                 layer_to_track_map: &self.layer_to_track_map,
                 midi_event_cache: &self.midi_event_cache,
-                waveform_cache: &self.waveform_cache,
-                waveform_chunk_cache: &self.waveform_chunk_cache,
-                waveform_image_cache: &mut self.waveform_image_cache,
                 audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
+                raw_audio_cache: &self.raw_audio_cache,
+                waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
                 effect_to_load: &mut self.effect_to_load,
                 effect_thumbnail_requests: &mut effect_thumbnail_requests,
                 effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
@@ -4052,14 +4003,12 @@ struct RenderContext<'a> {
     layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
     midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
-    /// Cache of waveform data for rendering (keyed by audio_pool_index)
-    waveform_cache: &'a HashMap<usize, Vec<daw_backend::WaveformPeak>>,
-    /// Chunk-based waveform cache for multi-resolution waveforms
-    waveform_chunk_cache: &'a HashMap<(usize, u8, u32), Vec<daw_backend::WaveformPeak>>,
-    /// Cache of rendered waveform images (GPU textures)
-    waveform_image_cache: &'a mut waveform_image_cache::WaveformImageCache,
-    /// Audio pool indices with new waveform data this frame (for thumbnail invalidation)
+    /// Audio pool indices with new raw audio data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: &'a HashSet<usize>,
+    /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
+    raw_audio_cache: &'a HashMap<usize, (Vec<f32>, u32, u32)>,
+    /// Pool indices needing GPU texture upload
+    waveform_gpu_dirty: &'a mut HashSet<usize>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
     effect_to_load: &'a mut Option<Uuid>,
     /// Queue for effect thumbnail requests
@@ -4540,10 +4489,9 @@ fn render_pane(
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
-                waveform_cache: ctx.waveform_cache,
-                waveform_chunk_cache: ctx.waveform_chunk_cache,
-                waveform_image_cache: ctx.waveform_image_cache,
                 audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
+                raw_audio_cache: ctx.raw_audio_cache,
+                waveform_gpu_dirty: ctx.waveform_gpu_dirty,
                 effect_to_load: ctx.effect_to_load,
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
@@ -4608,10 +4556,9 @@ fn render_pane(
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
-                waveform_cache: ctx.waveform_cache,
-                waveform_chunk_cache: ctx.waveform_chunk_cache,
-                waveform_image_cache: ctx.waveform_image_cache,
                 audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
+                raw_audio_cache: ctx.raw_audio_cache,
+                waveform_gpu_dirty: ctx.waveform_gpu_dirty,
                 effect_to_load: ctx.effect_to_load,
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,

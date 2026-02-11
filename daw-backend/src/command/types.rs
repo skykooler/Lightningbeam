@@ -299,6 +299,8 @@ pub enum Query {
     AddAudioClipSync(TrackId, usize, f64, f64, f64),
     /// Add an audio file to the pool synchronously (path, data, channels, sample_rate) - returns pool index
     AddAudioFileSync(String, Vec<f32>, u32, u32),
+    /// Get raw audio samples from pool (pool_index) - returns (samples, sample_rate, channels)
+    GetPoolAudioSamples(usize),
     /// Get a clone of the current project for serialization
     GetProject,
     /// Set the project (replaces current project state)
@@ -368,6 +370,8 @@ pub enum QueryResponse {
     AudioClipInstanceAdded(Result<AudioClipInstanceId, String>),
     /// Audio file added to pool (returns pool index)
     AudioFileAddedSync(Result<usize, String>),
+    /// Raw audio samples from pool (samples, sample_rate, channels)
+    PoolAudioSamples(Result<(Vec<f32>, u32, u32), String>),
     /// Project retrieved
     ProjectRetrieved(Result<Box<crate::audio::project::Project>, String>),
     /// Project set

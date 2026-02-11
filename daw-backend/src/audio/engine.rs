@@ -1812,6 +1812,16 @@ impl Engine {
                     None => QueryResponse::PoolFileInfo(Err(format!("Pool index {} not found", pool_index))),
                 }
             }
+            Query::GetPoolAudioSamples(pool_index) => {
+                match self.audio_pool.get_file(pool_index) {
+                    Some(file) => QueryResponse::PoolAudioSamples(Ok((
+                        file.data.clone(),
+                        file.sample_rate,
+                        file.channels,
+                    ))),
+                    None => QueryResponse::PoolAudioSamples(Err(format!("Pool index {} not found", pool_index))),
+                }
+            }
             Query::ExportAudio(settings, output_path) => {
                 // Perform export directly - this will block the audio thread but that's okay
                 // since we're exporting and not playing back anyway
@@ -2890,6 +2900,31 @@ impl EngineController {
                         self.cached_export_response = Some(result);
                     }
                     _ => {} // Discard other responses
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Get raw audio samples from pool (samples, sample_rate, channels)
+    pub fn get_pool_audio_samples(&mut self, pool_index: usize) -> Result<(Vec<f32>, u32, u32), String> {
+        if let Err(_) = self.query_tx.push(Query::GetPoolAudioSamples(pool_index)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5); // Longer timeout for large audio data
+
+        while start.elapsed() < timeout {
+            if let Ok(response) = self.query_response_rx.pop() {
+                match response {
+                    QueryResponse::PoolAudioSamples(result) => return result,
+                    QueryResponse::AudioExported(result) => {
+                        self.cached_export_response = Some(result);
+                    }
+                    _ => {}
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));

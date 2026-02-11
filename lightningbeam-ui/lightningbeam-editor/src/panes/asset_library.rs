@@ -17,6 +17,42 @@ use uuid::Uuid;
 use super::{DragClipType, DraggingAsset, NodePath, PaneRenderer, SharedPaneState};
 use crate::widgets::ImeTextField;
 
+/// Derive min/max peak pairs from raw audio samples for thumbnail rendering.
+/// Downsamples to `num_peaks` (min, max) pairs by scanning chunks of samples.
+fn peaks_from_raw_audio(
+    raw: &(Vec<f32>, u32, u32), // (samples, sample_rate, channels)
+    num_peaks: usize,
+) -> Vec<(f32, f32)> {
+    let (samples, _sr, channels) = raw;
+    let ch = (*channels as usize).max(1);
+    let total_frames = samples.len() / ch;
+    if total_frames == 0 || num_peaks == 0 {
+        return vec![];
+    }
+    let frames_per_peak = (total_frames as f64 / num_peaks as f64).max(1.0);
+    let mut peaks = Vec::with_capacity(num_peaks);
+    for i in 0..num_peaks {
+        let start = (i as f64 * frames_per_peak) as usize;
+        let end = (((i + 1) as f64 * frames_per_peak) as usize).min(total_frames);
+        let mut min_val = f32::MAX;
+        let mut max_val = f32::MIN;
+        for frame in start..end {
+            // Mix all channels together for the thumbnail
+            let mut sample = 0.0f32;
+            for c in 0..ch {
+                sample += samples[frame * ch + c];
+            }
+            sample /= ch as f32;
+            min_val = min_val.min(sample);
+            max_val = max_val.max(sample);
+        }
+        if min_val <= max_val {
+            peaks.push((min_val, max_val));
+        }
+    }
+    peaks
+}
+
 // Thumbnail constants
 const THUMBNAIL_SIZE: u32 = 64;
 const THUMBNAIL_PREVIEW_SECONDS: f64 = 10.0;
@@ -1790,8 +1826,8 @@ impl AssetLibraryPane {
                 if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                     if let Some(clip) = document.audio_clips.get(&asset_id) {
                         if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                            shared.waveform_cache.get(audio_pool_index)
-                                .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect())
+                            shared.raw_audio_cache.get(audio_pool_index)
+                                .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize))
                         } else {
                             None
                         }
@@ -2380,8 +2416,8 @@ impl AssetLibraryPane {
                         match &clip.clip_type {
                             AudioClipType::Sampled { audio_pool_index } => {
                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
-                                let waveform: Option<Vec<(f32, f32)>> = shared.waveform_cache.get(audio_pool_index)
-                                    .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
+                                    .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize));
                                 if let Some(ref peaks) = waveform {
                                     Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
                                 } else {
@@ -2525,8 +2561,8 @@ impl AssetLibraryPane {
                         match &clip.clip_type {
                             AudioClipType::Sampled { audio_pool_index } => {
                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
-                                let waveform: Option<Vec<(f32, f32)>> = shared.waveform_cache.get(audio_pool_index)
-                                    .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
+                                    .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize));
                                 if let Some(ref peaks) = waveform {
                                     Some(generate_waveform_thumbnail(peaks, bg_color, wave_color))
                                 } else {
@@ -2850,9 +2886,8 @@ impl AssetLibraryPane {
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
                                     if let AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                                        // Use cached waveform data (populated by fetch_waveform in main.rs)
-                                        let waveform = shared.waveform_cache.get(audio_pool_index)
-                                            .map(|peaks| peaks.iter().map(|p| (p.min, p.max)).collect());
+                                        let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
+                                            .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize));
                                         if waveform.is_some() {
                                             println!("🎵 Found waveform for pool {} (asset {})", audio_pool_index, asset_id);
                                         } else {
