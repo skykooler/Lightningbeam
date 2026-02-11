@@ -48,6 +48,13 @@ impl AudioSystem {
     /// * `event_emitter` - Optional event emitter for pushing events to external systems
     /// * `buffer_size` - Audio buffer size in frames (128, 256, 512, 1024, etc.)
     ///                   Smaller = lower latency but higher CPU usage. Default: 256
+    ///
+    /// # Environment Variables
+    /// * `DAW_AUDIO_DEBUG=1` - Enable audio callback timing diagnostics. Logs:
+    ///   - Device and config info at startup
+    ///   - First 10 callback buffer sizes (to detect ALSA buffer variance)
+    ///   - Per-overrun timing breakdown (command vs render time)
+    ///   - Periodic (~5s) timing summaries (avg/worst/overrun rate)
     pub fn new(
         event_emitter: Option<std::sync::Arc<dyn EventEmitter>>,
         buffer_size: u32,
@@ -62,6 +69,12 @@ impl AudioSystem {
         let default_output_config = output_device.default_output_config().map_err(|e| e.to_string())?;
         let sample_rate = default_output_config.sample_rate().0;
         let channels = default_output_config.channels() as u32;
+        let debug_audio = std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1");
+        if debug_audio {
+            eprintln!("[AUDIO DEBUG] Device: {:?}", output_device.name());
+            eprintln!("[AUDIO DEBUG] Default config: {:?}", default_output_config);
+            eprintln!("[AUDIO DEBUG] Default buffer size: {:?}", default_output_config.buffer_size());
+        }
 
         // Create queues
         let (command_tx, command_rx) = rtrb::RingBuffer::new(512); // Larger buffer for MIDI + UI commands
@@ -102,29 +115,27 @@ impl AudioSystem {
 
         let mut output_buffer = vec![0.0f32; 16384];
 
-        // Log audio configuration
-        println!("Audio Output Configuration:");
-        println!("  Sample Rate: {} Hz", output_config.sample_rate.0);
-        println!("  Channels: {}", output_config.channels);
-        println!("  Buffer Size: {:?}", output_config.buffer_size);
-
-        // Calculate expected latency
-        if let cpal::BufferSize::Fixed(size) = output_config.buffer_size {
-            let latency_ms = (size as f64 / output_config.sample_rate.0 as f64) * 1000.0;
-            println!("  Expected Latency: {:.2} ms", latency_ms);
+        if debug_audio {
+            eprintln!("[AUDIO DEBUG] Output config: sr={} Hz, ch={}, buf={:?}",
+                output_config.sample_rate.0, output_config.channels, output_config.buffer_size);
+            if let cpal::BufferSize::Fixed(size) = output_config.buffer_size {
+                let latency_ms = (size as f64 / output_config.sample_rate.0 as f64) * 1000.0;
+                eprintln!("[AUDIO DEBUG] Expected latency: {:.2} ms", latency_ms);
+            }
         }
 
-        let mut first_callback = true;
+        let mut callback_log_count: u32 = 0;
+        let cb_debug = debug_audio;
         let output_stream = output_device
             .build_output_stream(
                 &output_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if first_callback {
+                    if cb_debug && callback_log_count < 10 {
                         let frames = data.len() / output_config.channels as usize;
                         let latency_ms = (frames as f64 / output_config.sample_rate.0 as f64) * 1000.0;
-                        println!("Audio callback buffer size: {} samples ({} frames, {:.2} ms latency)",
-                                 data.len(), frames, latency_ms);
-                        first_callback = false;
+                        eprintln!("[AUDIO CB #{}] {} samples ({} frames, {:.2} ms)",
+                                 callback_log_count, data.len(), frames, latency_ms);
+                        callback_log_count += 1;
                     }
                     let buf = &mut output_buffer[..data.len()];
                     buf.fill(0.0);

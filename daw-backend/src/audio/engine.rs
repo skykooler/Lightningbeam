@@ -63,6 +63,18 @@ pub struct Engine {
 
     // Metronome for click track
     metronome: Metronome,
+
+    // Pre-allocated buffer for recording input samples (avoids allocation per callback)
+    recording_sample_buffer: Vec<f32>,
+
+    // Callback timing diagnostics (enabled by DAW_AUDIO_DEBUG=1)
+    debug_audio: bool,
+    callback_count: u64,
+    timing_worst_total_us: u64,
+    timing_worst_commands_us: u64,
+    timing_worst_render_us: u64,
+    timing_sum_total_us: u64,
+    timing_overrun_count: u64,
 }
 
 impl Engine {
@@ -110,6 +122,14 @@ impl Engine {
             midi_recording_state: None,
             midi_input_manager: None,
             metronome: Metronome::new(sample_rate),
+            recording_sample_buffer: Vec::with_capacity(4096),
+            debug_audio: std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1"),
+            callback_count: 0,
+            timing_worst_total_us: 0,
+            timing_worst_commands_us: 0,
+            timing_worst_render_us: 0,
+            timing_sum_total_us: 0,
+            timing_overrun_count: 0,
         }
     }
 
@@ -209,6 +229,8 @@ impl Engine {
 
     /// Process audio callback - called from the audio thread
     pub fn process(&mut self, output: &mut [f32]) {
+        let t_start = if self.debug_audio { Some(std::time::Instant::now()) } else { None };
+
         // Process all pending commands
         while let Ok(cmd) = self.command_rx.pop() {
             self.handle_command(cmd);
@@ -236,11 +258,15 @@ impl Engine {
 
         // Forward chunk generation events from background threads
         while let Ok(event) = self.chunk_generation_rx.try_recv() {
-            if let AudioEvent::WaveformChunksReady { pool_index, detail_level, ref chunks } = event {
-                println!("📬 [AUDIO THREAD] Received {} chunks for pool {} level {}, forwarding to UI", chunks.len(), pool_index, detail_level);
+            if self.debug_audio {
+                if let AudioEvent::WaveformChunksReady { pool_index, detail_level, ref chunks } = event {
+                    eprintln!("[AUDIO THREAD] Received {} chunks for pool {} level {}, forwarding to UI", chunks.len(), pool_index, detail_level);
+                }
             }
             let _ = self.event_tx.push(event);
         }
+
+        let t_commands = if self.debug_audio { Some(std::time::Instant::now()) } else { None };
 
         if self.playing {
             // Ensure mix buffer is sized correctly
@@ -323,15 +349,24 @@ impl Engine {
         // Process recording if active (independent of playback state)
         if let Some(recording) = &mut self.recording_state {
             if let Some(input_rx) = &mut self.input_rx {
-                // Pull samples from input ringbuffer
-                let mut samples = Vec::new();
+                // Phase 1: Discard stale samples by popping without storing
+                // (fast — no Vec push, no add_samples overhead)
+                while recording.samples_to_skip > 0 {
+                    match input_rx.pop() {
+                        Ok(_) => recording.samples_to_skip -= 1,
+                        Err(_) => break,
+                    }
+                }
+
+                // Phase 2: Pull fresh samples for actual recording
+                self.recording_sample_buffer.clear();
                 while let Ok(sample) = input_rx.pop() {
-                    samples.push(sample);
+                    self.recording_sample_buffer.push(sample);
                 }
 
                 // Add samples to recording
-                if !samples.is_empty() {
-                    match recording.add_samples(&samples) {
+                if !self.recording_sample_buffer.is_empty() {
+                    match recording.add_samples(&self.recording_sample_buffer) {
                         Ok(_flushed) => {
                             // Update clip duration every callback for sample-accurate timing
                             let duration = recording.duration();
@@ -348,7 +383,7 @@ impl Engine {
                             }
 
                             // Send progress event periodically (every ~0.1 seconds)
-                            self.recording_progress_counter += samples.len();
+                            self.recording_progress_counter += self.recording_sample_buffer.len();
                             if self.recording_progress_counter >= (self.sample_rate as usize / 10) {
                                 let _ = self.event_tx.push(AudioEvent::RecordingProgress(clip_id, duration));
                                 self.recording_progress_counter = 0;
@@ -364,6 +399,42 @@ impl Engine {
                         }
                     }
                 }
+            }
+        }
+
+        // Timing diagnostics (DAW_AUDIO_DEBUG=1)
+        if let (true, Some(t_start), Some(t_commands)) = (self.debug_audio, t_start, t_commands) {
+            let t_end = std::time::Instant::now();
+            let total_us = t_end.duration_since(t_start).as_micros() as u64;
+            let commands_us = t_commands.duration_since(t_start).as_micros() as u64;
+            let render_us = total_us.saturating_sub(commands_us);
+
+            self.callback_count += 1;
+            self.timing_sum_total_us += total_us;
+            if total_us > self.timing_worst_total_us { self.timing_worst_total_us = total_us; }
+            if commands_us > self.timing_worst_commands_us { self.timing_worst_commands_us = commands_us; }
+            if render_us > self.timing_worst_render_us { self.timing_worst_render_us = render_us; }
+
+            let frames = output.len() as u64 / self.channels as u64;
+            let deadline_us = frames * 1_000_000 / self.sample_rate as u64;
+
+            if total_us > deadline_us {
+                self.timing_overrun_count += 1;
+                eprintln!(
+                    "[AUDIO TIMING] OVERRUN #{}: total={} us (deadline={} us) | cmds={} us, render={} us | buf={} frames",
+                    self.timing_overrun_count, total_us, deadline_us, commands_us, render_us, frames
+                );
+            }
+
+            if self.callback_count % 860 == 0 {
+                let avg_us = self.timing_sum_total_us / self.callback_count;
+                eprintln!(
+                    "[AUDIO TIMING] avg={} us, worst: total={} us, cmds={} us, render={} us | overruns={}/{} ({:.1}%) | deadline={} us",
+                    avg_us, self.timing_worst_total_us, self.timing_worst_commands_us, self.timing_worst_render_us,
+                    self.timing_overrun_count, self.callback_count,
+                    self.timing_overrun_count as f64 / self.callback_count as f64 * 100.0,
+                    deadline_us
+                );
             }
         }
     }
@@ -2023,9 +2094,9 @@ impl Engine {
                         flush_interval_seconds,
                     );
 
-                    // Check how many samples are currently in the input buffer and mark them for skipping
+                    // Count stale samples so we can skip them incrementally
                     let samples_in_buffer = if let Some(input_rx) = &self.input_rx {
-                        input_rx.slots()  // Number of samples currently in the buffer
+                        input_rx.slots()
                     } else {
                         0
                     };
@@ -2033,11 +2104,11 @@ impl Engine {
                     self.recording_state = Some(recording_state);
                     self.recording_progress_counter = 0; // Reset progress counter
 
-                    // Set the number of samples to skip on the recording state
+                    // Set samples to skip (drained incrementally across callbacks)
                     if let Some(recording) = &mut self.recording_state {
                         recording.samples_to_skip = samples_in_buffer;
-                        if samples_in_buffer > 0 {
-                            eprintln!("Will skip {} stale samples from input buffer", samples_in_buffer);
+                        if self.debug_audio && samples_in_buffer > 0 {
+                            eprintln!("[AUDIO DEBUG] Will skip {} stale samples from input buffer", samples_in_buffer);
                         }
                     }
 

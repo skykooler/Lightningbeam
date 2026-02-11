@@ -367,8 +367,9 @@ impl Project {
             output.len(),
         );
 
-        // Render each root track
-        for &track_id in &self.root_tracks.clone() {
+        // Render each root track (index-based to avoid clone)
+        for i in 0..self.root_tracks.len() {
+            let track_id = self.root_tracks[i];
             self.render_track(
                 track_id,
                 output,
@@ -439,8 +440,8 @@ impl Project {
                 track.render(output, midi_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Group(group)) => {
-                // Get children IDs, check if this group is soloed, and transform context
-                let children: Vec<TrackId> = group.children.clone();
+                // Read group properties and transform context (index-based child iteration to avoid clone)
+                let num_children = group.children.len();
                 let this_group_is_soloed = group.solo;
                 let child_ctx = group.transform_context(ctx);
 
@@ -452,7 +453,11 @@ impl Project {
                 // Recursively render all children into the group buffer
                 // If this group is soloed (or parent was soloed), children inherit that state
                 let children_parent_soloed = parent_is_soloed || this_group_is_soloed;
-                for &child_id in &children {
+                for i in 0..num_children {
+                    let child_id = match self.tracks.get(&track_id) {
+                        Some(TrackNode::Group(g)) => g.children[i],
+                        _ => break,
+                    };
                     self.render_track(
                         child_id,
                         &mut group_buffer,

@@ -296,15 +296,13 @@ impl AudioClipPool {
                     // Direct channel mapping
                     let ch_offset = dst_ch;
 
-                    // Extract channel samples for interpolation
-                    let mut channel_samples = Vec::with_capacity(KERNEL_SIZE);
-                    for i in -(HALF_KERNEL as i32)..(HALF_KERNEL as i32) {
+                    // Extract channel samples for interpolation (stack-allocated)
+                    let mut channel_samples = [0.0f32; KERNEL_SIZE];
+                    for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
                         let idx = src_frame + i;
                         if idx >= 0 && (idx as usize) < audio_file.frames as usize {
                             let sample_idx = (idx as usize) * src_channels + ch_offset;
-                            channel_samples.push(audio_file.data[sample_idx]);
-                        } else {
-                            channel_samples.push(0.0);
+                            channel_samples[j] = audio_file.data[sample_idx];
                         }
                     }
 
@@ -312,13 +310,11 @@ impl AudioClipPool {
 
                 } else if src_channels == 1 && dst_channels > 1 {
                     // Mono to stereo - duplicate
-                    let mut channel_samples = Vec::with_capacity(KERNEL_SIZE);
-                    for i in -(HALF_KERNEL as i32)..(HALF_KERNEL as i32) {
+                    let mut channel_samples = [0.0f32; KERNEL_SIZE];
+                    for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
                         let idx = src_frame + i;
                         if idx >= 0 && (idx as usize) < audio_file.frames as usize {
-                            channel_samples.push(audio_file.data[idx as usize]);
-                        } else {
-                            channel_samples.push(0.0);
+                            channel_samples[j] = audio_file.data[idx as usize];
                         }
                     }
 
@@ -329,14 +325,12 @@ impl AudioClipPool {
                     let mut sum = 0.0;
 
                     for src_ch in 0..src_channels {
-                        let mut channel_samples = Vec::with_capacity(KERNEL_SIZE);
-                        for i in -(HALF_KERNEL as i32)..(HALF_KERNEL as i32) {
+                        let mut channel_samples = [0.0f32; KERNEL_SIZE];
+                        for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
                             let idx = src_frame + i;
                             if idx >= 0 && (idx as usize) < audio_file.frames as usize {
                                 let sample_idx = (idx as usize) * src_channels + src_ch;
-                                channel_samples.push(audio_file.data[sample_idx]);
-                            } else {
-                                channel_samples.push(0.0);
+                                channel_samples[j] = audio_file.data[sample_idx];
                             }
                         }
                         sum += windowed_sinc_interpolate(&channel_samples, frac);
@@ -348,14 +342,12 @@ impl AudioClipPool {
                     // Mismatched channels - use modulo mapping
                     let src_ch = dst_ch % src_channels;
 
-                    let mut channel_samples = Vec::with_capacity(KERNEL_SIZE);
-                    for i in -(HALF_KERNEL as i32)..(HALF_KERNEL as i32) {
+                    let mut channel_samples = [0.0f32; KERNEL_SIZE];
+                    for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
                         let idx = src_frame + i;
                         if idx >= 0 && (idx as usize) < audio_file.frames as usize {
                             let sample_idx = (idx as usize) * src_channels + src_ch;
-                            channel_samples.push(audio_file.data[sample_idx]);
-                        } else {
-                            channel_samples.push(0.0);
+                            channel_samples[j] = audio_file.data[sample_idx];
                         }
                     }
 

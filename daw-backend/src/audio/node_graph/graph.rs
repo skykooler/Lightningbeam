@@ -95,6 +95,9 @@ pub struct AudioGraph {
 
     /// Current playback time (for automation nodes)
     playback_time: f64,
+
+    /// Cached topological sort order (invalidated on graph mutation)
+    topo_cache: Option<Vec<NodeIndex>>,
 }
 
 impl AudioGraph {
@@ -113,12 +116,14 @@ impl AudioGraph {
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
             node_positions: std::collections::HashMap::new(),
             playback_time: 0.0,
+            topo_cache: None,
         }
     }
 
     /// Add a node to the graph
     pub fn add_node(&mut self, node: Box<dyn AudioNode>) -> NodeIndex {
         let graph_node = GraphNode::new(node, self.buffer_size);
+        self.topo_cache = None;
         self.graph.add_node(graph_node)
     }
 
@@ -158,6 +163,7 @@ impl AudioGraph {
 
         // Add the edge
         self.graph.add_edge(from, to, Connection { from_port, to_port });
+        self.topo_cache = None;
 
         Ok(())
     }
@@ -175,6 +181,7 @@ impl AudioGraph {
             let conn = &self.graph[edge_idx];
             if conn.from_port == from_port && conn.to_port == to_port {
                 self.graph.remove_edge(edge_idx);
+                self.topo_cache = None;
             }
         }
     }
@@ -182,6 +189,7 @@ impl AudioGraph {
     /// Remove a node from the graph
     pub fn remove_node(&mut self, node: NodeIndex) {
         self.graph.remove_node(node);
+        self.topo_cache = None;
 
         // Update MIDI targets
         self.midi_targets.retain(|&idx| idx != node);
@@ -372,15 +380,21 @@ impl AudioGraph {
             }
         }
 
-        // Topological sort for processing order
-        let topo = petgraph::algo::toposort(&self.graph, None)
-            .unwrap_or_else(|_| {
-                // If there's a cycle (shouldn't happen due to validation), just process in index order
-                self.graph.node_indices().collect()
-            });
+        // Topological sort for processing order (cached, recomputed only on graph mutation)
+        if self.topo_cache.is_none() {
+            self.topo_cache = Some(
+                petgraph::algo::toposort(&self.graph, None)
+                    .unwrap_or_else(|_| {
+                        // If there's a cycle (shouldn't happen due to validation), just process in index order
+                        self.graph.node_indices().collect()
+                    })
+            );
+        }
+        let topo_len = self.topo_cache.as_ref().unwrap().len();
 
         // Process nodes in topological order
-        for node_idx in topo {
+        for topo_i in 0..topo_len {
+            let node_idx = self.topo_cache.as_ref().unwrap()[topo_i];
             // Get input port information
             let inputs = self.graph[node_idx].node.inputs();
             let num_audio_cv_inputs = inputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
@@ -409,25 +423,33 @@ impl AudioGraph {
                 }
             }
 
-            // Collect inputs from connected nodes
-            let incoming = self.graph.edges_directed(node_idx, Direction::Incoming).collect::<Vec<_>>();
+            // Collect edge info into stack array to avoid heap allocation
+            // (need to collect because we borrow graph immutably for source node data)
+            const MAX_EDGES: usize = 32;
+            let mut edge_info: [(NodeIndex, usize, usize); MAX_EDGES] = [(NodeIndex::new(0), 0, 0); MAX_EDGES];
+            let mut edge_count = 0;
+            for edge in self.graph.edges_directed(node_idx, Direction::Incoming) {
+                if edge_count < MAX_EDGES {
+                    edge_info[edge_count] = (edge.source(), edge.weight().from_port, edge.weight().to_port);
+                    edge_count += 1;
+                }
+            }
 
-            for edge in incoming {
-                let source_idx = edge.source();
-                let conn = edge.weight();
+            for ei in 0..edge_count {
+                let (source_idx, from_port, to_port) = edge_info[ei];
                 let source_node = &self.graph[source_idx];
 
                 // Determine source port type
-                if conn.from_port < source_node.node.outputs().len() {
-                    let source_port_type = source_node.node.outputs()[conn.from_port].signal_type;
+                if from_port < source_node.node.outputs().len() {
+                    let source_port_type = source_node.node.outputs()[from_port].signal_type;
 
                     match source_port_type {
                         SignalType::Audio | SignalType::CV => {
                             // Copy audio/CV data
-                            if conn.to_port < num_audio_cv_inputs && conn.from_port < source_node.output_buffers.len() {
-                                let source_buffer = &source_node.output_buffers[conn.from_port];
-                                if conn.to_port < self.input_buffers.len() {
-                                    for (dst, src) in self.input_buffers[conn.to_port].iter_mut().zip(source_buffer.iter()) {
+                            if to_port < num_audio_cv_inputs && from_port < source_node.output_buffers.len() {
+                                let source_buffer = &source_node.output_buffers[from_port];
+                                if to_port < self.input_buffers.len() {
+                                    for (dst, src) in self.input_buffers[to_port].iter_mut().zip(source_buffer.iter()) {
                                         // If dst is NaN (unconnected), replace it; otherwise add (for mixing)
                                         if dst.is_nan() {
                                             *dst = *src;
@@ -442,12 +464,12 @@ impl AudioGraph {
                             // Copy MIDI events
                             // Map from global port index to MIDI-only port index
                             let midi_port_idx = inputs.iter()
-                                .take(conn.to_port + 1)
+                                .take(to_port + 1)
                                 .filter(|p| p.signal_type == SignalType::Midi)
                                 .count() - 1;
 
                             let source_midi_idx = source_node.node.outputs().iter()
-                                .take(conn.from_port + 1)
+                                .take(from_port + 1)
                                 .filter(|p| p.signal_type == SignalType::Midi)
                                 .count() - 1;
 

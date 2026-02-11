@@ -578,6 +578,10 @@ pub struct AudioTrack {
     /// Runtime effects processing graph (rebuilt from preset on load)
     #[serde(skip, default = "default_audio_graph")]
     pub effects_graph: AudioGraph,
+
+    /// Pre-allocated buffer for clip rendering (avoids heap allocation per callback)
+    #[serde(skip, default)]
+    clip_render_buffer: Vec<f32>,
 }
 
 impl Clone for AudioTrack {
@@ -593,6 +597,7 @@ impl Clone for AudioTrack {
             next_automation_id: self.next_automation_id,
             effects_graph_preset: self.effects_graph_preset.clone(),
             effects_graph: default_audio_graph(), // Create fresh graph, not cloned
+            clip_render_buffer: Vec::new(),
         }
     }
 }
@@ -635,6 +640,7 @@ impl AudioTrack {
             next_automation_id: 0,
             effects_graph_preset: None,
             effects_graph,
+            clip_render_buffer: Vec::new(),
         }
     }
 
@@ -755,11 +761,13 @@ impl AudioTrack {
         let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
         let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
 
-        // Create a temporary buffer for clip rendering
-        let mut clip_buffer = vec![0.0f32; output.len()];
+        // Split borrow: take clip_render_buffer out to avoid borrow conflict with &self methods
+        let mut clip_buffer = std::mem::take(&mut self.clip_render_buffer);
+        clip_buffer.resize(output.len(), 0.0);
+        clip_buffer.fill(0.0);
         let mut rendered = 0;
 
-        // Render all active clip instances into the temporary buffer
+        // Render all active clip instances into the buffer
         for clip in &self.clips {
             // Check if clip overlaps with current buffer time range
             if clip.external_start < buffer_end_seconds && clip.external_end() > playhead_seconds {
@@ -786,6 +794,9 @@ impl AudioTrack {
                 }
             }
         }
+
+        // Put the buffer back for reuse next callback
+        self.clip_render_buffer = clip_buffer;
 
         // Process through the effects graph (this will write to output buffer)
         self.effects_graph.process(output, &[], playhead_seconds);
