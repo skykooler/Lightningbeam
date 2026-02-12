@@ -1759,8 +1759,10 @@ impl TimelinePane {
         }
 
         // Distinguish between mouse wheel (discrete) and trackpad (smooth)
+        // Only handle scroll when mouse is over the timeline area
         let mut handled = false;
-        ui.input(|i| {
+        let pointer_over_timeline = response.hovered() || ui.rect_contains_pointer(header_rect);
+        if pointer_over_timeline { ui.input(|i| {
             for event in &i.raw.events {
                 if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
                     match unit {
@@ -1787,10 +1789,10 @@ impl TimelinePane {
                     }
                 }
             }
-        });
+        }); }
 
         // Handle scroll_delta for trackpad panning (when Ctrl not held)
-        if !handled {
+        if pointer_over_timeline && !handled {
             let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
             if scroll_delta.x.abs() > 0.0 || scroll_delta.y.abs() > 0.0 {
                 // Horizontal scroll: pan timeline (inverted: positive delta scrolls left/earlier in time)

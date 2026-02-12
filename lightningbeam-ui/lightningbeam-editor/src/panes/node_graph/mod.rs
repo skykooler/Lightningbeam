@@ -626,11 +626,15 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
         // Allocate the rect and render the graph editor within it
         ui.allocate_ui_at_rect(rect, |ui| {
             // Check for scroll input to override library's default zoom behavior
+            // Only handle scroll when mouse is over the node graph area
+            let pointer_over_graph = ui.rect_contains_pointer(rect);
             let modifiers = ui.input(|i| i.modifiers);
             let has_ctrl = modifiers.ctrl || modifiers.command;
 
             // When ctrl is held, check for raw scroll events in the events list
-            let scroll_delta = if has_ctrl {
+            let scroll_delta = if !pointer_over_graph {
+                egui::Vec2::ZERO
+            } else if has_ctrl {
                 // Sum up scroll events from the raw event list
                 ui.input(|i| {
                     let mut total_scroll = egui::Vec2::ZERO;

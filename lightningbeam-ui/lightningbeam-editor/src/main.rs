@@ -751,6 +751,9 @@ impl EditorApp {
     fn new(cc: &eframe::CreationContext, layouts: Vec<LayoutDefinition>, theme: Theme) -> Self {
         let current_layout = layouts[0].layout.clone();
 
+        // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
+        cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);
+
         // Load application config
         let config = AppConfig::load();
 
