@@ -31,11 +31,203 @@ pub struct WaveformChunk {
     pub peaks: Vec<WaveformPeak>,   // Variable length based on level
 }
 
+/// Whether an audio file is uncompressed (WAV/AIFF — can be memory-mapped) or compressed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    /// Uncompressed PCM (WAV, AIFF) — suitable for memory mapping
+    Pcm,
+    /// Compressed (MP3, FLAC, OGG, AAC, etc.) — requires decoding
+    Compressed,
+}
+
+/// Audio file metadata obtained without decoding
+#[derive(Debug, Clone)]
+pub struct AudioMetadata {
+    pub channels: u32,
+    pub sample_rate: u32,
+    pub duration: f64,
+    pub n_frames: Option<u64>,
+    pub format: AudioFormat,
+}
+
 pub struct AudioFile {
     pub data: Vec<f32>,
     pub channels: u32,
     pub sample_rate: u32,
     pub frames: u64,
+}
+
+/// Read only metadata from an audio file without decoding any audio packets.
+/// This is fast (sub-millisecond) and suitable for calling on the UI thread.
+pub fn read_metadata<P: AsRef<Path>>(path: P) -> Result<AudioMetadata, String> {
+    let path = path.as_ref();
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    let ext = path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase());
+    if let Some(ref ext_str) = ext {
+        hint.with_extension(ext_str);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("Failed to probe file: {}", e))?;
+
+    let format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        .ok_or_else(|| "No audio tracks found".to_string())?;
+
+    let codec_params = &track.codec_params;
+    let channels = codec_params.channels
+        .ok_or_else(|| "Channel count not specified".to_string())?
+        .count() as u32;
+    let sample_rate = codec_params.sample_rate
+        .ok_or_else(|| "Sample rate not specified".to_string())?;
+    let n_frames = codec_params.n_frames;
+
+    // Determine duration from frame count or time base
+    let duration = if let Some(frames) = n_frames {
+        frames as f64 / sample_rate as f64
+    } else if let Some(tb) = codec_params.time_base {
+        if let Some(dur) = codec_params.n_frames {
+            tb.calc_time(dur).seconds as f64 + tb.calc_time(dur).frac
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Determine if this is a PCM format (WAV/AIFF) or compressed
+    let audio_format = match ext.as_deref() {
+        Some("wav") | Some("wave") | Some("aiff") | Some("aif") => AudioFormat::Pcm,
+        _ => AudioFormat::Compressed,
+    };
+
+    Ok(AudioMetadata {
+        channels,
+        sample_rate,
+        duration,
+        n_frames,
+        format: audio_format,
+    })
+}
+
+/// Parsed WAV header info needed for memory-mapping.
+pub struct WavHeaderInfo {
+    pub data_offset: usize,
+    pub data_size: usize,
+    pub sample_format: crate::audio::pool::PcmSampleFormat,
+    pub channels: u32,
+    pub sample_rate: u32,
+    pub total_frames: u64,
+}
+
+/// Parse a WAV file header from a byte slice (e.g. from an mmap).
+/// Returns the byte offset to PCM data and format details.
+pub fn parse_wav_header(data: &[u8]) -> Result<WavHeaderInfo, String> {
+    if data.len() < 44 {
+        return Err("File too small to be a valid WAV".to_string());
+    }
+
+    // RIFF header
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err("Not a valid RIFF/WAVE file".to_string());
+    }
+
+    // Walk chunks to find "fmt " and "data"
+    let mut pos = 12;
+    let mut fmt_found = false;
+    let mut channels: u32 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u16 = 0;
+    let mut format_code: u16 = 0;
+
+    let mut data_offset: usize = 0;
+    let mut data_size: usize = 0;
+
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
+        ]) as usize;
+
+        if chunk_id == b"fmt " {
+            if pos + 8 + 16 > data.len() {
+                return Err("fmt chunk too small".to_string());
+            }
+            let base = pos + 8;
+            format_code = u16::from_le_bytes([data[base], data[base + 1]]);
+            channels = u16::from_le_bytes([data[base + 2], data[base + 3]]) as u32;
+            sample_rate = u32::from_le_bytes([
+                data[base + 4],
+                data[base + 5],
+                data[base + 6],
+                data[base + 7],
+            ]);
+            bits_per_sample = u16::from_le_bytes([data[base + 14], data[base + 15]]);
+            fmt_found = true;
+        } else if chunk_id == b"data" {
+            data_offset = pos + 8;
+            data_size = chunk_size;
+            break;
+        }
+
+        // Advance to next chunk (chunks are 2-byte aligned)
+        pos += 8 + chunk_size;
+        if chunk_size % 2 != 0 {
+            pos += 1;
+        }
+    }
+
+    if !fmt_found {
+        return Err("No fmt chunk found".to_string());
+    }
+    if data_offset == 0 {
+        return Err("No data chunk found".to_string());
+    }
+
+    // Determine sample format
+    let sample_format = match (format_code, bits_per_sample) {
+        (1, 16) => crate::audio::pool::PcmSampleFormat::I16,
+        (1, 24) => crate::audio::pool::PcmSampleFormat::I24,
+        (3, 32) => crate::audio::pool::PcmSampleFormat::F32,
+        (1, 32) => crate::audio::pool::PcmSampleFormat::F32, // 32-bit PCM treated as float
+        _ => {
+            return Err(format!(
+                "Unsupported WAV format: code={}, bits={}",
+                format_code, bits_per_sample
+            ));
+        }
+    };
+
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    let bytes_per_frame = bytes_per_sample * channels as usize;
+    let total_frames = if bytes_per_frame > 0 {
+        (data_size / bytes_per_frame) as u64
+    } else {
+        0
+    };
+
+    Ok(WavHeaderInfo {
+        data_offset,
+        data_size,
+        sample_format,
+        channels,
+        sample_rate,
+        total_frames,
+    })
 }
 
 impl AudioFile {

@@ -17,6 +17,9 @@ base64 = "0.22"
 pathdiff = "0.2"
 rayon = "1.10"
 
+# Memory-mapped I/O for audio files
+memmap2 = "0.9"
+
 # Audio export
 hound = "3.5"
 ffmpeg-next = "8.0"  # For MP3/AAC encoding

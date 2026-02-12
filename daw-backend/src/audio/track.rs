@@ -795,11 +795,11 @@ impl AudioTrack {
             }
         }
 
-        // Put the buffer back for reuse next callback
-        self.clip_render_buffer = clip_buffer;
-
         // Process through the effects graph (this will write to output buffer)
         self.effects_graph.process(output, &[], playhead_seconds);
+
+        // Put the buffer back for reuse next callback
+        self.clip_render_buffer = clip_buffer;
 
         // Evaluate and apply automation
         let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
@@ -874,8 +874,8 @@ impl AudioTrack {
 
         // For now, render in a simpler way - iterate through the timeline range
         // and use get_content_position for each sample position
-        let output_start_offset = ((render_start_seconds - playhead_seconds) * samples_per_second) as usize;
-        let output_end_offset = ((render_end_seconds - playhead_seconds) * samples_per_second) as usize;
+        let output_start_offset = ((render_start_seconds - playhead_seconds) * samples_per_second + 0.5) as usize;
+        let output_end_offset = ((render_end_seconds - playhead_seconds) * samples_per_second + 0.5) as usize;
 
         if output_end_offset > output.len() || output_start_offset > output.len() {
             return 0;

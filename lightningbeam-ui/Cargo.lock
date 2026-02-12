@@ -1661,6 +1661,7 @@ dependencies = [
  "dasp_signal",
  "ffmpeg-next",
  "hound",
+ "memmap2",
  "midir",
  "midly",
  "pathdiff",

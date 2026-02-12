@@ -186,6 +186,13 @@ pub enum Command {
         chunk_indices: Vec<u32>,
         priority: u8, // 0=Low, 1=Medium, 2=High
     },
+
+    // Async audio import
+    /// Import an audio file asynchronously. The engine probes the file format
+    /// and either memory-maps it (WAV/AIFF) or sets up stream decode
+    /// (compressed). Emits `AudioFileReady` when playback-ready and
+    /// `AudioDecodeProgress` for compressed files as waveform data is decoded.
+    ImportAudio(std::path::PathBuf),
 }
 
 /// Events sent from audio thread back to UI/control thread
@@ -252,6 +259,33 @@ pub enum AudioEvent {
         pool_index: usize,
         detail_level: u8,
         chunks: Vec<(u32, (f64, f64), Vec<WaveformPeak>)>,
+    },
+
+    /// An audio file has been imported and is ready for playback.
+    /// For WAV/AIFF: the file is memory-mapped. For compressed: the disk
+    /// reader is stream-decoding ahead of the playhead.
+    AudioFileReady {
+        pool_index: usize,
+        path: String,
+        channels: u32,
+        sample_rate: u32,
+        duration: f64,
+        format: crate::io::audio_file::AudioFormat,
+    },
+
+    /// Progressive decode progress for a compressed audio file's waveform data.
+    /// The UI can use this to update waveform display incrementally.
+    AudioDecodeProgress {
+        pool_index: usize,
+        decoded_frames: u64,
+        total_frames: u64,
+    },
+
+    /// Background waveform decode completed for a compressed audio file.
+    /// Internal event — consumed by the engine to update the pool, not forwarded to UI.
+    WaveformDecodeComplete {
+        pool_index: usize,
+        samples: Vec<f32>,
     },
 }
 

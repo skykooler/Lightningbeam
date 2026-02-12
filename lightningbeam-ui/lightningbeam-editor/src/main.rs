@@ -2318,9 +2318,14 @@ impl EditorApp {
         }
     }
 
-    /// Import an audio file via daw-backend
+    /// Import an audio file via daw-backend (async — non-blocking)
+    ///
+    /// Reads only metadata from the file (sub-millisecond), then sends the path
+    /// to the engine for async import. The engine memory-maps WAV files or sets
+    /// up stream decoding for compressed formats. An `AudioFileReady` event is
+    /// emitted when the file is playback-ready; the event handler populates the
+    /// GPU waveform cache.
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
-        use daw_backend::io::audio_file::AudioFile;
         use lightningbeam_core::clip::AudioClip;
 
         let name = path.file_stem()
@@ -2328,69 +2333,47 @@ impl EditorApp {
             .unwrap_or("Untitled Audio")
             .to_string();
 
-        // Load audio file via daw-backend
-        match AudioFile::load(path) {
-            Ok(audio_file) => {
-                let duration = audio_file.frames as f64 / audio_file.sample_rate as f64;
-                let channels = audio_file.channels;
-                let sample_rate = audio_file.sample_rate;
-
-                // Add to audio engine pool if available
-                if let Some(ref controller_arc) = self.audio_controller {
-                    let pool_index = {
-                        let mut controller = controller_arc.lock().unwrap();
-                        // Send audio data to the engine
-                        let path_str = path.to_string_lossy().to_string();
-                        println!("📤 [UI] Sending AddAudioFile command to engine: {}", path_str);
-                        controller.add_audio_file(
-                            path_str.clone(),
-                            audio_file.data,
-                            channels,
-                            sample_rate,
-                        );
-
-                        // For now, use a placeholder pool index (the engine will assign the real one)
-                        // In a full implementation, we'd wait for the AudioFileAdded event
-                        self.action_executor.document().audio_clips.len()
-                    }; // Controller lock is dropped here
-
-                    // Create audio clip in document
-                    let clip = AudioClip::new_sampled(&name, pool_index, duration);
-                    let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
-
-                    // Fetch raw audio samples for GPU waveform rendering
-                    if let Some(ref controller_arc) = self.audio_controller {
-                        let mut controller = controller_arc.lock().unwrap();
-                        match controller.get_pool_audio_samples(pool_index) {
-                            Ok((samples, sr, ch)) => {
-                                println!("✅ Cached {} raw audio samples for GPU waveform", samples.len());
-                                self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
-                                self.waveform_gpu_dirty.insert(pool_index);
-                            }
-                            Err(e) => eprintln!("Failed to fetch raw audio: {}", e),
-                        }
-                    }
-
-                    println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {}",
-                        name, duration, channels, sample_rate, clip_id);
-
-                    Some(ImportedAssetInfo {
-                        clip_id,
-                        clip_type: panes::DragClipType::AudioSampled,
-                        name,
-                        dimensions: None,
-                        duration,
-                        linked_audio_clip_id: None,
-                    })
-                } else {
-                    eprintln!("Cannot import audio: audio engine not initialized");
-                    None
-                }
-            }
+        // Read metadata without decoding (fast — sub-millisecond)
+        let metadata = match daw_backend::io::read_metadata(path) {
+            Ok(m) => m,
             Err(e) => {
-                eprintln!("Failed to load audio '{}': {}", path.display(), e);
-                None
+                eprintln!("Failed to read audio metadata '{}': {}", path.display(), e);
+                return None;
             }
+        };
+
+        let duration = metadata.duration;
+        let channels = metadata.channels;
+        let sample_rate = metadata.sample_rate;
+
+        if let Some(ref controller_arc) = self.audio_controller {
+            // Predict the pool index (engine assigns sequentially)
+            let pool_index = self.action_executor.document().audio_clips.len();
+
+            // Send async import command (non-blocking)
+            {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.import_audio(path.to_path_buf());
+            }
+
+            // Create audio clip in document immediately (metadata is enough)
+            let clip = AudioClip::new_sampled(&name, pool_index, duration);
+            let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+
+            println!("Imported audio '{}' ({:.1}s, {}ch, {}Hz) - ID: {} (pool: {})",
+                name, duration, channels, sample_rate, clip_id, pool_index);
+
+            Some(ImportedAssetInfo {
+                clip_id,
+                clip_type: panes::DragClipType::AudioSampled,
+                name,
+                dimensions: None,
+                duration,
+                linked_audio_clip_id: None,
+            })
+        } else {
+            eprintln!("Cannot import audio: audio engine not initialized");
+            None
         }
     }
 
@@ -3468,6 +3451,44 @@ impl eframe::App for EditorApp {
                             self.recording_clips.clear();
                             self.recording_layer_id = None;
                             ctx.request_repaint();
+                        }
+                        AudioEvent::AudioFileReady { pool_index, path, channels, sample_rate, duration, format } => {
+                            println!("Audio file ready: pool={}, path={}, ch={}, sr={}, {:.1}s, {:?}",
+                                     pool_index, path, channels, sample_rate, duration, format);
+                            // For PCM (mmap'd) files, raw samples are available immediately
+                            // via the pool's data() accessor. Fetch them for GPU waveform.
+                            if format == daw_backend::io::AudioFormat::Pcm {
+                                if let Some(ref controller_arc) = self.audio_controller {
+                                    let mut controller = controller_arc.lock().unwrap();
+                                    match controller.get_pool_audio_samples(pool_index) {
+                                        Ok((samples, sr, ch)) => {
+                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                            self.waveform_gpu_dirty.insert(pool_index);
+                                        }
+                                        Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
+                                    }
+                                }
+                            }
+                            // For compressed files, waveform data arrives progressively
+                            // via AudioDecodeProgress events.
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::AudioDecodeProgress { pool_index, decoded_frames, total_frames } => {
+                            // Waveform decode complete — fetch samples for GPU waveform
+                            if decoded_frames == total_frames {
+                                if let Some(ref controller_arc) = self.audio_controller {
+                                    let mut controller = controller_arc.lock().unwrap();
+                                    match controller.get_pool_audio_samples(pool_index) {
+                                        Ok((samples, sr, ch)) => {
+                                            println!("Waveform decode complete for pool {}: {} samples", pool_index, samples.len());
+                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                            self.waveform_gpu_dirty.insert(pool_index);
+                                        }
+                                        Err(e) => eprintln!("Failed to fetch decoded audio for pool {}: {}", pool_index, e),
+                                    }
+                                }
+                                ctx.request_repaint();
+                            }
                         }
                         _ => {} // Ignore other events for now
                     }
