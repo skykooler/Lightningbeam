@@ -505,7 +505,7 @@ impl TimelinePane {
         painter: &egui::Painter,
         clip_rect: egui::Rect,
         rect_min_x: f32, // Timeline panel left edge (for proper viewport-relative positioning)
-        events: &[(f64, u8, bool)], // (timestamp, note_number, is_note_on)
+        events: &[(f64, u8, u8, bool)], // (timestamp, note_number, velocity, is_note_on)
         trim_start: f64,
         visible_duration: f64,
         timeline_start: f64,
@@ -527,7 +527,7 @@ impl TimelinePane {
         let mut note_rectangles: Vec<(egui::Rect, u8)> = Vec::new();
 
         // First pass: pair note-ons with note-offs to calculate durations
-        for &(timestamp, note_number, is_note_on) in events {
+        for &(timestamp, note_number, _velocity, is_note_on) in events {
             if is_note_on {
                 // Store note-on timestamp
                 active_notes.insert(note_number, timestamp);
@@ -892,7 +892,7 @@ impl TimelinePane {
         document: &lightningbeam_core::document::Document,
         active_layer_id: &Option<uuid::Uuid>,
         selection: &lightningbeam_core::selection::Selection,
-        midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
+        midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
         raw_audio_cache: &std::collections::HashMap<usize, (Vec<f32>, u32, u32)>,
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
         target_format: wgpu::TextureFormat,

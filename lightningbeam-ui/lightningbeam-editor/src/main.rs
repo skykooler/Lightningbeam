@@ -20,6 +20,8 @@ mod theme;
 use theme::{Theme, ThemeMode};
 
 mod waveform_gpu;
+mod spectrogram_gpu;
+mod spectrogram_compute;
 
 mod config;
 use config::AppConfig;
@@ -687,8 +689,8 @@ struct EditorApp {
 
     /// Cache for MIDI event data (keyed by backend midi_clip_id)
     /// Prevents repeated backend queries for the same MIDI clip
-    /// Format: (timestamp, note_number, is_note_on)
-    midi_event_cache: HashMap<u32, Vec<(f64, u8, bool)>>,
+    /// Format: (timestamp, note_number, velocity, is_note_on)
+    midi_event_cache: HashMap<u32, Vec<(f64, u8, u8, bool)>>,
     /// Cache for audio file durations to avoid repeated queries
     /// Format: pool_index -> duration in seconds
     audio_duration_cache: HashMap<usize, f64>,
@@ -2395,15 +2397,15 @@ impl EditorApp {
                 let duration = midi_clip.duration;
                 let event_count = midi_clip.events.len();
 
-                // Process MIDI events to cache format: (timestamp, note_number, is_note_on)
+                // Process MIDI events to cache format: (timestamp, note_number, velocity, is_note_on)
                 // Filter to note events only (status 0x90 = note-on, 0x80 = note-off)
-                let processed_events: Vec<(f64, u8, bool)> = midi_clip.events.iter()
+                let processed_events: Vec<(f64, u8, u8, bool)> = midi_clip.events.iter()
                     .filter_map(|event| {
                         let status_type = event.status & 0xF0;
                         if status_type == 0x90 || status_type == 0x80 {
                             // Note-on is 0x90 with velocity > 0, Note-off is 0x80 or velocity = 0
                             let is_note_on = status_type == 0x90 && event.data2 > 0;
-                            Some((event.timestamp, event.data1, is_note_on))
+                            Some((event.timestamp, event.data1, event.data2, is_note_on))
                         } else {
                             None // Ignore non-note events (CC, pitch bend, etc.)
                         }
@@ -4026,7 +4028,7 @@ struct RenderContext<'a> {
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
     layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
-    midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, bool)>>,
+    midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, u8, bool)>>,
     /// Audio pool indices with new raw audio data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: &'a HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))

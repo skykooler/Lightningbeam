@@ -188,7 +188,7 @@ pub struct SharedPaneState<'a> {
     /// Number of sides for polygon tool
     pub polygon_sides: &'a mut u32,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
-    pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, bool)>>,
+    pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
     /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
