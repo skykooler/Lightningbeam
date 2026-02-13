@@ -1716,46 +1716,72 @@ impl EditorApp {
 
             // Edit menu
             MenuAction::Undo => {
-                if let Some(ref controller_arc) = self.audio_controller {
+                let undo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
                     };
-
                     match self.action_executor.undo_with_backend(&mut backend_context) {
-                        Ok(true) => println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default()),
-                        Ok(false) => println!("Nothing to undo"),
-                        Err(e) => eprintln!("Undo failed: {}", e),
+                        Ok(true) => {
+                            println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default());
+                            true
+                        }
+                        Ok(false) => { println!("Nothing to undo"); false }
+                        Err(e) => { eprintln!("Undo failed: {}", e); false }
                     }
                 } else {
                     match self.action_executor.undo() {
-                        Ok(true) => println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default()),
-                        Ok(false) => println!("Nothing to undo"),
-                        Err(e) => eprintln!("Undo failed: {}", e),
+                        Ok(true) => {
+                            println!("Undid: {}", self.action_executor.redo_description().unwrap_or_default());
+                            true
+                        }
+                        Ok(false) => { println!("Nothing to undo"); false }
+                        Err(e) => { eprintln!("Undo failed: {}", e); false }
+                    }
+                };
+                // Rebuild MIDI cache after undo (backend_context dropped, borrows released)
+                if undo_succeeded {
+                    let midi_update = self.action_executor.last_redo_midi_notes()
+                        .map(|(id, notes)| (id, notes.to_vec()));
+                    if let Some((clip_id, notes)) = midi_update {
+                        self.rebuild_midi_cache_entry(clip_id, &notes);
                     }
                 }
             }
             MenuAction::Redo => {
-                if let Some(ref controller_arc) = self.audio_controller {
+                let redo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
                     };
-
                     match self.action_executor.redo_with_backend(&mut backend_context) {
-                        Ok(true) => println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default()),
-                        Ok(false) => println!("Nothing to redo"),
-                        Err(e) => eprintln!("Redo failed: {}", e),
+                        Ok(true) => {
+                            println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default());
+                            true
+                        }
+                        Ok(false) => { println!("Nothing to redo"); false }
+                        Err(e) => { eprintln!("Redo failed: {}", e); false }
                     }
                 } else {
                     match self.action_executor.redo() {
-                        Ok(true) => println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default()),
-                        Ok(false) => println!("Nothing to redo"),
-                        Err(e) => eprintln!("Redo failed: {}", e),
+                        Ok(true) => {
+                            println!("Redid: {}", self.action_executor.undo_description().unwrap_or_default());
+                            true
+                        }
+                        Ok(false) => { println!("Nothing to redo"); false }
+                        Err(e) => { eprintln!("Redo failed: {}", e); false }
+                    }
+                };
+                // Rebuild MIDI cache after redo (backend_context dropped, borrows released)
+                if redo_succeeded {
+                    let midi_update = self.action_executor.last_undo_midi_notes()
+                        .map(|(id, notes)| (id, notes.to_vec()));
+                    if let Some((clip_id, notes)) = midi_update {
+                        self.rebuild_midi_cache_entry(clip_id, &notes);
                     }
                 }
             }
@@ -2380,6 +2406,18 @@ impl EditorApp {
             eprintln!("Cannot import audio: audio engine not initialized");
             None
         }
+    }
+
+    /// Rebuild a MIDI event cache entry from backend note format.
+    /// Called after undo/redo to keep the cache consistent with the backend.
+    fn rebuild_midi_cache_entry(&mut self, clip_id: u32, notes: &[(f64, u8, u8, f64)]) {
+        let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+        for &(start_time, note, velocity, duration) in notes {
+            events.push((start_time, note, velocity, true));
+            events.push((start_time + duration, note, velocity, false));
+        }
+        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        self.midi_event_cache.insert(clip_id, events);
     }
 
     /// Import a MIDI file via daw-backend
@@ -3798,7 +3836,7 @@ impl eframe::App for EditorApp {
                 paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
                 polygon_sides: &mut self.polygon_sides,
                 layer_to_track_map: &self.layer_to_track_map,
-                midi_event_cache: &self.midi_event_cache,
+                midi_event_cache: &mut self.midi_event_cache,
                 audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
                 raw_audio_cache: &self.raw_audio_cache,
                 waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
@@ -4028,7 +4066,7 @@ struct RenderContext<'a> {
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
     layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
-    midi_event_cache: &'a HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    midi_event_cache: &'a mut HashMap<u32, Vec<(f64, u8, u8, bool)>>,
     /// Audio pool indices with new raw audio data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: &'a HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))

@@ -71,4 +71,12 @@ impl Action for UpdateMidiNotesAction {
         controller.update_midi_clip_notes(*track_id, self.midi_clip_id, self.old_notes.clone());
         Ok(())
     }
+
+    fn midi_notes_after_execute(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        Some((self.midi_clip_id, &self.new_notes))
+    }
+
+    fn midi_notes_after_rollback(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        Some((self.midi_clip_id, &self.old_notes))
+    }
 }

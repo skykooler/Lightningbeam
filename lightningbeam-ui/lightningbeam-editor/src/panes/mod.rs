@@ -187,8 +187,12 @@ pub struct SharedPaneState<'a> {
     pub paint_bucket_gap_tolerance: &'a mut f64,
     /// Number of sides for polygon tool
     pub polygon_sides: &'a mut u32,
-    /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
-    pub midi_event_cache: &'a std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    /// Cache of MIDI events for rendering (keyed by backend midi_clip_id).
+    /// Mutable so panes can update the cache immediately on edits (avoiding 1-frame snap-back).
+    /// NOTE: If an action later fails during execution, the cache may be out of sync with the
+    /// backend. This is acceptable because MIDI note edits are simple and unlikely to fail.
+    /// Undo/redo rebuilds affected entries from the backend to restore consistency.
+    pub midi_event_cache: &'a mut std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
     /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))

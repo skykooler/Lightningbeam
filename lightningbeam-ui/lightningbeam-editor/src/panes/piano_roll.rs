@@ -78,10 +78,11 @@ pub struct PianoRollPane {
     selected_clip_id: Option<u32>,
 
     // Note preview
-    preview_note: Option<u8>,
-    preview_base_note: Option<u8>, // original pitch before drag offset
+    preview_note: Option<u8>,       // current preview pitch (stays set after auto-release for re-strike check)
+    preview_note_sounding: bool,    // true while MIDI note-on is active (false after auto-release)
+    preview_base_note: Option<u8>,  // original pitch before drag offset
     preview_velocity: u8,
-    preview_duration: Option<f64>, // auto-release after this many seconds (None = hold until mouse-up)
+    preview_duration: Option<f64>,  // auto-release after this many seconds (None = hold until mouse-up)
     preview_start_time: f64,
 
     // Auto-scroll
@@ -117,6 +118,7 @@ impl PianoRollPane {
             drag_note_offsets: None,
             selected_clip_id: None,
             preview_note: None,
+            preview_note_sounding: false,
             preview_base_note: None,
             preview_velocity: DEFAULT_VELOCITY,
             preview_duration: None,
@@ -619,10 +621,20 @@ impl PianoRollPane {
         let ctrl_held = ui.input(|i| i.modifiers.ctrl);
         let now = ui.input(|i| i.time);
 
-        // Auto-release preview note after its duration expires
-        if let (Some(_), Some(dur)) = (self.preview_note, self.preview_duration) {
-            if now - self.preview_start_time >= dur {
-                self.preview_note_off(shared);
+        // Auto-release preview note after its duration expires.
+        // Sends note_off but keeps preview_note set so the re-strike check
+        // won't re-trigger at the same pitch.
+        if let (Some(note), Some(dur)) = (self.preview_note, self.preview_duration) {
+            if self.preview_note_sounding && now - self.preview_start_time >= dur {
+                if let Some(layer_id) = *shared.active_layer_id {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller.as_ref() {
+                            let mut controller = controller_arc.lock().unwrap();
+                            controller.send_midi_note_off(track_id, note);
+                        }
+                    }
+                }
+                self.preview_note_sounding = false;
             }
         }
 
@@ -1004,6 +1016,12 @@ impl PianoRollPane {
 
     /// Update midi_event_cache immediately so notes render at their new positions
     /// without waiting for the backend round-trip.
+    ///
+    /// DESYNC RISK: This updates the cache before the action executes on the backend.
+    /// If the action later fails during execute_with_backend(), the cache will be out
+    /// of sync with the backend state. This is acceptable because MIDI note edits are
+    /// simple operations unlikely to fail, and undo/redo rebuilds cache from the action's
+    /// stored note data to restore consistency.
     fn update_cache_from_resolved(clip_id: u32, resolved: &[ResolvedNote], shared: &mut SharedPaneState) {
         let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(resolved.len() * 2);
         for n in resolved {
@@ -1159,6 +1177,7 @@ impl PianoRollPane {
                     let mut controller = controller_arc.lock().unwrap();
                     controller.send_midi_note_on(track_id, note, velocity);
                     self.preview_note = Some(note);
+                    self.preview_note_sounding = true;
                     self.preview_velocity = velocity;
                     self.preview_duration = duration;
                     self.preview_start_time = time;
@@ -1169,13 +1188,16 @@ impl PianoRollPane {
 
     fn preview_note_off(&mut self, shared: &mut SharedPaneState) {
         if let Some(note) = self.preview_note.take() {
-            if let Some(layer_id) = *shared.active_layer_id {
-                if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
-                    if let Some(controller_arc) = shared.audio_controller.as_ref() {
-                        let mut controller = controller_arc.lock().unwrap();
-                        controller.send_midi_note_off(track_id, note);
+            if self.preview_note_sounding {
+                if let Some(layer_id) = *shared.active_layer_id {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller.as_ref() {
+                            let mut controller = controller_arc.lock().unwrap();
+                            controller.send_midi_note_off(track_id, note);
+                        }
                     }
                 }
+                self.preview_note_sounding = false;
             }
         }
         // Don't clear preview_base_note or preview_duration here —

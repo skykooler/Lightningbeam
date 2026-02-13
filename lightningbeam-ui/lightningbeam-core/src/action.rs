@@ -96,6 +96,18 @@ pub trait Action: Send {
     fn rollback_backend(&mut self, _backend: &mut BackendContext, _document: &Document) -> Result<(), String> {
         Ok(())
     }
+
+    /// Return MIDI cache data reflecting the state after execute/redo.
+    /// Format: (clip_id, notes) where notes are (start_time, note, velocity, duration).
+    /// Used to keep the frontend MIDI event cache in sync after undo/redo.
+    fn midi_notes_after_execute(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        None
+    }
+
+    /// Return MIDI cache data reflecting the state after rollback/undo.
+    fn midi_notes_after_rollback(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        None
+    }
 }
 
 /// Action executor that wraps the document and manages undo/redo
@@ -243,6 +255,18 @@ impl ActionExecutor {
     /// Get the description of the next action to undo
     pub fn undo_description(&self) -> Option<String> {
         self.undo_stack.last().map(|a| a.description())
+    }
+
+    /// Get MIDI cache data from the last action on the undo stack (after redo).
+    /// Returns the notes reflecting execute state.
+    pub fn last_undo_midi_notes(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        self.undo_stack.last().and_then(|a| a.midi_notes_after_execute())
+    }
+
+    /// Get MIDI cache data from the last action on the redo stack (after undo).
+    /// Returns the notes reflecting rollback state.
+    pub fn last_redo_midi_notes(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
+        self.redo_stack.last().and_then(|a| a.midi_notes_after_rollback())
     }
 
     /// Get the description of the next action to redo
