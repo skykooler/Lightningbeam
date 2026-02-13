@@ -2431,6 +2431,12 @@ impl Engine {
     fn handle_stop_midi_recording(&mut self) {
         eprintln!("[MIDI_RECORDING] handle_stop_midi_recording called");
         if let Some(mut recording) = self.midi_recording_state.take() {
+            // Send note-off to the synth for any notes still held, so they don't get stuck
+            let track_id_for_noteoff = recording.track_id;
+            for note_num in recording.active_note_numbers() {
+                self.project.send_midi_note_off(track_id_for_noteoff, note_num);
+            }
+
             // Close out any active notes at the current playhead position
             let end_time = self.playhead as f64 / self.sample_rate as f64;
             eprintln!("[MIDI_RECORDING] Closing active notes at time {}", end_time);

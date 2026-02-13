@@ -150,21 +150,25 @@ impl TimelinePane {
 
     /// Start recording on the active audio layer
     fn start_recording(&mut self, shared: &mut SharedPaneState) {
+        use lightningbeam_core::clip::{AudioClip, ClipInstance};
+
         let Some(active_layer_id) = *shared.active_layer_id else {
             println!("⚠️  No active layer selected for recording");
             return;
         };
 
-        // Get the active layer and check if it's an audio layer
-        let document = shared.action_executor.document();
-        let Some(layer) = document.root.children.iter().find(|l| l.id() == active_layer_id) else {
-            println!("⚠️  Active layer not found in document");
-            return;
-        };
-
-        let AnyLayer::Audio(audio_layer) = layer else {
-            println!("⚠️  Active layer is not an audio layer - cannot record");
-            return;
+        // Get layer type (copy it so we can drop the document borrow before mutating)
+        let layer_type = {
+            let document = shared.action_executor.document();
+            let Some(layer) = document.root.children.iter().find(|l| l.id() == active_layer_id) else {
+                println!("⚠️  Active layer not found in document");
+                return;
+            };
+            let AnyLayer::Audio(audio_layer) = layer else {
+                println!("⚠️  Active layer is not an audio layer - cannot record");
+                return;
+            };
+            audio_layer.audio_layer_type
         };
 
         // Get the backend track ID for this layer
@@ -179,31 +183,53 @@ impl TimelinePane {
         if let Some(controller_arc) = shared.audio_controller {
             let mut controller = controller_arc.lock().unwrap();
 
-            match audio_layer.audio_layer_type {
+            match layer_type {
                 AudioLayerType::Midi => {
-                    // For MIDI recording, we need to create a clip first
-                    // The backend will emit MidiRecordingStarted with the clip_id
+                    // Create backend MIDI clip and start recording
                     let clip_id = controller.create_midi_clip(track_id, start_time, 4.0);
                     controller.start_midi_recording(track_id, clip_id, start_time);
                     shared.recording_clips.insert(active_layer_id, clip_id);
                     println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
                              track_id, start_time, clip_id);
+
+                    // Drop controller lock before document mutation
+                    drop(controller);
+
+                    // Create document clip + clip instance immediately (clip_id is known synchronously)
+                    let doc_clip = AudioClip::new_midi("Recording...", clip_id, 4.0);
+                    let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
+
+                    let clip_instance = ClipInstance::new(doc_clip_id)
+                        .with_timeline_start(start_time);
+
+                    if let Some(layer) = shared.action_executor.document_mut().root.children.iter_mut()
+                        .find(|l| l.id() == active_layer_id)
+                    {
+                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                            audio_layer.clip_instances.push(clip_instance);
+                        }
+                    }
+
+                    // Initialize empty cache entry for this clip
+                    shared.midi_event_cache.insert(clip_id, Vec::new());
                 }
                 AudioLayerType::Sampled => {
                     // For audio recording, backend creates the clip
                     controller.start_recording(track_id, start_time);
                     println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
+                    drop(controller);
                 }
             }
 
-            // Auto-start playback if not already playing
+            // Re-acquire lock for playback start
             if !*shared.is_playing {
+                let mut controller = controller_arc.lock().unwrap();
                 controller.play();
                 *shared.is_playing = true;
                 println!("▶ Auto-started playback for recording");
             }
 
-            // Store recording state for clip creation when RecordingStarted event arrives
+            // Store recording state
             *shared.is_recording = true;
             *shared.recording_start_time = start_time;
             *shared.recording_layer_id = Some(active_layer_id);

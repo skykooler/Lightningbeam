@@ -7,7 +7,7 @@ use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
 use super::node_graph::preset::GraphPreset;
 use super::pool::AudioClipPool;
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Track ID type
 pub type TrackId = u32;
@@ -334,6 +334,10 @@ pub struct MidiTrack {
     /// Queue for live MIDI input (virtual keyboard, MIDI controllers)
     #[serde(skip)]
     live_midi_queue: Vec<MidiEvent>,
+    /// Clip instances that were active (overlapping playhead) in the previous render buffer.
+    /// Used to detect when the playhead exits a clip, so we can send all-notes-off.
+    #[serde(skip)]
+    prev_active_instances: HashSet<MidiClipInstanceId>,
 }
 
 impl Clone for MidiTrack {
@@ -350,6 +354,7 @@ impl Clone for MidiTrack {
             automation_lanes: self.automation_lanes.clone(),
             next_automation_id: self.next_automation_id,
             live_midi_queue: Vec::new(), // Don't clone live MIDI queue
+            prev_active_instances: HashSet::new(),
         }
     }
 }
@@ -372,6 +377,7 @@ impl MidiTrack {
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
             live_midi_queue: Vec::new(),
+            prev_active_instances: HashSet::new(),
         }
     }
 
@@ -505,7 +511,11 @@ impl MidiTrack {
 
         // Collect MIDI events from all clip instances that overlap with current time range
         let mut midi_events = Vec::new();
+        let mut currently_active = HashSet::new();
         for instance in &self.clip_instances {
+            if instance.overlaps_range(playhead_seconds, buffer_end_seconds) {
+                currently_active.insert(instance.id);
+            }
             // Get the clip content from the pool
             if let Some(clip) = midi_pool.get_clip(instance.clip_id) {
                 let events = instance.get_events_in_range(
@@ -516,6 +526,18 @@ impl MidiTrack {
                 midi_events.extend(events);
             }
         }
+
+        // Send all-notes-off for clip instances that just became inactive
+        // (playhead exited the clip). This prevents stuck notes from malformed clips.
+        for prev_id in &self.prev_active_instances {
+            if !currently_active.contains(prev_id) {
+                for note in 0..128u8 {
+                    midi_events.push(MidiEvent::note_off(playhead_seconds, 0, note, 0));
+                }
+                break; // One round of all-notes-off is enough
+            }
+        }
+        self.prev_active_instances = currently_active;
 
         // Add live MIDI events (from virtual keyboard or MIDI controllers)
         // This allows real-time input to be heard during playback/recording

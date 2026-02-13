@@ -256,7 +256,8 @@ impl MidiClipInstance {
             // Get events from the clip that fall within the internal range
             for event in &clip.events {
                 // Skip events outside the trimmed region
-                if event.timestamp < self.internal_start || event.timestamp >= self.internal_end {
+                // Use > (not >=) for internal_end so note-offs at the clip boundary are included
+                if event.timestamp < self.internal_start || event.timestamp > self.internal_end {
                     continue;
                 }
 
@@ -265,9 +266,10 @@ impl MidiClipInstance {
                 let timeline_time = self.external_start + loop_offset + relative_content_time;
 
                 // Check if within current buffer range and instance bounds
+                // Use <= for external_end so note-offs at the clip boundary are included
                 if timeline_time >= range_start_seconds
                     && timeline_time < range_end_seconds
-                    && timeline_time < external_end
+                    && timeline_time <= external_end
                 {
                     let mut adjusted_event = *event;
                     adjusted_event.timestamp = timeline_time;

@@ -253,6 +253,11 @@ impl MidiRecordingState {
         self.completed_notes.len()
     }
 
+    /// Get the note numbers of all currently held (active) notes
+    pub fn active_note_numbers(&self) -> Vec<u8> {
+        self.active_notes.keys().copied().collect()
+    }
+
     /// Close out all active notes at the given time
     /// This should be called when stopping recording to end any held notes
     pub fn close_active_notes(&mut self, end_time: f64) {

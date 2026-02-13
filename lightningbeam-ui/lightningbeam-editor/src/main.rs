@@ -3482,13 +3482,103 @@ impl eframe::App for EditorApp {
                             self.recording_layer_id = None;
                             ctx.request_repaint();
                         }
-                        AudioEvent::MidiRecordingProgress(_track_id, _clip_id, duration, _notes) => {
-                            println!("🎹 MIDI recording progress: {:.2}s", duration);
+                        AudioEvent::MidiRecordingProgress(_track_id, clip_id, duration, notes) => {
+                            // Update clip duration in document (so timeline bar grows)
+                            if let Some(layer_id) = self.recording_layer_id {
+                                let doc_clip_id = {
+                                    let document = self.action_executor.document();
+                                    document.root.children.iter()
+                                        .find(|l| l.id() == layer_id)
+                                        .and_then(|layer| {
+                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                audio_layer.clip_instances.last().map(|i| i.clip_id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                };
+
+                                if let Some(doc_clip_id) = doc_clip_id {
+                                    if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
+                                        clip.duration = duration;
+                                    }
+                                }
+                            }
+
+                            // Update midi_event_cache with notes captured so far
+                            // (inlined instead of calling rebuild_midi_cache_entry to avoid
+                            // conflicting &mut self borrow with event_rx loop)
+                            {
+                                let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+                                for &(start_time, note, velocity, dur) in &notes {
+                                    events.push((start_time, note, velocity, true));
+                                    events.push((start_time + dur, note, velocity, false));
+                                }
+                                events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                                self.midi_event_cache.insert(clip_id, events);
+                            }
                             ctx.request_repaint();
                         }
                         AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count) => {
                             println!("🎹 MIDI recording stopped: track={:?}, clip_id={}, {} notes",
                                      track_id, clip_id, note_count);
+
+                            // Query backend for the definitive final note data
+                            if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                match controller.query_midi_clip(track_id, clip_id) {
+                                    Ok(midi_clip_data) => {
+                                        // Convert backend MidiEvent format to cache format
+                                        let cache_events: Vec<(f64, u8, u8, bool)> = midi_clip_data.events.iter()
+                                            .filter_map(|event| {
+                                                let status_type = event.status & 0xF0;
+                                                if status_type == 0x90 || status_type == 0x80 {
+                                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
+                                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        drop(controller);
+                                        self.midi_event_cache.insert(clip_id, cache_events);
+
+                                        // Update document clip with final duration and name
+                                        if let Some(layer_id) = self.recording_layer_id {
+                                            let doc_clip_id = {
+                                                let document = self.action_executor.document();
+                                                document.root.children.iter()
+                                                    .find(|l| l.id() == layer_id)
+                                                    .and_then(|layer| {
+                                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                            audio_layer.clip_instances.last().map(|i| i.clip_id)
+                                                        } else {
+                                                            None
+                                                        }
+                                                    })
+                                            };
+                                            if let Some(doc_clip_id) = doc_clip_id {
+                                                if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
+                                                    clip.duration = midi_clip_data.duration;
+                                                    clip.name = format!("MIDI Recording {}", clip_id);
+                                                }
+                                            }
+                                        }
+
+                                        println!("✅ Finalized MIDI recording: {} notes, {:.2}s",
+                                                 note_count, midi_clip_data.duration);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to query MIDI clip data after recording: {}", e);
+                                        // Cache was already populated by last MidiRecordingProgress event
+                                    }
+                                }
+                            }
+
+                            // TODO: Store clip_instance_to_backend_map entry for this MIDI clip.
+                            // The backend created the instance in create_midi_clip(), but doesn't
+                            // report the instance_id back. Needed for move/trim operations later.
+
                             // Clear recording state
                             self.is_recording = false;
                             self.recording_clips.clear();
