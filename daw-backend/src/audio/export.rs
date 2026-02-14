@@ -72,7 +72,7 @@ pub fn export_audio<P: AsRef<Path>>(
     midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
-    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+    event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
 ) -> Result<(), String>
 {
     // Route to appropriate export implementation based on format
@@ -435,8 +435,6 @@ fn export_mp3<P: AsRef<Path>>(
             channel_layout,
             pts,
         )?;
-
-        frames_rendered += final_frame_size;
     }
 
     // Flush encoder
@@ -602,8 +600,6 @@ fn export_aac<P: AsRef<Path>>(
             channel_layout,
             pts,
         )?;
-
-        frames_rendered += final_frame_size;
     }
 
     // Flush encoder
@@ -615,35 +611,6 @@ fn export_aac<P: AsRef<Path>>(
         .map_err(|e| format!("Failed to write trailer: {}", e))?;
 
     Ok(())
-}
-
-/// Convert interleaved f32 samples to planar i16 format
-fn convert_to_planar_i16(interleaved: &[f32], channels: u32) -> Vec<Vec<i16>> {
-    let num_frames = interleaved.len() / channels as usize;
-    let mut planar = vec![vec![0i16; num_frames]; channels as usize];
-
-    for (i, chunk) in interleaved.chunks(channels as usize).enumerate() {
-        for (ch, &sample) in chunk.iter().enumerate() {
-            let clamped = sample.max(-1.0).min(1.0);
-            planar[ch][i] = (clamped * 32767.0) as i16;
-        }
-    }
-
-    planar
-}
-
-/// Convert interleaved f32 samples to planar f32 format
-fn convert_to_planar_f32(interleaved: &[f32], channels: u32) -> Vec<Vec<f32>> {
-    let num_frames = interleaved.len() / channels as usize;
-    let mut planar = vec![vec![0.0f32; num_frames]; channels as usize];
-
-    for (i, chunk) in interleaved.chunks(channels as usize).enumerate() {
-        for (ch, &sample) in chunk.iter().enumerate() {
-            planar[ch][i] = sample;
-        }
-    }
-
-    planar
 }
 
 /// Convert a chunk of interleaved f32 samples to planar i16 format

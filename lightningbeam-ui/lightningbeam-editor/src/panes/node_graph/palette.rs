@@ -38,7 +38,7 @@ impl NodePalette {
             .rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 30));
 
         // Create UI within the palette rect
-        ui.allocate_ui_at_rect(rect, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             ui.vertical(|ui| {
                 ui.add_space(8.0);
 

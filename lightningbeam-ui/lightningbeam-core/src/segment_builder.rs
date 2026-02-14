@@ -32,9 +32,9 @@ struct ExtractedSegment {
     /// Original curve index
     curve_index: usize,
     /// Minimum parameter value from boundary points
-    t_min: f64,
+    _t_min: f64,
     /// Maximum parameter value from boundary points
-    t_max: f64,
+    _t_max: f64,
     /// The curve segment (trimmed to [t_min, t_max])
     segment: CurveSegment,
 }
@@ -148,8 +148,8 @@ fn split_segments_at_intersections(segments: Vec<ExtractedSegment>) -> Vec<Extra
 
                 result.push(ExtractedSegment {
                     curve_index: seg.curve_index,
-                    t_min: t_start,
-                    t_max: t_end,
+                    _t_min: t_start,
+                    _t_max: t_end,
                     segment: subseg,
                 });
             }
@@ -260,8 +260,8 @@ fn extract_segments(
 
         segments.push(ExtractedSegment {
             curve_index: curve_idx,
-            t_min,
-            t_max,
+            _t_min: t_min,
+            _t_max: t_max,
             segment,
         });
     }
@@ -540,7 +540,7 @@ enum ConnectedSegment {
     Curve {
         segment: CurveSegment,
         start: Point,
-        end: Point,
+        _end: Point,
     },
     /// A line segment bridging a gap
     Line { start: Point, end: Point },
@@ -550,7 +550,7 @@ enum ConnectedSegment {
 fn connect_segments(
     extracted: &[ExtractedSegment],
     config: &SegmentBuilderConfig,
-    click_point: Point,
+    _click_point: Point,
 ) -> Option<Vec<ConnectedSegment>> {
     if extracted.is_empty() {
         println!("connect_segments: No segments to connect");
@@ -575,7 +575,7 @@ fn connect_segments(
         connected.push(ConnectedSegment::Curve {
             segment: current.segment.clone(),
             start: current.segment.eval_at(0.0),
-            end: current_end,
+            _end: current_end,
         });
 
         // Check if we need to connect to the next segment
@@ -794,7 +794,7 @@ mod tests {
             // If it found segments, verify they're valid
             assert!(!segments.is_empty());
             for seg in &segments {
-                assert!(seg.t_min <= seg.t_max);
+                assert!(seg._t_min <= seg._t_max);
             }
         }
         // If None, the algorithm couldn't form a cycle - that's okay for this test

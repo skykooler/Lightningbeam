@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Node Type Registry
 //!
 //! Defines metadata for all available node types

@@ -216,7 +216,7 @@ impl ReadbackPipeline {
     /// Call this frequently to process completed transfers.
     pub fn poll_nonblocking(&mut self) -> Vec<ReadbackResult> {
         // Poll GPU without blocking
-        self.device.poll(wgpu::PollType::Poll);
+        let _ = self.device.poll(wgpu::PollType::Poll);
 
         // Collect all completed readbacks
         let mut results = Vec::new();
@@ -269,13 +269,14 @@ impl ReadbackPipeline {
     /// Flush pipeline and wait for all pending operations
     ///
     /// Call this at the end of export to ensure all frames are processed
+    #[allow(dead_code)]
     pub fn flush(&mut self) -> Vec<ReadbackResult> {
         let mut all_results = Vec::new();
 
         // Keep polling until all buffers are Free
         loop {
             // Poll for new completions
-            self.device.poll(wgpu::PollType::Poll);
+            let _ = self.device.poll(wgpu::PollType::Poll);
 
             while let Ok(result) = self.readback_rx.try_recv() {
                 self.buffers[result.buffer_id].state = BufferState::Mapped;
@@ -310,8 +311,4 @@ impl ReadbackPipeline {
         all_results
     }
 
-    /// Get buffer count currently in flight (for monitoring)
-    pub fn buffers_in_flight(&self) -> usize {
-        self.buffers.iter().filter(|b| b.state != BufferState::Free).count()
-    }
 }

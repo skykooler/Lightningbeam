@@ -67,6 +67,7 @@ impl NodeGraphPane {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_track_id(
         track_id: Uuid,
         audio_controller: std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>,
@@ -207,7 +208,7 @@ impl NodeGraphPane {
             // Set parameter values
             for (&param_id, &value) in &node.parameters {
                 // Find the input param in the graph and set its value
-                if let Some(node_data) = self.state.graph.nodes.get_mut(frontend_id) {
+                if let Some(_node_data) = self.state.graph.nodes.get_mut(frontend_id) {
                     // TODO: Set parameter values on the node's input params
                     // This requires matching param_id to the input param by index
                     let _ = (param_id, value); // Silence unused warning for now
@@ -428,25 +429,25 @@ impl NodeGraphPane {
 
     fn check_parameter_changes(&mut self) {
         // Check all input parameters for value changes
-        let mut checked_count = 0;
-        let mut connection_only_count = 0;
-        let mut non_float_count = 0;
+        let mut _checked_count = 0;
+        let mut _connection_only_count = 0;
+        let mut _non_float_count = 0;
 
         for (input_id, input_param) in &self.state.graph.inputs {
             // Only check parameters that can have constant values (not ConnectionOnly)
             if matches!(input_param.kind, InputParamKind::ConnectionOnly) {
-                connection_only_count += 1;
+                _connection_only_count += 1;
                 continue;
             }
 
             // Get current value
             let current_value = match &input_param.value {
                 ValueType::Float { value } => {
-                    checked_count += 1;
+                    _checked_count += 1;
                     *value
                 },
                 other => {
-                    non_float_count += 1;
+                    _non_float_count += 1;
                     eprintln!("[DEBUG] Non-float parameter type: {:?}", std::mem::discriminant(other));
                     continue;
                 }
@@ -572,7 +573,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                     // Check if track is MIDI or Audio
                     if let Some(audio_controller) = &shared.audio_controller {
                         let is_valid_track = {
-                            let controller = audio_controller.lock().unwrap();
+                            let _controller = audio_controller.lock().unwrap();
                             // TODO: Query track type from backend
                             // For now, assume it's valid if we have a track ID mapping
                             true
@@ -624,7 +625,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
         let grid_color = grid_style.background_color.unwrap_or(egui::Color32::from_gray(55));
 
         // Allocate the rect and render the graph editor within it
-        ui.allocate_ui_at_rect(rect, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             // Check for scroll input to override library's default zoom behavior
             // Only handle scroll when mouse is over the node graph area
             let pointer_over_graph = ui.rect_contains_pointer(rect);
@@ -705,8 +706,8 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
             // Draw menu button in top-left corner
             let button_pos = rect.min + egui::vec2(8.0, 8.0);
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(button_pos, egui::vec2(100.0, 24.0)),
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(button_pos, egui::vec2(100.0, 24.0))),
                 |ui| {
                     if ui.button("➕ Add Node").clicked() {
                         // Open node finder at button's top-left position

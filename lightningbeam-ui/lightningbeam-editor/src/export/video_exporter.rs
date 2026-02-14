@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Video export functionality
 //!
 //! Exports video from the timeline using FFmpeg encoding:

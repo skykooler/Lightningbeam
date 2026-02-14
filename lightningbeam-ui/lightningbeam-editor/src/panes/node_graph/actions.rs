@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub enum NodeGraphAction {
     AddNode(AddNodeAction),
     RemoveNode(RemoveNodeAction),
+    #[allow(dead_code)]
     MoveNode(MoveNodeAction),
     Connect(ConnectAction),
     Disconnect(DisconnectAction),
@@ -240,6 +241,7 @@ impl RemoveNodeAction {
 // MoveNodeAction
 // ============================================================================
 
+#[allow(dead_code)]
 pub struct MoveNodeAction {
     layer_id: Uuid,
     backend_node_id: BackendNodeId,
@@ -248,6 +250,7 @@ pub struct MoveNodeAction {
 }
 
 impl MoveNodeAction {
+    #[allow(dead_code)]
     pub fn new(layer_id: Uuid, backend_node_id: BackendNodeId, new_position: (f32, f32)) -> Self {
         Self {
             layer_id,

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Audio export functionality
 //!
 //! Exports audio from the timeline to various formats:
@@ -168,7 +169,7 @@ fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
     // Step 3: Encode frames and write to output
     // Convert interleaved f32 samples to planar i16 format
     let num_frames = pcm_samples.len() / settings.channels as usize;
-    let mut planar_samples = convert_to_planar_i16(&pcm_samples, settings.channels);
+    let planar_samples = convert_to_planar_i16(&pcm_samples, settings.channels);
 
     // Get encoder frame size
     let frame_size = encoder.frame_size();

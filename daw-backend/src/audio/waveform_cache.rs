@@ -64,7 +64,7 @@ pub struct WaveformCache {
     chunks: HashMap<WaveformChunkKey, Vec<WaveformPeak>>,
 
     /// Maximum memory usage in MB (for future LRU eviction)
-    max_memory_mb: usize,
+    _max_memory_mb: usize,
 
     /// Current memory usage estimate in bytes
     current_memory_bytes: usize,
@@ -75,7 +75,7 @@ impl WaveformCache {
     pub fn new(max_memory_mb: usize) -> Self {
         Self {
             chunks: HashMap::new(),
-            max_memory_mb,
+            _max_memory_mb: max_memory_mb,
             current_memory_bytes: 0,
         }
     }

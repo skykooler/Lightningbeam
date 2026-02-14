@@ -189,22 +189,6 @@ impl EffectLayer {
         self.clip_instances = new_order;
     }
 
-    // === MUTATION METHODS (pub(crate) - only accessible to action module) ===
-
-    /// Add a clip instance (internal, for actions only)
-    pub(crate) fn add_clip_instance_internal(&mut self, instance: ClipInstance) -> Uuid {
-        self.add_clip_instance(instance)
-    }
-
-    /// Remove a clip instance (internal, for actions only)
-    pub(crate) fn remove_clip_instance_internal(&mut self, id: &Uuid) -> Option<ClipInstance> {
-        self.remove_clip_instance(id)
-    }
-
-    /// Insert a clip instance at a specific index (internal, for actions only)
-    pub(crate) fn insert_clip_instance_internal(&mut self, index: usize, instance: ClipInstance) -> Uuid {
-        self.insert_clip_instance(index, instance)
-    }
 }
 
 #[cfg(test)]

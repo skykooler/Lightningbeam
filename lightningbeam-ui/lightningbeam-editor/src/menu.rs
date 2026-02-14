@@ -29,7 +29,9 @@ pub enum ShortcutKey {
     // Numbers
     Num0,
     // Symbols
-    Comma, Minus, Equals, Plus,
+    Comma, Minus, Equals,
+    #[allow(dead_code)] // Completes keyboard mapping set
+    Plus,
     BracketLeft, BracketRight,
     // Special
     Delete,
@@ -189,6 +191,7 @@ pub enum MenuAction {
     RecenterView,
     NextLayout,
     PreviousLayout,
+    #[allow(dead_code)] // Handler exists in main.rs, menu item not yet wired
     SwitchLayout(usize),
 
     // Help menu
@@ -219,6 +222,7 @@ pub enum MenuDef {
 // Shortcut constants for clarity
 const CTRL: bool = true;
 const SHIFT: bool = true;
+#[allow(dead_code)]
 const ALT: bool = true;
 const NO_CTRL: bool = false;
 const NO_SHIFT: bool = false;
@@ -288,7 +292,9 @@ impl MenuItemDef {
     // macOS app menu items
     const SETTINGS: Self = Self { label: "Settings", action: MenuAction::Settings, shortcut: Some(Shortcut::new(ShortcutKey::Comma, CTRL, NO_SHIFT, NO_ALT)) };
     const CLOSE_WINDOW: Self = Self { label: "Close Window", action: MenuAction::CloseWindow, shortcut: Some(Shortcut::new(ShortcutKey::W, CTRL, NO_SHIFT, NO_ALT)) };
+    #[allow(dead_code)] // Used in #[cfg(target_os = "macos")] block
     const QUIT_MACOS: Self = Self { label: "Quit Lightningbeam", action: MenuAction::Quit, shortcut: Some(Shortcut::new(ShortcutKey::Q, CTRL, NO_SHIFT, NO_ALT)) };
+    #[allow(dead_code)]
     const ABOUT_MACOS: Self = Self { label: "About Lightningbeam", action: MenuAction::About, shortcut: None };
 
     /// Get all menu items with shortcuts (for keyboard handling)
@@ -593,7 +599,7 @@ impl MenuSystem {
     pub fn render_egui_menu_bar(&self, ui: &mut egui::Ui, recent_files: &[std::path::PathBuf]) -> Option<MenuAction> {
         let mut action = None;
 
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             for menu_def in MenuItemDef::menu_structure() {
                 if let Some(a) = self.render_menu_def(ui, menu_def, recent_files) {
                     action = Some(a);
@@ -632,7 +638,7 @@ impl MenuSystem {
 
                             if ui.button(display_name).clicked() {
                                 action = Some(MenuAction::OpenRecent(index));
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
 
@@ -643,14 +649,14 @@ impl MenuSystem {
 
                         if ui.button("Clear Recent Files").clicked() {
                             action = Some(MenuAction::ClearRecentFiles);
-                            ui.close_menu();
+                            ui.close();
                         }
                     } else {
                         // Normal submenu rendering
                         for child in *children {
                             if let Some(a) = self.render_menu_def(ui, child, recent_files) {
                                 action = Some(a);
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     }

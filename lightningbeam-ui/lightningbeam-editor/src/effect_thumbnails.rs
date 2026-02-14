@@ -4,7 +4,7 @@
 //! using the actual WGSL shaders.
 
 use lightningbeam_core::effect::{EffectDefinition, EffectInstance};
-use lightningbeam_core::gpu::effect_processor::{EffectProcessor, EffectUniforms};
+use lightningbeam_core::gpu::effect_processor::EffectProcessor;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ pub struct EffectThumbnailGenerator {
     /// Effect processor for compiling and applying shaders
     effect_processor: EffectProcessor,
     /// Source texture (still-life image scaled to thumbnail size)
+    #[allow(dead_code)] // Must stay alive — source_view is a view into this texture
     source_texture: wgpu::Texture,
     /// View of the source texture
     source_view: wgpu::TextureView,
@@ -101,7 +102,7 @@ impl EffectThumbnailGenerator {
         let dest_view = dest_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create readback buffer
-        let buffer_size = (EFFECT_THUMBNAIL_SIZE * EFFECT_THUMBNAIL_SIZE * 4) as u64;
+        let _buffer_size = (EFFECT_THUMBNAIL_SIZE * EFFECT_THUMBNAIL_SIZE * 4) as u64;
         // Align to 256 bytes for wgpu requirements
         let aligned_bytes_per_row = ((EFFECT_THUMBNAIL_SIZE * 4 + 255) / 256) * 256;
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -160,11 +161,13 @@ impl EffectThumbnailGenerator {
     }
 
     /// Get a cached thumbnail, or None if not yet generated
+    #[allow(dead_code)]
     pub fn get_thumbnail(&self, effect_id: &Uuid) -> Option<&Vec<u8>> {
         self.thumbnail_cache.get(effect_id)
     }
 
     /// Check if a thumbnail is cached
+    #[allow(dead_code)]
     pub fn has_thumbnail(&self, effect_id: &Uuid) -> bool {
         self.thumbnail_cache.contains_key(effect_id)
     }

@@ -4,4 +4,3 @@
 
 pub mod dialog;
 
-pub use dialog::{PreferencesDialog, PreferencesSaveResult};

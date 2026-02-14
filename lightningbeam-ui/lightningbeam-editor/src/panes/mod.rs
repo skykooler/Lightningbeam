@@ -47,6 +47,7 @@ pub struct DraggingAsset {
     /// Display name
     pub name: String,
     /// Duration in seconds
+    #[allow(dead_code)] // Populated during drag, consumed when drag-and-drop features expand
     pub duration: f64,
     /// Dimensions (width, height) for vector/video clips, None for audio
     pub dimensions: Option<(f64, f64)>,
@@ -132,6 +133,7 @@ pub fn find_sampled_audio_track(document: &lightningbeam_core::document::Documen
 /// Shared state that all panes can access
 pub struct SharedPaneState<'a> {
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
+    #[allow(dead_code)] // Used by pane chrome rendering in main.rs
     pub icon_cache: &'a mut crate::IconCache,
     pub selected_tool: &'a mut Tool,
     pub fill_color: &'a mut egui::Color32,
@@ -220,7 +222,7 @@ pub trait PaneRenderer {
     /// Render the optional header section with controls
     ///
     /// Returns true if a header was rendered, false if no header
-    fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+    fn render_header(&mut self, _ui: &mut egui::Ui, _shared: &mut SharedPaneState) -> bool {
         false // Default: no header
     }
 
@@ -234,6 +236,7 @@ pub trait PaneRenderer {
     );
 
     /// Get the display name of this pane
+    #[allow(dead_code)] // Implemented by all panes, dispatch infrastructure complete
     fn name(&self) -> &str;
 }
 

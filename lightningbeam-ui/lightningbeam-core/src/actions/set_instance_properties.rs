@@ -68,26 +68,6 @@ impl SetInstancePropertiesAction {
         }
     }
 
-    fn get_instance_value(&self, document: &Document, instance_id: &Uuid) -> Option<f64> {
-        if let Some(layer) = document.get_layer(&self.layer_id) {
-            if let AnyLayer::Vector(vector_layer) = layer {
-                if let Some(instance) = vector_layer.get_object(instance_id) {
-                    return Some(match &self.property {
-                        InstancePropertyChange::X(_) => instance.transform.x,
-                        InstancePropertyChange::Y(_) => instance.transform.y,
-                        InstancePropertyChange::Rotation(_) => instance.transform.rotation,
-                        InstancePropertyChange::ScaleX(_) => instance.transform.scale_x,
-                        InstancePropertyChange::ScaleY(_) => instance.transform.scale_y,
-                        InstancePropertyChange::SkewX(_) => instance.transform.skew_x,
-                        InstancePropertyChange::SkewY(_) => instance.transform.skew_y,
-                        InstancePropertyChange::Opacity(_) => instance.opacity,
-                    });
-                }
-            }
-        }
-        None
-    }
-
     fn apply_to_instance(&self, document: &mut Document, instance_id: &Uuid, value: f64) {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {

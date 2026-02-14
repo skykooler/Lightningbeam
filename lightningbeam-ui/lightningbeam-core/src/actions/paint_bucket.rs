@@ -26,10 +26,10 @@ pub struct PaintBucketAction {
     fill_color: ShapeColor,
 
     /// Tolerance for gap bridging (in pixels)
-    tolerance: f64,
+    _tolerance: f64,
 
     /// Gap handling mode
-    gap_mode: GapHandlingMode,
+    _gap_mode: GapHandlingMode,
 
     /// ID of the created shape (set after execution)
     created_shape_id: Option<Uuid>,
@@ -59,8 +59,8 @@ impl PaintBucketAction {
             layer_id,
             click_point,
             fill_color,
-            tolerance,
-            gap_mode,
+            _tolerance: tolerance,
+            _gap_mode: gap_mode,
             created_shape_id: None,
             created_shape_instance_id: None,
         }

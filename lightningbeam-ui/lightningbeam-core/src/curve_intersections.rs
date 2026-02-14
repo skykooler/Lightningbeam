@@ -229,27 +229,6 @@ pub fn find_closest_approach(
     }
 }
 
-/// Refine intersection parameters using Newton's method
-fn refine_intersection(
-    curve1: &CubicBez,
-    curve2: &CubicBez,
-    mut t1: f64,
-    mut t2: f64,
-) -> (f64, f64) {
-    // Simple refinement: just find nearest points iteratively
-    for _ in 0..5 {
-        let p1 = curve1.eval(t1);
-        let nearest2 = curve2.nearest(p1, 1e-6);
-        t2 = nearest2.t;
-
-        let p2 = curve2.eval(t2);
-        let nearest1 = curve1.nearest(p2, 1e-6);
-        t1 = nearest1.t;
-    }
-
-    (t1.clamp(0.0, 1.0), t2.clamp(0.0, 1.0))
-}
-
 /// Refine self-intersection parameters
 fn refine_self_intersection(curve: &CubicBez, mut t1: f64, mut t2: f64) -> (f64, f64) {
     // Refine by moving parameters closer to where curves actually meet

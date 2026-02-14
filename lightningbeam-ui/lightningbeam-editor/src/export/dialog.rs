@@ -182,7 +182,7 @@ impl ExportDialog {
                         ("Podcast AAC", AudioExportSettings::podcast_aac()),
                     ];
 
-                    egui::ComboBox::from_id_source("export_preset")
+                    egui::ComboBox::from_id_salt("export_preset")
                         .selected_text(presets[self.selected_audio_preset].0)
                         .show_ui(ui, |ui| {
                             for (i, (name, _)) in presets.iter().enumerate() {
@@ -207,7 +207,7 @@ impl ExportDialog {
         ui.heading("Format");
         ui.horizontal(|ui| {
             ui.label("Format:");
-            egui::ComboBox::from_id_source("audio_format")
+            egui::ComboBox::from_id_salt("audio_format")
                 .selected_text(self.audio_settings.format.name())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.audio_settings.format, AudioFormat::Wav, "WAV (Uncompressed)");
@@ -222,7 +222,7 @@ impl ExportDialog {
         // Audio settings
         ui.horizontal(|ui| {
             ui.label("Sample Rate:");
-            egui::ComboBox::from_id_source("sample_rate")
+            egui::ComboBox::from_id_salt("sample_rate")
                 .selected_text(format!("{} Hz", self.audio_settings.sample_rate))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.audio_settings.sample_rate, 44100, "44100 Hz");
@@ -251,7 +251,7 @@ impl ExportDialog {
         if self.audio_settings.format.uses_bitrate() {
             ui.horizontal(|ui| {
                 ui.label("Bitrate:");
-                egui::ComboBox::from_id_source("bitrate")
+                egui::ComboBox::from_id_salt("bitrate")
                     .selected_text(format!("{} kbps", self.audio_settings.bitrate_kbps))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.audio_settings.bitrate_kbps, 128, "128 kbps");
@@ -269,7 +269,7 @@ impl ExportDialog {
         ui.heading("Codec");
         ui.horizontal(|ui| {
             ui.label("Codec:");
-            egui::ComboBox::from_id_source("video_codec")
+            egui::ComboBox::from_id_salt("video_codec")
                 .selected_text(format!("{:?}", self.video_settings.codec))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.video_settings.codec, VideoCodec::H264, "H.264 (Most Compatible)");
@@ -287,13 +287,13 @@ impl ExportDialog {
         ui.horizontal(|ui| {
             ui.label("Width:");
             let mut custom_width = self.video_settings.width.unwrap_or(1920);
-            if ui.add(egui::DragValue::new(&mut custom_width).clamp_range(1..=7680)).changed() {
+            if ui.add(egui::DragValue::new(&mut custom_width).range(1..=7680)).changed() {
                 self.video_settings.width = Some(custom_width);
             }
 
             ui.label("Height:");
             let mut custom_height = self.video_settings.height.unwrap_or(1080);
-            if ui.add(egui::DragValue::new(&mut custom_height).clamp_range(1..=4320)).changed() {
+            if ui.add(egui::DragValue::new(&mut custom_height).range(1..=4320)).changed() {
                 self.video_settings.height = Some(custom_height);
             }
         });
@@ -320,7 +320,7 @@ impl ExportDialog {
         ui.heading("Framerate");
         ui.horizontal(|ui| {
             ui.label("FPS:");
-            egui::ComboBox::from_id_source("framerate")
+            egui::ComboBox::from_id_salt("framerate")
                 .selected_text(format!("{}", self.video_settings.framerate as u32))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.video_settings.framerate, 24.0, "24");
@@ -335,7 +335,7 @@ impl ExportDialog {
         ui.heading("Quality");
         ui.horizontal(|ui| {
             ui.label("Quality:");
-            egui::ComboBox::from_id_source("video_quality")
+            egui::ComboBox::from_id_salt("video_quality")
                 .selected_text(self.video_settings.quality.name())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.video_settings.quality, VideoQuality::Low, VideoQuality::Low.name());
@@ -363,13 +363,13 @@ impl ExportDialog {
             ui.label("Start:");
             ui.add(egui::DragValue::new(start_time)
                 .speed(0.1)
-                .clamp_range(0.0..=*end_time)
+                .range(0.0..=*end_time)
                 .suffix(" s"));
 
             ui.label("End:");
             ui.add(egui::DragValue::new(end_time)
                 .speed(0.1)
-                .clamp_range(*start_time..=f64::MAX)
+                .range(*start_time..=f64::MAX)
                 .suffix(" s"));
         });
 

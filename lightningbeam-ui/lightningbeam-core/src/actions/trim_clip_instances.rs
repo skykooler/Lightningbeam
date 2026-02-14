@@ -68,7 +68,7 @@ impl Action for TrimClipInstancesAction {
         let mut expanded_trims = self.layer_trims.clone();
         let mut already_processed = std::collections::HashSet::new();
 
-        for (layer_id, trims) in &self.layer_trims {
+        for (_layer_id, trims) in &self.layer_trims {
             for (instance_id, trim_type, old, new) in trims {
                 // Skip if already processed
                 if already_processed.contains(instance_id) {
@@ -189,7 +189,7 @@ impl Action for TrimClipInstancesAction {
 
                 match trim_type {
                     TrimType::TrimLeft => {
-                        if let (Some(old_trim), Some(new_trim), Some(old_timeline), Some(new_timeline)) =
+                        if let (Some(old_trim), Some(new_trim), Some(old_timeline), Some(_new_timeline)) =
                             (old.trim_value, new.trim_value, old.timeline_start, new.timeline_start)
                         {
                             // If extending to the left (new_trim < old_trim)
@@ -365,7 +365,7 @@ impl Action for TrimClipInstancesAction {
                 .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
 
             // Process each clip instance trim
-            for (instance_id, trim_type, _old, new) in trims {
+            for (instance_id, _trim_type, _old, _new) in trims {
                 // Get clip instances from the layer
                 let clip_instances = match layer {
                     AnyLayer::Audio(al) => &al.clip_instances,

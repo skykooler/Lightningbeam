@@ -215,7 +215,7 @@ impl VirtualPianoPane {
 
             // Handle interaction (skip if a black key is being interacted with)
             let key_id = ui.id().with(("white_key", note));
-            let response = ui.interact(key_rect, key_id, egui::Sense::click_and_drag());
+            let _response = ui.interact(key_rect, key_id, egui::Sense::click_and_drag());
 
             // Visual feedback for pressed keys (check both pressed_notes and current pointer state)
             let pointer_over_key = ui.input(|i| {
@@ -298,7 +298,7 @@ impl VirtualPianoPane {
 
             // Handle interaction (same as white keys)
             let key_id = ui.id().with(("black_key", note));
-            let response = ui.interact(key_rect, key_id, egui::Sense::click_and_drag());
+            let _response = ui.interact(key_rect, key_id, egui::Sense::click_and_drag());
 
             // Visual feedback for pressed keys (check both pressed_notes and current pointer state)
             let pointer_over_key = ui.input(|i| {

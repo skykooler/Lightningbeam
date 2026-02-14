@@ -42,6 +42,7 @@ pub struct VideoExportState {
     /// Start time in seconds
     start_time: f64,
     /// End time in seconds
+    #[allow(dead_code)]
     end_time: f64,
     /// Frames per second
     framerate: f64,
@@ -163,7 +164,7 @@ impl ExportOrchestrator {
     /// For parallel video+audio exports, returns combined progress.
     pub fn poll_progress(&mut self) -> Option<ExportProgress> {
         // Handle parallel video+audio export
-        if let Some(ref mut parallel) = self.parallel_export {
+        if let Some(ref mut _parallel) = self.parallel_export {
             return self.poll_parallel_progress();
         }
 
@@ -461,6 +462,7 @@ impl ExportOrchestrator {
     /// Wait for the export to complete
     ///
     /// This blocks until the export thread finishes.
+    #[allow(dead_code)]
     pub fn wait_for_completion(&mut self) {
         if let Some(handle) = self.thread_handle.take() {
             handle.join().ok();
@@ -915,7 +917,7 @@ impl ExportOrchestrator {
                 }
 
                 // Render to GPU (timed)
-                let render_start = Instant::now();
+                let _render_start = Instant::now();
                 let encoder = video_exporter::render_frame_to_gpu_rgba(
                     document, timestamp, width, height,
                     device, queue, renderer, image_cache, video_manager,
@@ -1049,7 +1051,7 @@ impl ExportOrchestrator {
         // Determine dimensions from first frame
         let (width, height) = if let Some((_, _, ref y_plane, _, _)) = first_frame {
             // Calculate dimensions from Y plane size (full resolution, 1 byte per pixel)
-            let pixel_count = y_plane.len();
+            let _pixel_count = y_plane.len();
             // Use settings dimensions if provided, otherwise infer from buffer
             let w = settings.width.unwrap_or(1920); // Default to 1920 if not specified
             let h = settings.height.unwrap_or(1080); // Default to 1080 if not specified
@@ -1088,7 +1090,7 @@ impl ExportOrchestrator {
         println!("🧵 [ENCODER] Encoder initialized, ready to encode frames");
 
         // Process first frame
-        if let Some((frame_num, timestamp, y_plane, u_plane, v_plane)) = first_frame {
+        if let Some((_frame_num, timestamp, y_plane, u_plane, v_plane)) = first_frame {
             Self::encode_frame(
                 &mut encoder,
                 &mut output,
@@ -1115,7 +1117,7 @@ impl ExportOrchestrator {
             }
 
             match frame_rx.recv() {
-                Ok(VideoFrameMessage::Frame { frame_num, timestamp, y_plane, u_plane, v_plane }) => {
+                Ok(VideoFrameMessage::Frame { frame_num: _, timestamp, y_plane, u_plane, v_plane }) => {
                     Self::encode_frame(
                         &mut encoder,
                         &mut output,

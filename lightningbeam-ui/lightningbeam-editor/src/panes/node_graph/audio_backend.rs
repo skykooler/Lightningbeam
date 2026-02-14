@@ -17,8 +17,8 @@ pub struct AudioGraphBackend {
     audio_controller: Arc<Mutex<EngineController>>,
 
     /// Maps backend NodeIndex to stable IDs for round-trip serialization
-    node_index_to_stable: HashMap<NodeIndex, u32>,
-    next_stable_id: u32,
+    _node_index_to_stable: HashMap<NodeIndex, u32>,
+    _next_stable_id: u32,
 }
 
 impl AudioGraphBackend {
@@ -26,8 +26,8 @@ impl AudioGraphBackend {
         Self {
             track_id,
             audio_controller,
-            node_index_to_stable: HashMap::new(),
-            next_stable_id: 0,
+            _node_index_to_stable: HashMap::new(),
+            _next_stable_id: 0,
         }
     }
 }
@@ -41,25 +41,23 @@ impl GraphBackend for AudioGraphBackend {
 
         // Generate placeholder node ID
         // This will be replaced with actual backend NodeIndex from sync query
-        let stable_id = self.next_stable_id;
-        self.next_stable_id += 1;
+        let stable_id = self._next_stable_id;
+        self._next_stable_id += 1;
 
         // Placeholder: use stable_id as backend index (will be wrong, but compiles)
         let node_idx = NodeIndex::new(stable_id as usize);
-        self.node_index_to_stable.insert(node_idx, stable_id);
+        self._node_index_to_stable.insert(node_idx, stable_id);
 
         Ok(BackendNodeId::Audio(node_idx))
     }
 
     fn remove_node(&mut self, backend_id: BackendNodeId) -> Result<(), String> {
-        let BackendNodeId::Audio(node_idx) = backend_id else {
-            return Err("Invalid backend node type".to_string());
-        };
+        let BackendNodeId::Audio(node_idx) = backend_id;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_remove_node(self.track_id, node_idx.index() as u32);
 
-        self.node_index_to_stable.remove(&node_idx);
+        self._node_index_to_stable.remove(&node_idx);
 
         Ok(())
     }
@@ -71,12 +69,8 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(from_idx) = output_node else {
-            return Err("Invalid output node type".to_string());
-        };
-        let BackendNodeId::Audio(to_idx) = input_node else {
-            return Err("Invalid input node type".to_string());
-        };
+        let BackendNodeId::Audio(from_idx) = output_node;
+        let BackendNodeId::Audio(to_idx) = input_node;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_connect(
@@ -97,12 +91,8 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(from_idx) = output_node else {
-            return Err("Invalid output node type".to_string());
-        };
-        let BackendNodeId::Audio(to_idx) = input_node else {
-            return Err("Invalid input node type".to_string());
-        };
+        let BackendNodeId::Audio(from_idx) = output_node;
+        let BackendNodeId::Audio(to_idx) = input_node;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_disconnect(
@@ -122,9 +112,7 @@ impl GraphBackend for AudioGraphBackend {
         param_id: u32,
         value: f64,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(node_idx) = backend_id else {
-            return Err("Invalid backend node type".to_string());
-        };
+        let BackendNodeId::Audio(node_idx) = backend_id;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_set_parameter(
@@ -180,9 +168,7 @@ impl GraphBackend for AudioGraphBackend {
         x: f32,
         y: f32,
     ) -> Result<BackendNodeId, String> {
-        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id else {
-            return Err("Invalid voice allocator node type".to_string());
-        };
+        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_add_node_to_template(
@@ -194,8 +180,8 @@ impl GraphBackend for AudioGraphBackend {
         );
 
         // Placeholder return
-        let stable_id = self.next_stable_id;
-        self.next_stable_id += 1;
+        let stable_id = self._next_stable_id;
+        self._next_stable_id += 1;
         let node_idx = NodeIndex::new(stable_id as usize);
 
         Ok(BackendNodeId::Audio(node_idx))
@@ -209,15 +195,9 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id else {
-            return Err("Invalid voice allocator node type".to_string());
-        };
-        let BackendNodeId::Audio(from_idx) = output_node else {
-            return Err("Invalid output node type".to_string());
-        };
-        let BackendNodeId::Audio(to_idx) = input_node else {
-            return Err("Invalid input node type".to_string());
-        };
+        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id;
+        let BackendNodeId::Audio(from_idx) = output_node;
+        let BackendNodeId::Audio(to_idx) = input_node;
 
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_connect_in_template(

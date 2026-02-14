@@ -122,7 +122,7 @@ impl PlanarGraph {
 
         // Initialize with endpoints for all curves
         for (i, curve) in curves.iter().enumerate() {
-            let mut curve_intersections = vec![
+            let curve_intersections = vec![
                 (0.0, curve.p0),
                 (1.0, curve.p3),
             ];
@@ -202,7 +202,7 @@ impl PlanarGraph {
 
     /// Build nodes and edges from curves and their intersections
     fn build_nodes_and_edges(
-        curves: &[CubicBez],
+        _curves: &[CubicBez],
         intersections: HashMap<usize, Vec<(f64, Point)>>,
     ) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         let mut nodes = Vec::new();
@@ -459,11 +459,6 @@ impl PlanarGraph {
 
             // Get the end node of this half-edge
             let edge = &self.edges[current_edge];
-            let start_node_this_edge = if current_forward {
-                edge.start_node
-            } else {
-                edge.end_node
-            };
             let end_node = if current_forward {
                 edge.end_node
             } else {

@@ -72,6 +72,7 @@ fn key_to_char(key: egui::Key, shift: bool) -> Option<char> {
 }
 
 /// Response from the IME text field widget
+#[allow(dead_code)] // Standard widget response fields; callers will use as features expand
 pub struct ImeTextFieldResponse {
     /// The egui response for the text field area
     pub response: egui::Response,

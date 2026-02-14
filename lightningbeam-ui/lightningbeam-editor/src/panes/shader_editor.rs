@@ -219,6 +219,7 @@ pub struct ShaderEditorPane {
     /// The shader source code being edited
     shader_code: String,
     /// Whether to show the template selector
+    #[allow(dead_code)]
     show_templates: bool,
     /// Error message from last compilation attempt (if any)
     compile_error: Option<String>,

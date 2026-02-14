@@ -46,27 +46,6 @@ pub struct Style {
     // Add more properties as needed
 }
 
-impl Style {
-    /// Merge another style into this one (other's properties override if present)
-    pub fn merge(&mut self, other: &Style) {
-        if other.background_color.is_some() {
-            self.background_color = other.background_color;
-        }
-        if other.border_color.is_some() {
-            self.border_color = other.border_color;
-        }
-        if other.text_color.is_some() {
-            self.text_color = other.text_color;
-        }
-        if other.width.is_some() {
-            self.width = other.width;
-        }
-        if other.height.is_some() {
-            self.height = other.height;
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Theme {
     light_variables: HashMap<String, String>,
@@ -229,21 +208,13 @@ impl Theme {
         }
     }
 
-    /// Get a CSS variable value and parse as color (backward compatibility helper)
-    /// This allows old code using theme.color("variable-name") to work
-    pub fn color(&self, var_name: &str) -> Option<egui::Color32> {
-        // Try light variables first, then dark variables
-        let value = self.light_variables.get(var_name)
-            .or_else(|| self.dark_variables.get(var_name))?;
-        parse_hex_color(value)
-    }
-
     /// Get the number of loaded selectors
     pub fn len(&self) -> usize {
         self.light_styles.len()
     }
 
     /// Check if theme has no styles
+    #[allow(dead_code)] // Used in tests
     pub fn is_empty(&self) -> bool {
         self.light_styles.is_empty()
     }

@@ -14,9 +14,6 @@ use wgpu::util::DeviceExt;
 /// Fixed texture width (power of 2) for all waveform textures
 const TEX_WIDTH: u32 = 2048;
 
-/// Maximum number of texture segments per audio clip
-const MAX_SEGMENTS: u32 = 16;
-
 /// GPU resources for all waveform textures, stored in CallbackResources
 pub struct WaveformGpuResources {
     /// Per-audio-pool-index GPU data
@@ -34,6 +31,7 @@ pub struct WaveformGpuResources {
 }
 
 /// GPU data for a single audio file
+#[allow(dead_code)] // textures/texture_views must stay alive to back bind groups; metadata for future use
 pub struct WaveformGpuEntry {
     /// One texture per segment (for long audio split across multiple textures)
     pub textures: Vec<wgpu::Texture>,
@@ -610,12 +608,6 @@ impl egui_wgpu::CallbackTrait for WaveformCallback {
 fn compute_mip_count(width: u32, height: u32) -> u32 {
     let max_dim = width.max(height);
     (max_dim as f32).log2().floor() as u32 + 1
-}
-
-/// Calculate how many texture segments are needed for a given frame count
-pub fn segment_count_for_frames(total_frames: u64, max_texture_height: u32) -> u32 {
-    let max_frames_per_segment = TEX_WIDTH as u64 * max_texture_height as u64;
-    ((total_frames + max_frames_per_segment - 1) / max_frames_per_segment) as u32
 }
 
 /// Get the fixed texture width used for all waveform textures

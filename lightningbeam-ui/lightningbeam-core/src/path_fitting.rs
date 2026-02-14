@@ -478,7 +478,7 @@ fn map_t_to_relative_distances(bez: &[Point; 4], b_parts: usize) -> Vec<f64> {
 }
 
 /// Find t value for a given parameter distance
-fn find_t(bez: &[Point; 4], param: f64, t_dist_map: &[f64], b_parts: usize) -> f64 {
+fn find_t(_bez: &[Point; 4], param: f64, t_dist_map: &[f64], b_parts: usize) -> f64 {
     if param < 0.0 {
         return 0.0;
     }

@@ -23,12 +23,12 @@ pub struct VideoMetadata {
 /// Video decoder with LRU frame caching
 pub struct VideoDecoder {
     path: String,
-    width: u32,          // Original video width
-    height: u32,         // Original video height
+    _width: u32,          // Original video width
+    _height: u32,         // Original video height
     output_width: u32,   // Scaled output width
     output_height: u32,  // Scaled output height
     fps: f64,
-    duration: f64,
+    _duration: f64,
     time_base: f64,
     stream_index: usize,
     frame_cache: LruCache<i64, Vec<u8>>, // timestamp -> RGBA data
@@ -107,12 +107,12 @@ impl VideoDecoder {
 
         Ok(Self {
             path,
-            width,
-            height,
+            _width: width,
+            _height: height,
             output_width,
             output_height,
             fps,
-            duration,
+            _duration: duration,
             time_base,
             stream_index,
             frame_cache: LruCache::new(

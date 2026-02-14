@@ -6,8 +6,8 @@
 use eframe::egui;
 use lightningbeam_core::action::Action;
 use lightningbeam_core::clip::ClipInstance;
-use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, HDR_FORMAT, SrgbToLinearConverter};
-use lightningbeam_core::layer::{AnyLayer, AudioLayer, AudioLayerType, VideoLayer, VectorLayer};
+use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, SrgbToLinearConverter};
+use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::renderer::RenderedLayerType;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -872,7 +872,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
 
                         // Also draw selection outlines for clip instances
-                        let clip_instance_count = self.selection.clip_instances().len();
+                        let _clip_instance_count = self.selection.clip_instances().len();
                         for &clip_id in self.selection.clip_instances() {
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
                                 // Calculate clip-local time
@@ -1865,7 +1865,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 // Clamp to texture bounds
                 if tex_x < width && tex_y < height {
                     // Create a staging buffer to read back the pixel
-                    let bytes_per_pixel = 4; // RGBA8
+                    let _bytes_per_pixel = 4; // RGBA8
                     // Align bytes_per_row to 256 (wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
                     let bytes_per_row_alignment = 256u32;
                     let bytes_per_row = bytes_per_row_alignment; // Single pixel, use minimum alignment
@@ -2128,7 +2128,6 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::hit_test::{self, hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
-        use lightningbeam_core::bezpath_editing::{extract_editable_curves, mold_curve};
         use vello::kurbo::{Point, Rect as KurboRect, Affine};
 
         // Check if we have an active vector layer
@@ -2618,9 +2617,8 @@ impl StagePane {
         mouse_pos: vello::kurbo::Point,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::{mold_curve, rebuild_bezpath};
+        use lightningbeam_core::bezpath_editing::mold_curve;
         use lightningbeam_core::tool::ToolState;
-        use vello::kurbo::Point;
 
         // Clone tool state to get owned values
         let tool_state = shared.tool_state.clone();
@@ -2799,12 +2797,12 @@ impl StagePane {
         ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
-        shift_held: bool,
+        _shift_held: bool,
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::hit_test::{self, hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
+        use lightningbeam_core::hit_test::{hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
         use vello::kurbo::{Point, Affine};
 
         // Check if we have an active vector layer
@@ -2897,7 +2895,7 @@ impl StagePane {
         shape_instance_id: uuid::Uuid,
         curve_index: usize,
         point_index: u8,
-        mouse_pos: vello::kurbo::Point,
+        _mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
@@ -3606,7 +3604,7 @@ impl StagePane {
 
         // Mouse drag: add points to path
         if response.dragged() {
-            if let ToolState::DrawingPath { points, simplify_mode } = &mut *shared.tool_state {
+            if let ToolState::DrawingPath { points, simplify_mode: _ } = &mut *shared.tool_state {
                 // Only add point if it's far enough from the last point (reduce noise)
                 const MIN_POINT_DISTANCE: f64 = 2.0;
 
@@ -3760,63 +3758,12 @@ impl StagePane {
         }
     }
 
-    /// Decompose an affine matrix into transform components
-    /// Returns (translation_x, translation_y, rotation_deg, scale_x, scale_y, skew_x_deg, skew_y_deg)
-    fn decompose_affine(affine: kurbo::Affine) -> (f64, f64, f64, f64, f64, f64, f64) {
-        let coeffs = affine.as_coeffs();
-        let a = coeffs[0];
-        let b = coeffs[1];
-        let c = coeffs[2];
-        let d = coeffs[3];
-        let e = coeffs[4]; // translation_x
-        let f = coeffs[5]; // translation_y
-
-        // Extract translation
-        let tx = e;
-        let ty = f;
-
-        // Decompose linear part [[a, c], [b, d]] into rotate * scale * skew
-        // Using QR-like decomposition
-
-        // Extract rotation
-        let rotation_rad = b.atan2(a);
-        let cos_r = rotation_rad.cos();
-        let sin_r = rotation_rad.sin();
-
-        // Remove rotation to get scale * skew
-        // R^(-1) * M where M = [[a, c], [b, d]]
-        let m11 = a * cos_r + b * sin_r;
-        let m12 = c * cos_r + d * sin_r;
-        let m21 = -a * sin_r + b * cos_r;
-        let m22 = -c * sin_r + d * cos_r;
-
-        // Now [[m11, m12], [m21, m22]] = scale * skew
-        // scale * skew = [[sx, 0], [0, sy]] * [[1, tan(skew_y)], [tan(skew_x), 1]]
-        //              = [[sx, sx*tan(skew_y)], [sy*tan(skew_x), sy]]
-
-        let scale_x = m11;
-        let scale_y = m22;
-
-        let skew_x_rad = if scale_y.abs() > 0.001 { (m21 / scale_y).atan() } else { 0.0 };
-        let skew_y_rad = if scale_x.abs() > 0.001 { (m12 / scale_x).atan() } else { 0.0 };
-
-        (
-            tx,
-            ty,
-            rotation_rad.to_degrees(),
-            scale_x,
-            scale_y,
-            skew_x_rad.to_degrees(),
-            skew_y_rad.to_degrees(),
-        )
-    }
-
     /// Apply transform preview to objects based on current mouse position
     fn apply_transform_preview(
         vector_layer: &mut lightningbeam_core::layer::VectorLayer,
         mode: &lightningbeam_core::tool::TransformMode,
         original_transforms: &std::collections::HashMap<uuid::Uuid, lightningbeam_core::object::Transform>,
-        pivot: vello::kurbo::Point,
+        _pivot: vello::kurbo::Point,
         start_mouse: vello::kurbo::Point,
         current_mouse: vello::kurbo::Point,
         original_bbox: vello::kurbo::Rect,
@@ -4784,7 +4731,6 @@ impl StagePane {
                                         _ => egui::CursorIcon::Default,
                                     };
                                     ui.ctx().set_cursor_icon(cursor);
-                                    hovering_handle = true;
                                     break;
                                 }
                             }
@@ -5219,7 +5165,6 @@ impl StagePane {
                                         }
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     } else if let AnyLayer::Video(video_layer) = layer {

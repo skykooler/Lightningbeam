@@ -32,7 +32,7 @@ impl Action for MoveClipInstancesAction {
         let mut expanded_moves = self.layer_moves.clone();
         let mut already_processed = std::collections::HashSet::new();
 
-        for (layer_id, moves) in &self.layer_moves {
+        for (_layer_id, moves) in &self.layer_moves {
             for (instance_id, old_start, new_start) in moves {
                 // Skip if already processed
                 if already_processed.contains(instance_id) {

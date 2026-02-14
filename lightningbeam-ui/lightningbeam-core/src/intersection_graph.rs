@@ -455,23 +455,23 @@ struct CurveIntersection {
     t_on_current: f64,
 
     /// Parameter on other curve
-    t_on_other: f64,
+    _t_on_other: f64,
 
     /// ID of the other curve
-    other_curve_id: usize,
+    _other_curve_id: usize,
 
     /// Intersection point
     point: Point,
 
     /// Whether this is a gap (within tolerance but not exact intersection)
-    is_gap: bool,
+    _is_gap: bool,
 }
 
 /// Find all intersections on a given curve
 fn find_intersections_on_curve(
     curve_id: usize,
     curves: &[CubicBez],
-    processed_curves: &HashSet<usize>,
+    _processed_curves: &HashSet<usize>,
     quadtree: &ToleranceQuadtree,
     tolerance: f64,
     debug_info: &mut WalkDebugInfo,
@@ -489,10 +489,10 @@ fn find_intersections_on_curve(
             for int in self_ints {
                 intersections.push(CurveIntersection {
                     t_on_current: int.t1,
-                    t_on_other: int.t2.unwrap_or(int.t1),
-                    other_curve_id: curve_id,
+                    _t_on_other: int.t2.unwrap_or(int.t1),
+                    _other_curve_id: curve_id,
                     point: int.point,
-                    is_gap: false,
+                    _is_gap: false,
                 });
                 debug_info.intersections_found += 1;
             }
@@ -504,10 +504,10 @@ fn find_intersections_on_curve(
             for int in exact_ints {
                 intersections.push(CurveIntersection {
                     t_on_current: int.t1,
-                    t_on_other: int.t2.unwrap_or(0.0),
-                    other_curve_id: other_id,
+                    _t_on_other: int.t2.unwrap_or(0.0),
+                    _other_curve_id: other_id,
                     point: int.point,
-                    is_gap: false,
+                    _is_gap: false,
                 });
                 debug_info.intersections_found += 1;
             }
@@ -516,10 +516,10 @@ fn find_intersections_on_curve(
             if let Some(approach) = find_closest_approach(current_curve, other_curve, tolerance) {
                 intersections.push(CurveIntersection {
                     t_on_current: approach.t1,
-                    t_on_other: approach.t2,
-                    other_curve_id: other_id,
+                    _t_on_other: approach.t2,
+                    _other_curve_id: other_id,
                     point: approach.p1,
-                    is_gap: true,
+                    _is_gap: true,
                 });
             }
         }

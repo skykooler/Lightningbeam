@@ -192,7 +192,7 @@ impl PreferencesDialog {
                     ui.label("Default BPM:");
                     ui.add(
                         egui::DragValue::new(&mut self.working_prefs.bpm)
-                            .clamp_range(20..=300)
+                            .range(20..=300)
                             .speed(1.0),
                     );
                 });
@@ -201,7 +201,7 @@ impl PreferencesDialog {
                     ui.label("Default Framerate:");
                     ui.add(
                         egui::DragValue::new(&mut self.working_prefs.framerate)
-                            .clamp_range(1..=120)
+                            .range(1..=120)
                             .speed(1.0)
                             .suffix(" fps"),
                     );
@@ -211,7 +211,7 @@ impl PreferencesDialog {
                     ui.label("Default File Width:");
                     ui.add(
                         egui::DragValue::new(&mut self.working_prefs.file_width)
-                            .clamp_range(100..=10000)
+                            .range(100..=10000)
                             .speed(10.0)
                             .suffix(" px"),
                     );
@@ -221,7 +221,7 @@ impl PreferencesDialog {
                     ui.label("Default File Height:");
                     ui.add(
                         egui::DragValue::new(&mut self.working_prefs.file_height)
-                            .clamp_range(100..=10000)
+                            .range(100..=10000)
                             .speed(10.0)
                             .suffix(" px"),
                     );
@@ -231,7 +231,7 @@ impl PreferencesDialog {
                     ui.label("Scroll Speed:");
                     ui.add(
                         egui::DragValue::new(&mut self.working_prefs.scroll_speed)
-                            .clamp_range(0.1..=10.0)
+                            .range(0.1..=10.0)
                             .speed(0.1),
                     );
                 });
@@ -245,7 +245,7 @@ impl PreferencesDialog {
                 ui.horizontal(|ui| {
                     ui.label("Audio Buffer Size:");
 
-                    egui::ComboBox::from_id_source("audio_buffer_size")
+                    egui::ComboBox::from_id_salt("audio_buffer_size")
                         .selected_text(format!("{} samples", self.working_prefs.audio_buffer_size))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -292,7 +292,7 @@ impl PreferencesDialog {
                 ui.horizontal(|ui| {
                     ui.label("Theme:");
 
-                    egui::ComboBox::from_id_source("theme_mode")
+                    egui::ComboBox::from_id_salt("theme_mode")
                         .selected_text(format!("{:?}", self.working_prefs.theme_mode))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(

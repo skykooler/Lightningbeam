@@ -125,6 +125,7 @@ impl TimelinePane {
 
     /// Execute a view action with the given parameters
     /// Called from main.rs after determining this is the best handler
+    #[allow(dead_code)] // Mirrors StagePane; wiring in main.rs pending (see TODO at view action dispatch)
     pub fn execute_view_action(&mut self, action: &crate::menu::MenuAction, zoom_center: egui::Vec2) {
         use crate::menu::MenuAction;
         match action {
@@ -781,7 +782,7 @@ impl TimelinePane {
 
             // Mute button
             // TODO: Replace with SVG icon (volume-up-fill.svg / volume-mute.svg)
-            let mute_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
+            let mute_response = ui.scope_builder(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
                 let mute_text = if is_muted { "🔇" } else { "🔊" };
                 let button = egui::Button::new(mute_text)
                     .fill(if is_muted {
@@ -805,7 +806,7 @@ impl TimelinePane {
 
             // Solo button
             // TODO: Replace with SVG headphones icon
-            let solo_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
+            let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
                 let button = egui::Button::new("🎧")
                     .fill(if is_soloed {
                         egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
@@ -828,7 +829,7 @@ impl TimelinePane {
 
             // Lock button
             // TODO: Replace with SVG lock/lock-open icons
-            let lock_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(lock_button_rect), |ui| {
+            let lock_response = ui.scope_builder(egui::UiBuilder::new().max_rect(lock_button_rect), |ui| {
                 let lock_text = if is_locked { "🔒" } else { "🔓" };
                 let button = egui::Button::new(lock_text)
                     .fill(if is_locked {
@@ -851,7 +852,7 @@ impl TimelinePane {
             }
 
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
-            let volume_response = ui.allocate_new_ui(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
+            let volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
                     // 0.0-1.0 volume maps to 0.0-0.7 slider (70%)
@@ -1217,7 +1218,7 @@ impl TimelinePane {
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(audio_pool_index) {
                                             let total_frames = samples.len() / (*ch).max(1) as usize;
                                             let audio_file_duration = total_frames as f64 / *sr as f64;
-                                            let screen_size = ui.ctx().screen_rect().size();
+                                            let screen_size = ui.ctx().content_rect().size();
 
                                             let pending_upload = if waveform_gpu_dirty.contains(audio_pool_index) {
                                                 waveform_gpu_dirty.remove(audio_pool_index);
@@ -1347,7 +1348,7 @@ impl TimelinePane {
     fn handle_input(
         &mut self,
         ui: &mut egui::Ui,
-        full_timeline_rect: egui::Rect,
+        _full_timeline_rect: egui::Rect,
         ruler_rect: egui::Rect,
         content_rect: egui::Rect,
         header_rect: egui::Rect,
@@ -1357,7 +1358,7 @@ impl TimelinePane {
         selection: &mut lightningbeam_core::selection::Selection,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         playback_time: &mut f64,
-        is_playing: &mut bool,
+        _is_playing: &mut bool,
         audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     ) {
         // Don't allocate the header area for input - let widgets handle it directly
@@ -2296,7 +2297,7 @@ impl PaneRenderer for TimelinePane {
                                 *shared.dragging_asset = None;
                             } else {
                                 // Get document dimensions for centering and create clip instance
-                                let (center_x, center_y, mut clip_instance) = {
+                                let (_center_x, _center_y, clip_instance) = {
                                     let doc = shared.action_executor.document();
                                     let center_x = doc.width / 2.0;
                                     let center_y = doc.height / 2.0;

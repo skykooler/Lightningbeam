@@ -403,6 +403,7 @@ enum FileCommand {
 }
 
 /// Progress updates from file operations worker
+#[allow(dead_code)] // EncodingAudio/DecodingAudio planned for granular progress reporting
 enum FileProgress {
     SerializingAudioPool,
     EncodingAudio { current: usize, total: usize },
@@ -428,6 +429,7 @@ enum FileOperation {
 
 /// Information about an imported asset (for auto-placement)
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // name/duration populated for future import UX features
 struct ImportedAssetInfo {
     clip_id: uuid::Uuid,
     clip_type: panes::DragClipType,
@@ -619,6 +621,7 @@ enum RecordingArmMode {
     #[default]
     Auto,
     /// User explicitly arms tracks (multi-track recording workflow)
+    #[allow(dead_code)]
     Manual,
 }
 
@@ -650,12 +653,15 @@ struct EditorApp {
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
     // Audio engine integration
-    audio_stream: Option<cpal::Stream>, // Audio stream (must be kept alive)
-    audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>, // Shared audio controller
-    audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>, // Audio event receiver
-    audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>, // Flag set when audio events arrive
-    audio_sample_rate: u32, // Audio sample rate
-    audio_channels: u32, // Audio channel count
+    #[allow(dead_code)] // Must be kept alive to maintain audio output
+    audio_stream: Option<cpal::Stream>,
+    audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>,
+    audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[allow(dead_code)] // Stored for future export/recording configuration
+    audio_sample_rate: u32,
+    #[allow(dead_code)]
+    audio_channels: u32,
     // Video decoding and management
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, // Shared video manager
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
@@ -667,8 +673,10 @@ struct EditorApp {
     playback_time: f64, // Current playback position in seconds (persistent - save with document)
     is_playing: bool,   // Whether playback is currently active (transient - don't save)
     // Recording state
-    recording_arm_mode: RecordingArmMode, // How tracks are armed for recording
-    armed_layers: HashSet<Uuid>,          // Explicitly armed layers (used in Manual mode)
+    #[allow(dead_code)] // Infrastructure for Manual recording mode
+    recording_arm_mode: RecordingArmMode,
+    #[allow(dead_code)]
+    armed_layers: HashSet<Uuid>,
     is_recording: bool,                   // Whether recording is currently active
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
     recording_start_time: f64,            // Playback time when recording started
@@ -942,7 +950,7 @@ impl EditorApp {
                 egui::vec2(content_width, content_height),
             );
 
-            ui.allocate_ui_at_rect(content_rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
                 ui.vertical_centered(|ui| {
                     // Title
                     ui.heading(egui::RichText::new("Welcome to Lightningbeam!")
@@ -1470,10 +1478,6 @@ impl EditorApp {
 
         // Clear pane instances so they rebuild with new layout
         self.pane_instances.clear();
-    }
-
-    fn current_layout_def(&self) -> &LayoutDefinition {
-        &self.layouts[self.current_layout_index]
     }
 
     fn apply_layout_action(&mut self, action: LayoutAction) {
@@ -2511,7 +2515,7 @@ impl EditorApp {
         };
 
         // Create video clip with real metadata
-        let mut clip = VideoClip::new(
+        let clip = VideoClip::new(
             &name,
             path_str.clone(),
             metadata.width as f64,
@@ -3776,12 +3780,11 @@ impl eframe::App for EditorApp {
         // Poll export orchestrator for progress
         if let Some(orchestrator) = &mut self.export_orchestrator {
             // Only log occasionally to avoid spam
-            static mut POLL_COUNT: u32 = 0;
-            unsafe {
-                POLL_COUNT += 1;
-                if POLL_COUNT % 60 == 0 {
-                    println!("🔍 [MAIN] Polling orchestrator (poll #{})...", POLL_COUNT);
-                }
+            use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+            static POLL_COUNT: AtomicU32 = AtomicU32::new(0);
+            let count = POLL_COUNT.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            if count % 60 == 0 {
+                println!("🔍 [MAIN] Polling orchestrator (poll #{})...", count);
             }
             if let Some(progress) = orchestrator.poll_progress() {
                 match progress {
@@ -4275,12 +4278,12 @@ fn render_layout_node(
 
                 if ui.button("Split Horizontal ->").clicked() {
                     *layout_action = Some(LayoutAction::EnterSplitPreviewHorizontal);
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 if ui.button("Split Vertical |").clicked() {
                     *layout_action = Some(LayoutAction::EnterSplitPreviewVertical);
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 ui.separator();
@@ -4289,14 +4292,14 @@ fn render_layout_node(
                     let mut path_keep_right = path.clone();
                     path_keep_right.push(1); // Remove left, keep right child
                     *layout_action = Some(LayoutAction::RemoveSplit(path_keep_right));
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 if ui.button("Join Right >").clicked() {
                     let mut path_keep_left = path.clone();
                     path_keep_left.push(0); // Remove right, keep left child
                     *layout_action = Some(LayoutAction::RemoveSplit(path_keep_left));
-                    ui.close_menu();
+                    ui.close();
                 }
 
             });
@@ -4397,12 +4400,12 @@ fn render_layout_node(
 
                 if ui.button("Split Horizontal ->").clicked() {
                     *layout_action = Some(LayoutAction::EnterSplitPreviewHorizontal);
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 if ui.button("Split Vertical |").clicked() {
                     *layout_action = Some(LayoutAction::EnterSplitPreviewVertical);
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 ui.separator();
@@ -4411,14 +4414,14 @@ fn render_layout_node(
                     let mut path_keep_bottom = path.clone();
                     path_keep_bottom.push(1); // Remove top, keep bottom child
                     *layout_action = Some(LayoutAction::RemoveSplit(path_keep_bottom));
-                    ui.close_menu();
+                    ui.close();
                 }
 
                 if ui.button("Join Down v").clicked() {
                     let mut path_keep_top = path.clone();
                     path_keep_top.push(0); // Remove bottom, keep top child
                     *layout_action = Some(LayoutAction::RemoveSplit(path_keep_top));
-                    ui.close_menu();
+                    ui.close();
                 }
 
             });
@@ -4825,100 +4828,6 @@ fn render_pane(
         }
     } else if response.clicked() {
         *selected_pane = Some(path.clone());
-    }
-}
-
-/// Render toolbar with tool buttons
-fn render_toolbar(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    tool_icon_cache: &mut ToolIconCache,
-    selected_tool: &mut Tool,
-    path: &NodePath,
-) {
-    let button_size = 60.0; // 50% bigger (was 40.0)
-    let button_padding = 8.0;
-    let button_spacing = 4.0;
-
-    // Calculate how many columns we can fit
-    let available_width = rect.width() - (button_padding * 2.0);
-    let columns = ((available_width + button_spacing) / (button_size + button_spacing)).floor() as usize;
-    let columns = columns.max(1); // At least 1 column
-
-    let mut x = rect.left() + button_padding;
-    let mut y = rect.top() + button_padding;
-    let mut col = 0;
-
-    for tool in Tool::all() {
-        let button_rect = egui::Rect::from_min_size(
-            egui::pos2(x, y),
-            egui::vec2(button_size, button_size),
-        );
-
-        // Check if this is the selected tool
-        let is_selected = *selected_tool == *tool;
-
-        // Button background
-        let bg_color = if is_selected {
-            egui::Color32::from_rgb(70, 100, 150) // Highlighted blue
-        } else {
-            egui::Color32::from_rgb(50, 50, 50)
-        };
-        ui.painter().rect_filled(button_rect, 4.0, bg_color);
-
-        // Load and render tool icon
-        if let Some(icon) = tool_icon_cache.get_or_load(*tool, ui.ctx()) {
-            let icon_rect = button_rect.shrink(8.0); // Padding inside button
-            ui.painter().image(
-                icon.id(),
-                icon_rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-        }
-
-        // Make button interactive (include path to ensure unique IDs across panes)
-        let button_id = ui.id().with(("tool_button", path, *tool as usize));
-        let response = ui.interact(button_rect, button_id, egui::Sense::click());
-
-        // Check for click first
-        if response.clicked() {
-            *selected_tool = *tool;
-        }
-
-        if response.hovered() {
-            ui.painter().rect_stroke(
-                button_rect,
-                4.0,
-                egui::Stroke::new(2.0, egui::Color32::from_gray(180)),
-                egui::StrokeKind::Middle,
-            );
-        }
-
-        // Show tooltip with tool name and shortcut (consumes response)
-        response.on_hover_text(format!("{} ({})", tool.display_name(), tool.shortcut_hint()));
-
-        // Draw selection border
-        if is_selected {
-            ui.painter().rect_stroke(
-                button_rect,
-                4.0,
-                egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255)),
-                egui::StrokeKind::Middle,
-            );
-        }
-
-        // Move to next position in grid
-        col += 1;
-        if col >= columns {
-            // Move to next row
-            col = 0;
-            x = rect.left() + button_padding;
-            y += button_size + button_spacing;
-        } else {
-            // Move to next column
-            x += button_size + button_spacing;
-        }
     }
 }
 

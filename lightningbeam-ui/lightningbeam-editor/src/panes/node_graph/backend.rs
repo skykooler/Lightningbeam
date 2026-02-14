@@ -18,6 +18,7 @@ pub enum BackendNodeId {
 /// Implementations:
 /// - AudioGraphBackend: Wraps daw_backend::AudioGraph via EngineController
 /// - VfxGraphBackend (future): GPU-based shader graph
+#[allow(dead_code)]
 pub trait GraphBackend: Send {
     /// Add a node to the backend graph
     fn add_node(&mut self, node_type: &str, x: f32, y: f32) -> Result<BackendNodeId, String>;

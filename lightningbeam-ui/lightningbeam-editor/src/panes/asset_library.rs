@@ -62,6 +62,7 @@ const SEARCH_BAR_HEIGHT: f32 = 30.0;
 const CATEGORY_TAB_HEIGHT: f32 = 28.0;
 const BREADCRUMB_HEIGHT: f32 = 24.0;
 const ITEM_HEIGHT: f32 = 40.0;
+#[allow(dead_code)]
 const ITEM_PADDING: f32 = 4.0;
 const LIST_THUMBNAIL_SIZE: f32 = 32.0;
 const GRID_ITEM_SIZE: f32 = 80.0;
@@ -137,6 +138,7 @@ impl ThumbnailCache {
     }
 
     /// Check if a thumbnail is already cached (and not dirty)
+    #[allow(dead_code)]
     pub fn has(&self, asset_id: &Uuid) -> bool {
         self.textures.contains_key(asset_id) && !self.dirty.contains(asset_id)
     }
@@ -146,11 +148,6 @@ impl ThumbnailCache {
         self.dirty.insert(*asset_id);
     }
 
-    /// Clear all cached thumbnails
-    pub fn clear(&mut self) {
-        self.textures.clear();
-        self.dirty.clear();
-    }
 }
 
 // ============================================================================
@@ -285,7 +282,7 @@ fn generate_waveform_thumbnail(
 
     // Draw waveform
     let center_y = size / 2;
-    let num_peaks = waveform_peaks.len().min(size);
+    let _num_peaks = waveform_peaks.len().min(size);
 
     for (x, &(min_val, max_val)) in waveform_peaks.iter().take(size).enumerate() {
         // Scale peaks to pixel range (center ± half height)
@@ -552,6 +549,7 @@ fn shape_color_to_tiny_skia(color: &ShapeColor) -> tiny_skia::Color {
 }
 
 /// Generate a simple effect thumbnail with a pink gradient
+#[allow(dead_code)]
 fn generate_effect_thumbnail() -> Vec<u8> {
     let size = THUMBNAIL_SIZE as usize;
     let mut rgba = vec![0u8; size * size * 4];
@@ -628,6 +626,7 @@ fn generate_effect_thumbnail() -> Vec<u8> {
 }
 
 /// Ellipsize a string to fit within a maximum character count
+#[allow(dead_code)]
 fn ellipsize(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -706,6 +705,7 @@ pub struct AssetEntry {
 pub struct FolderEntry {
     pub id: Uuid,
     pub name: String,
+    #[allow(dead_code)]
     pub category: AssetCategory,
     pub item_count: usize,
 }
@@ -718,6 +718,7 @@ pub enum LibraryItem {
 }
 
 impl LibraryItem {
+    #[allow(dead_code)]
     pub fn id(&self) -> Uuid {
         match self {
             LibraryItem::Folder(f) => f.id,
@@ -810,6 +811,7 @@ pub struct AssetLibraryPane {
     current_folders: HashMap<u8, Option<Uuid>>,
 
     /// Set of expanded folder IDs (for tree view - future enhancement)
+    #[allow(dead_code)]
     expanded_folders: HashSet<Uuid>,
 
     /// Cached folder icon texture
@@ -1283,6 +1285,7 @@ impl AssetLibraryPane {
     }
 
     /// Filter assets based on current category and search text
+    #[allow(dead_code)]
     fn filter_assets<'a>(&self, assets: &'a [AssetEntry]) -> Vec<&'a AssetEntry> {
         let search_lower = self.search_filter.to_lowercase();
 
@@ -1727,6 +1730,7 @@ impl AssetLibraryPane {
     }
 
     /// Render a section header for effect categories
+    #[allow(dead_code)] // Part of List/Grid view rendering subsystem, not yet wired
     fn render_section_header(ui: &mut egui::Ui, label: &str, color: egui::Color32) {
         ui.add_space(4.0);
         let (header_rect, _) = ui.allocate_exact_size(
@@ -1744,7 +1748,7 @@ impl AssetLibraryPane {
     }
 
     /// Render a grid of asset items
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     fn render_grid_items(
         &mut self,
         ui: &mut egui::Ui,
@@ -1755,7 +1759,7 @@ impl AssetLibraryPane {
         shared: &mut SharedPaneState,
         document: &Document,
         text_color: egui::Color32,
-        secondary_text_color: egui::Color32,
+        _secondary_text_color: egui::Color32,
     ) {
         if assets.is_empty() {
             return;
@@ -2003,7 +2007,7 @@ impl AssetLibraryPane {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
-        path: &NodePath,
+        _path: &NodePath,
         shared: &mut SharedPaneState,
         items: &[&LibraryItem],
         document: &Document,
@@ -2012,7 +2016,7 @@ impl AssetLibraryPane {
         let folder_icon = self.get_folder_icon(ui.ctx()).cloned();
 
         let _scroll_area = egui::ScrollArea::vertical()
-            .id_source("asset_library_scroll")
+            .id_salt("asset_library_scroll")
             .show_viewport(ui, |ui, viewport| {
                 ui.set_min_width(rect.width());
 
@@ -2171,7 +2175,7 @@ impl AssetLibraryPane {
         // Load folder icon if needed
         let folder_icon = self.get_folder_icon(ui.ctx()).cloned();
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_library_grid_scroll", path))
                 .auto_shrink([false, false])
@@ -2661,6 +2665,7 @@ impl AssetLibraryPane {
     }
 
     /// Render assets based on current view mode
+    #[allow(dead_code)]
     fn render_assets(
         &mut self,
         ui: &mut egui::Ui,
@@ -2681,6 +2686,7 @@ impl AssetLibraryPane {
     }
 
     /// Render the asset list view
+    #[allow(dead_code)]
     fn render_asset_list_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -2724,7 +2730,7 @@ impl AssetLibraryPane {
 
         // Use egui's built-in ScrollArea for scrolling
         let scroll_area_rect = rect;
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(scroll_area_rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(scroll_area_rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_list_scroll", path))
                 .auto_shrink([false, false])
@@ -2757,7 +2763,7 @@ impl AssetLibraryPane {
                     };
                     let mut rendered_builtin_header = false;
                     let mut rendered_custom_header = false;
-                    let mut builtin_rendered = 0;
+                    let mut _builtin_rendered = 0;
 
                     for asset in assets_to_render {
                         // Render section headers for Effects tab
@@ -2781,7 +2787,7 @@ impl AssetLibraryPane {
                                 rendered_custom_header = true;
                             }
                             if asset.is_builtin {
-                                builtin_rendered += 1;
+                                _builtin_rendered += 1;
                             }
                         }
 
@@ -3093,6 +3099,7 @@ impl AssetLibraryPane {
     }
 
     /// Render the asset grid view
+    #[allow(dead_code)]
     fn render_asset_grid_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -3165,7 +3172,7 @@ impl AssetLibraryPane {
             0
         };
 
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt(("asset_grid_scroll", path))
                 .auto_shrink([false, false])
