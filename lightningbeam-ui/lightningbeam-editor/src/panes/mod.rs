@@ -215,6 +215,8 @@ pub struct SharedPaneState<'a> {
     pub pending_menu_actions: &'a mut Vec<crate::menu::MenuAction>,
     /// Clipboard manager for cut/copy/paste operations
     pub clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
+    /// Whether to show waveforms as stacked stereo (true) or combined mono (false)
+    pub waveform_stereo: bool,
 }
 
 /// Trait for pane rendering

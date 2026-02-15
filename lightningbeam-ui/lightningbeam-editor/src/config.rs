@@ -45,6 +45,10 @@ pub struct AppConfig {
     #[serde(default = "defaults::debug")]
     pub debug: bool,
 
+    /// Show waveforms as stacked stereo instead of combined mono
+    #[serde(default = "defaults::waveform_stereo")]
+    pub waveform_stereo: bool,
+
     /// Theme mode ("light", "dark", or "system")
     #[serde(default = "defaults::theme_mode")]
     pub theme_mode: String,
@@ -63,6 +67,7 @@ impl Default for AppConfig {
             reopen_last_session: defaults::reopen_last_session(),
             restore_layout_from_file: defaults::restore_layout_from_file(),
             debug: defaults::debug(),
+            waveform_stereo: defaults::waveform_stereo(),
             theme_mode: defaults::theme_mode(),
         }
     }
@@ -263,5 +268,6 @@ mod defaults {
     pub fn reopen_last_session() -> bool { false }
     pub fn restore_layout_from_file() -> bool { true }
     pub fn debug() -> bool { false }
+    pub fn waveform_stereo() -> bool { false }
     pub fn theme_mode() -> String { "system".to_string() }
 }

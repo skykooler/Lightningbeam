@@ -4389,6 +4389,7 @@ impl eframe::App for EditorApp {
                 target_format: self.target_format,
                 pending_menu_actions: &mut pending_menu_actions,
                 clipboard_manager: &mut self.clipboard_manager,
+                waveform_stereo: self.config.waveform_stereo,
             };
 
             render_layout_node(
@@ -4661,6 +4662,8 @@ struct RenderContext<'a> {
     pending_menu_actions: &'a mut Vec<MenuAction>,
     /// Clipboard manager for paste availability checks
     clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
+    /// Whether to show waveforms as stacked stereo
+    waveform_stereo: bool,
 }
 
 /// Recursively render a layout node with drag support
@@ -5141,6 +5144,7 @@ fn render_pane(
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,
+                waveform_stereo: ctx.waveform_stereo,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -5210,6 +5214,7 @@ fn render_pane(
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,
+                waveform_stereo: ctx.waveform_stereo,
             };
 
             // Render pane content (header was already rendered above)

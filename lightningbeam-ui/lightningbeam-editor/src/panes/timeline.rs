@@ -928,6 +928,7 @@ impl TimelinePane {
         raw_audio_cache: &std::collections::HashMap<usize, (Vec<f32>, u32, u32)>,
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
         target_format: wgpu::TextureFormat,
+        waveform_stereo: bool,
     ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
         let painter = ui.painter();
 
@@ -1273,7 +1274,7 @@ impl TimelinePane {
                                                         tex_width: crate::waveform_gpu::tex_width() as f32,
                                                         total_frames: total_frames as f32,
                                                         segment_start_frame: 0.0,
-                                                        display_mode: 0.0,
+                                                        display_mode: if waveform_stereo { 1.0 } else { 0.0 },
                                                         _pad1: [0.0, 0.0],
                                                         tint_color: tint,
                                                         screen_size: [screen_size.x, screen_size.y],
@@ -2154,7 +2155,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

@@ -33,6 +33,7 @@ struct PreferencesState {
     reopen_last_session: bool,
     restore_layout_from_file: bool,
     debug: bool,
+    waveform_stereo: bool,
     theme_mode: ThemeMode,
 }
 
@@ -48,6 +49,7 @@ impl From<(&AppConfig, &Theme)> for PreferencesState {
             reopen_last_session: config.reopen_last_session,
             restore_layout_from_file: config.restore_layout_from_file,
             debug: config.debug,
+            waveform_stereo: config.waveform_stereo,
             theme_mode: theme.mode(),
         }
     }
@@ -65,6 +67,7 @@ impl Default for PreferencesState {
             reopen_last_session: false,
             restore_layout_from_file: true,
             debug: false,
+            waveform_stereo: false,
             theme_mode: ThemeMode::System,
         }
     }
@@ -335,6 +338,10 @@ impl PreferencesDialog {
             .default_open(false)
             .show(ui, |ui| {
                 ui.checkbox(&mut self.working_prefs.debug, "Enable debug mode");
+                ui.checkbox(
+                    &mut self.working_prefs.waveform_stereo,
+                    "Show waveforms as stacked stereo",
+                );
             });
     }
 
@@ -359,6 +366,7 @@ impl PreferencesDialog {
         temp_config.reopen_last_session = self.working_prefs.reopen_last_session;
         temp_config.restore_layout_from_file = self.working_prefs.restore_layout_from_file;
         temp_config.debug = self.working_prefs.debug;
+        temp_config.waveform_stereo = self.working_prefs.waveform_stereo;
         temp_config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
 
         // Validate
@@ -380,6 +388,7 @@ impl PreferencesDialog {
         config.reopen_last_session = self.working_prefs.reopen_last_session;
         config.restore_layout_from_file = self.working_prefs.restore_layout_from_file;
         config.debug = self.working_prefs.debug;
+        config.waveform_stereo = self.working_prefs.waveform_stereo;
         config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
 
         // Apply theme immediately
