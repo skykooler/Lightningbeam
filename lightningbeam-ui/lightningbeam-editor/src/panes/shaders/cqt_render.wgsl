@@ -27,7 +27,8 @@ struct Params {
     cache_start_column: f32,      // 4 @ 76
     cache_valid_start: f32,       // 4 @ 80
     cache_valid_end: f32,         // 4 @ 84
-    _pad: vec2<f32>,              // 8 @ 88, total 96
+    column_stride: f32,           // 4 @ 88
+    _pad: f32,                    // 4 @ 92, total 96
 }
 
 @group(0) @binding(0) var cache_tex: texture_2d<f32>;
@@ -141,8 +142,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // Map global column to ring buffer position
-    let ring_pos = global_col - params.cache_start_column;
+    // Map global column to ring buffer position (accounting for stride)
+    let ring_pos = (global_col - params.cache_start_column) / params.column_stride;
     let cache_x = ring_pos % params.cache_capacity;
 
     // Sample cache texture with bilinear filtering

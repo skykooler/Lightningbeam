@@ -1255,7 +1255,7 @@ impl TimelinePane {
                                                         pixels_per_second: self.pixels_per_second as f32,
                                                         audio_duration: audio_file_duration as f32,
                                                         sample_rate: *sr as f32,
-                                                        clip_start_time: instance_start as f32,
+                                                        clip_start_time: clip_screen_start,
                                                         trim_start: preview_trim_start as f32,
                                                         tex_width: crate::waveform_gpu::tex_width() as f32,
                                                         total_frames: total_frames as f32,

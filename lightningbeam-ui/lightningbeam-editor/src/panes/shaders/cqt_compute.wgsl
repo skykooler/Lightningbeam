@@ -18,7 +18,7 @@ struct CqtParams {
     tex_width: u32,           // waveform texture width (2048)
     total_frames: u32,        // total audio frames in waveform texture
     sample_rate: f32,
-    _pad0: u32,
+    column_stride: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -46,7 +46,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let global_col = params.column_start + col_rel;
+    let global_col = params.column_start + col_rel * params.column_stride;
     let sample_start = global_col * params.hop_size;
 
     let info = bins[bin_k];

@@ -59,8 +59,6 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.symphonia-bundle-flac]
 opt-level = 2
-[profile.dev.package.symphonia-format-wav]
-opt-level = 2
 [profile.dev.package.symphonia-format-ogg]
 opt-level = 2
 [profile.dev.package.symphonia-codec-vorbis]
@@ -70,6 +68,4 @@ opt-level = 2
 [profile.dev.package.symphonia-format-isomp4]
 opt-level = 2
 [profile.dev.package.cpal]
-opt-level = 2
-[profile.dev.package.rubato]
 opt-level = 2

@@ -63,8 +63,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Fragment X position → audio time
-    let timeline_time = params.viewport_start_time + (frag_x - params.clip_rect.x) / params.pixels_per_second;
-    let audio_time = timeline_time - params.clip_start_time + params.trim_start;
+    // clip_start_time is the screen X of the (unclamped) clip left edge.
+    // (frag_x - clip_start_time) / pps gives the time offset from the clip's start.
+    let audio_time = (frag_x - params.clip_start_time) / params.pixels_per_second + params.trim_start;
 
     // Audio time → frame index
     let frame_f = audio_time * params.sample_rate - params.segment_start_frame;

@@ -2353,8 +2353,6 @@ impl EditorApp {
     }
 
     /// Import an audio file via daw-backend (async — non-blocking)
-    ///
-    /// Reads only metadata from the file (sub-millisecond), then sends the path
     /// to the engine for async import. The engine memory-maps WAV files or sets
     /// up stream decoding for compressed formats. An `AudioFileReady` event is
     /// emitted when the file is playback-ready; the event handler populates the
@@ -2749,10 +2747,37 @@ impl EditorApp {
             // Get the newly created layer ID (it's the last child in the document)
             let doc = self.action_executor.document();
             if let Some(last_layer) = doc.root.children.last() {
-                target_layer_id = Some(last_layer.id());
+                let layer_id = last_layer.id();
+                target_layer_id = Some(layer_id);
 
                 // Update active layer to the new layer
                 self.active_layer_id = target_layer_id;
+
+                // Create a backend audio/MIDI track and add the mapping
+                if let Some(ref controller_arc) = self.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    match asset_info.clip_type {
+                        panes::DragClipType::AudioSampled => {
+                            match controller.create_audio_track_sync(layer_name.clone()) {
+                                Ok(track_id) => {
+                                    self.layer_to_track_map.insert(layer_id, track_id);
+                                    self.track_to_layer_map.insert(track_id, layer_id);
+                                }
+                                Err(e) => eprintln!("Failed to create audio track for auto-place: {}", e),
+                            }
+                        }
+                        panes::DragClipType::AudioMidi => {
+                            match controller.create_midi_track_sync(layer_name.clone()) {
+                                Ok(track_id) => {
+                                    self.layer_to_track_map.insert(layer_id, track_id);
+                                    self.track_to_layer_map.insert(track_id, layer_id);
+                                }
+                                Err(e) => eprintln!("Failed to create MIDI track for auto-place: {}", e),
+                            }
+                        }
+                        _ => {} // Other types don't need backend tracks
+                    }
+                }
             }
         }
 
@@ -3613,22 +3638,11 @@ impl eframe::App for EditorApp {
                             // via AudioDecodeProgress events.
                             ctx.request_repaint();
                         }
-                        AudioEvent::AudioDecodeProgress { pool_index, decoded_frames, total_frames } => {
-                            // Waveform decode complete — fetch samples for GPU waveform
-                            if decoded_frames == total_frames {
-                                if let Some(ref controller_arc) = self.audio_controller {
-                                    let mut controller = controller_arc.lock().unwrap();
-                                    match controller.get_pool_audio_samples(pool_index) {
-                                        Ok((samples, sr, ch)) => {
-                                            println!("Waveform decode complete for pool {}: {} samples", pool_index, samples.len());
-                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
-                                            self.waveform_gpu_dirty.insert(pool_index);
-                                        }
-                                        Err(e) => eprintln!("Failed to fetch decoded audio for pool {}: {}", pool_index, e),
-                                    }
-                                }
-                                ctx.request_repaint();
-                            }
+                        AudioEvent::AudioDecodeProgress { pool_index, samples, sample_rate, channels } => {
+                            // Samples arrive inline — no query needed
+                            self.raw_audio_cache.insert(pool_index, (samples, sample_rate, channels));
+                            self.waveform_gpu_dirty.insert(pool_index);
+                            ctx.request_repaint();
                         }
                         _ => {} // Ignore other events for now
                     }
@@ -4055,6 +4069,19 @@ impl eframe::App for EditorApp {
 
         if split_clips_requested {
             self.split_clips_at_playhead();
+        }
+
+        // Space bar toggles play/pause (only when no text input is focused)
+        if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            self.is_playing = !self.is_playing;
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                if self.is_playing {
+                    controller.play();
+                } else {
+                    controller.pause();
+                }
+            }
         }
 
         ctx.input(|i| {

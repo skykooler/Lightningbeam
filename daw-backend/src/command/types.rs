@@ -274,18 +274,22 @@ pub enum AudioEvent {
     },
 
     /// Progressive decode progress for a compressed audio file's waveform data.
-    /// The UI can use this to update waveform display incrementally.
+    /// Carries the samples inline so the UI doesn't need to query back.
     AudioDecodeProgress {
         pool_index: usize,
-        decoded_frames: u64,
-        total_frames: u64,
+        samples: Vec<f32>,
+        sample_rate: u32,
+        channels: u32,
     },
 
-    /// Background waveform decode completed for a compressed audio file.
+    /// Background waveform decode progress/completion for a compressed audio file.
     /// Internal event — consumed by the engine to update the pool, not forwarded to UI.
+    /// `decoded_frames` < `total_frames` means partial; equal means complete.
     WaveformDecodeComplete {
         pool_index: usize,
         samples: Vec<f32>,
+        decoded_frames: u64,
+        total_frames: u64,
     },
 }
 

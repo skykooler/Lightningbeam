@@ -338,6 +338,122 @@ impl AudioFile {
         })
     }
 
+    /// Decode a compressed audio file progressively, calling `on_progress` with
+    /// partial data snapshots so the UI can display waveforms as they decode.
+    /// Sends updates roughly every 2 seconds of decoded audio.
+    pub fn decode_progressive<P: AsRef<Path>, F>(path: P, total_frames: u64, on_progress: F)
+    where
+        F: Fn(&[f32], u64, u64),
+    {
+        let path = path.as_ref();
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[WAVEFORM DECODE] Failed to open {:?}: {}", path, e);
+                return;
+            }
+        };
+
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+        let mut hint = Hint::new();
+        if let Some(extension) = path.extension() {
+            if let Some(ext_str) = extension.to_str() {
+                hint.with_extension(ext_str);
+            }
+        }
+
+        let probed = match symphonia::default::get_probe()
+            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[WAVEFORM DECODE] Failed to probe {:?}: {}", path, e);
+                return;
+            }
+        };
+
+        let mut format = probed.format;
+
+        let track = match format.tracks().iter()
+            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+        {
+            Some(t) => t,
+            None => {
+                eprintln!("[WAVEFORM DECODE] No audio tracks in {:?}", path);
+                return;
+            }
+        };
+
+        let track_id = track.id;
+        let channels = track.codec_params.channels
+            .map(|c| c.count() as u32)
+            .unwrap_or(2);
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+
+        let mut decoder = match symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+        {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[WAVEFORM DECODE] Failed to create decoder for {:?}: {}", path, e);
+                return;
+            }
+        };
+
+        let mut audio_data = Vec::new();
+        let mut sample_buf = None;
+        // Send a progress update roughly every 2 seconds of audio
+        // Send first update quickly (0.25s), then every 2s of audio
+        let initial_interval = (sample_rate as usize * channels as usize) / 4;
+        let steady_interval = (sample_rate as usize * channels as usize) * 2;
+        let mut sent_first = false;
+        let mut last_update_len = 0usize;
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(Error::ResetRequired) => break,
+                Err(_) => break,
+            };
+
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            match decoder.decode(&packet) {
+                Ok(decoded) => {
+                    if sample_buf.is_none() {
+                        let spec = *decoded.spec();
+                        let duration = decoded.capacity() as u64;
+                        sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                    }
+                    if let Some(ref mut buf) = sample_buf {
+                        buf.copy_interleaved_ref(decoded);
+                        audio_data.extend_from_slice(buf.samples());
+                    }
+
+                    // Send progressive update (fast initial, then periodic)
+                    let interval = if sent_first { steady_interval } else { initial_interval };
+                    if audio_data.len() - last_update_len >= interval {
+                        let decoded_frames = audio_data.len() as u64 / channels as u64;
+                        on_progress(&audio_data, decoded_frames, total_frames);
+                        last_update_len = audio_data.len();
+                        sent_first = true;
+                    }
+                }
+                Err(Error::DecodeError(_)) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Final update with all data
+        let decoded_frames = audio_data.len() as u64 / channels as u64;
+        on_progress(&audio_data, decoded_frames, decoded_frames.max(total_frames));
+    }
+
     /// Calculate the duration of the audio file in seconds
     pub fn duration(&self) -> f64 {
         self.frames as f64 / self.sample_rate as f64

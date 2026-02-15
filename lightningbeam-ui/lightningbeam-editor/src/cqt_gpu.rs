@@ -21,7 +21,7 @@ const BINS_PER_OCTAVE: u32 = 24;
 const FREQ_BINS: u32 = 174; // ceil(log2(4186.0 / 27.5) * 24) = ceil(173.95)
 const HOP_SIZE: u32 = 512;
 const CACHE_CAPACITY: u32 = 4096;
-const MAX_COLS_PER_FRAME: u32 = 256;
+const MAX_COLS_PER_FRAME: u32 = 128;
 const F_MIN: f64 = 27.5; // A0 = MIDI 21
 const WAVEFORM_TEX_WIDTH: u32 = 2048;
 
@@ -49,7 +49,7 @@ struct CqtComputeParams {
     tex_width: u32,
     total_frames: u32,
     sample_rate: f32,
-    _pad0: u32,
+    column_stride: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -78,7 +78,8 @@ pub struct CqtRenderParams {
     pub cache_start_column: f32,      // 4 @ 76
     pub cache_valid_start: f32,       // 4 @ 80
     pub cache_valid_end: f32,         // 4 @ 84
-    pub _pad: [f32; 2],              // 8 @ 88, total 96
+    pub column_stride: f32,          // 4 @ 88
+    pub _pad: f32,                   // 4 @ 92, total 96
 }
 
 /// Per-pool-index cache entry with ring buffer and GPU resources.
@@ -111,6 +112,7 @@ struct CqtCacheEntry {
 
     // Metadata
     sample_rate: u32,
+    current_stride: u32,
 }
 
 /// Global GPU resources for CQT (stored in egui_wgpu::CallbackResources).
@@ -132,6 +134,8 @@ pub struct CqtCallback {
     /// Visible column range (global CQT column indices)
     pub visible_col_start: i64,
     pub visible_col_end: i64,
+    /// Column stride: 1 = full resolution, N = compute every Nth column
+    pub stride: u32,
 }
 
 /// Precompute CQT bin parameters for a given sample rate.
@@ -341,7 +345,14 @@ impl CqtGpuResources {
         total_frames: u64,
         sample_rate: u32,
     ) {
-        if self.entries.contains_key(&pool_index) {
+        // If entry exists, check if waveform data has grown (progressive decode)
+        if let Some(entry) = self.entries.get_mut(&pool_index) {
+            if entry.waveform_total_frames != total_frames {
+                // Waveform texture updated in-place with more data.
+                // The texture view is still valid (no destroy/recreate),
+                // so just update total_frames to allow computing new columns.
+                entry.waveform_total_frames = total_frames;
+            }
             return;
         }
 
@@ -458,6 +469,7 @@ impl CqtGpuResources {
                 render_bind_group,
                 render_uniform_buffer,
                 sample_rate,
+                current_stride: 1,
             },
         );
     }
@@ -473,18 +485,20 @@ fn dispatch_cqt_compute(
     entry: &CqtCacheEntry,
     start_col: i64,
     end_col: i64,
+    stride: u32,
 ) -> Vec<wgpu::CommandBuffer> {
-    let num_cols = (end_col - start_col) as u32;
-    if num_cols == 0 {
+    // Number of cache slots needed (each slot covers `stride` global columns)
+    let num_cols = ((end_col - start_col) as u32 / stride).max(1);
+    if end_col <= start_col {
         return Vec::new();
     }
 
     // Clamp to max per frame
     let num_cols = num_cols.min(MAX_COLS_PER_FRAME);
 
-    // Calculate ring buffer write offset
+    // Calculate ring buffer write offset (in cache slots, not global columns)
     let cache_write_offset =
-        ((start_col - entry.cache_start_column) as u32) % entry.cache_capacity;
+        (((start_col - entry.cache_start_column) / stride as i64) as u32) % entry.cache_capacity;
 
     let params = CqtComputeParams {
         hop_size: HOP_SIZE,
@@ -496,7 +510,7 @@ fn dispatch_cqt_compute(
         tex_width: WAVEFORM_TEX_WIDTH,
         total_frames: entry.waveform_total_frames as u32,
         sample_rate: entry.sample_rate as f32,
-        _pad0: 0,
+        column_stride: stride,
         _pad1: 0,
         _pad2: 0,
     };
@@ -569,9 +583,26 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
         );
 
         // Determine which columns need computing
+        let stride = self.stride.max(1) as i64;
         let vis_start = self.visible_col_start.max(0);
         let max_col = (total_frames as i64) / HOP_SIZE as i64;
-        let vis_end = self.visible_col_end.min(max_col);
+        let vis_end_raw = self.visible_col_end.min(max_col);
+        // Clamp visible range to cache capacity (in global columns, accounting for stride)
+        let vis_end = vis_end_raw.min(vis_start + CACHE_CAPACITY as i64 * stride);
+
+        // If stride changed, invalidate cache
+        {
+            let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
+            if entry.current_stride != self.stride {
+                entry.current_stride = self.stride;
+                entry.cache_start_column = vis_start;
+                entry.cache_valid_start = vis_start;
+                entry.cache_valid_end = vis_start;
+            }
+        }
+
+        // Stride-aware max columns per frame (in global column units)
+        let max_cols_global = MAX_COLS_PER_FRAME as i64 * stride;
 
         // Read current cache state, compute what's needed, then update state.
         // We split borrows carefully: read entry state, compute, then write back.
@@ -590,17 +621,18 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
                 && vis_start < cache_valid_end
                 && vis_end > cache_valid_end
             {
-                // Scrolling right
+                // Scrolling right — align to stride boundary
                 let actual_end =
-                    cache_valid_end + (vis_end - cache_valid_end).min(MAX_COLS_PER_FRAME as i64);
+                    cache_valid_end + (vis_end - cache_valid_end).min(max_cols_global);
                 cmds = dispatch_cqt_compute(
                     device, queue, &cqt_gpu.compute_pipeline, entry,
-                    cache_valid_end, actual_end,
+                    cache_valid_end, actual_end, self.stride,
                 );
                 let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
                 entry.cache_valid_end = actual_end;
-                if entry.cache_valid_end - entry.cache_valid_start > entry.cache_capacity as i64 {
-                    entry.cache_valid_start = entry.cache_valid_end - entry.cache_capacity as i64;
+                let cache_cap_global = entry.cache_capacity as i64 * stride;
+                if entry.cache_valid_end - entry.cache_valid_start > cache_cap_global {
+                    entry.cache_valid_start = entry.cache_valid_end - cache_cap_global;
                     entry.cache_start_column = entry.cache_valid_start;
                 }
             } else if vis_end <= cache_valid_end
@@ -609,16 +641,17 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
             {
                 // Scrolling left
                 let actual_start =
-                    cache_valid_start - (cache_valid_start - vis_start).min(MAX_COLS_PER_FRAME as i64);
+                    cache_valid_start - (cache_valid_start - vis_start).min(max_cols_global);
                 cmds = dispatch_cqt_compute(
                     device, queue, &cqt_gpu.compute_pipeline, entry,
-                    actual_start, cache_valid_start,
+                    actual_start, cache_valid_start, self.stride,
                 );
                 let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
                 entry.cache_valid_start = actual_start;
                 entry.cache_start_column = actual_start;
-                if entry.cache_valid_end - entry.cache_valid_start > entry.cache_capacity as i64 {
-                    entry.cache_valid_end = entry.cache_valid_start + entry.cache_capacity as i64;
+                let cache_cap_global = entry.cache_capacity as i64 * stride;
+                if entry.cache_valid_end - entry.cache_valid_start > cache_cap_global {
+                    entry.cache_valid_end = entry.cache_valid_start + cache_cap_global;
                 }
             } else {
                 // No overlap or first compute — reset cache
@@ -627,11 +660,11 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
                 entry.cache_valid_start = vis_start;
                 entry.cache_valid_end = vis_start;
 
-                let compute_end = vis_start + (vis_end - vis_start).min(MAX_COLS_PER_FRAME as i64);
+                let compute_end = vis_start + (vis_end - vis_start).min(max_cols_global);
                 let entry = cqt_gpu.entries.get(&self.pool_index).unwrap();
                 cmds = dispatch_cqt_compute(
                     device, queue, &cqt_gpu.compute_pipeline, entry,
-                    vis_start, compute_end,
+                    vis_start, compute_end, self.stride,
                 );
                 let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
                 entry.cache_valid_end = compute_end;
@@ -645,6 +678,7 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
         params.cache_valid_start = entry.cache_valid_start as f32;
         params.cache_valid_end = entry.cache_valid_end as f32;
         params.cache_capacity = entry.cache_capacity as f32;
+        params.column_stride = self.stride as f32;
 
         queue.write_buffer(
             &entry.render_uniform_buffer,

@@ -1296,6 +1296,11 @@ impl PianoRollPane {
                 let vis_col_start = (vis_audio_start * sample_rate as f64 / 512.0).floor() as i64;
                 let vis_col_end = (vis_audio_end * sample_rate as f64 / 512.0).ceil() as i64 + 1;
 
+                // Calculate stride: how many CQT columns per pixel
+                // When zoomed out, multiple CQT columns map to one pixel — compute every Nth
+                let cols_per_pixel = sample_rate as f32 / (512.0 * self.pixels_per_second);
+                let cqt_stride = (cols_per_pixel.ceil() as u32).max(1);
+
                 let callback = crate::cqt_gpu::CqtCallback {
                     pool_index,
                     params: crate::cqt_gpu::CqtRenderParams {
@@ -1318,12 +1323,14 @@ impl PianoRollPane {
                         cache_start_column: 0.0,
                         cache_valid_start: 0.0,
                         cache_valid_end: 0.0,
-                        _pad: [0.0; 2],
+                        column_stride: 0.0, // filled by prepare()
+                        _pad: 0.0,
                     },
                     target_format: shared.target_format,
                     sample_rate,
                     visible_col_start: vis_col_start,
                     visible_col_end: vis_col_end,
+                    stride: cqt_stride,
                 };
 
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(

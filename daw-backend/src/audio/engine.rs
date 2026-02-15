@@ -272,24 +272,25 @@ impl Engine {
         // Forward chunk generation events from background threads
         while let Ok(event) = self.chunk_generation_rx.try_recv() {
             match event {
-                AudioEvent::WaveformDecodeComplete { pool_index, samples } => {
-                    // Update pool entry with decoded waveform samples
+                AudioEvent::WaveformDecodeComplete { pool_index, samples, decoded_frames: df, total_frames: _tf } => {
+                    // Update pool entry and forward samples directly to UI
                     if let Some(file) = self.audio_pool.get_file_mut(pool_index) {
-                        let total = file.frames;
+                        let sr = file.sample_rate;
+                        let ch = file.channels;
                         if let crate::audio::pool::AudioStorage::Compressed {
                             ref mut decoded_for_waveform,
                             ref mut decoded_frames,
                             ..
                         } = file.storage {
-                            eprintln!("[ENGINE] Waveform decode complete for pool {}: {} samples", pool_index, samples.len());
-                            *decoded_for_waveform = samples;
-                            *decoded_frames = total;
+                            *decoded_for_waveform = samples.clone();
+                            *decoded_frames = df;
                         }
-                        // Notify frontend that waveform data is ready
+                        // Send samples inline — UI won't need to query back
                         let _ = self.event_tx.push(AudioEvent::AudioDecodeProgress {
                             pool_index,
-                            decoded_frames: total,
-                            total_frames: total,
+                            samples,
+                            sample_rate: sr,
+                            channels: ch,
                         });
                     }
                 }
@@ -1789,26 +1790,25 @@ impl Engine {
                         });
                     }
 
-                    // Spawn background thread to decode full file for waveform display
+                    // Spawn background thread to decode file progressively for waveform display
                     let bg_tx = self.chunk_generation_tx.clone();
                     let bg_path = path.to_path_buf();
+                    let bg_total_frames = total_frames;
                     let _ = std::thread::Builder::new()
                         .name(format!("waveform-decode-{}", idx))
                         .spawn(move || {
-                            eprintln!("[WAVEFORM DECODE] Starting full decode of {:?}", bg_path);
-                            match crate::io::AudioFile::load(&bg_path) {
-                                Ok(loaded) => {
-                                    eprintln!("[WAVEFORM DECODE] Complete: {} frames, {} channels",
-                                        loaded.frames, loaded.channels);
+                            crate::io::AudioFile::decode_progressive(
+                                &bg_path,
+                                bg_total_frames,
+                                |audio_data, decoded_frames, total| {
                                     let _ = bg_tx.send(AudioEvent::WaveformDecodeComplete {
                                         pool_index: idx,
-                                        samples: loaded.data,
+                                        samples: audio_data.to_vec(),
+                                        decoded_frames,
+                                        total_frames: total,
                                     });
-                                }
-                                Err(e) => {
-                                    eprintln!("[WAVEFORM DECODE] Failed to decode {:?}: {}", bg_path, e);
-                                }
-                            }
+                                },
+                            );
                         });
                     idx
                 }
