@@ -436,10 +436,11 @@ impl AudioFile {
                     }
 
                     // Send progressive update (fast initial, then periodic)
+                    // Only send NEW samples since last update (delta) to avoid large copies
                     let interval = if sent_first { steady_interval } else { initial_interval };
                     if audio_data.len() - last_update_len >= interval {
                         let decoded_frames = audio_data.len() as u64 / channels as u64;
-                        on_progress(&audio_data, decoded_frames, total_frames);
+                        on_progress(&audio_data[last_update_len..], decoded_frames, total_frames);
                         last_update_len = audio_data.len();
                         sent_first = true;
                     }
@@ -449,9 +450,9 @@ impl AudioFile {
             }
         }
 
-        // Final update with all data
+        // Final update with remaining data (delta since last update)
         let decoded_frames = audio_data.len() as u64 / channels as u64;
-        on_progress(&audio_data, decoded_frames, decoded_frames.max(total_frames));
+        on_progress(&audio_data[last_update_len..], decoded_frames, decoded_frames.max(total_frames));
     }
 
     /// Calculate the duration of the audio file in seconds

@@ -272,20 +272,11 @@ impl Engine {
         // Forward chunk generation events from background threads
         while let Ok(event) = self.chunk_generation_rx.try_recv() {
             match event {
-                AudioEvent::WaveformDecodeComplete { pool_index, samples, decoded_frames: df, total_frames: _tf } => {
-                    // Update pool entry and forward samples directly to UI
-                    if let Some(file) = self.audio_pool.get_file_mut(pool_index) {
+                AudioEvent::WaveformDecodeComplete { pool_index, samples, decoded_frames: _df, total_frames: _tf } => {
+                    // Forward samples directly to UI — no clone, just move
+                    if let Some(file) = self.audio_pool.get_file(pool_index) {
                         let sr = file.sample_rate;
                         let ch = file.channels;
-                        if let crate::audio::pool::AudioStorage::Compressed {
-                            ref mut decoded_for_waveform,
-                            ref mut decoded_frames,
-                            ..
-                        } = file.storage {
-                            *decoded_for_waveform = samples.clone();
-                            *decoded_frames = df;
-                        }
-                        // Send samples inline — UI won't need to query back
                         let _ = self.event_tx.push(AudioEvent::AudioDecodeProgress {
                             pool_index,
                             samples,
@@ -1824,6 +1815,22 @@ impl Engine {
             duration: metadata.duration,
             format: metadata.format,
         });
+
+        // For PCM files, send samples inline so the UI doesn't need to
+        // do a blocking get_pool_audio_samples() query.
+        if metadata.format == crate::io::AudioFormat::Pcm {
+            if let Some(file) = self.audio_pool.get_file(pool_index) {
+                let samples = file.data().to_vec();
+                if !samples.is_empty() {
+                    let _ = self.event_tx.push(AudioEvent::AudioDecodeProgress {
+                        pool_index,
+                        samples,
+                        sample_rate: metadata.sample_rate,
+                        channels: metadata.channels,
+                    });
+                }
+            }
+        }
 
         Ok(pool_index)
     }

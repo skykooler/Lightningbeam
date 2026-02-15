@@ -761,6 +761,7 @@ impl EditorApp {
         let current_layout = layouts[0].layout.clone();
 
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
+        #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);
 
         // Load application config
@@ -1670,6 +1671,7 @@ impl EditorApp {
                 let file = dialog.pick_file();
 
                 if let Some(path) = file {
+                    let _import_timer = std::time::Instant::now();
                     // Get extension and detect file type
                     let extension = path.extension()
                         .and_then(|e| e.to_str())
@@ -1698,12 +1700,16 @@ impl EditorApp {
                         }
                     };
 
+                    eprintln!("[TIMING] import took {:.1}ms", _import_timer.elapsed().as_secs_f64() * 1000.0);
                     // Auto-place if this is "Import" (not "Import to Library")
                     if auto_place {
                         if let Some(asset_info) = imported_asset {
+                            let _place_timer = std::time::Instant::now();
                             self.auto_place_asset(asset_info);
+                            eprintln!("[TIMING] auto_place took {:.1}ms", _place_timer.elapsed().as_secs_f64() * 1000.0);
                         }
                     }
+                    eprintln!("[TIMING] total import+place took {:.1}ms", _import_timer.elapsed().as_secs_f64() * 1000.0);
                 }
             }
             MenuAction::Export => {
@@ -3080,6 +3086,8 @@ impl EditorApp {
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let _frame_start = std::time::Instant::now();
+
         // Disable egui's built-in Ctrl+Plus/Minus zoom behavior
         // We handle zoom ourselves for the Stage pane
         ctx.options_mut(|o| {
@@ -3111,37 +3119,10 @@ impl eframe::App for EditorApp {
             // Will switch to editor mode when file finishes loading
         }
 
-        // Fetch missing raw audio on-demand (for lazy loading after project load)
-        // Collect pool indices that need raw audio data
-        let missing_raw_audio: Vec<usize> = self.action_executor.document()
-            .audio_clips.values()
-            .filter_map(|clip| {
-                if let lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } = &clip.clip_type {
-                    if !self.raw_audio_cache.contains_key(audio_pool_index) {
-                        Some(*audio_pool_index)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Fetch missing raw audio samples
-        for pool_index in missing_raw_audio {
-            if let Some(ref controller_arc) = self.audio_controller {
-                let mut controller = controller_arc.lock().unwrap();
-                match controller.get_pool_audio_samples(pool_index) {
-                    Ok((samples, sr, ch)) => {
-                        self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
-                        self.waveform_gpu_dirty.insert(pool_index);
-                        self.audio_pools_with_new_waveforms.insert(pool_index);
-                    }
-                    Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
-                }
-            }
-        }
+        // NOTE: Missing raw audio samples for newly imported files will arrive
+        // via AudioDecodeProgress events (compressed) or inline with AudioFileReady
+        // (PCM). No blocking query needed here.
+        // For project loading, audio files are re-imported which also sends events.
 
         // Initialize and update effect thumbnail generator (GPU-based effect previews)
         if let Some(render_state) = frame.wgpu_render_state() {
@@ -3296,6 +3277,7 @@ impl eframe::App for EditorApp {
             ctx.request_repaint();
         }
 
+        let _pre_events_ms = _frame_start.elapsed().as_secs_f64() * 1000.0;
         // Check if audio events are pending and request repaint if needed
         if self.audio_events_pending.load(std::sync::atomic::Ordering::Relaxed) {
             ctx.request_repaint();
@@ -3639,8 +3621,12 @@ impl eframe::App for EditorApp {
                             ctx.request_repaint();
                         }
                         AudioEvent::AudioDecodeProgress { pool_index, samples, sample_rate, channels } => {
-                            // Samples arrive inline — no query needed
-                            self.raw_audio_cache.insert(pool_index, (samples, sample_rate, channels));
+                            // Samples arrive as deltas — append to existing cache
+                            if let Some(entry) = self.raw_audio_cache.get_mut(&pool_index) {
+                                entry.0.extend_from_slice(&samples);
+                            } else {
+                                self.raw_audio_cache.insert(pool_index, (samples, sample_rate, channels));
+                            }
                             self.waveform_gpu_dirty.insert(pool_index);
                             ctx.request_repaint();
                         }
@@ -3657,6 +3643,8 @@ impl eframe::App for EditorApp {
                 self.audio_events_pending.store(false, std::sync::atomic::Ordering::Relaxed);
             }
         }
+
+        let _post_events_ms = _frame_start.elapsed().as_secs_f64() * 1000.0;
 
         // Request continuous repaints when playing to update time display
         if self.is_playing {
@@ -4144,6 +4132,12 @@ impl eframe::App for EditorApp {
                 self.audio_controller.as_ref(),
             );
             debug_overlay::render_debug_overlay(ctx, &stats);
+        }
+
+        let frame_ms = _frame_start.elapsed().as_secs_f64() * 1000.0;
+        if frame_ms > 50.0 {
+            eprintln!("[TIMING] SLOW FRAME: {:.1}ms (pre-events={:.1}, events={:.1}, post-events={:.1})",
+                frame_ms, _pre_events_ms, _post_events_ms - _pre_events_ms, frame_ms - _post_events_ms);
         }
     }
 
