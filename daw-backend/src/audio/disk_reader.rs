@@ -69,6 +69,11 @@ pub struct ReadAheadBuffer {
     channels: u32,
     /// Source file sample rate.
     sample_rate: u32,
+    /// Last file-local frame requested by the audio callback.
+    /// Written by the consumer (render_from_file), read by the disk reader.
+    /// The disk reader uses this instead of the global playhead to know
+    /// where in the file to buffer around.
+    target_frame: AtomicU64,
 }
 
 // SAFETY: See the doc comment on ReadAheadBuffer for the full safety argument.
@@ -102,6 +107,7 @@ impl ReadAheadBuffer {
             capacity_frames,
             channels,
             sample_rate,
+            target_frame: AtomicU64::new(0),
         }
     }
 
@@ -156,6 +162,20 @@ impl ReadAheadBuffer {
     #[inline]
     pub fn valid_frames_count(&self) -> u64 {
         self.valid_frames.load(Ordering::Acquire)
+    }
+
+    /// Update the target frame — the file-local frame the audio callback
+    /// is currently reading from. Called by `render_from_file` (consumer).
+    #[inline]
+    pub fn set_target_frame(&self, frame: u64) {
+        self.target_frame.store(frame, Ordering::Relaxed);
+    }
+
+    /// Get the target frame set by the audio callback.
+    /// Called by the disk reader thread (producer).
+    #[inline]
+    pub fn target_frame(&self) -> u64 {
+        self.target_frame.load(Ordering::Relaxed)
     }
 
     /// Reset the buffer to start at `new_start` with zero valid frames.
@@ -431,20 +451,16 @@ pub struct DiskReader {
 
 impl DiskReader {
     /// Create a new disk reader with a background thread.
-    ///
-    /// `playhead_frame` should be the same `Arc<AtomicU64>` used by the engine
-    /// so the disk reader knows where to fill ahead.
     pub fn new(playhead_frame: Arc<AtomicU64>, _sample_rate: u32) -> Self {
         let (command_tx, command_rx) = rtrb::RingBuffer::new(64);
         let running = Arc::new(AtomicBool::new(true));
 
         let thread_running = running.clone();
-        let thread_playhead = playhead_frame.clone();
 
         let thread_handle = std::thread::Builder::new()
             .name("disk-reader".into())
             .spawn(move || {
-                Self::reader_thread(command_rx, thread_playhead, thread_running);
+                Self::reader_thread(command_rx, thread_running);
             })
             .expect("Failed to spawn disk reader thread");
 
@@ -473,7 +489,6 @@ impl DiskReader {
     /// The disk reader background thread.
     fn reader_thread(
         mut command_rx: rtrb::Consumer<DiskReaderCommand>,
-        playhead_frame: Arc<AtomicU64>,
         running: Arc<AtomicBool>,
     ) {
         let mut active_files: HashMap<usize, (CompressedReader, Arc<ReadAheadBuffer>)> =
@@ -506,6 +521,7 @@ impl DiskReader {
                     }
                     DiskReaderCommand::Seek { frame } => {
                         for (_, (reader, buffer)) in active_files.iter_mut() {
+                            buffer.set_target_frame(frame);
                             buffer.reset(frame);
                             if let Err(e) = reader.seek(frame) {
                                 eprintln!("[DiskReader] Seek error: {}", e);
@@ -518,26 +534,28 @@ impl DiskReader {
                 }
             }
 
-            let playhead = playhead_frame.load(Ordering::Relaxed);
-
-            // Fill each active file's buffer ahead of the playhead.
+            // Fill each active file's buffer ahead of its target frame.
+            // Each file's target_frame is set by the audio callback in
+            // render_from_file, giving the file-local frame being read.
+            // This is independent of the global engine playhead.
             for (_pool_index, (reader, buffer)) in active_files.iter_mut() {
+                let target = buffer.target_frame();
                 let buf_start = buffer.start_frame();
                 let buf_valid = buffer.valid_frames_count();
                 let buf_end = buf_start + buf_valid;
 
-                // If the playhead has jumped behind or far ahead of the buffer,
+                // If the target has jumped behind or far ahead of the buffer,
                 // seek the decoder and reset.
-                if playhead < buf_start || playhead > buf_end + reader.sample_rate as u64 {
-                    buffer.reset(playhead);
-                    let _ = reader.seek(playhead);
+                if target < buf_start || target > buf_end + reader.sample_rate as u64 {
+                    buffer.reset(target);
+                    let _ = reader.seek(target);
                     continue;
                 }
 
-                // Advance the buffer start to reclaim space behind the playhead.
+                // Advance the buffer start to reclaim space behind the target.
                 // Keep a small lookback for sinc interpolation (~32 frames).
                 let lookback = 64u64;
-                let advance_to = playhead.saturating_sub(lookback);
+                let advance_to = target.saturating_sub(lookback);
                 if advance_to > buf_start {
                     buffer.advance_start(advance_to);
                 }
@@ -547,7 +565,7 @@ impl DiskReader {
                 let buf_valid = buffer.valid_frames_count();
                 let buf_end = buf_start + buf_valid;
                 let prefetch_target =
-                    playhead + (PREFETCH_SECONDS * reader.sample_rate as f64) as u64;
+                    target + (PREFETCH_SECONDS * reader.sample_rate as f64) as u64;
 
                 if buf_end >= prefetch_target {
                     continue; // Already filled far enough ahead.

@@ -92,10 +92,6 @@ pub struct PianoRollPane {
     // Resolved note cache — tracks when to invalidate
     cached_clip_id: Option<u32>,
 
-    // Spectrogram cache — keyed by audio pool index
-    // Stores pre-computed SpectrogramUpload data ready for GPU
-    spectrogram_computed: HashMap<usize, crate::spectrogram_gpu::SpectrogramUpload>,
-
     // Spectrogram gamma (power curve for colormap)
     spectrogram_gamma: f32,
 }
@@ -126,8 +122,7 @@ impl PianoRollPane {
             auto_scroll_enabled: true,
             user_scrolled_since_play: false,
             cached_clip_id: None,
-            spectrogram_computed: HashMap::new(),
-            spectrogram_gamma: 5.0,
+            spectrogram_gamma: 0.8,
         }
     }
 
@@ -1256,80 +1251,51 @@ impl PianoRollPane {
             }
         }
 
-        let screen_size = ui.ctx().input(|i| i.content_rect().size());
-
-        // Render spectrogram for each sampled clip on this layer
+        // Render CQT spectrogram for each sampled clip on this layer
         for &(pool_index, timeline_start, trim_start, _duration, sample_rate) in &clip_infos {
-            // Compute spectrogram if not cached
-            let needs_compute = !self.spectrogram_computed.contains_key(&pool_index);
-            let pending_upload = if needs_compute {
-                if let Some((samples, sr, ch)) = shared.raw_audio_cache.get(&pool_index) {
-                    let spec_data = crate::spectrogram_compute::compute_spectrogram(
-                        samples, *sr, *ch, 2048, 512,
-                    );
-                    if spec_data.time_bins > 0 {
-                        let upload = crate::spectrogram_gpu::SpectrogramUpload {
-                            magnitudes: spec_data.magnitudes,
-                            time_bins: spec_data.time_bins as u32,
-                            freq_bins: spec_data.freq_bins as u32,
-                            sample_rate: spec_data.sample_rate,
-                            hop_size: spec_data.hop_size as u32,
-                            fft_size: spec_data.fft_size as u32,
-                            duration: spec_data.duration as f32,
-                        };
-                        // Store a marker so we don't recompute
-                        self.spectrogram_computed.insert(pool_index, crate::spectrogram_gpu::SpectrogramUpload {
-                            magnitudes: Vec::new(), // We don't need to keep the data around
-                            time_bins: upload.time_bins,
-                            freq_bins: upload.freq_bins,
-                            sample_rate: upload.sample_rate,
-                            hop_size: upload.hop_size,
-                            fft_size: upload.fft_size,
-                            duration: upload.duration,
-                        });
-                        Some(upload)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            // Get audio duration from the raw audio cache
+            let audio_duration = if let Some((samples, sr, ch)) = shared.raw_audio_cache.get(&pool_index) {
+                samples.len() as f64 / (*sr as f64 * *ch as f64)
             } else {
-                None
-            };
-
-            // Get cached spectrogram metadata for params
-            let spec_meta = self.spectrogram_computed.get(&pool_index);
-            let (time_bins, freq_bins, hop_size, fft_size, audio_duration) = match spec_meta {
-                Some(m) => (m.time_bins as f32, m.freq_bins as f32, m.hop_size as f32, m.fft_size as f32, m.duration),
-                None => continue,
+                continue;
             };
 
             if view_rect.width() > 0.0 && view_rect.height() > 0.0 {
-                let callback = crate::spectrogram_gpu::SpectrogramCallback {
+                // Calculate visible CQT column range for streaming
+                let viewport_end_time = self.viewport_start_time + (view_rect.width() / self.pixels_per_second) as f64;
+                let vis_audio_start = (self.viewport_start_time - timeline_start + trim_start).max(0.0);
+                let vis_audio_end = (viewport_end_time - timeline_start + trim_start).min(audio_duration);
+                let vis_col_start = (vis_audio_start * sample_rate as f64 / 512.0).floor() as i64;
+                let vis_col_end = (vis_audio_end * sample_rate as f64 / 512.0).ceil() as i64 + 1;
+
+                let callback = crate::cqt_gpu::CqtCallback {
                     pool_index,
-                    params: crate::spectrogram_gpu::SpectrogramParams {
+                    params: crate::cqt_gpu::CqtRenderParams {
                         clip_rect: [view_rect.min.x, view_rect.min.y, view_rect.max.x, view_rect.max.y],
                         viewport_start_time: self.viewport_start_time as f32,
                         pixels_per_second: self.pixels_per_second,
-                        audio_duration,
+                        audio_duration: audio_duration as f32,
                         sample_rate: sample_rate as f32,
                         clip_start_time: timeline_start as f32,
                         trim_start: trim_start as f32,
-                        time_bins,
-                        freq_bins,
-                        hop_size,
-                        fft_size,
+                        freq_bins: 174.0,
+                        bins_per_octave: 24.0,
+                        hop_size: 512.0,
                         scroll_y: self.scroll_y,
                         note_height: self.note_height,
-                        screen_size: [screen_size.x, screen_size.y],
                         min_note: MIN_NOTE as f32,
                         max_note: MAX_NOTE as f32,
                         gamma: self.spectrogram_gamma,
-                        _pad: [0.0; 3],
+                        cache_capacity: 0.0, // filled by prepare()
+                        cache_start_column: 0.0,
+                        cache_valid_start: 0.0,
+                        cache_valid_end: 0.0,
+                        _pad: [0.0; 2],
                     },
                     target_format: shared.target_format,
-                    pending_upload,
+                    sample_rate,
+                    visible_col_start: vis_col_start,
+                    visible_col_end: vis_col_end,
                 };
 
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(

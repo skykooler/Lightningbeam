@@ -511,6 +511,11 @@ impl AudioClipPool {
 
         let src_start_position = start_time_seconds * audio_file.sample_rate as f64;
 
+        // Tell the disk reader where we're reading so it buffers the right region.
+        if use_read_ahead {
+            read_ahead.unwrap().set_target_frame(src_start_position as u64);
+        }
+
         let mut rendered_frames = 0;
 
         if audio_file.sample_rate == engine_sample_rate {

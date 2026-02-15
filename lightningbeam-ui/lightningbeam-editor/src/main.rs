@@ -20,8 +20,7 @@ mod theme;
 use theme::{Theme, ThemeMode};
 
 mod waveform_gpu;
-mod spectrogram_gpu;
-mod spectrogram_compute;
+mod cqt_gpu;
 
 mod config;
 use config::AppConfig;
@@ -2382,16 +2381,20 @@ impl EditorApp {
         let sample_rate = metadata.sample_rate;
 
         if let Some(ref controller_arc) = self.audio_controller {
-            // Predict the pool index (engine assigns sequentially)
-            let pool_index = self.action_executor.document().audio_clips.len();
-
-            // Send async import command (non-blocking)
-            {
+            // Import synchronously to get the real pool index from the engine.
+            // NOTE: briefly blocks the UI thread (sub-ms for PCM mmap; a few ms
+            // for compressed streaming init).
+            let pool_index = {
                 let mut controller = controller_arc.lock().unwrap();
-                controller.import_audio(path.to_path_buf());
-            }
+                match controller.import_audio_sync(path.to_path_buf()) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        eprintln!("Failed to import audio '{}': {}", path.display(), e);
+                        return None;
+                    }
+                }
+            };
 
-            // Create audio clip in document immediately (metadata is enough)
             let clip = AudioClip::new_sampled(&name, pool_index, duration);
             let clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 

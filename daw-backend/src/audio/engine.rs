@@ -489,6 +489,10 @@ impl Engine {
                 self.playhead_atomic.store(0, Ordering::Relaxed);
                 // Stop all MIDI notes when stopping playback
                 self.project.stop_all_notes();
+                // Reset disk reader buffers to the new playhead position
+                if let Some(ref mut dr) = self.disk_reader {
+                    dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: 0 });
+                }
             }
             Command::Pause => {
                 self.playing = false;
@@ -1686,163 +1690,142 @@ impl Engine {
             }
 
             Command::ImportAudio(path) => {
-                let path_str = path.to_string_lossy().to_string();
-
-                // Step 1: Read metadata (fast — no decoding)
-                let metadata = match crate::io::read_metadata(&path) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("[ENGINE] ImportAudio failed to read metadata for {:?}: {}", path, e);
-                        return;
-                    }
-                };
-
-                let pool_index;
-
-                eprintln!("[ENGINE] ImportAudio: format={:?}, ch={}, sr={}, n_frames={:?}, duration={:.2}s, path={}",
-                    metadata.format, metadata.channels, metadata.sample_rate, metadata.n_frames, metadata.duration, path_str);
-
-                match metadata.format {
-                    crate::io::AudioFormat::Pcm => {
-                        // WAV/AIFF: memory-map the file for instant availability
-                        let file = match std::fs::File::open(&path) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                eprintln!("[ENGINE] ImportAudio failed to open {:?}: {}", path, e);
-                                return;
-                            }
-                        };
-
-                        // SAFETY: The file is opened read-only. The mmap is shared
-                        // immutably. We never write to it.
-                        let mmap = match unsafe { memmap2::Mmap::map(&file) } {
-                            Ok(m) => m,
-                            Err(e) => {
-                                eprintln!("[ENGINE] ImportAudio mmap failed for {:?}: {}", path, e);
-                                return;
-                            }
-                        };
-
-                        // Parse WAV header to find PCM data offset and format
-                        let header = match crate::io::parse_wav_header(&mmap) {
-                            Ok(h) => h,
-                            Err(e) => {
-                                eprintln!("[ENGINE] ImportAudio WAV parse failed for {:?}: {}", path, e);
-                                return;
-                            }
-                        };
-
-                        let audio_file = crate::audio::pool::AudioFile::from_mmap(
-                            path.clone(),
-                            mmap,
-                            header.data_offset,
-                            header.sample_format,
-                            header.channels,
-                            header.sample_rate,
-                            header.total_frames,
-                        );
-
-                        pool_index = self.audio_pool.add_file(audio_file);
-                    }
-                    crate::io::AudioFormat::Compressed => {
-                        let sync_decode = std::env::var("DAW_SYNC_DECODE").is_ok();
-
-                        if sync_decode {
-                            // Diagnostic: full synchronous decode to InMemory (bypasses ring buffer)
-                            eprintln!("[ENGINE] DAW_SYNC_DECODE: doing full decode of {:?}", path);
-                            match crate::io::AudioFile::load(&path) {
-                                Ok(loaded) => {
-                                    let ext = path.extension()
-                                        .and_then(|e| e.to_str())
-                                        .map(|s| s.to_lowercase());
-                                    let audio_file = crate::audio::pool::AudioFile::with_format(
-                                        path.clone(),
-                                        loaded.data,
-                                        loaded.channels,
-                                        loaded.sample_rate,
-                                        ext,
-                                    );
-                                    pool_index = self.audio_pool.add_file(audio_file);
-                                    eprintln!("[ENGINE] DAW_SYNC_DECODE: pool_index={}, frames={}", pool_index, loaded.frames);
-                                }
-                                Err(e) => {
-                                    eprintln!("[ENGINE] DAW_SYNC_DECODE failed: {}", e);
-                                    return;
-                                }
-                            }
-                        } else {
-                            // Normal path: stream decode via disk reader
-                            let ext = path.extension()
-                                .and_then(|e| e.to_str())
-                                .map(|s| s.to_lowercase());
-
-                            let total_frames = metadata.n_frames.unwrap_or_else(|| {
-                                (metadata.duration * metadata.sample_rate as f64).ceil() as u64
-                            });
-
-                            let mut audio_file = crate::audio::pool::AudioFile::from_compressed(
-                                path.clone(),
-                                metadata.channels,
-                                metadata.sample_rate,
-                                total_frames,
-                                ext,
-                            );
-
-                            let buffer = crate::audio::disk_reader::DiskReader::create_buffer(
-                                metadata.sample_rate,
-                                metadata.channels,
-                            );
-                            audio_file.read_ahead = Some(buffer.clone());
-
-                            pool_index = self.audio_pool.add_file(audio_file);
-
-                            eprintln!("[ENGINE] Compressed: total_frames={}, pool_index={}, has_disk_reader={}",
-                                total_frames, pool_index, self.disk_reader.is_some());
-
-                            if let Some(ref mut dr) = self.disk_reader {
-                                dr.send(crate::audio::disk_reader::DiskReaderCommand::ActivateFile {
-                                    pool_index,
-                                    path: path.clone(),
-                                    buffer,
-                                });
-                            }
-
-                            // Spawn background thread to decode full file for waveform display
-                            let bg_tx = self.chunk_generation_tx.clone();
-                            let bg_path = path.clone();
-                            let _ = std::thread::Builder::new()
-                                .name(format!("waveform-decode-{}", pool_index))
-                                .spawn(move || {
-                                    eprintln!("[WAVEFORM DECODE] Starting full decode of {:?}", bg_path);
-                                    match crate::io::AudioFile::load(&bg_path) {
-                                        Ok(loaded) => {
-                                            eprintln!("[WAVEFORM DECODE] Complete: {} frames, {} channels",
-                                                loaded.frames, loaded.channels);
-                                            let _ = bg_tx.send(AudioEvent::WaveformDecodeComplete {
-                                                pool_index,
-                                                samples: loaded.data,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            eprintln!("[WAVEFORM DECODE] Failed to decode {:?}: {}", bg_path, e);
-                                        }
-                                    }
-                                });
-                        }
-                    }
+                if let Err(e) = self.do_import_audio(&path) {
+                    eprintln!("[ENGINE] ImportAudio failed for {:?}: {}", path, e);
                 }
-
-                // Emit AudioFileReady event
-                let _ = self.event_tx.push(AudioEvent::AudioFileReady {
-                    pool_index,
-                    path: path_str,
-                    channels: metadata.channels,
-                    sample_rate: metadata.sample_rate,
-                    duration: metadata.duration,
-                    format: metadata.format,
-                });
             }
         }
+    }
+
+    /// Import an audio file into the pool: mmap for PCM, streaming for compressed.
+    /// Returns the pool index on success. Emits AudioFileReady event.
+    fn do_import_audio(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let path_str = path.to_string_lossy().to_string();
+
+        let metadata = crate::io::read_metadata(path)
+            .map_err(|e| format!("Failed to read metadata for {:?}: {}", path, e))?;
+
+        eprintln!("[ENGINE] ImportAudio: format={:?}, ch={}, sr={}, n_frames={:?}, duration={:.2}s, path={}",
+            metadata.format, metadata.channels, metadata.sample_rate, metadata.n_frames, metadata.duration, path_str);
+
+        let pool_index = match metadata.format {
+            crate::io::AudioFormat::Pcm => {
+                let file = std::fs::File::open(path)
+                    .map_err(|e| format!("Failed to open {:?}: {}", path, e))?;
+
+                // SAFETY: The file is opened read-only. The mmap is shared
+                // immutably. We never write to it.
+                let mmap = unsafe { memmap2::Mmap::map(&file) }
+                    .map_err(|e| format!("mmap failed for {:?}: {}", path, e))?;
+
+                let header = crate::io::parse_wav_header(&mmap)
+                    .map_err(|e| format!("WAV parse failed for {:?}: {}", path, e))?;
+
+                let audio_file = crate::audio::pool::AudioFile::from_mmap(
+                    path.to_path_buf(),
+                    mmap,
+                    header.data_offset,
+                    header.sample_format,
+                    header.channels,
+                    header.sample_rate,
+                    header.total_frames,
+                );
+
+                self.audio_pool.add_file(audio_file)
+            }
+            crate::io::AudioFormat::Compressed => {
+                let sync_decode = std::env::var("DAW_SYNC_DECODE").is_ok();
+
+                if sync_decode {
+                    eprintln!("[ENGINE] DAW_SYNC_DECODE: doing full decode of {:?}", path);
+                    let loaded = crate::io::AudioFile::load(path)
+                        .map_err(|e| format!("DAW_SYNC_DECODE failed: {}", e))?;
+                    let ext = path.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_lowercase());
+                    let audio_file = crate::audio::pool::AudioFile::with_format(
+                        path.to_path_buf(),
+                        loaded.data,
+                        loaded.channels,
+                        loaded.sample_rate,
+                        ext,
+                    );
+                    let idx = self.audio_pool.add_file(audio_file);
+                    eprintln!("[ENGINE] DAW_SYNC_DECODE: pool_index={}, frames={}", idx, loaded.frames);
+                    idx
+                } else {
+                    let ext = path.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_lowercase());
+
+                    let total_frames = metadata.n_frames.unwrap_or_else(|| {
+                        (metadata.duration * metadata.sample_rate as f64).ceil() as u64
+                    });
+
+                    let mut audio_file = crate::audio::pool::AudioFile::from_compressed(
+                        path.to_path_buf(),
+                        metadata.channels,
+                        metadata.sample_rate,
+                        total_frames,
+                        ext,
+                    );
+
+                    let buffer = crate::audio::disk_reader::DiskReader::create_buffer(
+                        metadata.sample_rate,
+                        metadata.channels,
+                    );
+                    audio_file.read_ahead = Some(buffer.clone());
+
+                    let idx = self.audio_pool.add_file(audio_file);
+
+                    eprintln!("[ENGINE] Compressed: total_frames={}, pool_index={}, has_disk_reader={}",
+                        total_frames, idx, self.disk_reader.is_some());
+
+                    if let Some(ref mut dr) = self.disk_reader {
+                        dr.send(crate::audio::disk_reader::DiskReaderCommand::ActivateFile {
+                            pool_index: idx,
+                            path: path.to_path_buf(),
+                            buffer,
+                        });
+                    }
+
+                    // Spawn background thread to decode full file for waveform display
+                    let bg_tx = self.chunk_generation_tx.clone();
+                    let bg_path = path.to_path_buf();
+                    let _ = std::thread::Builder::new()
+                        .name(format!("waveform-decode-{}", idx))
+                        .spawn(move || {
+                            eprintln!("[WAVEFORM DECODE] Starting full decode of {:?}", bg_path);
+                            match crate::io::AudioFile::load(&bg_path) {
+                                Ok(loaded) => {
+                                    eprintln!("[WAVEFORM DECODE] Complete: {} frames, {} channels",
+                                        loaded.frames, loaded.channels);
+                                    let _ = bg_tx.send(AudioEvent::WaveformDecodeComplete {
+                                        pool_index: idx,
+                                        samples: loaded.data,
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!("[WAVEFORM DECODE] Failed to decode {:?}: {}", bg_path, e);
+                                }
+                            }
+                        });
+                    idx
+                }
+            }
+        };
+
+        // Emit AudioFileReady event
+        let _ = self.event_tx.push(AudioEvent::AudioFileReady {
+            pool_index,
+            path: path_str,
+            channels: metadata.channels,
+            sample_rate: metadata.sample_rate,
+            duration: metadata.duration,
+            format: metadata.format,
+        });
+
+        Ok(pool_index)
     }
 
     /// Handle synchronous queries from the UI thread
@@ -2230,6 +2213,9 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
 
                 QueryResponse::AudioFileAddedSync(Ok(pool_index))
+            }
+            Query::ImportAudioSync(path) => {
+                QueryResponse::AudioImportedSync(self.do_import_audio(&path))
             }
             Query::GetProject => {
                 // Clone the entire project for serialization
@@ -2672,6 +2658,21 @@ impl EngineController {
     /// formats. Listen for `AudioEvent::AudioFileReady` to get the pool index.
     pub fn import_audio(&mut self, path: std::path::PathBuf) {
         let _ = self.command_tx.push(Command::ImportAudio(path));
+    }
+
+    /// Import an audio file synchronously and get the pool index.
+    /// Does the same work as `import_audio` (mmap for PCM, streaming for
+    /// compressed) but returns the real pool index directly.
+    /// NOTE: briefly blocks the UI thread during file setup (sub-ms for PCM
+    /// mmap; a few ms for compressed streaming init). If this becomes a
+    /// problem for very large files, switch to async import with event-based
+    /// pool index reconciliation.
+    pub fn import_audio_sync(&mut self, path: std::path::PathBuf) -> Result<usize, String> {
+        let query = Query::ImportAudioSync(path);
+        match self.send_query(query)? {
+            QueryResponse::AudioImportedSync(result) => result,
+            _ => Err("Unexpected query response".to_string()),
+        }
     }
 
     /// Add a clip to an audio track

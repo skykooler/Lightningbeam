@@ -333,6 +333,14 @@ pub enum Query {
     AddAudioClipSync(TrackId, usize, f64, f64, f64),
     /// Add an audio file to the pool synchronously (path, data, channels, sample_rate) - returns pool index
     AddAudioFileSync(String, Vec<f32>, u32, u32),
+    /// Import an audio file synchronously (path) - returns pool index.
+    /// Does the same work as Command::ImportAudio (mmap for PCM, streaming
+    /// setup for compressed) but returns the real pool index in the response.
+    /// NOTE: briefly blocks the UI thread during file setup (sub-ms for PCM
+    /// mmap; a few ms for compressed streaming init). If this becomes a
+    /// problem for very large files, switch to async import with event-based
+    /// pool index reconciliation.
+    ImportAudioSync(std::path::PathBuf),
     /// Get raw audio samples from pool (pool_index) - returns (samples, sample_rate, channels)
     GetPoolAudioSamples(usize),
     /// Get a clone of the current project for serialization
@@ -404,6 +412,8 @@ pub enum QueryResponse {
     AudioClipInstanceAdded(Result<AudioClipInstanceId, String>),
     /// Audio file added to pool (returns pool index)
     AudioFileAddedSync(Result<usize, String>),
+    /// Audio file imported to pool (returns pool index)
+    AudioImportedSync(Result<usize, String>),
     /// Raw audio samples from pool (samples, sample_rate, channels)
     PoolAudioSamples(Result<(Vec<f32>, u32, u32), String>),
     /// Project retrieved
