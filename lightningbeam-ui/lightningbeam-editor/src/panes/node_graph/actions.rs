@@ -127,25 +127,35 @@ impl AddNodeAction {
             serde_json::from_str(&before_json)
                 .map_err(|e| format!("Failed to parse before graph state: {}", e))?;
 
-        // Add node to backend (using async API)
+        // Add node to backend (async command via ring buffer)
         controller.graph_add_node(*track_id, self.node_type.clone(), self.position.0, self.position.1);
 
-        // Query graph state after to find the new node ID
-        let after_json = controller.query_graph_state(*track_id)?;
-        let after_state: daw_backend::audio::node_graph::GraphPreset =
-            serde_json::from_str(&after_json)
-                .map_err(|e| format!("Failed to parse after graph state: {}", e))?;
-
-        // Find the new node by comparing before and after states
-        // The new node should have an ID that wasn't in the before state
+        // The command is in the ring buffer. The next query_graph_state call will go through
+        // the audio thread's process(), which drains commands BEFORE processing queries.
+        // So a single query after the push should see the new node.
+        // We retry a few times in case the audio thread hasn't woken up yet.
         let before_ids: std::collections::HashSet<_> = before_state.nodes.iter().map(|n| n.id).collect();
-        let new_node = after_state.nodes.iter()
-            .find(|n| !before_ids.contains(&n.id))
-            .ok_or("Failed to find newly added node in graph state")?;
+        let mut new_node = None;
+        for attempt in 0..10 {
+            // Sleep longer on first attempt to ensure audio callback has run
+            std::thread::sleep(std::time::Duration::from_millis(if attempt == 0 { 10 } else { 5 }));
+            match controller.query_graph_state(*track_id) {
+                Ok(after_json) => {
+                    if let Ok(after_state) = serde_json::from_str::<daw_backend::audio::node_graph::GraphPreset>(&after_json) {
+                        if let Some(node) = after_state.nodes.iter().find(|n| !before_ids.contains(&n.id)) {
+                            new_node = Some((node.id, node.node_type.clone()));
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let (new_node_id, _) = new_node.ok_or("Failed to find newly added node in graph state after retries")?;
 
         // Store the backend node ID
         self.backend_node_id = Some(BackendNodeId::Audio(
-            petgraph::stable_graph::NodeIndex::new(new_node.id as usize)
+            petgraph::stable_graph::NodeIndex::new(new_node_id as usize)
         ));
 
         Ok(())

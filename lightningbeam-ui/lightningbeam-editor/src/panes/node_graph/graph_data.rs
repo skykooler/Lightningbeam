@@ -73,9 +73,60 @@ pub enum NodeTemplate {
     AudioOutput,
 }
 
-/// Custom node data - empty for now, can be extended
+impl NodeTemplate {
+    /// Returns the backend-compatible type name string (matches daw-backend match arms)
+    pub fn backend_type_name(&self) -> &'static str {
+        match self {
+            NodeTemplate::MidiInput => "MidiInput",
+            NodeTemplate::AudioInput => "AudioInput",
+            NodeTemplate::AutomationInput => "AutomationInput",
+            NodeTemplate::Oscillator => "Oscillator",
+            NodeTemplate::WavetableOscillator => "WavetableOscillator",
+            NodeTemplate::FmSynth => "FMSynth",
+            NodeTemplate::Noise => "NoiseGenerator",
+            NodeTemplate::SimpleSampler => "SimpleSampler",
+            NodeTemplate::MultiSampler => "MultiSampler",
+            NodeTemplate::Filter => "Filter",
+            NodeTemplate::Gain => "Gain",
+            NodeTemplate::Echo => "Echo",
+            NodeTemplate::Reverb => "Reverb",
+            NodeTemplate::Chorus => "Chorus",
+            NodeTemplate::Flanger => "Flanger",
+            NodeTemplate::Phaser => "Phaser",
+            NodeTemplate::Distortion => "Distortion",
+            NodeTemplate::BitCrusher => "BitCrusher",
+            NodeTemplate::Compressor => "Compressor",
+            NodeTemplate::Limiter => "Limiter",
+            NodeTemplate::Eq => "EQ",
+            NodeTemplate::Pan => "Pan",
+            NodeTemplate::RingModulator => "RingModulator",
+            NodeTemplate::Vocoder => "Vocoder",
+            NodeTemplate::Adsr => "ADSR",
+            NodeTemplate::Lfo => "LFO",
+            NodeTemplate::Mixer => "Mixer",
+            NodeTemplate::Splitter => "Splitter",
+            NodeTemplate::Constant => "Constant",
+            NodeTemplate::MidiToCv => "MidiToCV",
+            NodeTemplate::AudioToCv => "AudioToCV",
+            NodeTemplate::Math => "Math",
+            NodeTemplate::SampleHold => "SampleHold",
+            NodeTemplate::SlewLimiter => "SlewLimiter",
+            NodeTemplate::Quantizer => "Quantizer",
+            NodeTemplate::EnvelopeFollower => "EnvelopeFollower",
+            NodeTemplate::BpmDetector => "BpmDetector",
+            NodeTemplate::Mod => "Mod",
+            NodeTemplate::Oscilloscope => "Oscilloscope",
+            NodeTemplate::VoiceAllocator => "VoiceAllocator",
+            NodeTemplate::AudioOutput => "AudioOutput",
+        }
+    }
+}
+
+/// Custom node data
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NodeData;
+pub struct NodeData {
+    pub template: NodeTemplate,
+}
 
 /// Custom graph state - can track selected nodes, etc.
 #[derive(Default)]
@@ -260,7 +311,7 @@ impl NodeTemplateTrait for NodeTemplate {
     }
 
     fn user_data(&self, _user_state: &mut Self::UserState) -> Self::NodeData {
-        NodeData
+        NodeData { template: *self }
     }
 
     fn build_node(
@@ -312,13 +363,13 @@ impl NodeTemplateTrait for NodeTemplate {
                 graph.add_input_param(node_id, "Gate".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 // Parameters
                 graph.add_input_param(node_id, "Attack".into(), DataType::CV,
-                    ValueType::float_param(10.0, 0.1, 2000.0, " ms", 0, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(0.01, 0.001, 5.0, " s", 0, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Decay".into(), DataType::CV,
-                    ValueType::float_param(100.0, 0.1, 2000.0, " ms", 1, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(0.1, 0.001, 5.0, " s", 1, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Sustain".into(), DataType::CV,
                     ValueType::float_param(0.7, 0.0, 1.0, "", 2, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Release".into(), DataType::CV,
-                    ValueType::float_param(200.0, 0.1, 5000.0, " ms", 3, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(0.2, 0.001, 5.0, " s", 3, None), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Envelope Out".into(), DataType::CV);
             }
             NodeTemplate::Lfo => {
@@ -342,7 +393,7 @@ impl NodeTemplateTrait for NodeTemplate {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 // Parameters
                 graph.add_input_param(node_id, "Delay Time".into(), DataType::CV,
-                    ValueType::float_param(250.0, 1.0, 2000.0, " ms", 0, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(0.5, 0.01, 2.0, " s", 0, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Feedback".into(), DataType::CV,
                     ValueType::float_param(0.3, 0.0, 0.95, "", 1, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Mix".into(), DataType::CV,

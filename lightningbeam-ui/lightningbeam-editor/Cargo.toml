@@ -15,7 +15,7 @@ eframe = { workspace = true }
 egui_extras = { workspace = true }
 egui-wgpu = { workspace = true }
 egui_code_editor = { workspace = true }
-egui_node_graph2 = { git = "https://github.com/PVDoriginal/egui_node_graph2" }
+egui_node_graph2 = { path = "../egui_node_graph2" }
 
 # GPU
 wgpu = { workspace = true }

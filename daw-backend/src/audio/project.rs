@@ -506,6 +506,21 @@ impl Project {
         }
     }
 
+    /// Set export (blocking) mode on all clip read-ahead buffers.
+    /// When enabled, `render_from_file` blocks until the disk reader
+    /// has filled the needed frames instead of returning silence.
+    pub fn set_export_mode(&self, export: bool) {
+        for track in self.tracks.values() {
+            if let TrackNode::Audio(t) = track {
+                for clip in &t.clips {
+                    if let Some(ref ra) = clip.read_ahead {
+                        ra.set_export_mode(export);
+                    }
+                }
+            }
+        }
+    }
+
     /// Reset all node graphs (clears effect buffers on seek)
     pub fn reset_all_graphs(&mut self) {
         for track in self.tracks.values_mut() {

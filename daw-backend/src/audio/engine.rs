@@ -1334,6 +1334,18 @@ impl Engine {
                 }
             }
 
+            Command::GraphSetNodePosition(track_id, node_index, x, y) => {
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(node_index as usize);
+                    graph.set_node_position(node_idx, x, y);
+                }
+            }
+
             Command::GraphSetMidiTarget(track_id, node_index, enabled) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                     let graph = &mut track.instrument_graph;
@@ -2245,7 +2257,10 @@ impl Engine {
                 QueryResponse::AudioImportedSync(self.do_import_audio(&path))
             }
             Query::GetProject => {
-                // Clone the entire project for serialization
+                // Save graph presets before cloning — AudioTrack::clone() creates
+                // a fresh default graph (not a copy), so the preset must be populated
+                // first so the clone carries the serialized graph data.
+                self.project.prepare_for_save();
                 QueryResponse::ProjectRetrieved(Ok(Box::new(self.project.clone())))
             }
             Query::SetProject(new_project) => {
@@ -2948,6 +2963,11 @@ impl EngineController {
     /// Set a parameter on a node in a track's instrument graph
     pub fn graph_set_parameter(&mut self, track_id: TrackId, node_id: u32, param_id: u32, value: f32) {
         let _ = self.command_tx.push(Command::GraphSetParameter(track_id, node_id, param_id, value));
+    }
+
+    /// Set the UI position of a node in a track's graph
+    pub fn graph_set_node_position(&mut self, track_id: TrackId, node_id: u32, x: f32, y: f32) {
+        let _ = self.command_tx.push(Command::GraphSetNodePosition(track_id, node_id, x, y));
     }
 
     /// Set which node receives MIDI events in a track's instrument graph

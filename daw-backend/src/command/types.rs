@@ -148,6 +148,8 @@ pub enum Command {
     GraphDisconnect(TrackId, u32, usize, u32, usize),
     /// Set a parameter on a node (track_id, node_index, param_id, value)
     GraphSetParameter(TrackId, u32, u32, f32),
+    /// Set the UI position of a node (track_id, node_index, x, y)
+    GraphSetNodePosition(TrackId, u32, f32, f32),
     /// Set which node receives MIDI events (track_id, node_index, enabled)
     GraphSetMidiTarget(TrackId, u32, bool),
     /// Set which node is the audio output (track_id, node_index)
@@ -250,6 +252,8 @@ pub enum AudioEvent {
         frames_rendered: usize,
         total_frames: usize,
     },
+    /// Export rendering complete, now writing/encoding the output file
+    ExportFinalizing,
     /// Waveform generated for audio pool file (pool_index, waveform)
     WaveformGenerated(usize, Vec<WaveformPeak>),
 

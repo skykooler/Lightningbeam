@@ -72,29 +72,44 @@ pub fn export_audio<P: AsRef<Path>>(
     midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
-    event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
+    mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
 ) -> Result<(), String>
 {
-    // Route to appropriate export implementation based on format
-    match settings.format {
+    // Reset all node graphs to clear stale effect buffers (echo, reverb, etc.)
+    project.reset_all_graphs();
+
+    // Enable blocking mode on all read-ahead buffers so compressed audio
+    // streams block until decoded frames are available (instead of returning
+    // silence when the disk reader hasn't caught up with offline rendering).
+    project.set_export_mode(true);
+
+    // Route to appropriate export implementation based on format.
+    // Ensure export mode is disabled even if an error occurs.
+    let result = match settings.format {
         ExportFormat::Wav | ExportFormat::Flac => {
-            // Render to memory then write (existing path)
-            let samples = render_to_memory(project, pool, midi_pool, settings, event_tx)?;
+            let samples = render_to_memory(project, pool, midi_pool, settings, event_tx.as_mut().map(|tx| &mut **tx))?;
+            // Signal that rendering is done and we're now writing the file
+            if let Some(ref mut tx) = event_tx {
+                let _ = tx.push(AudioEvent::ExportFinalizing);
+            }
             match settings.format {
-                ExportFormat::Wav => write_wav(&samples, settings, output_path)?,
-                ExportFormat::Flac => write_flac(&samples, settings, output_path)?,
+                ExportFormat::Wav => write_wav(&samples, settings, &output_path),
+                ExportFormat::Flac => write_flac(&samples, settings, &output_path),
                 _ => unreachable!(),
             }
         }
         ExportFormat::Mp3 => {
-            export_mp3(project, pool, midi_pool, settings, output_path, event_tx)?;
+            export_mp3(project, pool, midi_pool, settings, output_path, event_tx)
         }
         ExportFormat::Aac => {
-            export_aac(project, pool, midi_pool, settings, output_path, event_tx)?;
+            export_aac(project, pool, midi_pool, settings, output_path, event_tx)
         }
-    }
+    };
 
-    Ok(())
+    // Always disable export mode, even on error
+    project.set_export_mode(false);
+
+    result
 }
 
 /// Render the project to memory
@@ -437,6 +452,11 @@ fn export_mp3<P: AsRef<Path>>(
         )?;
     }
 
+    // Signal that rendering is done and we're now flushing/finalizing
+    if let Some(ref mut tx) = event_tx {
+        let _ = tx.push(AudioEvent::ExportFinalizing);
+    }
+
     // Flush encoder
     encoder.send_eof()
         .map_err(|e| format!("Failed to send EOF: {}", e))?;
@@ -600,6 +620,11 @@ fn export_aac<P: AsRef<Path>>(
             channel_layout,
             pts,
         )?;
+    }
+
+    // Signal that rendering is done and we're now flushing/finalizing
+    if let Some(ref mut tx) = event_tx {
+        let _ = tx.push(AudioEvent::ExportFinalizing);
     }
 
     // Flush encoder

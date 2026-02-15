@@ -95,6 +95,8 @@ pub struct AudioFile {
     /// Original file format (mp3, ogg, wav, flac, etc.)
     /// Used to determine if we should preserve lossy encoding during save
     pub original_format: Option<String>,
+    /// Original compressed file bytes (preserved across save/load to avoid re-encoding)
+    pub original_bytes: Option<Vec<u8>>,
 }
 
 impl AudioFile {
@@ -108,6 +110,7 @@ impl AudioFile {
             sample_rate,
             frames,
             original_format: None,
+            original_bytes: None,
         }
     }
 
@@ -121,6 +124,7 @@ impl AudioFile {
             sample_rate,
             frames,
             original_format,
+            original_bytes: None,
         }
     }
 
@@ -152,6 +156,7 @@ impl AudioFile {
             sample_rate,
             frames: total_frames,
             original_format: Some("wav".to_string()),
+            original_bytes: None,
         }
     }
 
@@ -174,6 +179,7 @@ impl AudioFile {
             sample_rate,
             frames: total_frames,
             original_format,
+            original_bytes: None,
         }
     }
 
@@ -468,6 +474,31 @@ impl AudioClipPool {
                     pool_index, std::mem::discriminant(&audio_file.storage), audio_file.frames);
             }
             return 0;
+        }
+
+        // In export mode, block-wait until the disk reader has filled the
+        // frames we need, so offline rendering never gets buffer misses.
+        if use_read_ahead {
+            let ra = read_ahead.unwrap();
+            if ra.is_export_mode() {
+                let src_start = (start_time_seconds * audio_file.sample_rate as f64) as u64;
+                // Tell the disk reader where we need data BEFORE waiting
+                ra.set_target_frame(src_start);
+                // Pad by 64 frames for sinc interpolation taps
+                let frames_needed = (output.len() / engine_channels as usize) as u64 + 64;
+                // Spin-wait with small sleeps until the disk reader fills the buffer
+                let mut wait_iters = 0u64;
+                while !ra.has_range(src_start, frames_needed) {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    wait_iters += 1;
+                    if wait_iters > 100_000 {
+                        // Safety valve: 10 seconds of waiting
+                        eprintln!("[EXPORT] Timed out waiting for disk reader (need frames {}..{})",
+                            src_start, src_start + frames_needed);
+                        break;
+                    }
+                }
+            }
         }
 
         // Snapshot the read-ahead buffer range once for the entire render call.
@@ -834,6 +865,15 @@ impl AudioClipPool {
                 || fmt_lower == "m4a" || fmt_lower == "opus"
         });
 
+        // Check for preserved original bytes first (from previous load cycle)
+        if let Some(ref original_bytes) = audio_file.original_bytes {
+            let data_base64 = general_purpose::STANDARD.encode(original_bytes);
+            return EmbeddedAudioData {
+                data_base64,
+                format: audio_file.original_format.clone().unwrap_or_else(|| "wav".to_string()),
+            };
+        }
+
         if is_lossy {
             // For lossy formats, read the original file bytes (if it still exists)
             if let Ok(original_bytes) = std::fs::read(&audio_file.path) {
@@ -1012,9 +1052,12 @@ impl AudioClipPool {
         // Clean up temporary file
         let _ = std::fs::remove_file(&temp_path);
 
-        // Update the path to reflect it was embedded
+        // Update the path to reflect it was embedded, and preserve original bytes
         if result.is_ok() && pool_index < self.files.len() {
             self.files[pool_index].path = PathBuf::from(format!("<embedded: {}>", name));
+            // Preserve the original compressed/encoded bytes so re-save doesn't need to re-encode
+            self.files[pool_index].original_bytes = Some(data);
+            self.files[pool_index].original_format = Some(embedded.format.clone());
         }
 
         eprintln!("📊 [POOL] ✅ Total load_from_embedded time: {:.2}ms", fn_start.elapsed().as_secs_f64() * 1000.0);

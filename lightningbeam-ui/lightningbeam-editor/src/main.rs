@@ -393,6 +393,7 @@ enum FileCommand {
     Save {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
+        layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -467,8 +468,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, progress_tx } => {
-                    self.handle_save(path, document, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -482,6 +483,7 @@ impl FileOperationsWorker {
         &self,
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
+        layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
@@ -524,7 +526,7 @@ impl FileOperationsWorker {
         let step3_start = std::time::Instant::now();
 
         let settings = SaveSettings::default();
-        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, &settings) {
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
@@ -666,6 +668,8 @@ struct EditorApp {
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
+    /// Generation counter - incremented on project load to force UI components to reload
+    project_generation: u64,
     // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
     clip_instance_to_backend_map: HashMap<Uuid, lightningbeam_core::action::BackendClipInstanceId>,
     // Playback state (global for all panes)
@@ -888,6 +892,7 @@ impl EditorApp {
             )),
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
+            project_generation: 0,
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
@@ -2557,6 +2562,7 @@ impl EditorApp {
         let command = FileCommand::Save {
             path: path.clone(),
             document,
+            layer_to_track_map: self.layer_to_track_map.clone(),
             progress_tx,
         };
 
@@ -2689,16 +2695,30 @@ impl EditorApp {
             eprintln!("📊 [APPLY] Step 4: Set audio project took {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
         }
 
-        // Reset state
+        // Reset state and restore track mappings
         let step5_start = std::time::Instant::now();
         self.layer_to_track_map.clear();
         self.track_to_layer_map.clear();
-        eprintln!("📊 [APPLY] Step 5: Clear track maps took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Sync audio layers (MIDI and Sampled)
+        if !loaded_project.layer_to_track_map.is_empty() {
+            // Restore saved mapping (connects UI layers to loaded backend tracks with effects graphs)
+            for (&layer_id, &track_id) in &loaded_project.layer_to_track_map {
+                self.layer_to_track_map.insert(layer_id, track_id);
+                self.track_to_layer_map.insert(track_id, layer_id);
+            }
+            eprintln!("📊 [APPLY] Step 5: Restored {} track mappings from file in {:.2}ms",
+                loaded_project.layer_to_track_map.len(), step5_start.elapsed().as_secs_f64() * 1000.0);
+        } else {
+            eprintln!("📊 [APPLY] Step 5: No saved track mappings (old file format)");
+        }
+
+        // Sync any audio layers that don't have a mapping yet (new layers, or old file format)
         let step6_start = std::time::Instant::now();
         self.sync_audio_layers_to_backend();
         eprintln!("📊 [APPLY] Step 6: Sync audio layers took {:.2}ms", step6_start.elapsed().as_secs_f64() * 1000.0);
+
+        // Increment project generation to force node graph pane reload
+        self.project_generation += 1;
 
         // Fetch raw audio for all audio clips in the loaded project
         let step7_start = std::time::Instant::now();
@@ -3744,9 +3764,19 @@ impl eframe::App for EditorApp {
                             );
                             ctx.request_repaint();
                         }
+                        AudioEvent::ExportFinalizing => {
+                            self.export_progress_dialog.update_progress(
+                                "Finalizing...".to_string(),
+                                1.0,
+                            );
+                            ctx.request_repaint();
+                        }
                         AudioEvent::WaveformChunksReady { pool_index, .. } => {
-                            // Fetch raw audio for GPU waveform if not already cached
-                            if !self.raw_audio_cache.contains_key(&pool_index) {
+                            // Skip synchronous audio queries during export (audio thread is blocked)
+                            let is_exporting = self.export_orchestrator.as_ref()
+                                .map_or(false, |o| o.is_exporting());
+
+                            if !is_exporting && !self.raw_audio_cache.contains_key(&pool_index) {
                                 if let Some(ref controller_arc) = self.audio_controller {
                                     let mut controller = controller_arc.lock().unwrap();
                                     match controller.get_pool_audio_samples(pool_index) {
@@ -4316,6 +4346,14 @@ impl eframe::App for EditorApp {
             return; // Skip editor rendering
         }
 
+        // Skip rendering the editor while a file is loading — the loading dialog
+        // (rendered earlier) is all the user needs to see. This avoids showing
+        // the default empty layout behind the dialog for several seconds.
+        if matches!(self.file_operation, Some(FileOperation::Loading { .. })) {
+            egui::CentralPanel::default().show(ctx, |_ui| {});
+            return;
+        }
+
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -4390,6 +4428,7 @@ impl eframe::App for EditorApp {
                 pending_menu_actions: &mut pending_menu_actions,
                 clipboard_manager: &mut self.clipboard_manager,
                 waveform_stereo: self.config.waveform_stereo,
+                project_generation: self.project_generation,
             };
 
             render_layout_node(
@@ -4664,6 +4703,8 @@ struct RenderContext<'a> {
     clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
     /// Whether to show waveforms as stacked stereo
     waveform_stereo: bool,
+    /// Project generation counter (incremented on load)
+    project_generation: u64,
 }
 
 /// Recursively render a layout node with drag support
@@ -5145,6 +5186,7 @@ fn render_pane(
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,
                 waveform_stereo: ctx.waveform_stereo,
+                project_generation: ctx.project_generation,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -5215,6 +5257,7 @@ fn render_pane(
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,
                 waveform_stereo: ctx.waveform_stereo,
+                project_generation: ctx.project_generation,
             };
 
             // Render pane content (header was already rendered above)

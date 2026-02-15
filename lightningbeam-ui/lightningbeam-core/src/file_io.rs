@@ -55,6 +55,11 @@ pub struct SerializedAudioBackend {
     /// Note: embedded_data field from daw-backend is ignored; embedded files
     /// are stored as FLAC in the ZIP's media/audio/ directory instead
     pub audio_pool_entries: Vec<AudioPoolEntry>,
+
+    /// Mapping from UI layer UUIDs to backend TrackIds
+    /// Preserves the connection between UI layers and audio engine tracks across save/load
+    #[serde(default)]
+    pub layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
 }
 
 /// Settings for saving a project
@@ -87,6 +92,9 @@ pub struct LoadedProject {
 
     /// Deserialized audio project
     pub audio_project: AudioProject,
+
+    /// Mapping from UI layer UUIDs to backend TrackIds (empty for old files)
+    pub layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
 
     /// Loaded audio pool entries
     pub audio_pool_entries: Vec<AudioPoolEntry>,
@@ -138,6 +146,7 @@ pub fn save_beam(
     document: &Document,
     audio_project: &mut AudioProject,
     audio_pool_entries: Vec<AudioPoolEntry>,
+    layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
     _settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
@@ -174,10 +183,12 @@ pub fn save_beam(
         None
     };
 
-    // 2. Prepare audio project for serialization (save AudioGraph presets)
+    // 2. Graph presets are already populated by the engine thread (in GetProject handler)
+    // before cloning. Do NOT call prepare_for_save() here — the cloned project has
+    // default empty graphs (AudioTrack::clone() doesn't copy the graph), so calling
+    // prepare_for_save() would overwrite the good presets with empty ones.
     let step2_start = std::time::Instant::now();
-    audio_project.prepare_for_save();
-    eprintln!("📊 [SAVE_BEAM] Step 2: Prepare audio project took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("📊 [SAVE_BEAM] Step 2: (graph presets already prepared) took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
     // 3. Create ZIP writer
     let step3_start = std::time::Instant::now();
@@ -363,6 +374,7 @@ pub fn save_beam(
             sample_rate: 48000, // TODO: Get from audio engine
             project: audio_project.clone(),
             audio_pool_entries: modified_entries,
+            layer_to_track_map: layer_to_track_map.clone(),
         },
     };
     eprintln!("📊 [SAVE_BEAM] Step 5: Build BeamProject structure took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
@@ -449,6 +461,7 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
     let document = beam_project.ui_state;
     let mut audio_project = beam_project.audio_backend.project;
     let audio_pool_entries = beam_project.audio_backend.audio_pool_entries;
+    let layer_to_track_map = beam_project.audio_backend.layer_to_track_map;
     eprintln!("📊 [LOAD_BEAM] Step 5: Extract document and audio state took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
 
     // 6. Rebuild AudioGraphs from presets
@@ -503,17 +516,37 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
                                 samples_f32.push(sample as f32 / max_value);
                             }
 
-                            // Convert f32 samples to bytes (little-endian)
-                            let mut pcm_bytes = Vec::new();
-                            for sample in samples_f32 {
-                                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+                            // Encode f32 samples as a proper WAV file (with RIFF header)
+                            let channels = entry.channels;
+                            let sample_rate = entry.sample_rate;
+                            let num_samples = samples_f32.len();
+                            let bytes_per_sample = 4u32; // 32-bit float
+                            let data_size = num_samples * bytes_per_sample as usize;
+                            let file_size = 36 + data_size;
+
+                            let mut wav_data = Vec::with_capacity(44 + data_size);
+                            wav_data.extend_from_slice(b"RIFF");
+                            wav_data.extend_from_slice(&(file_size as u32).to_le_bytes());
+                            wav_data.extend_from_slice(b"WAVE");
+                            wav_data.extend_from_slice(b"fmt ");
+                            wav_data.extend_from_slice(&16u32.to_le_bytes());
+                            wav_data.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+                            wav_data.extend_from_slice(&(channels as u16).to_le_bytes());
+                            wav_data.extend_from_slice(&sample_rate.to_le_bytes());
+                            wav_data.extend_from_slice(&(sample_rate * channels * bytes_per_sample).to_le_bytes());
+                            wav_data.extend_from_slice(&((channels * bytes_per_sample) as u16).to_le_bytes());
+                            wav_data.extend_from_slice(&32u16.to_le_bytes());
+                            wav_data.extend_from_slice(b"data");
+                            wav_data.extend_from_slice(&(data_size as u32).to_le_bytes());
+                            for &sample in &samples_f32 {
+                                wav_data.extend_from_slice(&sample.to_le_bytes());
                             }
 
                             flac_decode_time += flac_decode_start.elapsed().as_secs_f64() * 1000.0;
 
                             Some(daw_backend::audio::pool::EmbeddedAudioData {
-                                data_base64: BASE64_STANDARD.encode(&pcm_bytes),
-                                format: "wav".to_string(), // Mark as WAV since it's now PCM
+                                data_base64: BASE64_STANDARD.encode(&wav_data),
+                                format: "wav".to_string(),
                             })
                         } else {
                             // Lossy format - store as-is
@@ -573,6 +606,7 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
     Ok(LoadedProject {
         document,
         audio_project,
+        layer_to_track_map,
         audio_pool_entries: restored_entries,
         missing_files,
     })

@@ -161,6 +161,17 @@ impl AudioGraph {
         // Validate the connection
         self.validate_connection(from, from_port, to, to_port)?;
 
+        // Remove any existing connection to the same input port (replace semantics).
+        // The frontend UI enforces single-connection inputs, so when a new connection
+        // targets the same port, the old one should be replaced.
+        let edges_to_remove: Vec<_> = self.graph.edges_directed(to, petgraph::Direction::Incoming)
+            .filter(|e| e.weight().to_port == to_port)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges_to_remove {
+            self.graph.remove_edge(edge_id);
+        }
+
         // Add the edge
         self.graph.add_edge(from, to, Connection { from_port, to_port });
         self.topo_cache = None;

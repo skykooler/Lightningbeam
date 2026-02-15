@@ -217,6 +217,8 @@ pub struct SharedPaneState<'a> {
     pub clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
     /// Whether to show waveforms as stacked stereo (true) or combined mono (false)
     pub waveform_stereo: bool,
+    /// Generation counter - incremented on project load to force reloads
+    pub project_generation: u64,
 }
 
 /// Trait for pane rendering

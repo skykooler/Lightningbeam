@@ -48,6 +48,14 @@ pub struct NodeGraphPane {
     /// Track parameter values to detect changes
     /// Maps InputId -> last known value
     parameter_values: HashMap<InputId, f32>,
+
+    /// Last seen project generation (to detect project reloads)
+    last_project_generation: u64,
+
+    /// Node currently being dragged (for insert-on-connection-drop)
+    dragging_node: Option<NodeId>,
+    /// Connection that would be targeted for insertion (highlighted during drag)
+    insert_target: Option<(InputId, OutputId)>,
 }
 
 impl NodeGraphPane {
@@ -64,6 +72,10 @@ impl NodeGraphPane {
             pending_action: None,
             pending_node_addition: None,
             parameter_values: HashMap::new(),
+            last_project_generation: 0,
+            dragging_node: None,
+
+            insert_target: None,
         }
     }
 
@@ -88,6 +100,10 @@ impl NodeGraphPane {
             pending_action: None,
             pending_node_addition: None,
             parameter_values: HashMap::new(),
+            last_project_generation: 0,
+            dragging_node: None,
+
+            insert_target: None,
         };
 
         // Load existing graph from backend
@@ -184,7 +200,7 @@ impl NodeGraphPane {
                 label: node.node_type.clone(),
                 inputs: vec![],
                 outputs: vec![],
-                user_data: graph_data::NodeData,
+                user_data: graph_data::NodeData { template: node_template },
             });
 
             // Build the node's inputs and outputs (this adds them to graph.inputs and graph.outputs)
@@ -235,11 +251,22 @@ impl NodeGraphPane {
                         // Find input param on to_node
                         if let Some(to_node) = self.state.graph.nodes.get(to_id) {
                             if let Some((_name, input_id)) = to_node.inputs.get(conn.to_port) {
-                                // Add connection to graph - connections map is InputId -> Vec<OutputId>
-                                if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
-                                    connections.push(*output_id);
-                                } else {
-                                    self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                // Check max_connections to avoid panic in egui_node_graph2 rendering
+                                let max_conns = self.state.graph.inputs.get(*input_id)
+                                    .and_then(|p| p.max_connections)
+                                    .map(|n| n.get() as usize)
+                                    .unwrap_or(usize::MAX);
+
+                                let current_count = self.state.graph.connections.get(*input_id)
+                                    .map(|c| c.len())
+                                    .unwrap_or(0);
+
+                                if current_count < max_conns {
+                                    if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
+                                        connections.push(*output_id);
+                                    } else {
+                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                    }
                                 }
                             }
                         }
@@ -258,6 +285,7 @@ impl NodeGraphPane {
             graph_data::NodeData,
         >,
         shared: &mut crate::panes::SharedPaneState,
+        pane_rect: egui::Rect,
     ) {
         use egui_node_graph2::NodeResponse;
 
@@ -265,12 +293,16 @@ impl NodeGraphPane {
             match node_response {
                 NodeResponse::CreatedNode(node_id) => {
                     // Node was created from the node finder
-                    // Get node label which is the node type string
+                    // Reposition to the center of the pane (in graph coordinates)
+                    let center_graph = (pane_rect.center().to_vec2()
+                        - self.state.pan_zoom.pan
+                        - pane_rect.min.to_vec2())
+                        / self.state.pan_zoom.zoom;
+                    self.state.node_positions.insert(node_id, center_graph.to_pos2());
+
                     if let Some(node) = self.state.graph.nodes.get(node_id) {
-                        let node_type = node.label.clone();
-                        let position = self.state.node_positions.get(node_id)
-                            .map(|pos| (pos.x, pos.y))
-                            .unwrap_or((0.0, 0.0));
+                        let node_type = node.user_data.template.backend_type_name().to_string();
+                        let position = (center_graph.x, center_graph.y);
 
                         if let Some(track_id) = self.track_id {
                             let action = Box::new(actions::NodeGraphAction::AddNode(
@@ -368,9 +400,28 @@ impl NodeGraphPane {
                     }
                 }
                 NodeResponse::MoveNode { node, drag_delta: _ } => {
-                    // Node was moved - we'll handle this on drag end
-                    // For now, just update the position (no action needed during drag)
                     self.user_state.active_node = Some(node);
+                    self.dragging_node = Some(node);
+
+                    // Sync updated position to backend
+                    if let Some(&backend_id) = self.node_id_map.get(&node) {
+                        if let Some(pos) = self.state.node_positions.get(node) {
+                            let node_index = match backend_id {
+                                BackendNodeId::Audio(idx) => idx.index() as u32,
+                            };
+                            if let Some(audio_controller) = &shared.audio_controller {
+                                if let Some(&backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid)) {
+                                    let mut controller = audio_controller.lock().unwrap();
+                                    controller.graph_set_node_position(
+                                        backend_track_id,
+                                        node_index,
+                                        pos.x,
+                                        pos.y,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {
                     // Ignore other events (SelectNode, RaiseNode, etc.)
@@ -417,7 +468,6 @@ impl NodeGraphPane {
                                             );
                                             self.node_id_map.insert(frontend_id, backend_id);
                                             self.backend_to_frontend_map.insert(backend_id, frontend_id);
-                                            eprintln!("[DEBUG] Mapped new node: frontend {:?} -> backend {:?}", frontend_id, backend_id);
                                         }
                                     }
                                 }
@@ -552,6 +602,301 @@ impl NodeGraphPane {
             y += grid_spacing;
         }
     }
+
+    /// Evaluate a cubic bezier curve at parameter t ∈ [0, 1]
+    fn bezier_point(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t: f32) -> egui::Pos2 {
+        let u = 1.0 - t;
+        let tt = t * t;
+        let uu = u * u;
+        egui::pos2(
+            uu * u * p0.x + 3.0 * uu * t * p1.x + 3.0 * u * tt * p2.x + tt * t * p3.x,
+            uu * u * p0.y + 3.0 * uu * t * p1.y + 3.0 * u * tt * p2.y + tt * t * p3.y,
+        )
+    }
+
+    /// Find the nearest compatible connection for inserting the dragged node.
+    /// Returns (input_id, output_id, src_graph_pos, dst_graph_pos) — positions in graph space.
+    fn find_insert_target(
+        &self,
+        dragged_node: NodeId,
+    ) -> Option<(InputId, OutputId, egui::Pos2, egui::Pos2)> {
+        let node_pos = *self.state.node_positions.get(dragged_node)?;
+
+        // Collect which InputIds are connected (to find free ports on dragged node)
+        let mut connected_inputs: std::collections::HashSet<InputId> = std::collections::HashSet::new();
+        let mut connected_outputs: std::collections::HashSet<OutputId> = std::collections::HashSet::new();
+        for (input_id, outputs) in self.state.graph.iter_connection_groups() {
+            connected_inputs.insert(input_id);
+            for output_id in outputs {
+                connected_outputs.insert(output_id);
+            }
+        }
+
+        // Get dragged node's free input types and free output types
+        let dragged_data = self.state.graph.nodes.get(dragged_node)?;
+        let free_input_types: Vec<DataType> = dragged_data.inputs.iter()
+            .filter(|(_, id)| !connected_inputs.contains(id))
+            .filter_map(|(_, id)| {
+                let param = self.state.graph.inputs.get(*id)?;
+                if matches!(param.kind, InputParamKind::ConstantOnly) { return None; }
+                Some(param.typ.clone())
+            })
+            .collect();
+        let free_output_types: Vec<DataType> = dragged_data.outputs.iter()
+            .filter(|(_, id)| !connected_outputs.contains(id))
+            .filter_map(|(_, id)| Some(self.state.graph.outputs.get(*id)?.typ.clone()))
+            .collect();
+
+        if free_input_types.is_empty() || free_output_types.is_empty() {
+            return None;
+        }
+
+        let threshold = 50.0; // graph-space distance threshold
+
+        let mut best: Option<(InputId, OutputId, egui::Pos2, egui::Pos2, f32)> = None;
+
+        for (input_id, outputs) in self.state.graph.iter_connection_groups() {
+            for output_id in outputs {
+                // Skip connections involving the dragged node
+                let input_node = self.state.graph.inputs.get(input_id).map(|p| p.node);
+                let output_node = self.state.graph.outputs.get(output_id).map(|p| p.node);
+                if input_node == Some(dragged_node) || output_node == Some(dragged_node) {
+                    continue;
+                }
+
+                // Check data type compatibility
+                let conn_type = match self.state.graph.outputs.get(output_id) {
+                    Some(p) => p.typ.clone(),
+                    None => continue,
+                };
+                let has_matching_input = free_input_types.iter().any(|t| *t == conn_type);
+                let has_matching_output = free_output_types.iter().any(|t| *t == conn_type);
+                if !has_matching_input || !has_matching_output {
+                    continue;
+                }
+
+                // Get source and dest node positions (graph space)
+                let src_node_id = output_node.unwrap();
+                let dst_node_id = input_node.unwrap();
+                let src_node_pos = match self.state.node_positions.get(src_node_id) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+                let dst_node_pos = match self.state.node_positions.get(dst_node_id) {
+                    Some(p) => *p,
+                    None => continue,
+                };
+
+                // Approximate port positions in graph space (output on right, input on left)
+                let src_port = egui::pos2(src_node_pos.x + 80.0, src_node_pos.y + 30.0);
+                let dst_port = egui::pos2(dst_node_pos.x - 10.0, dst_node_pos.y + 30.0);
+
+                // Compute bezier in graph space
+                let control_scale = ((dst_port.x - src_port.x) / 2.0).max(30.0);
+                let src_ctrl = egui::pos2(src_port.x + control_scale, src_port.y);
+                let dst_ctrl = egui::pos2(dst_port.x - control_scale, dst_port.y);
+
+                // Sample bezier and find min distance to dragged node center
+                let mut min_dist = f32::MAX;
+                for i in 0..=20 {
+                    let t = i as f32 / 20.0;
+                    let p = Self::bezier_point(src_port, src_ctrl, dst_ctrl, dst_port, t);
+                    let d = node_pos.distance(p);
+                    if d < min_dist {
+                        min_dist = d;
+                    }
+                }
+
+                if min_dist < threshold {
+                    if best.is_none() || min_dist < best.as_ref().unwrap().4 {
+                        best = Some((input_id, output_id, src_port, dst_port, min_dist));
+                    }
+                }
+            }
+        }
+
+        best.map(|(input, output, src, dst, _)| (input, output, src, dst))
+    }
+
+    /// Draw a highlight over a connection to indicate insertion target.
+    /// src/dst are in graph space — converted to screen space here.
+    fn draw_connection_highlight(
+        ui: &egui::Ui,
+        src_graph: egui::Pos2,
+        dst_graph: egui::Pos2,
+        zoom: f32,
+        pan: egui::Vec2,
+        editor_offset: egui::Vec2,
+    ) {
+        // Convert graph space to screen space
+        let to_screen = |p: egui::Pos2| -> egui::Pos2 {
+            egui::pos2(p.x * zoom + pan.x + editor_offset.x, p.y * zoom + pan.y + editor_offset.y)
+        };
+        let src = to_screen(src_graph);
+        let dst = to_screen(dst_graph);
+
+        let control_scale = ((dst.x - src.x) / 2.0).max(30.0 * zoom);
+        let src_ctrl = egui::pos2(src.x + control_scale, src.y);
+        let dst_ctrl = egui::pos2(dst.x - control_scale, dst.y);
+
+        let bezier = egui::epaint::CubicBezierShape::from_points_stroke(
+            [src, src_ctrl, dst_ctrl, dst],
+            false,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(7.0 * zoom, egui::Color32::from_rgb(100, 220, 100)),
+        );
+        ui.painter().add(bezier);
+    }
+
+    /// Execute the insert-node-on-connection action
+    fn execute_insert_on_connection(
+        &mut self,
+        dragged_node: NodeId,
+        target_input: InputId,
+        target_output: OutputId,
+        shared: &mut crate::panes::SharedPaneState,
+    ) {
+        let track_id = match self.track_id {
+            Some(id) => id,
+            None => return,
+        };
+        let backend_track_id = match shared.layer_to_track_map.get(&track_id) {
+            Some(&id) => id,
+            None => return,
+        };
+        let audio_controller = match shared.audio_controller {
+            Some(ref c) => (*c).clone(),
+            None => return,
+        };
+
+        // Get the connection's data type to find matching ports on dragged node
+        let conn_type = match self.state.graph.outputs.get(target_output) {
+            Some(p) => p.typ.clone(),
+            None => return,
+        };
+
+        // Get the source and dest nodes/ports of the existing connection
+        let src_frontend_node = match self.state.graph.outputs.get(target_output) {
+            Some(p) => p.node,
+            None => return,
+        };
+        let dst_frontend_node = match self.state.graph.inputs.get(target_input) {
+            Some(p) => p.node,
+            None => return,
+        };
+
+        let src_port_idx = self.state.graph.nodes.get(src_frontend_node)
+            .and_then(|n| n.outputs.iter().position(|(_, id)| *id == target_output))
+            .unwrap_or(0);
+        let dst_port_idx = self.state.graph.nodes.get(dst_frontend_node)
+            .and_then(|n| n.inputs.iter().position(|(_, id)| *id == target_input))
+            .unwrap_or(0);
+
+        // Find matching free input and output on the dragged node
+        let dragged_data = match self.state.graph.nodes.get(dragged_node) {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Collect connected ports
+        let mut connected_inputs: std::collections::HashSet<InputId> = std::collections::HashSet::new();
+        let mut connected_outputs: std::collections::HashSet<OutputId> = std::collections::HashSet::new();
+        for (input_id, outputs) in self.state.graph.iter_connection_groups() {
+            connected_inputs.insert(input_id);
+            for output_id in outputs {
+                connected_outputs.insert(output_id);
+            }
+        }
+
+        // Find first free input with matching type
+        let drag_input = dragged_data.inputs.iter()
+            .find(|(_, id)| {
+                if connected_inputs.contains(id) { return false; }
+                self.state.graph.inputs.get(*id)
+                    .map(|p| {
+                        !matches!(p.kind, InputParamKind::ConstantOnly) && p.typ == conn_type
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(_, id)| *id);
+
+        let drag_output = dragged_data.outputs.iter()
+            .find(|(_, id)| {
+                if connected_outputs.contains(id) { return false; }
+                self.state.graph.outputs.get(*id)
+                    .map(|p| p.typ == conn_type)
+                    .unwrap_or(false)
+            })
+            .map(|(_, id)| *id);
+
+        let (drag_input_id, drag_output_id) = match (drag_input, drag_output) {
+            (Some(i), Some(o)) => (i, o),
+            _ => return,
+        };
+
+        let drag_input_port_idx = dragged_data.inputs.iter()
+            .position(|(_, id)| *id == drag_input_id)
+            .unwrap_or(0);
+        let drag_output_port_idx = dragged_data.outputs.iter()
+            .position(|(_, id)| *id == drag_output_id)
+            .unwrap_or(0);
+
+        // Get backend node IDs
+        let src_backend = match self.node_id_map.get(&src_frontend_node) {
+            Some(&id) => id,
+            None => return,
+        };
+        let dst_backend = match self.node_id_map.get(&dst_frontend_node) {
+            Some(&id) => id,
+            None => return,
+        };
+        let drag_backend = match self.node_id_map.get(&dragged_node) {
+            Some(&id) => id,
+            None => return,
+        };
+
+        let BackendNodeId::Audio(src_idx) = src_backend;
+        let BackendNodeId::Audio(dst_idx) = dst_backend;
+        let BackendNodeId::Audio(drag_idx) = drag_backend;
+
+        // Send commands to backend: disconnect old, connect source→drag, connect drag→dest
+        {
+            let mut controller = audio_controller.lock().unwrap();
+            controller.graph_disconnect(
+                backend_track_id,
+                src_idx.index() as u32, src_port_idx,
+                dst_idx.index() as u32, dst_port_idx,
+            );
+            controller.graph_connect(
+                backend_track_id,
+                src_idx.index() as u32, src_port_idx,
+                drag_idx.index() as u32, drag_input_port_idx,
+            );
+            controller.graph_connect(
+                backend_track_id,
+                drag_idx.index() as u32, drag_output_port_idx,
+                dst_idx.index() as u32, dst_port_idx,
+            );
+        }
+
+        // Update frontend connections
+        // Remove old connection
+        if let Some(conns) = self.state.graph.connections.get_mut(target_input) {
+            conns.retain(|&o| o != target_output);
+        }
+        // Add source → drag_input
+        if let Some(conns) = self.state.graph.connections.get_mut(drag_input_id) {
+            conns.push(target_output);
+        } else {
+            self.state.graph.connections.insert(drag_input_id, vec![target_output]);
+        }
+        // Add drag_output → dest
+        if let Some(conns) = self.state.graph.connections.get_mut(target_input) {
+            conns.push(drag_output_id);
+        } else {
+            self.state.graph.connections.insert(target_input, vec![drag_output_id]);
+        }
+    }
 }
 
 impl crate::panes::PaneRenderer for NodeGraphPane {
@@ -562,11 +907,15 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
         _path: &NodePath,
         shared: &mut crate::panes::SharedPaneState,
     ) {
-        // Check if we need to reload for a different track
+        // Check if we need to reload for a different track or project reload
         let current_track = *shared.active_layer_id;
+        let generation_changed = shared.project_generation != self.last_project_generation;
+        if generation_changed {
+            self.last_project_generation = shared.project_generation;
+        }
 
-        // If selected track changed, reload the graph
-        if self.track_id != current_track {
+        // If selected track changed or project was reloaded, reload the graph
+        if self.track_id != current_track || (generation_changed && current_track.is_some()) {
             if let Some(new_track_id) = current_track {
                 // Get backend track ID
                 if let Some(&backend_track_id) = shared.layer_to_track_map.get(&new_track_id) {
@@ -669,13 +1018,40 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             );
 
             // Handle graph events and create actions
-            self.handle_graph_response(graph_response, shared);
+            self.handle_graph_response(graph_response, shared, rect);
 
             // Check for parameter value changes and send updates to backend
             self.check_parameter_changes();
 
             // Execute any parameter change actions
             self.execute_pending_action(shared);
+
+            // Insert-node-on-connection: find target during drag, highlight, and execute on drop
+            let primary_down = ui.input(|i| i.pointer.primary_down());
+            if let Some(dragged) = self.dragging_node {
+                if primary_down {
+                    // Still dragging — check for nearby compatible connection
+                    if let Some((input_id, output_id, src_graph, dst_graph)) = self.find_insert_target(dragged) {
+                        self.insert_target = Some((input_id, output_id));
+                        Self::draw_connection_highlight(
+                            ui,
+                            src_graph,
+                            dst_graph,
+                            self.state.pan_zoom.zoom,
+                            self.state.pan_zoom.pan,
+                            rect.min.to_vec2(),
+                        );
+                    } else {
+                        self.insert_target = None;
+                    }
+                } else {
+                    // Drag ended — execute insertion if we have a target
+                    if let Some((target_input, target_output)) = self.insert_target.take() {
+                        self.execute_insert_on_connection(dragged, target_input, target_output, shared);
+                    }
+                    self.dragging_node = None;
+                }
+            }
 
             // Override library's default scroll behavior:
             // - Library uses scroll for zoom

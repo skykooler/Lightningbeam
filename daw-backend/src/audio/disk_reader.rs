@@ -74,6 +74,9 @@ pub struct ReadAheadBuffer {
     /// The disk reader uses this instead of the global playhead to know
     /// where in the file to buffer around.
     target_frame: AtomicU64,
+    /// When true, `render_from_file` will block-wait for frames instead of
+    /// returning silence on buffer miss. Used during offline export.
+    export_mode: AtomicBool,
 }
 
 // SAFETY: See the doc comment on ReadAheadBuffer for the full safety argument.
@@ -108,6 +111,7 @@ impl ReadAheadBuffer {
             channels,
             sample_rate,
             target_frame: AtomicU64::new(0),
+            export_mode: AtomicBool::new(false),
         }
     }
 
@@ -198,6 +202,18 @@ impl ReadAheadBuffer {
     #[inline]
     pub fn has_active_target(&self) -> bool {
         self.target_frame.load(Ordering::Relaxed) != u64::MAX
+    }
+
+    /// Enable or disable export (blocking) mode. When enabled,
+    /// `render_from_file` will spin-wait for frames instead of returning
+    /// silence on buffer miss.
+    pub fn set_export_mode(&self, export: bool) {
+        self.export_mode.store(export, Ordering::Release);
+    }
+
+    /// Check if export (blocking) mode is active.
+    pub fn is_export_mode(&self) -> bool {
+        self.export_mode.load(Ordering::Acquire)
     }
 
     /// Reset the buffer to start at `new_start` with zero valid frames.
@@ -614,8 +630,12 @@ impl DiskReader {
                 }
             }
 
-            // Sleep briefly to avoid busy-spinning when all buffers are full.
-            std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            // In export mode, skip the sleep so decoding runs at full speed.
+            // Otherwise sleep briefly to avoid busy-spinning.
+            let any_exporting = active_files.values().any(|(_, buf)| buf.is_export_mode());
+            if !any_exporting {
+                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            }
         }
     }
 }

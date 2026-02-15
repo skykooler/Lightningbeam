@@ -1813,6 +1813,11 @@ impl TimelinePane {
                 let new_time = self.x_to_time(x).max(0.0);
                 *playback_time = new_time;
                 self.is_scrubbing = true;
+                // Seek immediately so it works while playing
+                if let Some(controller_arc) = audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.seek(new_time);
+                }
             }
         }
         // Continue scrubbing while dragging, even if cursor leaves ruler
@@ -1821,16 +1826,15 @@ impl TimelinePane {
                 let x = (pos.x - content_rect.min.x).max(0.0);
                 let new_time = self.x_to_time(x).max(0.0);
                 *playback_time = new_time;
+                if let Some(controller_arc) = audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.seek(new_time);
+                }
             }
         }
-        // Stop scrubbing when drag ends - seek the audio engine
+        // Stop scrubbing when drag ends
         else if !response.dragged() && self.is_scrubbing {
             self.is_scrubbing = false;
-            // Seek the audio engine to the new position
-            if let Some(controller_arc) = audio_controller {
-                let mut controller = controller_arc.lock().unwrap();
-                controller.seek(*playback_time);
-            }
         }
 
         // Distinguish between mouse wheel (discrete) and trackpad (smooth)
