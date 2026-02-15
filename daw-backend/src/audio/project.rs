@@ -484,6 +484,19 @@ impl Project {
         }
     }
 
+    /// Reset all per-clip read-ahead target frames before a new render cycle.
+    pub fn reset_read_ahead_targets(&self) {
+        for track in self.tracks.values() {
+            if let TrackNode::Audio(audio_track) = track {
+                for clip in &audio_track.clips {
+                    if let Some(ra) = clip.read_ahead.as_deref() {
+                        ra.reset_target_frame();
+                    }
+                }
+            }
+        }
+    }
+
     /// Stop all notes on all MIDI tracks
     pub fn stop_all_notes(&mut self) {
         for track in self.tracks.values_mut() {

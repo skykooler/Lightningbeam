@@ -40,3 +40,6 @@ pathdiff = "0.2"
 # Audio encoding for embedded files
 flacenc = "0.4" # For FLAC encoding (lossless)
 claxon = "0.4" # For FLAC decoding
+
+# System clipboard
+arboard = "3"

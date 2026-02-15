@@ -95,9 +95,6 @@ pub struct AudioFile {
     /// Original file format (mp3, ogg, wav, flac, etc.)
     /// Used to determine if we should preserve lossy encoding during save
     pub original_format: Option<String>,
-    /// Read-ahead buffer for streaming playback (Compressed files).
-    /// When present, `render_from_file` reads from this buffer instead of `data()`.
-    pub read_ahead: Option<Arc<super::disk_reader::ReadAheadBuffer>>,
 }
 
 impl AudioFile {
@@ -111,7 +108,6 @@ impl AudioFile {
             sample_rate,
             frames,
             original_format: None,
-            read_ahead: None,
         }
     }
 
@@ -125,7 +121,6 @@ impl AudioFile {
             sample_rate,
             frames,
             original_format,
-            read_ahead: None,
         }
     }
 
@@ -157,7 +152,6 @@ impl AudioFile {
             sample_rate,
             frames: total_frames,
             original_format: Some("wav".to_string()),
-            read_ahead: None,
         }
     }
 
@@ -180,7 +174,6 @@ impl AudioFile {
             sample_rate,
             frames: total_frames,
             original_format,
-            read_ahead: None,
         }
     }
 
@@ -444,6 +437,7 @@ impl AudioClipPool {
 
     /// Render audio from a file in the pool with high-quality windowed sinc interpolation
     /// start_time_seconds: position in the audio file to start reading from (in seconds)
+    /// clip_read_ahead: per-clip-instance read-ahead buffer for compressed audio streaming
     /// Returns the number of samples actually rendered
     pub fn render_from_file(
         &self,
@@ -453,13 +447,14 @@ impl AudioClipPool {
         gain: f32,
         engine_sample_rate: u32,
         engine_channels: u32,
+        clip_read_ahead: Option<&super::disk_reader::ReadAheadBuffer>,
     ) -> usize {
         let Some(audio_file) = self.files.get(pool_index) else {
             return 0;
         };
 
         let audio_data = audio_file.data();
-        let read_ahead = audio_file.read_ahead.as_deref();
+        let read_ahead = clip_read_ahead;
         let use_read_ahead = audio_data.is_empty();
         let src_channels = audio_file.channels as usize;
 

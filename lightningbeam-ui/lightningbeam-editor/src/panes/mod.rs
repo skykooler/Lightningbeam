@@ -213,6 +213,8 @@ pub struct SharedPaneState<'a> {
     pub target_format: wgpu::TextureFormat,
     /// Menu actions queued by panes (e.g. context menu items), processed by main after rendering
     pub pending_menu_actions: &'a mut Vec<crate::menu::MenuAction>,
+    /// Clipboard manager for cut/copy/paste operations
+    pub clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
 }
 
 /// Trait for pane rendering

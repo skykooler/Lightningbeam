@@ -415,16 +415,18 @@ impl Action for SplitClipInstanceAction {
                 }
 
                 // 2. Add the new (right) instance
-                let duration = clip.duration;
+                let internal_start = new_instance.trim_start;
+                let internal_end = new_instance.trim_end.unwrap_or(clip.duration);
+                let effective_duration = new_instance.timeline_duration
+                    .unwrap_or(internal_end - internal_start);
                 let start_time = new_instance.timeline_start;
-                let offset = new_instance.trim_start;
 
                 let query = Query::AddAudioClipSync(
                     *backend_track_id,
                     *audio_pool_index,
                     start_time,
-                    duration,
-                    offset,
+                    effective_duration,
+                    internal_start,
                 );
 
                 match controller.send_query(query)? {

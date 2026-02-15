@@ -226,12 +226,14 @@ impl Action for AddClipInstanceAction {
                 // For sampled audio, send AddAudioClipSync query
                 use daw_backend::command::{Query, QueryResponse};
 
-                let duration = clip.duration;
+                let internal_start = self.clip_instance.trim_start;
+                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
+                let effective_duration = self.clip_instance.timeline_duration
+                    .unwrap_or(internal_end - internal_start);
                 let start_time = self.clip_instance.timeline_start;
-                let offset = self.clip_instance.trim_start;
 
                 let query =
-                    Query::AddAudioClipSync(*backend_track_id, *audio_pool_index, start_time, duration, offset);
+                    Query::AddAudioClipSync(*backend_track_id, *audio_pool_index, start_time, effective_duration, internal_start);
 
                 match controller.send_query(query)? {
                     QueryResponse::AudioClipInstanceAdded(Ok(instance_id)) => {

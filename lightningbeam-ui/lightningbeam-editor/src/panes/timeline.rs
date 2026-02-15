@@ -56,8 +56,9 @@ pub struct TimelinePane {
     /// Track if a layer control widget was clicked this frame
     layer_control_clicked: bool,
 
-    /// Context menu state: Some((clip_instance_id, position)) when a right-click menu is open
-    context_menu_clip: Option<(uuid::Uuid, egui::Pos2)>,
+    /// Context menu state: Some((optional_clip_instance_id, position)) when a right-click menu is open
+    /// clip_id is None when right-clicking on empty timeline space
+    context_menu_clip: Option<(Option<uuid::Uuid>, egui::Pos2)>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -2179,32 +2180,36 @@ impl PaneRenderer for TimelinePane {
             shared.audio_controller,
         );
 
-        // Clip context menu: detect right-click on clips
+        // Context menu: detect right-click on clips or empty timeline space
         let mut just_opened_menu = false;
         let secondary_clicked = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
         if secondary_clicked {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect) {
-                    // Select the clip if not already selected
-                    if !shared.selection.contains_clip_instance(&clip_id) {
-                        shared.selection.select_only_clip_instance(clip_id);
+                if content_rect.contains(pos) {
+                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect) {
+                        // Right-clicked on a clip
+                        if !shared.selection.contains_clip_instance(&clip_id) {
+                            shared.selection.select_only_clip_instance(clip_id);
+                        }
+                        self.context_menu_clip = Some((Some(clip_id), pos));
+                    } else {
+                        // Right-clicked on empty timeline space
+                        self.context_menu_clip = Some((None, pos));
                     }
-                    self.context_menu_clip = Some((clip_id, pos));
                     just_opened_menu = true;
-                } else {
-                    self.context_menu_clip = None;
                 }
             }
         }
 
-        // Render clip context menu
-        if let Some((_ctx_clip_id, menu_pos)) = self.context_menu_clip {
+        // Render context menu
+        if let Some((ctx_clip_id, menu_pos)) = self.context_menu_clip {
+            let has_clip = ctx_clip_id.is_some();
             // Determine which items are enabled
             let playback_time = *shared.playback_time;
             let min_split_px = 4.0_f32;
 
             // Split: playhead must be over a selected clip, at least min_split_px from edges
-            let split_enabled = {
+            let split_enabled = has_clip && {
                 let mut enabled = false;
                 if let Some(layer_id) = *shared.active_layer_id {
                     if let Some(layer) = document.get_layer(&layer_id) {
@@ -2233,7 +2238,7 @@ impl PaneRenderer for TimelinePane {
             };
 
             // Duplicate: check if there's room to the right of each selected clip
-            let duplicate_enabled = {
+            let duplicate_enabled = has_clip && {
                 let mut enabled = false;
                 if let Some(layer_id) = *shared.active_layer_id {
                     if let Some(layer) = document.get_layer(&layer_id) {
@@ -2258,6 +2263,58 @@ impl PaneRenderer for TimelinePane {
                                 }
                             })
                             && instances.iter().any(|ci| shared.selection.contains_clip_instance(&ci.id));
+                    }
+                }
+                enabled
+            };
+
+            // Paste: check if clipboard has content and there's room at playhead
+            let paste_enabled = {
+                let mut enabled = false;
+                if shared.clipboard_manager.has_content() {
+                    if let Some(layer_id) = *shared.active_layer_id {
+                        if let Some(content) = shared.clipboard_manager.paste() {
+                            if let lightningbeam_core::clipboard::ClipboardContent::ClipInstances {
+                                ref layer_type,
+                                ref instances,
+                                ..
+                            } = content
+                            {
+                                if let Some(layer) = document.get_layer(&layer_id) {
+                                    if layer_type.is_compatible(layer) && !instances.is_empty() {
+                                        // Check if each pasted clip would fit at playhead
+                                        let min_start = instances
+                                            .iter()
+                                            .map(|i| i.timeline_start)
+                                            .fold(f64::INFINITY, f64::min);
+                                        let offset = *shared.playback_time - min_start;
+
+                                        enabled = instances.iter().all(|ci| {
+                                            let paste_start = (ci.timeline_start + offset).max(0.0);
+                                            if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                                let eff = ci.effective_duration(dur);
+                                                document
+                                                    .find_nearest_valid_position(
+                                                        &layer_id,
+                                                        paste_start,
+                                                        eff,
+                                                        &[],
+                                                    )
+                                                    .is_some()
+                                            } else {
+                                                // Clip def not in document yet (from external paste) — allow
+                                                true
+                                            }
+                                        });
+                                    }
+                                }
+                            } else {
+                                // Shapes paste — always enabled if layer is vector
+                                if let Some(layer) = document.get_layer(&layer_id) {
+                                    enabled = matches!(layer, AnyLayer::Vector(_));
+                                }
+                            }
+                        }
                     }
                 }
                 enabled
@@ -2311,16 +2368,20 @@ impl PaneRenderer for TimelinePane {
                             item_clicked = true;
                         }
                         ui.separator();
-                        if menu_item(ui, "Cut", true) {
+                        if menu_item(ui, "Cut", has_clip) {
                             shared.pending_menu_actions.push(crate::menu::MenuAction::Cut);
                             item_clicked = true;
                         }
-                        if menu_item(ui, "Copy", true) {
+                        if menu_item(ui, "Copy", has_clip) {
                             shared.pending_menu_actions.push(crate::menu::MenuAction::Copy);
                             item_clicked = true;
                         }
+                        if menu_item(ui, "Paste", paste_enabled) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::Paste);
+                            item_clicked = true;
+                        }
                         ui.separator();
-                        if menu_item(ui, "Delete", true) {
+                        if menu_item(ui, "Delete", has_clip) {
                             shared.pending_menu_actions.push(crate::menu::MenuAction::Delete);
                             item_clicked = true;
                         }

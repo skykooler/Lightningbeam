@@ -682,6 +682,8 @@ struct EditorApp {
     recording_layer_id: Option<Uuid>,     // Layer being recorded to (for creating clips)
     // Asset drag-and-drop state
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
+    // Clipboard
+    clipboard_manager: lightningbeam_core::clipboard::ClipboardManager,
     // Shader editor inter-pane communication
     effect_to_load: Option<Uuid>, // Effect ID to load into shader editor (set by asset library)
     // Effect thumbnail invalidation queue (persists across frames until processed)
@@ -896,6 +898,7 @@ impl EditorApp {
             recording_start_time: 0.0,        // Will be set when recording starts
             recording_layer_id: None,         // Will be set when recording starts
             dragging_asset: None, // No asset being dragged initially
+            clipboard_manager: lightningbeam_core::clipboard::ClipboardManager::new(),
             effect_to_load: None, // No effect to load initially
             effect_thumbnails_to_invalidate: Vec::new(), // No thumbnails to invalidate initially
             last_import_filter: ImportFilter::default(), // Default to "All Supported"
@@ -1472,6 +1475,364 @@ impl EditorApp {
         }
     }
 
+    /// Copy the current selection to the clipboard
+    fn clipboard_copy_selection(&mut self) {
+        use lightningbeam_core::clipboard::{ClipboardContent, ClipboardLayerType};
+        use lightningbeam_core::layer::AnyLayer;
+
+        // Check what's selected: clip instances take priority, then shapes
+        if !self.selection.clip_instances().is_empty() {
+            let active_layer_id = match self.active_layer_id {
+                Some(id) => id,
+                None => return,
+            };
+
+            let document = self.action_executor.document();
+            let layer = match document.get_layer(&active_layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+
+            let layer_type = ClipboardLayerType::from_layer(layer);
+
+            let instances: Vec<_> = match layer {
+                AnyLayer::Vector(vl) => &vl.clip_instances,
+                AnyLayer::Audio(al) => &al.clip_instances,
+                AnyLayer::Video(vl) => &vl.clip_instances,
+                AnyLayer::Effect(el) => &el.clip_instances,
+            }
+            .iter()
+            .filter(|ci| self.selection.contains_clip_instance(&ci.id))
+            .cloned()
+            .collect();
+
+            if instances.is_empty() {
+                return;
+            }
+
+            // Gather referenced clip definitions
+            let mut audio_clips = Vec::new();
+            let mut video_clips = Vec::new();
+            let mut vector_clips = Vec::new();
+            let image_assets = Vec::new();
+            let mut seen_clip_ids = std::collections::HashSet::new();
+
+            for inst in &instances {
+                if !seen_clip_ids.insert(inst.clip_id) {
+                    continue;
+                }
+                if let Some(clip) = document.get_audio_clip(&inst.clip_id) {
+                    audio_clips.push((inst.clip_id, clip.clone()));
+                } else if let Some(clip) = document.get_video_clip(&inst.clip_id) {
+                    video_clips.push((inst.clip_id, clip.clone()));
+                } else if let Some(clip) = document.get_vector_clip(&inst.clip_id) {
+                    vector_clips.push((inst.clip_id, clip.clone()));
+                }
+            }
+
+            // Gather image assets referenced by vector clips
+            // (Future: walk vector clip layers for image fill references)
+
+            let content = ClipboardContent::ClipInstances {
+                layer_type,
+                instances,
+                audio_clips,
+                video_clips,
+                vector_clips,
+                image_assets,
+            };
+
+            self.clipboard_manager.copy(content);
+        } else if !self.selection.shape_instances().is_empty() {
+            let active_layer_id = match self.active_layer_id {
+                Some(id) => id,
+                None => return,
+            };
+
+            let document = self.action_executor.document();
+            let layer = match document.get_layer(&active_layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+
+            let vector_layer = match layer {
+                AnyLayer::Vector(vl) => vl,
+                _ => return,
+            };
+
+            // Gather selected shape instances and their shape definitions
+            let selected_instances: Vec<_> = vector_layer
+                .shape_instances
+                .iter()
+                .filter(|si| self.selection.contains_shape_instance(&si.id))
+                .cloned()
+                .collect();
+
+            if selected_instances.is_empty() {
+                return;
+            }
+
+            let mut shapes = Vec::new();
+            let mut seen_shape_ids = std::collections::HashSet::new();
+            for inst in &selected_instances {
+                if seen_shape_ids.insert(inst.shape_id) {
+                    if let Some(shape) = vector_layer.shapes.get(&inst.shape_id) {
+                        shapes.push((inst.shape_id, shape.clone()));
+                    }
+                }
+            }
+
+            let content = ClipboardContent::Shapes {
+                shapes,
+                instances: selected_instances,
+            };
+
+            self.clipboard_manager.copy(content);
+        }
+    }
+
+    /// Delete the current selection (for cut and delete operations)
+    fn clipboard_delete_selection(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        if !self.selection.clip_instances().is_empty() {
+            let active_layer_id = match self.active_layer_id {
+                Some(id) => id,
+                None => return,
+            };
+
+            // Build removals list
+            let removals: Vec<(Uuid, Uuid)> = self
+                .selection
+                .clip_instances()
+                .iter()
+                .map(|&id| (active_layer_id, id))
+                .collect();
+
+            if removals.is_empty() {
+                return;
+            }
+
+            let action = lightningbeam_core::actions::RemoveClipInstancesAction::new(removals);
+
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let mut backend_context = lightningbeam_core::action::BackendContext {
+                    audio_controller: Some(&mut *controller),
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                };
+                if let Err(e) = self
+                    .action_executor
+                    .execute_with_backend(Box::new(action), &mut backend_context)
+                {
+                    eprintln!("Delete clip instances failed: {}", e);
+                }
+            } else {
+                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                    eprintln!("Delete clip instances failed: {}", e);
+                }
+            }
+
+            self.selection.clear_clip_instances();
+        } else if !self.selection.shape_instances().is_empty() {
+            let active_layer_id = match self.active_layer_id {
+                Some(id) => id,
+                None => return,
+            };
+
+            let document = self.action_executor.document();
+            let layer = match document.get_layer(&active_layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+
+            let vector_layer = match layer {
+                AnyLayer::Vector(vl) => vl,
+                _ => return,
+            };
+
+            // Collect shape instance IDs and their shape IDs
+            let instance_ids: Vec<Uuid> = self.selection.shape_instances().to_vec();
+            let mut shape_ids: Vec<Uuid> = Vec::new();
+            let mut shape_id_set = std::collections::HashSet::new();
+
+            for inst in &vector_layer.shape_instances {
+                if instance_ids.contains(&inst.id) {
+                    if shape_id_set.insert(inst.shape_id) {
+                        // Only remove shape definition if no other instances reference it
+                        let other_refs = vector_layer
+                            .shape_instances
+                            .iter()
+                            .any(|si| si.shape_id == inst.shape_id && !instance_ids.contains(&si.id));
+                        if !other_refs {
+                            shape_ids.push(inst.shape_id);
+                        }
+                    }
+                }
+            }
+
+            let action = lightningbeam_core::actions::RemoveShapesAction::new(
+                active_layer_id,
+                shape_ids,
+                instance_ids,
+            );
+
+            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                eprintln!("Delete shapes failed: {}", e);
+            }
+
+            self.selection.clear_shape_instances();
+            self.selection.clear_shapes();
+        }
+    }
+
+    /// Paste from clipboard
+    fn clipboard_paste(&mut self) {
+        use lightningbeam_core::clipboard::ClipboardContent;
+        use lightningbeam_core::layer::AnyLayer;
+
+        let content = match self.clipboard_manager.paste() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Regenerate IDs for the paste
+        let (new_content, _id_map) = content.with_regenerated_ids();
+
+        match new_content {
+            ClipboardContent::ClipInstances {
+                layer_type,
+                mut instances,
+                audio_clips,
+                video_clips,
+                vector_clips,
+                image_assets,
+            } => {
+                let active_layer_id = match self.active_layer_id {
+                    Some(id) => id,
+                    None => return,
+                };
+
+                // Verify layer compatibility
+                {
+                    let document = self.action_executor.document();
+                    let layer = match document.get_layer(&active_layer_id) {
+                        Some(l) => l,
+                        None => return,
+                    };
+                    if !layer_type.is_compatible(layer) {
+                        eprintln!("Cannot paste: incompatible layer type");
+                        return;
+                    }
+                }
+
+                // Add clip definitions to document (they have new IDs from regeneration)
+                {
+                    let document = self.action_executor.document_mut();
+                    for (_id, clip) in &audio_clips {
+                        document.audio_clips.insert(clip.id, clip.clone());
+                    }
+                    for (_id, clip) in &video_clips {
+                        document.video_clips.insert(clip.id, clip.clone());
+                    }
+                    for (_id, clip) in &vector_clips {
+                        document.vector_clips.insert(clip.id, clip.clone());
+                    }
+                    for (_id, asset) in &image_assets {
+                        document.image_assets.insert(asset.id, asset.clone());
+                    }
+                }
+
+                // Position instances at playhead, preserving relative offsets
+                if !instances.is_empty() {
+                    let min_start = instances
+                        .iter()
+                        .map(|i| i.timeline_start)
+                        .fold(f64::INFINITY, f64::min);
+                    let offset = self.playback_time - min_start;
+                    for inst in &mut instances {
+                        inst.timeline_start = (inst.timeline_start + offset).max(0.0);
+                    }
+                }
+
+                // Add each instance via action (handles overlap avoidance)
+                let new_ids: Vec<Uuid> = instances.iter().map(|i| i.id).collect();
+
+                for instance in instances {
+                    let action = lightningbeam_core::actions::AddClipInstanceAction::new(
+                        active_layer_id,
+                        instance,
+                    );
+
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        let mut backend_context = lightningbeam_core::action::BackendContext {
+                            audio_controller: Some(&mut *controller),
+                            layer_to_track_map: &self.layer_to_track_map,
+                            clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        };
+                        if let Err(e) = self
+                            .action_executor
+                            .execute_with_backend(Box::new(action), &mut backend_context)
+                        {
+                            eprintln!("Paste clip failed: {}", e);
+                        }
+                    } else {
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Paste clip failed: {}", e);
+                        }
+                    }
+                }
+
+                // Select pasted clips
+                self.selection.clear_clip_instances();
+                for id in new_ids {
+                    self.selection.add_clip_instance(id);
+                }
+            }
+            ClipboardContent::Shapes {
+                shapes,
+                instances,
+            } => {
+                let active_layer_id = match self.active_layer_id {
+                    Some(id) => id,
+                    None => return,
+                };
+
+                // Add shapes and instances to the active vector layer
+                let document = self.action_executor.document_mut();
+                let layer = match document.get_layer_mut(&active_layer_id) {
+                    Some(l) => l,
+                    None => return,
+                };
+
+                let vector_layer = match layer {
+                    AnyLayer::Vector(vl) => vl,
+                    _ => {
+                        eprintln!("Cannot paste shapes: not a vector layer");
+                        return;
+                    }
+                };
+
+                let new_instance_ids: Vec<Uuid> = instances.iter().map(|i| i.id).collect();
+
+                for (id, shape) in shapes {
+                    vector_layer.shapes.insert(id, shape);
+                }
+                for inst in instances {
+                    vector_layer.shape_instances.push(inst);
+                }
+
+                // Select pasted shapes
+                self.selection.clear_shape_instances();
+                for id in new_instance_ids {
+                    self.selection.add_shape_instance(id);
+                }
+            }
+        }
+    }
+
     /// Duplicate the selected clip instances on the active layer.
     /// Each duplicate is placed immediately after the original clip.
     fn duplicate_selected_clips(&mut self) {
@@ -1870,20 +2231,17 @@ impl EditorApp {
                 }
             }
             MenuAction::Cut => {
-                println!("Menu: Cut");
-                // TODO: Implement cut
+                self.clipboard_copy_selection();
+                self.clipboard_delete_selection();
             }
             MenuAction::Copy => {
-                println!("Menu: Copy");
-                // TODO: Implement copy
+                self.clipboard_copy_selection();
             }
             MenuAction::Paste => {
-                println!("Menu: Paste");
-                // TODO: Implement paste
+                self.clipboard_paste();
             }
             MenuAction::Delete => {
-                println!("Menu: Delete");
-                // TODO: Implement delete
+                self.clipboard_delete_selection();
             }
             MenuAction::SelectAll => {
                 println!("Menu: Select All");
@@ -4030,6 +4388,7 @@ impl eframe::App for EditorApp {
                 effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
                 target_format: self.target_format,
                 pending_menu_actions: &mut pending_menu_actions,
+                clipboard_manager: &mut self.clipboard_manager,
             };
 
             render_layout_node(
@@ -4153,6 +4512,24 @@ impl eframe::App for EditorApp {
         }
 
         ctx.input(|i| {
+            // Handle clipboard events (Ctrl+C/X/V) — winit converts these to
+            // Event::Copy/Cut/Paste instead of regular key events, so
+            // check_shortcuts won't see them via key_pressed().
+            for event in &i.events {
+                match event {
+                    egui::Event::Copy => {
+                        self.handle_menu_action(MenuAction::Copy);
+                    }
+                    egui::Event::Cut => {
+                        self.handle_menu_action(MenuAction::Cut);
+                    }
+                    egui::Event::Paste(_) => {
+                        self.handle_menu_action(MenuAction::Paste);
+                    }
+                    _ => {}
+                }
+            }
+
             // Check menu shortcuts that use modifiers (Cmd+S, etc.) - allow even when typing
             // But skip shortcuts without modifiers when keyboard input is claimed (e.g., virtual piano)
             if let Some(action) = MenuSystem::check_shortcuts(i) {
@@ -4282,6 +4659,8 @@ struct RenderContext<'a> {
     target_format: wgpu::TextureFormat,
     /// Menu actions queued by panes (e.g. context menus), processed after rendering
     pending_menu_actions: &'a mut Vec<MenuAction>,
+    /// Clipboard manager for paste availability checks
+    clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
 }
 
 /// Recursively render a layout node with drag support
@@ -4761,6 +5140,7 @@ fn render_pane(
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
+                clipboard_manager: ctx.clipboard_manager,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -4829,6 +5209,7 @@ fn render_pane(
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
+                clipboard_manager: ctx.clipboard_manager,
             };
 
             // Render pane content (header was already rendered above)

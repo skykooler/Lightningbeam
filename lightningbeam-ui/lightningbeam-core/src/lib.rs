@@ -40,3 +40,4 @@ pub mod planar_graph;
 pub mod file_types;
 pub mod file_io;
 pub mod export;
+pub mod clipboard;

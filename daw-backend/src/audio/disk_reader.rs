@@ -166,8 +166,24 @@ impl ReadAheadBuffer {
 
     /// Update the target frame — the file-local frame the audio callback
     /// is currently reading from. Called by `render_from_file` (consumer).
+    /// Each clip instance has its own buffer, so a plain store is sufficient.
     #[inline]
     pub fn set_target_frame(&self, frame: u64) {
+        self.target_frame.store(frame, Ordering::Relaxed);
+    }
+
+    /// Reset the target frame to MAX before a new render cycle.
+    /// If no clip calls `set_target_frame` this cycle, `has_active_target()`
+    /// returns false, telling the disk reader to skip this buffer.
+    #[inline]
+    pub fn reset_target_frame(&self) {
+        self.target_frame.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// Force-set the target frame to an exact value.
+    /// Used by the disk reader's seek command where we need an absolute position.
+    #[inline]
+    pub fn force_target_frame(&self, frame: u64) {
         self.target_frame.store(frame, Ordering::Relaxed);
     }
 
@@ -176,6 +192,12 @@ impl ReadAheadBuffer {
     #[inline]
     pub fn target_frame(&self) -> u64 {
         self.target_frame.load(Ordering::Relaxed)
+    }
+
+    /// Check if any clip set a target this cycle (vs still at reset value).
+    #[inline]
+    pub fn has_active_target(&self) -> bool {
+        self.target_frame.load(Ordering::Relaxed) != u64::MAX
     }
 
     /// Reset the buffer to start at `new_start` with zero valid frames.
@@ -413,14 +435,14 @@ impl CompressedReader {
 
 /// Commands sent from the engine to the disk reader thread.
 pub enum DiskReaderCommand {
-    /// Start streaming a compressed file.
+    /// Start streaming a compressed file for a clip instance.
     ActivateFile {
-        pool_index: usize,
+        reader_id: u64,
         path: PathBuf,
         buffer: Arc<ReadAheadBuffer>,
     },
-    /// Stop streaming a file.
-    DeactivateFile { pool_index: usize },
+    /// Stop streaming for a clip instance.
+    DeactivateFile { reader_id: u64 },
     /// The playhead has jumped — refill buffers from the new position.
     Seek { frame: u64 },
     /// Shut down the disk reader thread.
@@ -491,7 +513,7 @@ impl DiskReader {
         mut command_rx: rtrb::Consumer<DiskReaderCommand>,
         running: Arc<AtomicBool>,
     ) {
-        let mut active_files: HashMap<usize, (CompressedReader, Arc<ReadAheadBuffer>)> =
+        let mut active_files: HashMap<u64, (CompressedReader, Arc<ReadAheadBuffer>)> =
             HashMap::new();
         let mut decode_buf = Vec::with_capacity(8192);
 
@@ -500,14 +522,14 @@ impl DiskReader {
             while let Ok(cmd) = command_rx.pop() {
                 match cmd {
                     DiskReaderCommand::ActivateFile {
-                        pool_index,
+                        reader_id,
                         path,
                         buffer,
                     } => match CompressedReader::open(&path) {
                         Ok(reader) => {
-                            eprintln!("[DiskReader] Activated pool={}, ch={}, sr={}, path={:?}",
-                                pool_index, reader.channels, reader.sample_rate, path);
-                            active_files.insert(pool_index, (reader, buffer));
+                            eprintln!("[DiskReader] Activated reader={}, ch={}, sr={}, path={:?}",
+                                reader_id, reader.channels, reader.sample_rate, path);
+                            active_files.insert(reader_id, (reader, buffer));
                         }
                         Err(e) => {
                             eprintln!(
@@ -516,12 +538,12 @@ impl DiskReader {
                             );
                         }
                     },
-                    DiskReaderCommand::DeactivateFile { pool_index } => {
-                        active_files.remove(&pool_index);
+                    DiskReaderCommand::DeactivateFile { reader_id } => {
+                        active_files.remove(&reader_id);
                     }
                     DiskReaderCommand::Seek { frame } => {
                         for (_, (reader, buffer)) in active_files.iter_mut() {
-                            buffer.set_target_frame(frame);
+                            buffer.force_target_frame(frame);
                             buffer.reset(frame);
                             if let Err(e) = reader.seek(frame) {
                                 eprintln!("[DiskReader] Seek error: {}", e);
@@ -534,11 +556,15 @@ impl DiskReader {
                 }
             }
 
-            // Fill each active file's buffer ahead of its target frame.
-            // Each file's target_frame is set by the audio callback in
-            // render_from_file, giving the file-local frame being read.
-            // This is independent of the global engine playhead.
-            for (_pool_index, (reader, buffer)) in active_files.iter_mut() {
+            // Fill each active reader's buffer ahead of its target frame.
+            // Each clip instance has its own buffer and target_frame, set by
+            // render_from_file during the audio callback.
+            for (_reader_id, (reader, buffer)) in active_files.iter_mut() {
+                // Skip files where no clip is currently playing
+                if !buffer.has_active_target() {
+                    continue;
+                }
+
                 let target = buffer.target_frame();
                 let buf_start = buffer.start_frame();
                 let buf_valid = buffer.valid_frames_count();
@@ -578,8 +604,8 @@ impl DiskReader {
                         let was_empty = buffer.valid_frames_count() == 0;
                         buffer.write_samples(&decode_buf, frames);
                         if was_empty {
-                            eprintln!("[DiskReader] pool={}: first fill, {} frames, buf_start={}, valid={}",
-                                _pool_index, frames, buffer.start_frame(), buffer.valid_frames_count());
+                            eprintln!("[DiskReader] reader={}: first fill, {} frames, buf_start={}, valid={}",
+                                _reader_id, frames, buffer.start_frame(), buffer.valid_frames_count());
                         }
                     }
                     Err(e) => {

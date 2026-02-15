@@ -313,6 +313,9 @@ impl Engine {
             // Convert playhead from frames to seconds for timeline-based rendering
             let playhead_seconds = self.playhead as f64 / self.sample_rate as f64;
 
+            // Reset per-clip read-ahead targets before rendering.
+            self.project.reset_read_ahead_targets();
+
             // Render the entire project hierarchy into the mix buffer
             // Note: We need to use a raw pointer to avoid borrow checker issues
             // The midi_clip_pool is part of project, so we extract a reference before mutable borrow
@@ -798,6 +801,12 @@ impl Engine {
                 let _ = self.project.remove_midi_clip(track_id, instance_id);
             }
             Command::RemoveAudioClip(track_id, instance_id) => {
+                // Deactivate the per-clip disk reader before removing
+                if let Some(ref mut dr) = self.disk_reader {
+                    dr.send(crate::audio::disk_reader::DiskReaderCommand::DeactivateFile {
+                        reader_id: instance_id as u64,
+                    });
+                }
                 // Remove an audio clip instance from a track (for undo/redo support)
                 let _ = self.project.remove_audio_clip(track_id, instance_id);
             }
@@ -1754,7 +1763,7 @@ impl Engine {
                         (metadata.duration * metadata.sample_rate as f64).ceil() as u64
                     });
 
-                    let mut audio_file = crate::audio::pool::AudioFile::from_compressed(
+                    let audio_file = crate::audio::pool::AudioFile::from_compressed(
                         path.to_path_buf(),
                         metadata.channels,
                         metadata.sample_rate,
@@ -1762,24 +1771,10 @@ impl Engine {
                         ext,
                     );
 
-                    let buffer = crate::audio::disk_reader::DiskReader::create_buffer(
-                        metadata.sample_rate,
-                        metadata.channels,
-                    );
-                    audio_file.read_ahead = Some(buffer.clone());
-
                     let idx = self.audio_pool.add_file(audio_file);
 
                     eprintln!("[ENGINE] Compressed: total_frames={}, pool_index={}, has_disk_reader={}",
                         total_frames, idx, self.disk_reader.is_some());
-
-                    if let Some(ref mut dr) = self.disk_reader {
-                        dr.send(crate::audio::disk_reader::DiskReaderCommand::ActivateFile {
-                            pool_index: idx,
-                            path: path.to_path_buf(),
-                            buffer,
-                        });
-                    }
 
                     // Spawn background thread to decode file progressively for waveform display
                     let bg_tx = self.chunk_generation_tx.clone();
@@ -2138,6 +2133,28 @@ impl Engine {
                 let instance_id = self.next_clip_id;
                 self.next_clip_id += 1;
 
+                // For compressed files, create a per-clip read-ahead buffer
+                let read_ahead = if let Some(file) = self.audio_pool.get_file(pool_index) {
+                    if matches!(file.storage, crate::audio::pool::AudioStorage::Compressed { .. }) {
+                        let buffer = crate::audio::disk_reader::DiskReader::create_buffer(
+                            file.sample_rate,
+                            file.channels,
+                        );
+                        if let Some(ref mut dr) = self.disk_reader {
+                            dr.send(crate::audio::disk_reader::DiskReaderCommand::ActivateFile {
+                                reader_id: instance_id as u64,
+                                path: file.path.clone(),
+                                buffer: buffer.clone(),
+                            });
+                        }
+                        Some(buffer)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let clip = AudioClipInstance {
                     id: instance_id,
                     audio_pool_index: pool_index,
@@ -2146,6 +2163,7 @@ impl Engine {
                     external_start: start_time,
                     external_duration: duration,
                     gain: 1.0,
+                    read_ahead,
                 };
 
                 match self.project.add_clip(track_id, clip) {

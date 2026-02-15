@@ -917,6 +917,7 @@ impl AudioTrack {
                 combined_gain,
                 sample_rate,
                 channels,
+                clip.read_ahead.as_deref(),
             );
         } else {
             // Looping case: need to handle wrap-around at loop boundaries
@@ -951,6 +952,7 @@ impl AudioTrack {
                     combined_gain,
                     sample_rate,
                     channels,
+                    clip.read_ahead.as_deref(),
                 );
 
                 total_rendered += rendered;

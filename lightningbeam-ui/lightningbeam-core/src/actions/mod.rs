@@ -25,6 +25,8 @@ pub mod rename_folder;
 pub mod delete_folder;
 pub mod move_asset_to_folder;
 pub mod update_midi_notes;
+pub mod remove_clip_instances;
+pub mod remove_shapes;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -48,3 +50,5 @@ pub use rename_folder::RenameFolderAction;
 pub use delete_folder::{DeleteFolderAction, DeleteStrategy};
 pub use move_asset_to_folder::MoveAssetToFolderAction;
 pub use update_midi_notes::UpdateMidiNotesAction;
+pub use remove_clip_instances::RemoveClipInstancesAction;
+pub use remove_shapes::RemoveShapesAction;

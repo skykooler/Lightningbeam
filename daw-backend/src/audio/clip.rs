@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 
 /// Audio clip instance ID type
@@ -35,6 +36,13 @@ pub struct AudioClipInstance {
 
     /// Clip-level gain
     pub gain: f32,
+
+    /// Per-instance read-ahead buffer for compressed audio streaming.
+    /// Each clip instance gets its own buffer so multiple instances of the
+    /// same file (on different tracks or at different positions) don't fight
+    /// over a single target_frame.
+    #[serde(skip)]
+    pub read_ahead: Option<Arc<super::disk_reader::ReadAheadBuffer>>,
 }
 
 /// Type alias for backwards compatibility
@@ -58,6 +66,7 @@ impl AudioClipInstance {
             external_start,
             external_duration,
             gain: 1.0,
+            read_ahead: None,
         }
     }
 
@@ -78,6 +87,7 @@ impl AudioClipInstance {
             external_start: start_time,
             external_duration: duration,
             gain: 1.0,
+            read_ahead: None,
         }
     }
 
