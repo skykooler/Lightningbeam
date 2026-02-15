@@ -73,7 +73,7 @@ impl Action for AddClipInstanceAction {
             &self.layer_id,
             self.clip_instance.timeline_start,
             effective_duration,
-            None, // Not excluding any instance
+            &[], // Not excluding any instance
         );
 
         if let Some(valid_start) = adjusted_start {

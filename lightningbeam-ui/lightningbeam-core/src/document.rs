@@ -549,7 +549,7 @@ impl Document {
         layer_id: &Uuid,
         start_time: f64,
         end_time: f64,
-        exclude_instance_id: Option<&Uuid>,
+        exclude_instance_ids: &[Uuid],
     ) -> (bool, Option<Uuid>) {
         let Some(layer) = self.get_layer(layer_id) else {
             return (false, None);
@@ -568,11 +568,9 @@ impl Document {
         };
 
         for instance in instances {
-            // Skip the instance we're checking against itself
-            if let Some(exclude_id) = exclude_instance_id {
-                if &instance.id == exclude_id {
-                    continue;
-                }
+            // Skip excluded instances
+            if exclude_instance_ids.contains(&instance.id) {
+                continue;
             }
 
             // Calculate instance end time
@@ -598,13 +596,13 @@ impl Document {
     ///
     /// Returns adjusted timeline_start, or None if no valid position exists
     ///
-    /// Strategy: Prefers snapping to the right (later in timeline) over left
+    /// Strategy: Snaps to whichever side (left or right) is closest to the desired position
     pub fn find_nearest_valid_position(
         &self,
         layer_id: &Uuid,
         desired_start: f64,
         clip_duration: f64,
-        exclude_instance_id: Option<&Uuid>,
+        exclude_instance_ids: &[Uuid],
     ) -> Option<f64> {
         let layer = self.get_layer(layer_id)?;
 
@@ -618,7 +616,7 @@ impl Document {
 
         // Check if desired position is already valid
         let desired_end = desired_start + clip_duration;
-        let (overlaps, _) = self.check_overlap_on_layer(layer_id, desired_start, desired_end, exclude_instance_id);
+        let (overlaps, _) = self.check_overlap_on_layer(layer_id, desired_start, desired_end, exclude_instance_ids);
         if !overlaps {
             return Some(desired_start);
         }
@@ -633,10 +631,8 @@ impl Document {
 
         let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
         for instance in instances {
-            if let Some(exclude_id) = exclude_instance_id {
-                if &instance.id == exclude_id {
-                    continue;
-                }
+            if exclude_instance_ids.contains(&instance.id) {
+                continue;
             }
 
             if let Some(clip_dur) = self.get_clip_duration(&instance.clip_id) {
@@ -651,22 +647,22 @@ impl Document {
         // Sort by start time
         occupied_ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Find the clip we're overlapping with
+        // Find the clip we're overlapping with and try both sides, pick nearest
         for (occupied_start, occupied_end, _) in &occupied_ranges {
             if desired_start < *occupied_end && *occupied_start < desired_end {
+                let mut candidates: Vec<f64> = Vec::new();
+
                 // Try snapping to the right (after this clip)
                 let snap_right = *occupied_end;
                 let snap_right_end = snap_right + clip_duration;
-
                 let (overlaps_right, _) = self.check_overlap_on_layer(
                     layer_id,
                     snap_right,
                     snap_right_end,
-                    exclude_instance_id,
+                    exclude_instance_ids,
                 );
-
                 if !overlaps_right {
-                    return Some(snap_right);
+                    candidates.push(snap_right);
                 }
 
                 // Try snapping to the left (before this clip)
@@ -676,12 +672,21 @@ impl Document {
                         layer_id,
                         snap_left,
                         *occupied_start,
-                        exclude_instance_id,
+                        exclude_instance_ids,
                     );
-
                     if !overlaps_left {
-                        return Some(snap_left);
+                        candidates.push(snap_left);
                     }
+                }
+
+                // Pick the candidate closest to desired_start
+                if !candidates.is_empty() {
+                    candidates.sort_by(|a, b| {
+                        let dist_a = (a - desired_start).abs();
+                        let dist_b = (b - desired_start).abs();
+                        dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    return Some(candidates[0]);
                 }
             }
         }
@@ -693,6 +698,69 @@ impl Document {
 
         // No valid position found
         None
+    }
+
+    /// Clamp a group move offset so no clip in the group overlaps a non-group clip or
+    /// goes before timeline start. All clips move by the same returned offset.
+    pub fn clamp_group_move_offset(
+        &self,
+        layer_id: &Uuid,
+        group: &[(Uuid, f64, f64)], // (instance_id, timeline_start, effective_duration)
+        desired_offset: f64,
+    ) -> f64 {
+        let Some(layer) = self.get_layer(layer_id) else {
+            return desired_offset;
+        };
+        if matches!(layer, AnyLayer::Vector(_)) {
+            return desired_offset;
+        }
+
+        let group_ids: Vec<Uuid> = group.iter().map(|(id, _, _)| *id).collect();
+
+        let instances: &[ClipInstance] = match layer {
+            AnyLayer::Audio(a) => &a.clip_instances,
+            AnyLayer::Video(v) => &v.clip_instances,
+            AnyLayer::Effect(e) => &e.clip_instances,
+            AnyLayer::Vector(v) => &v.clip_instances,
+        };
+
+        // Collect non-group clip ranges
+        let mut non_group: Vec<(f64, f64)> = Vec::new();
+        for inst in instances {
+            if group_ids.contains(&inst.id) {
+                continue;
+            }
+            if let Some(dur) = self.get_clip_duration(&inst.clip_id) {
+                let end = inst.timeline_start + (inst.trim_end.unwrap_or(dur) - inst.trim_start);
+                non_group.push((inst.timeline_start, end));
+            }
+        }
+
+        let mut clamped = desired_offset;
+
+        for &(_, start, duration) in group {
+            let end = start + duration;
+
+            // Can't go before timeline start
+            clamped = clamped.max(-start);
+
+            // Check against non-group clips
+            for &(ns, ne) in &non_group {
+                if clamped < 0.0 {
+                    // Moving left: if non-group clip end is between our destination and current start
+                    if ne <= start && ne > start + clamped {
+                        clamped = clamped.max(ne - start);
+                    }
+                } else if clamped > 0.0 {
+                    // Moving right: if non-group clip start is between our current end and destination
+                    if ns >= end && ns < end + clamped {
+                        clamped = clamped.min(ns - end);
+                    }
+                }
+            }
+        }
+
+        clamped
     }
 
     /// Find the maximum amount we can extend a clip to the left without overlapping
@@ -788,7 +856,7 @@ impl Document {
         if nearest_start == f64::MAX {
             f64::MAX // No clip to the right, can extend freely
         } else {
-            nearest_start - current_timeline_start // Distance to next clip
+            (nearest_start - current_end).max(0.0) // Gap between our end and next clip's start
         }
     }
 }

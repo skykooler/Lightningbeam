@@ -28,6 +28,10 @@ pub struct WaveformGpuResources {
     mipgen_bind_group_layout: wgpu::BindGroupLayout,
     /// Sampler for waveform texture (nearest, since we do manual LOD selection)
     sampler: wgpu::Sampler,
+    /// Per-callback-instance uniform buffers and bind groups.
+    /// Keyed by (pool_index, instance_id). Each clip instance referencing the same
+    /// pool_index gets its own uniform buffer so multiple clips don't clobber each other.
+    per_instance: HashMap<(usize, u64), (wgpu::Buffer, wgpu::BindGroup)>,
 }
 
 /// GPU data for a single audio file
@@ -92,7 +96,11 @@ pub struct WaveformCallback {
     pub target_format: wgpu::TextureFormat,
     /// Raw audio data for upload if this is the first time we see this pool_index
     pub pending_upload: Option<PendingUpload>,
+    /// Unique ID for this callback instance (allows multiple clips sharing the same
+    /// pool_index to have independent uniform buffers)
+    pub instance_id: u64,
 }
+
 
 /// Raw audio data waiting to be uploaded to GPU
 pub struct PendingUpload {
@@ -259,6 +267,7 @@ impl WaveformGpuResources {
             render_bind_group_layout,
             mipgen_bind_group_layout,
             sampler,
+            per_instance: HashMap::new(),
         }
     }
 
@@ -364,6 +373,8 @@ impl WaveformGpuResources {
 
         // Full create (first upload or texture needs to grow)
         self.entries.remove(&pool_index);
+        // Invalidate per-instance bind groups for this pool (texture changed)
+        self.per_instance.retain(|&(pi, _), _| pi != pool_index);
 
         let total_frames = new_total_frames;
 
@@ -652,14 +663,40 @@ impl egui_wgpu::CallbackTrait for WaveformCallback {
             cmds.extend(new_cmds);
         }
 
-        // Update uniform buffer for this draw
+        // Get or create a per-instance uniform buffer + bind group.
+        // This ensures multiple clip instances sharing the same pool_index
+        // don't clobber each other's shader params.
+        let key = (self.pool_index, self.instance_id);
         if let Some(entry) = gpu_resources.entries.get(&self.pool_index) {
-            if self.segment_index < entry.uniform_buffers.len() {
-                queue.write_buffer(
-                    &entry.uniform_buffers[self.segment_index],
-                    0,
-                    bytemuck::cast_slice(&[self.params]),
-                );
+            if self.segment_index < entry.texture_views.len() {
+                let (buf, _bg) = gpu_resources.per_instance.entry(key).or_insert_with(|| {
+                    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(&format!("waveform_{}_inst_{}", self.pool_index, self.instance_id)),
+                        size: std::mem::size_of::<WaveformParams>() as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("waveform_{}_inst_{}_bg", self.pool_index, self.instance_id)),
+                        layout: &gpu_resources.render_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&entry.texture_views[self.segment_index]),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&gpu_resources.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: buf.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    (buf, bg)
+                });
+                queue.write_buffer(buf, 0, bytemuck::cast_slice(&[self.params]));
             }
         }
 
@@ -677,17 +714,14 @@ impl egui_wgpu::CallbackTrait for WaveformCallback {
             None => return,
         };
 
-        let entry = match gpu_resources.entries.get(&self.pool_index) {
-            Some(e) => e,
+        let key = (self.pool_index, self.instance_id);
+        let (_buf, bind_group) = match gpu_resources.per_instance.get(&key) {
+            Some(entry) => entry,
             None => return,
         };
 
-        if self.segment_index >= entry.render_bind_groups.len() {
-            return;
-        }
-
         render_pass.set_pipeline(&gpu_resources.render_pipeline);
-        render_pass.set_bind_group(0, &entry.render_bind_groups[self.segment_index], &[]);
+        render_pass.set_bind_group(0, bind_group, &[]);
         render_pass.draw(0..3, 0..1); // Fullscreen triangle
     }
 }

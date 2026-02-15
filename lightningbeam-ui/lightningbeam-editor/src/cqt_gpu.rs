@@ -349,9 +349,20 @@ impl CqtGpuResources {
         if let Some(entry) = self.entries.get_mut(&pool_index) {
             if entry.waveform_total_frames != total_frames {
                 // Waveform texture updated in-place with more data.
-                // The texture view is still valid (no destroy/recreate),
-                // so just update total_frames to allow computing new columns.
+                // Invalidate cached CQT columns near the old boundary — they were
+                // computed with truncated windows and show artifacts. Rewind
+                // cache_valid_end so those columns get recomputed with full data.
+                // The lowest bin (A0=27.5Hz) has the longest window:
+                //   Q = 1/(2^(1/B)-1), N_k = ceil(Q * sr / f_min), margin = N_k/2/hop
+                let q = 1.0 / (2.0_f64.powf(1.0 / BINS_PER_OCTAVE as f64) - 1.0);
+                let max_window = (q * entry.sample_rate as f64 / F_MIN).ceil() as i64;
+                let margin_cols = max_window / 2 / HOP_SIZE as i64 + 1;
+                let old_max_col = entry.waveform_total_frames as i64 / HOP_SIZE as i64;
                 entry.waveform_total_frames = total_frames;
+                let invalidate_from = old_max_col - margin_cols;
+                if entry.cache_valid_end > invalidate_from {
+                    entry.cache_valid_end = invalidate_from.max(entry.cache_valid_start);
+                }
             }
             return;
         }
@@ -621,7 +632,8 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
                 && vis_start < cache_valid_end
                 && vis_end > cache_valid_end
             {
-                // Scrolling right — align to stride boundary
+                // Scrolling right — compute new columns at the right edge.
+                // cache_start_column stays fixed; the ring buffer wraps naturally.
                 let actual_end =
                     cache_valid_end + (vis_end - cache_valid_end).min(max_cols_global);
                 cmds = dispatch_cqt_compute(
@@ -633,22 +645,26 @@ impl egui_wgpu::CallbackTrait for CqtCallback {
                 let cache_cap_global = entry.cache_capacity as i64 * stride;
                 if entry.cache_valid_end - entry.cache_valid_start > cache_cap_global {
                     entry.cache_valid_start = entry.cache_valid_end - cache_cap_global;
-                    entry.cache_start_column = entry.cache_valid_start;
                 }
             } else if vis_end <= cache_valid_end
                 && vis_end > cache_valid_start
                 && vis_start < cache_valid_start
             {
-                // Scrolling left
+                // Scrolling left — move anchor BEFORE dispatch so compute and
+                // render use the same cache_start_column mapping.
                 let actual_start =
                     cache_valid_start - (cache_valid_start - vis_start).min(max_cols_global);
+                {
+                    let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
+                    entry.cache_start_column = actual_start;
+                }
+                let entry = cqt_gpu.entries.get(&self.pool_index).unwrap();
                 cmds = dispatch_cqt_compute(
                     device, queue, &cqt_gpu.compute_pipeline, entry,
                     actual_start, cache_valid_start, self.stride,
                 );
                 let entry = cqt_gpu.entries.get_mut(&self.pool_index).unwrap();
                 entry.cache_valid_start = actual_start;
-                entry.cache_start_column = actual_start;
                 let cache_cap_global = entry.cache_capacity as i64 * stride;
                 if entry.cache_valid_end - entry.cache_valid_start > cache_cap_global {
                     entry.cache_valid_end = entry.cache_valid_start + cache_cap_global;

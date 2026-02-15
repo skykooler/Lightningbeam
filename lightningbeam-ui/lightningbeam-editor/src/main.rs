@@ -1472,6 +1472,73 @@ impl EditorApp {
         }
     }
 
+    /// Duplicate the selected clip instances on the active layer.
+    /// Each duplicate is placed immediately after the original clip.
+    fn duplicate_selected_clips(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::AddClipInstanceAction;
+
+        let active_layer_id = match self.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let document = self.action_executor.document();
+        let selection = &self.selection;
+
+        // Find selected clip instances on the active layer
+        let clips_to_duplicate: Vec<lightningbeam_core::clip::ClipInstance> = {
+            let layer = match document.get_layer(&active_layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            let instances = match layer {
+                AnyLayer::Vector(vl) => &vl.clip_instances,
+                AnyLayer::Audio(al) => &al.clip_instances,
+                AnyLayer::Video(vl) => &vl.clip_instances,
+                AnyLayer::Effect(el) => &el.clip_instances,
+            };
+            instances.iter()
+                .filter(|ci| selection.contains_clip_instance(&ci.id))
+                .cloned()
+                .collect()
+        };
+
+        if clips_to_duplicate.is_empty() {
+            return;
+        }
+
+        // Collect all duplicate instances upfront to release the document borrow
+        let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
+            let mut duplicate = original.clone();
+            duplicate.id = uuid::Uuid::new_v4();
+            let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
+            let effective_duration = original.effective_duration(clip_duration);
+            duplicate.timeline_start = original.timeline_start + effective_duration;
+            duplicate
+        }).collect();
+
+        for duplicate in duplicates {
+            let action = AddClipInstanceAction::new(active_layer_id, duplicate);
+
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                let mut backend_context = lightningbeam_core::action::BackendContext {
+                    audio_controller: Some(&mut *controller),
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                };
+                if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
+                    eprintln!("Duplicate clip failed: {}", e);
+                }
+            } else {
+                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                    eprintln!("Duplicate clip failed: {}", e);
+                }
+            }
+        }
+    }
+
     fn switch_layout(&mut self, index: usize) {
         self.current_layout_index = index;
         self.current_layout = self.layouts[index].layout.clone();
@@ -1834,6 +1901,12 @@ impl EditorApp {
             MenuAction::BringToFront => {
                 println!("Menu: Bring to Front");
                 // TODO: Implement bring to front
+            }
+            MenuAction::SplitClip => {
+                self.split_clips_at_playhead();
+            }
+            MenuAction::DuplicateClip => {
+                self.duplicate_selected_clips();
             }
 
             // Layer menu
@@ -4048,16 +4121,6 @@ impl eframe::App for EditorApp {
         // Check keyboard shortcuts AFTER UI is rendered
         // This ensures text fields have had a chance to claim focus first
         let wants_keyboard = ctx.wants_keyboard_input();
-
-        // Check for Ctrl+K (split clip at playhead) - needs to be outside the input closure
-        // so we can mutate self
-        let split_clips_requested = ctx.input(|i| {
-            (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::K)
-        });
-
-        if split_clips_requested {
-            self.split_clips_at_playhead();
-        }
 
         // Space bar toggles play/pause (only when no text input is focused)
         if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Space)) {

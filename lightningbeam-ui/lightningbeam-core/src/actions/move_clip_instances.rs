@@ -88,41 +88,25 @@ impl Action for MoveClipInstancesAction {
 
             let mut adjusted_layer_moves = Vec::new();
 
-            for (instance_id, old_start, new_start) in moves {
-                // Get the instance to calculate its duration
-                let clip_instances: &[ClipInstance] = match layer {
-                    AnyLayer::Audio(al) => &al.clip_instances,
-                    AnyLayer::Video(vl) => &vl.clip_instances,
-                    AnyLayer::Vector(vl) => &vl.clip_instances,
-                    AnyLayer::Effect(el) => &el.clip_instances,
-                };
+            let clip_instances: &[ClipInstance] = match layer {
+                AnyLayer::Audio(al) => &al.clip_instances,
+                AnyLayer::Video(vl) => &vl.clip_instances,
+                AnyLayer::Vector(vl) => &vl.clip_instances,
+                AnyLayer::Effect(el) => &el.clip_instances,
+            };
 
-                let instance = clip_instances.iter()
-                    .find(|ci| &ci.id == instance_id)
-                    .ok_or_else(|| format!("Instance {} not found", instance_id))?;
+            let group: Vec<(Uuid, f64, f64)> = moves.iter().filter_map(|(id, old_start, _)| {
+                let inst = clip_instances.iter().find(|ci| &ci.id == id)?;
+                let dur = document.get_clip_duration(&inst.clip_id)?;
+                let eff = inst.trim_end.unwrap_or(dur) - inst.trim_start;
+                Some((*id, *old_start, eff))
+            }).collect();
 
-                let clip_duration = document.get_clip_duration(&instance.clip_id)
-                    .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
+            let desired_offset = moves[0].2 - moves[0].1;
+            let clamped = document.clamp_group_move_offset(layer_id, &group, desired_offset);
 
-                let trim_start = instance.trim_start;
-                let trim_end = instance.trim_end.unwrap_or(clip_duration);
-                let effective_duration = trim_end - trim_start;
-
-                // Find nearest valid position, excluding this instance from overlap checks
-                let adjusted_start = document.find_nearest_valid_position(
-                    layer_id,
-                    *new_start,
-                    effective_duration,
-                    Some(instance_id),
-                );
-
-                if let Some(valid_start) = adjusted_start {
-                    adjusted_layer_moves.push((*instance_id, *old_start, valid_start));
-                } else {
-                    return Err(format!(
-                        "Cannot move clip: no valid position found on layer"
-                    ));
-                }
+            for (instance_id, old_start, _) in moves {
+                adjusted_layer_moves.push((*instance_id, *old_start, (*old_start + clamped).max(0.0)));
             }
 
             adjusted_moves.insert(*layer_id, adjusted_layer_moves);

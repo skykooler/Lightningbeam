@@ -25,7 +25,7 @@ pub struct Shortcut {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutKey {
     // Letters
-    A, C, E, G, I, K, L, N, O, Q, S, V, W, X, Z,
+    A, C, D, E, G, I, K, L, N, O, Q, S, V, W, X, Z,
     // Numbers
     Num0,
     // Symbols
@@ -61,6 +61,7 @@ impl Shortcut {
         let code = match self.key {
             ShortcutKey::A => Code::KeyA,
             ShortcutKey::C => Code::KeyC,
+            ShortcutKey::D => Code::KeyD,
             ShortcutKey::E => Code::KeyE,
             ShortcutKey::G => Code::KeyG,
             ShortcutKey::I => Code::KeyI,
@@ -104,6 +105,7 @@ impl Shortcut {
         let key = match self.key {
             ShortcutKey::A => egui::Key::A,
             ShortcutKey::C => egui::Key::C,
+            ShortcutKey::D => egui::Key::D,
             ShortcutKey::E => egui::Key::E,
             ShortcutKey::G => egui::Key::G,
             ShortcutKey::I => egui::Key::I,
@@ -163,6 +165,8 @@ pub enum MenuAction {
     Group,
     SendToBack,
     BringToFront,
+    SplitClip,
+    DuplicateClip,
 
     // Layer menu
     AddLayer,
@@ -257,6 +261,8 @@ impl MenuItemDef {
     const GROUP: Self = Self { label: "Group", action: MenuAction::Group, shortcut: Some(Shortcut::new(ShortcutKey::G, CTRL, NO_SHIFT, NO_ALT)) };
     const SEND_TO_BACK: Self = Self { label: "Send to back", action: MenuAction::SendToBack, shortcut: None };
     const BRING_TO_FRONT: Self = Self { label: "Bring to front", action: MenuAction::BringToFront, shortcut: None };
+    const SPLIT_CLIP: Self = Self { label: "Split Clip", action: MenuAction::SplitClip, shortcut: Some(Shortcut::new(ShortcutKey::K, CTRL, NO_SHIFT, NO_ALT)) };
+    const DUPLICATE_CLIP: Self = Self { label: "Duplicate Clip", action: MenuAction::DuplicateClip, shortcut: Some(Shortcut::new(ShortcutKey::D, CTRL, NO_SHIFT, NO_ALT)) };
 
     // Layer menu items
     const ADD_LAYER: Self = Self { label: "Add Layer", action: MenuAction::AddLayer, shortcut: Some(Shortcut::new(ShortcutKey::L, CTRL, SHIFT, NO_ALT)) };
@@ -366,6 +372,9 @@ impl MenuItemDef {
                     MenuDef::Separator,
                     MenuDef::Item(&Self::SEND_TO_BACK),
                     MenuDef::Item(&Self::BRING_TO_FRONT),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::SPLIT_CLIP),
+                    MenuDef::Item(&Self::DUPLICATE_CLIP),
                 ],
             },
             // Layer menu
@@ -677,21 +686,47 @@ impl MenuSystem {
         // Set minimum width for menu items to prevent cramping
         ui.set_min_width(180.0);
 
-        if shortcut_text.is_empty() {
-            ui.add(egui::Button::new(def.label).min_size(egui::vec2(0.0, 0.0))).clicked()
-        } else {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 20.0; // More space between label and shortcut
+        let desired_width = ui.available_width();
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(desired_width, ui.spacing().interact_size.y),
+            egui::Sense::click(),
+        );
 
-                let button = ui.add(egui::Button::new(def.label).min_size(egui::vec2(0.0, 0.0)));
+        if ui.is_rect_visible(rect) {
+            // Highlight on hover
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+            }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(&shortcut_text).weak().size(12.0));
-                });
+            // Draw label text left-aligned
+            let text_color = if response.hovered() {
+                ui.visuals().widgets.hovered.text_color()
+            } else {
+                ui.visuals().widgets.inactive.text_color()
+            };
+            let label_pos = rect.min + egui::vec2(4.0, (rect.height() - 14.0) / 2.0);
+            ui.painter().text(
+                label_pos,
+                egui::Align2::LEFT_TOP,
+                def.label,
+                egui::FontId::proportional(14.0),
+                text_color,
+            );
 
-                button.clicked()
-            }).inner
+            // Draw shortcut text right-aligned
+            if !shortcut_text.is_empty() {
+                let shortcut_pos = rect.max - egui::vec2(4.0, (rect.height() - 12.0) / 2.0);
+                ui.painter().text(
+                    shortcut_pos,
+                    egui::Align2::RIGHT_BOTTOM,
+                    &shortcut_text,
+                    egui::FontId::proportional(12.0),
+                    ui.visuals().weak_text_color(),
+                );
+            }
         }
+
+        response.clicked()
     }
 
     /// Format shortcut for display (e.g., "Ctrl+S")
@@ -711,6 +746,7 @@ impl MenuSystem {
         let key_name = match shortcut.key {
             ShortcutKey::A => "A",
             ShortcutKey::C => "C",
+            ShortcutKey::D => "D",
             ShortcutKey::E => "E",
             ShortcutKey::G => "G",
             ShortcutKey::I => "I",

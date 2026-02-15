@@ -93,7 +93,7 @@ fn find_sampled_audio_track_for_clip(
                     &audio_layer.layer.id,
                     timeline_start,
                     clip_end,
-                    None, // Don't exclude any instances
+                    &[], // Don't exclude any instances
                 );
 
                 if !overlaps {
@@ -997,6 +997,24 @@ impl TimelinePane {
                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
             };
 
+            // For moves, precompute the clamped offset so all selected clips move uniformly
+            let group_move_offset = if self.clip_drag_state == Some(ClipDragType::Move) {
+                let group: Vec<(uuid::Uuid, f64, f64)> = clip_instances.iter()
+                    .filter(|ci| selection.contains_clip_instance(&ci.id))
+                    .filter_map(|ci| {
+                        let dur = document.get_clip_duration(&ci.clip_id)?;
+                        Some((ci.id, ci.timeline_start, ci.effective_duration(dur)))
+                    })
+                    .collect();
+                if !group.is_empty() {
+                    Some(document.clamp_group_move_offset(&layer.id(), &group, self.drag_offset))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             for clip_instance in clip_instances {
                 // Get the clip to determine duration
                 let clip_duration = match layer {
@@ -1052,21 +1070,9 @@ impl TimelinePane {
                         if is_selected || is_linked_to_dragged {
                             match drag_type {
                                 ClipDragType::Move => {
-                                    // Move: shift the entire clip along the timeline with auto-snap preview
-                                    let desired_start = clip_instance.timeline_start + self.drag_offset;
-                                    let current_duration = instance_duration;
-
-                                    // Find snapped position for preview
-                                    let snapped_start = document
-                                        .find_nearest_valid_position(
-                                            &layer.id(),
-                                            desired_start,
-                                            current_duration,
-                                            Some(&clip_instance.id),
-                                        )
-                                        .unwrap_or(desired_start);
-
-                                    instance_start = snapped_start;
+                                    if let Some(offset) = group_move_offset {
+                                        instance_start = (clip_instance.timeline_start + offset).max(0.0);
+                                    }
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
@@ -1246,6 +1252,8 @@ impl TimelinePane {
                                             );
 
                                             if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
+                                                // Use clip instance UUID's lower 64 bits as stable instance ID
+                                                let instance_id = clip_instance.id.as_u128() as u64;
                                                 let callback = crate::waveform_gpu::WaveformCallback {
                                                     pool_index: *audio_pool_index,
                                                     segment_index: 0,
@@ -1268,6 +1276,7 @@ impl TimelinePane {
                                                     },
                                                     target_format,
                                                     pending_upload,
+                                                    instance_id,
                                                 };
 
                                                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -1640,10 +1649,24 @@ impl TimelinePane {
                                                         clip_instance.timeline_start;
 
                                                     // New trim_start is clamped to valid range
-                                                    let new_trim_start = (old_trim_start
+                                                    let desired_trim_start = (old_trim_start
                                                         + self.drag_offset)
                                                         .max(0.0)
                                                         .min(clip_duration);
+
+                                                    // Apply overlap prevention when extending left
+                                                    let new_trim_start = if desired_trim_start < old_trim_start {
+                                                        let max_extend = document.find_max_trim_extend_left(
+                                                            &layer_id,
+                                                            &clip_instance.id,
+                                                            old_timeline_start,
+                                                        );
+                                                        let desired_extend = old_trim_start - desired_trim_start;
+                                                        let actual_extend = desired_extend.min(max_extend);
+                                                        old_trim_start - actual_extend
+                                                    } else {
+                                                        desired_trim_start
+                                                    };
 
                                                     // Calculate actual offset after clamping
                                                     let actual_offset = new_trim_start - old_trim_start;
@@ -1672,8 +1695,27 @@ impl TimelinePane {
                                                     // Calculate new trim_end based on current duration
                                                     let current_duration =
                                                         clip_instance.effective_duration(clip_duration);
-                                                    let new_duration =
-                                                        (current_duration + self.drag_offset).max(0.0);
+                                                    let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration);
+                                                    let desired_trim_end = (old_trim_end_val + self.drag_offset)
+                                                        .max(clip_instance.trim_start)
+                                                        .min(clip_duration);
+
+                                                    // Apply overlap prevention when extending right
+                                                    let new_trim_end_val = if desired_trim_end > old_trim_end_val {
+                                                        let max_extend = document.find_max_trim_extend_right(
+                                                            &layer_id,
+                                                            &clip_instance.id,
+                                                            clip_instance.timeline_start,
+                                                            current_duration,
+                                                        );
+                                                        let desired_extend = desired_trim_end - old_trim_end_val;
+                                                        let actual_extend = desired_extend.min(max_extend);
+                                                        old_trim_end_val + actual_extend
+                                                    } else {
+                                                        desired_trim_end
+                                                    };
+
+                                                    let new_duration = (new_trim_end_val - clip_instance.trim_start).max(0.0);
 
                                                     // Convert new duration back to trim_end value
                                                     let new_trim_end = if new_duration >= clip_duration {
@@ -2244,7 +2286,7 @@ impl PaneRenderer for TimelinePane {
                                     &layer.id(),
                                     raw_drop_time,
                                     clip_duration,
-                                    None,
+                                    &[],
                                 );
 
                             snapped.unwrap_or(raw_drop_time)
