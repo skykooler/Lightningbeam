@@ -211,6 +211,8 @@ pub struct SharedPaneState<'a> {
     pub effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
     /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
     pub target_format: wgpu::TextureFormat,
+    /// Menu actions queued by panes (e.g. context menu items), processed by main after rendering
+    pub pending_menu_actions: &'a mut Vec<crate::menu::MenuAction>,
 }
 
 /// Trait for pane rendering

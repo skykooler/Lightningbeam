@@ -55,6 +55,9 @@ pub struct TimelinePane {
 
     /// Track if a layer control widget was clicked this frame
     layer_control_clicked: bool,
+
+    /// Context menu state: Some((clip_instance_id, position)) when a right-click menu is open
+    context_menu_clip: Option<(uuid::Uuid, egui::Pos2)>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -120,6 +123,7 @@ impl TimelinePane {
             drag_offset: 0.0,
             mousedown_pos: None,
             layer_control_clicked: false,
+            context_menu_clip: None,
         }
     }
 
@@ -2174,6 +2178,166 @@ impl PaneRenderer for TimelinePane {
             shared.is_playing,
             shared.audio_controller,
         );
+
+        // Clip context menu: detect right-click on clips
+        let mut just_opened_menu = false;
+        let secondary_clicked = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+        if secondary_clicked {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect) {
+                    // Select the clip if not already selected
+                    if !shared.selection.contains_clip_instance(&clip_id) {
+                        shared.selection.select_only_clip_instance(clip_id);
+                    }
+                    self.context_menu_clip = Some((clip_id, pos));
+                    just_opened_menu = true;
+                } else {
+                    self.context_menu_clip = None;
+                }
+            }
+        }
+
+        // Render clip context menu
+        if let Some((_ctx_clip_id, menu_pos)) = self.context_menu_clip {
+            // Determine which items are enabled
+            let playback_time = *shared.playback_time;
+            let min_split_px = 4.0_f32;
+
+            // Split: playhead must be over a selected clip, at least min_split_px from edges
+            let split_enabled = {
+                let mut enabled = false;
+                if let Some(layer_id) = *shared.active_layer_id {
+                    if let Some(layer) = document.get_layer(&layer_id) {
+                        let instances: &[ClipInstance] = match layer {
+                            AnyLayer::Vector(vl) => &vl.clip_instances,
+                            AnyLayer::Audio(al) => &al.clip_instances,
+                            AnyLayer::Video(vl) => &vl.clip_instances,
+                            AnyLayer::Effect(el) => &el.clip_instances,
+                        };
+                        for inst in instances {
+                            if !shared.selection.contains_clip_instance(&inst.id) { continue; }
+                            if let Some(dur) = document.get_clip_duration(&inst.clip_id) {
+                                let eff = inst.effective_duration(dur);
+                                let start = inst.timeline_start;
+                                let end = start + eff;
+                                let min_dist = min_split_px as f64 / self.pixels_per_second as f64;
+                                if playback_time > start + min_dist && playback_time < end - min_dist {
+                                    enabled = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                enabled
+            };
+
+            // Duplicate: check if there's room to the right of each selected clip
+            let duplicate_enabled = {
+                let mut enabled = false;
+                if let Some(layer_id) = *shared.active_layer_id {
+                    if let Some(layer) = document.get_layer(&layer_id) {
+                        let instances: &[ClipInstance] = match layer {
+                            AnyLayer::Vector(vl) => &vl.clip_instances,
+                            AnyLayer::Audio(al) => &al.clip_instances,
+                            AnyLayer::Video(vl) => &vl.clip_instances,
+                            AnyLayer::Effect(el) => &el.clip_instances,
+                        };
+                        // Check each selected clip
+                        enabled = instances.iter()
+                            .filter(|ci| shared.selection.contains_clip_instance(&ci.id))
+                            .all(|ci| {
+                                if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                    let eff = ci.effective_duration(dur);
+                                    let max_extend = document.find_max_trim_extend_right(
+                                        &layer_id, &ci.id, ci.timeline_start, eff,
+                                    );
+                                    max_extend >= eff
+                                } else {
+                                    false
+                                }
+                            })
+                            && instances.iter().any(|ci| shared.selection.contains_clip_instance(&ci.id));
+                    }
+                }
+                enabled
+            };
+
+            let area_id = ui.id().with("clip_context_menu");
+            let mut item_clicked = false;
+            let area_response = egui::Area::new(area_id)
+                .order(egui::Order::Foreground)
+                .fixed_pos(menu_pos)
+                .interactable(true)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(160.0);
+
+                        // Helper: full-width menu item with optional enabled state
+                        let menu_item = |ui: &mut egui::Ui, label: &str, enabled: bool| -> bool {
+                            let desired_width = ui.available_width();
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(desired_width, ui.spacing().interact_size.y),
+                                if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+                            );
+                            if ui.is_rect_visible(rect) {
+                                if enabled && response.hovered() {
+                                    ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+                                }
+                                let text_color = if !enabled {
+                                    ui.visuals().weak_text_color()
+                                } else if response.hovered() {
+                                    ui.visuals().widgets.hovered.text_color()
+                                } else {
+                                    ui.visuals().widgets.inactive.text_color()
+                                };
+                                ui.painter().text(
+                                    rect.min + egui::vec2(4.0, (rect.height() - 14.0) / 2.0),
+                                    egui::Align2::LEFT_TOP,
+                                    label,
+                                    egui::FontId::proportional(14.0),
+                                    text_color,
+                                );
+                            }
+                            enabled && response.clicked()
+                        };
+
+                        if menu_item(ui, "Split Clip", split_enabled) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::SplitClip);
+                            item_clicked = true;
+                        }
+                        if menu_item(ui, "Duplicate Clip", duplicate_enabled) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::DuplicateClip);
+                            item_clicked = true;
+                        }
+                        ui.separator();
+                        if menu_item(ui, "Cut", true) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::Cut);
+                            item_clicked = true;
+                        }
+                        if menu_item(ui, "Copy", true) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::Copy);
+                            item_clicked = true;
+                        }
+                        ui.separator();
+                        if menu_item(ui, "Delete", true) {
+                            shared.pending_menu_actions.push(crate::menu::MenuAction::Delete);
+                            item_clicked = true;
+                        }
+                    });
+                });
+
+            // Close on item click or click outside (skip on the frame we just opened)
+            if !just_opened_menu {
+                let any_click = ui.input(|i| {
+                    i.pointer.button_clicked(egui::PointerButton::Primary)
+                        || i.pointer.button_clicked(egui::PointerButton::Secondary)
+                });
+                if item_clicked || (any_click && !area_response.response.contains_pointer()) {
+                    self.context_menu_clip = None;
+                }
+            }
+        }
 
         // VIDEO HOVER DETECTION: Handle video clip hover tooltips AFTER input handling
         // This ensures hover events aren't consumed by the main input handler

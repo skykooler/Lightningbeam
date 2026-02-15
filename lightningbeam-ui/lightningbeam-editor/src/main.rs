@@ -1518,6 +1518,8 @@ impl EditorApp {
             duplicate
         }).collect();
 
+        let new_ids: Vec<uuid::Uuid> = duplicates.iter().map(|d| d.id).collect();
+
         for duplicate in duplicates {
             let action = AddClipInstanceAction::new(active_layer_id, duplicate);
 
@@ -1536,6 +1538,12 @@ impl EditorApp {
                     eprintln!("Duplicate clip failed: {}", e);
                 }
             }
+        }
+
+        // Select the new duplicates instead of the originals
+        self.selection.clear_clip_instances();
+        for id in new_ids {
+            self.selection.add_clip_instance(id);
         }
     }
 
@@ -3967,6 +3975,9 @@ impl eframe::App for EditorApp {
             // Registry for actions to execute after rendering (two-phase dispatch)
             let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
 
+            // Menu actions queued by pane context menus
+            let mut pending_menu_actions: Vec<MenuAction> = Vec::new();
+
             // Queue for effect thumbnail requests (collected during rendering)
             let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
             // Empty cache fallback if generator not initialized
@@ -4018,6 +4029,7 @@ impl eframe::App for EditorApp {
                     .unwrap_or(&empty_thumbnail_cache),
                 effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
                 target_format: self.target_format,
+                pending_menu_actions: &mut pending_menu_actions,
             };
 
             render_layout_node(
@@ -4082,6 +4094,11 @@ impl eframe::App for EditorApp {
                     // No audio system available, execute without backend
                     let _ = self.action_executor.execute(action);
                 }
+            }
+
+            // Process menu actions queued by pane context menus
+            for action in pending_menu_actions {
+                self.handle_menu_action(action);
             }
 
             // Set cursor based on hover state
@@ -4263,6 +4280,8 @@ struct RenderContext<'a> {
     effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
     /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
     target_format: wgpu::TextureFormat,
+    /// Menu actions queued by panes (e.g. context menus), processed after rendering
+    pending_menu_actions: &'a mut Vec<MenuAction>,
 }
 
 /// Recursively render a layout node with drag support
@@ -4741,6 +4760,7 @@ fn render_pane(
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
                 target_format: ctx.target_format,
+                pending_menu_actions: ctx.pending_menu_actions,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -4808,6 +4828,7 @@ fn render_pane(
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
                 target_format: ctx.target_format,
+                pending_menu_actions: ctx.pending_menu_actions,
             };
 
             // Render pane content (header was already rendered above)
