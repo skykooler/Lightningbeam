@@ -136,6 +136,14 @@ impl PianoRollPane {
         self.viewport_start_time + ((x - grid_rect.min.x) / self.pixels_per_second) as f64
     }
 
+    fn apply_zoom_at_point(&mut self, zoom_delta: f32, mouse_x: f32, grid_rect: Rect) {
+        let time_at_mouse = self.x_to_time(mouse_x, grid_rect);
+        self.pixels_per_second = (self.pixels_per_second * (1.0 + zoom_delta)).clamp(20.0, 2000.0);
+        let new_mouse_x = self.time_to_x(time_at_mouse, grid_rect);
+        let time_delta = (new_mouse_x - mouse_x) / self.pixels_per_second;
+        self.viewport_start_time = (self.viewport_start_time + time_delta as f64).max(0.0);
+    }
+
     fn note_to_y(&self, note: u8, rect: Rect) -> f32 {
         let note_index = (MAX_NOTE - note) as f32;
         rect.min.y + note_index * self.note_height - self.scroll_y
@@ -261,14 +269,10 @@ impl PianoRollPane {
         // Handle input before rendering
         self.handle_input(ui, grid_rect, keyboard_rect, shared, &clip_data);
 
-        // Auto-scroll during playback
+        // Auto-scroll during playback: pin playhead to center of viewport
         if *shared.is_playing && self.auto_scroll_enabled && !self.user_scrolled_since_play {
-            let playhead_x = self.time_to_x(*shared.playback_time, grid_rect);
-            let margin = grid_rect.width() * 0.2;
-            if playhead_x > grid_rect.max.x - margin || playhead_x < grid_rect.min.x + margin {
-                self.viewport_start_time = *shared.playback_time - (grid_rect.width() * 0.4 / self.pixels_per_second) as f64;
-                self.viewport_start_time = self.viewport_start_time.max(0.0);
-            }
+            self.viewport_start_time = *shared.playback_time - (grid_rect.width() * 0.5 / self.pixels_per_second) as f64;
+            self.viewport_start_time = self.viewport_start_time.max(0.0);
         }
 
         // Reset user_scrolled when playback stops
@@ -635,29 +639,53 @@ impl PianoRollPane {
 
         // Scroll/zoom handling
         if let Some(hover_pos) = response.hover_pos() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta);
+            let mut zoom_handled = false;
 
-            if ctrl_held {
-                // Zoom
-                if scroll.y != 0.0 {
-                    let zoom_factor = if scroll.y > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                    let time_at_cursor = self.x_to_time(hover_pos.x, grid_rect);
-                    self.pixels_per_second = (self.pixels_per_second * zoom_factor as f32).clamp(20.0, 2000.0);
-                    // Keep cursor at same time position
-                    self.viewport_start_time = time_at_cursor - ((hover_pos.x - grid_rect.min.x) / self.pixels_per_second) as f64;
+            // Check raw mouse wheel events to distinguish mouse wheel from trackpad
+            let raw_wheel = ui.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::MouseWheel { unit, delta, modifiers } = e {
+                        Some((*unit, *delta, *modifiers))
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            if let Some((unit, delta, modifiers)) = raw_wheel {
+                match unit {
+                    egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                        // Mouse wheel: always zoom horizontally
+                        let zoom_delta = delta.y * 0.005;
+                        self.apply_zoom_at_point(zoom_delta, hover_pos.x, grid_rect);
+                        self.user_scrolled_since_play = true;
+                        zoom_handled = true;
+                    }
+                    egui::MouseWheelUnit::Point => {
+                        if ctrl_held || modifiers.ctrl {
+                            // Trackpad + Ctrl: zoom
+                            let zoom_delta = delta.y * 0.005;
+                            self.apply_zoom_at_point(zoom_delta, hover_pos.x, grid_rect);
+                            self.user_scrolled_since_play = true;
+                            zoom_handled = true;
+                        }
+                    }
+                }
+            }
+
+            // Trackpad panning (smooth scroll without Ctrl)
+            if !zoom_handled {
+                let scroll = ui.input(|i| i.smooth_scroll_delta);
+                if scroll.x.abs() > 0.0 {
+                    self.viewport_start_time -= (scroll.x / self.pixels_per_second) as f64;
+                    self.viewport_start_time = self.viewport_start_time.max(0.0);
                     self.user_scrolled_since_play = true;
                 }
-            } else if shift_held || scroll.x.abs() > 0.0 {
-                // Horizontal scroll
-                let dx = if scroll.x.abs() > 0.0 { scroll.x } else { scroll.y };
-                self.viewport_start_time -= (dx / self.pixels_per_second) as f64;
-                self.viewport_start_time = self.viewport_start_time.max(0.0);
-                self.user_scrolled_since_play = true;
-            } else {
-                // Vertical scroll
-                self.scroll_y -= scroll.y;
-                let max_scroll = (MAX_NOTE - MIN_NOTE + 1) as f32 * self.note_height - grid_rect.height();
-                self.scroll_y = self.scroll_y.clamp(0.0, max_scroll.max(0.0));
+                if scroll.y.abs() > 0.0 {
+                    self.scroll_y -= scroll.y;
+                    let max_scroll = (MAX_NOTE - MIN_NOTE + 1) as f32 * self.note_height - grid_rect.height();
+                    self.scroll_y = self.scroll_y.clamp(0.0, max_scroll.max(0.0));
+                }
             }
         }
 
@@ -1308,28 +1336,50 @@ impl PianoRollPane {
         // Handle scroll/zoom
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         if let Some(hover_pos) = response.hover_pos() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta);
             let ctrl_held = ui.input(|i| i.modifiers.ctrl);
-            let shift_held = ui.input(|i| i.modifiers.shift);
+            let mut zoom_handled = false;
 
-            if ctrl_held && scroll.y != 0.0 {
-                // Zoom
-                let zoom_factor = if scroll.y > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                let time_at_cursor = self.x_to_time(hover_pos.x, view_rect);
-                self.pixels_per_second = (self.pixels_per_second * zoom_factor as f32).clamp(20.0, 2000.0);
-                self.viewport_start_time = time_at_cursor - ((hover_pos.x - view_rect.min.x) / self.pixels_per_second) as f64;
-                self.user_scrolled_since_play = true;
-            } else if shift_held || scroll.x.abs() > 0.0 {
-                // Horizontal scroll
-                let dx = if scroll.x.abs() > 0.0 { scroll.x } else { scroll.y };
-                self.viewport_start_time -= (dx / self.pixels_per_second) as f64;
-                self.viewport_start_time = self.viewport_start_time.max(0.0);
-                self.user_scrolled_since_play = true;
-            } else {
-                // Vertical scroll (same as MIDI mode)
-                self.scroll_y -= scroll.y;
-                let max_scroll = (MAX_NOTE - MIN_NOTE + 1) as f32 * self.note_height - view_rect.height();
-                self.scroll_y = self.scroll_y.clamp(0.0, max_scroll.max(0.0));
+            let raw_wheel = ui.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::MouseWheel { unit, delta, modifiers } = e {
+                        Some((*unit, *delta, *modifiers))
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            if let Some((unit, delta, modifiers)) = raw_wheel {
+                match unit {
+                    egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                        let zoom_delta = delta.y * 0.005;
+                        self.apply_zoom_at_point(zoom_delta, hover_pos.x, view_rect);
+                        self.user_scrolled_since_play = true;
+                        zoom_handled = true;
+                    }
+                    egui::MouseWheelUnit::Point => {
+                        if ctrl_held || modifiers.ctrl {
+                            let zoom_delta = delta.y * 0.005;
+                            self.apply_zoom_at_point(zoom_delta, hover_pos.x, view_rect);
+                            self.user_scrolled_since_play = true;
+                            zoom_handled = true;
+                        }
+                    }
+                }
+            }
+
+            if !zoom_handled {
+                let scroll = ui.input(|i| i.smooth_scroll_delta);
+                if scroll.x.abs() > 0.0 {
+                    self.viewport_start_time -= (scroll.x / self.pixels_per_second) as f64;
+                    self.viewport_start_time = self.viewport_start_time.max(0.0);
+                    self.user_scrolled_since_play = true;
+                }
+                if scroll.y.abs() > 0.0 {
+                    self.scroll_y -= scroll.y;
+                    let max_scroll = (MAX_NOTE - MIN_NOTE + 1) as f32 * self.note_height - view_rect.height();
+                    self.scroll_y = self.scroll_y.clamp(0.0, max_scroll.max(0.0));
+                }
             }
         }
 
@@ -1340,14 +1390,10 @@ impl PianoRollPane {
         // Keyboard on top (same as MIDI mode)
         self.render_keyboard(&painter, keyboard_rect);
 
-        // Auto-scroll during playback
+        // Auto-scroll during playback: pin playhead to center of viewport
         if *shared.is_playing && self.auto_scroll_enabled && !self.user_scrolled_since_play {
-            let playhead_x = self.time_to_x(*shared.playback_time, view_rect);
-            let margin = view_rect.width() * 0.2;
-            if playhead_x > view_rect.max.x - margin || playhead_x < view_rect.min.x + margin {
-                self.viewport_start_time = *shared.playback_time - (view_rect.width() * 0.4 / self.pixels_per_second) as f64;
-                self.viewport_start_time = self.viewport_start_time.max(0.0);
-            }
+            self.viewport_start_time = *shared.playback_time - (view_rect.width() * 0.5 / self.pixels_per_second) as f64;
+            self.viewport_start_time = self.viewport_start_time.max(0.0);
         }
 
         if !*shared.is_playing {
