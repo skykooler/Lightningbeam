@@ -332,10 +332,10 @@ impl NodeTypeRegistry {
         );
 
         types.insert(
-            "Delay".to_string(),
+            "Echo".to_string(),
             NodeTypeInfo {
-                id: "Delay".to_string(),
-                display_name: "Delay".to_string(),
+                id: "Echo".to_string(),
+                display_name: "Echo".to_string(),
                 category: NodeCategory::Effects,
                 inputs: vec![PortInfo {
                     index: 0,
@@ -347,7 +347,7 @@ impl NodeTypeRegistry {
                     index: 0,
                     name: "Out".to_string(),
                     signal_type: DataType::Audio,
-                    description: "Delayed audio output".to_string(),
+                    description: "Echo audio output".to_string(),
                 }],
                 parameters: vec![
                     ParameterInfo {
@@ -357,7 +357,7 @@ impl NodeTypeRegistry {
                         min: 1.0,
                         max: 2000.0,
                         unit: ParameterUnit::Milliseconds,
-                        description: "Delay time".to_string(),
+                        description: "Echo time".to_string(),
                     },
                     ParameterInfo {
                         id: 1,
@@ -378,7 +378,7 @@ impl NodeTypeRegistry {
                         description: "Dry/wet mix".to_string(),
                     },
                 ],
-                description: "Time-based delay effect".to_string(),
+                description: "Echo effect with feedback".to_string(),
             },
         );
 

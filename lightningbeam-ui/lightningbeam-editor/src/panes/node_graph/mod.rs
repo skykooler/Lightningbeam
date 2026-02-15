@@ -137,7 +137,7 @@ impl NodeGraphPane {
                 // Effects
                 "Filter" => graph_data::NodeTemplate::Filter,
                 "Gain" => graph_data::NodeTemplate::Gain,
-                "Delay" => graph_data::NodeTemplate::Delay,
+                "Echo" | "Delay" => graph_data::NodeTemplate::Echo,
                 "Reverb" => graph_data::NodeTemplate::Reverb,
                 "Chorus" => graph_data::NodeTemplate::Chorus,
                 "Flanger" => graph_data::NodeTemplate::Flanger,
@@ -205,13 +205,17 @@ impl NodeGraphPane {
             self.node_id_map.insert(frontend_id, backend_id);
             self.backend_to_frontend_map.insert(backend_id, frontend_id);
 
-            // Set parameter values
-            for (&param_id, &value) in &node.parameters {
-                // Find the input param in the graph and set its value
-                if let Some(_node_data) = self.state.graph.nodes.get_mut(frontend_id) {
-                    // TODO: Set parameter values on the node's input params
-                    // This requires matching param_id to the input param by index
-                    let _ = (param_id, value); // Silence unused warning for now
+            // Set parameter values from backend
+            if let Some(node_data) = self.state.graph.nodes.get(frontend_id) {
+                let input_ids: Vec<InputId> = node_data.inputs.iter().map(|(_, id)| *id).collect();
+                for input_id in input_ids {
+                    if let Some(input_param) = self.state.graph.inputs.get_mut(input_id) {
+                        if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &mut input_param.value {
+                            if let Some(&backend_value) = node.parameters.get(pid) {
+                                *value = backend_value as f32;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -440,11 +444,11 @@ impl NodeGraphPane {
                 continue;
             }
 
-            // Get current value
-            let current_value = match &input_param.value {
-                ValueType::Float { value } => {
+            // Get current value and backend param ID
+            let (current_value, backend_param_id) = match &input_param.value {
+                ValueType::Float { value, backend_param_id, .. } => {
                     _checked_count += 1;
-                    *value
+                    (*value, *backend_param_id)
                 },
                 other => {
                     _non_float_count += 1;
@@ -468,24 +472,20 @@ impl NodeGraphPane {
                 if let Some(track_id) = self.track_id {
                     let node_id = input_param.node;
 
-                    // Get backend node ID
+                    // Get backend node ID and use stored param ID
                     if let Some(&backend_id) = self.node_id_map.get(&node_id) {
-                        // Get parameter index (position in node's inputs array)
-                        if let Some(node) = self.state.graph.nodes.get(node_id) {
-                            if let Some(param_index) = node.inputs.iter().position(|(_, id)| *id == input_id) {
-                                eprintln!("[DEBUG] Parameter changed: node {:?} param {} from {:?} to {}",
-                                    backend_id, param_index, previous_value, current_value);
-                                // Create action to update backend
-                                let action = Box::new(actions::NodeGraphAction::SetParameter(
-                                    actions::SetParameterAction::new(
-                                        track_id,
-                                        backend_id,
-                                        param_index as u32,
-                                        current_value as f64,
-                                    )
-                                ));
-                                self.pending_action = Some(action);
-                            }
+                        if let Some(param_id) = backend_param_id {
+                            eprintln!("[DEBUG] Parameter changed: node {:?} param {} from {:?} to {}",
+                                backend_id, param_id, previous_value, current_value);
+                            let action = Box::new(actions::NodeGraphAction::SetParameter(
+                                actions::SetParameterAction::new(
+                                    track_id,
+                                    backend_id,
+                                    param_id,
+                                    current_value as f64,
+                                )
+                            ));
+                            self.pending_action = Some(action);
                         }
                     }
                 }

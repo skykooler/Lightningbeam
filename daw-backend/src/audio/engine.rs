@@ -501,6 +501,8 @@ impl Engine {
                     .store(self.playhead, Ordering::Relaxed);
                 // Stop all MIDI notes when seeking to prevent stuck notes
                 self.project.stop_all_notes();
+                // Reset all node graphs to clear effect buffers (echo, reverb, etc.)
+                self.project.reset_all_graphs();
                 // Notify disk reader to refill buffers from new position
                 if let Some(ref mut dr) = self.disk_reader {
                     dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: frames });
@@ -1080,7 +1082,7 @@ impl Engine {
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
-                            "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Echo" | "Delay" => Box::new(EchoNode::new("Echo".to_string())),
                             "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
@@ -1165,7 +1167,7 @@ impl Engine {
                             "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
                             "Pan" => Box::new(PanNode::new("Pan".to_string())),
                             "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
-                            "Delay" => Box::new(DelayNode::new("Delay".to_string())),
+                            "Echo" | "Delay" => Box::new(EchoNode::new("Echo".to_string())),
                             "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
                             "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
                             "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),

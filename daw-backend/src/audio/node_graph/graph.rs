@@ -865,7 +865,7 @@ impl AudioGraph {
                 "Splitter" => Box::new(SplitterNode::new("Splitter")),
                 "Pan" => Box::new(PanNode::new("Pan")),
                 "Quantizer" => Box::new(QuantizerNode::new("Quantizer")),
-                "Delay" => Box::new(DelayNode::new("Delay")),
+                "Echo" | "Delay" => Box::new(EchoNode::new("Echo")),
                 "Distortion" => Box::new(DistortionNode::new("Distortion")),
                 "Reverb" => Box::new(ReverbNode::new("Reverb")),
                 "Chorus" => Box::new(ChorusNode::new("Chorus")),

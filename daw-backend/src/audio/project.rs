@@ -506,6 +506,17 @@ impl Project {
         }
     }
 
+    /// Reset all node graphs (clears effect buffers on seek)
+    pub fn reset_all_graphs(&mut self) {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(t) => t.effects_graph.reset(),
+                TrackNode::Midi(t) => t.instrument_graph.reset(),
+                TrackNode::Group(_) => {}
+            }
+        }
+    }
+
     /// Process live MIDI input from all MIDI tracks (called even when not playing)
     pub fn process_live_midi(&mut self, output: &mut [f32], sample_rate: u32, channels: u32) {
         // Process all MIDI tracks to handle queued live input events

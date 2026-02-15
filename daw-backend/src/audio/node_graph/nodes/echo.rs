@@ -7,8 +7,8 @@ const PARAM_WET_DRY: u32 = 2;
 
 const MAX_DELAY_SECONDS: f32 = 2.0;
 
-/// Stereo delay node with feedback
-pub struct DelayNode {
+/// Stereo echo node with feedback
+pub struct EchoNode {
     name: String,
     delay_time: f32,     // seconds
     feedback: f32,       // 0.0 to 0.95
@@ -26,7 +26,7 @@ pub struct DelayNode {
     parameters: Vec<Parameter>,
 }
 
-impl DelayNode {
+impl EchoNode {
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
 
@@ -79,7 +79,7 @@ impl DelayNode {
     }
 }
 
-impl AudioNode for DelayNode {
+impl AudioNode for EchoNode {
     fn category(&self) -> NodeCategory {
         NodeCategory::Effect
     }
@@ -185,7 +185,7 @@ impl AudioNode for DelayNode {
     }
 
     fn node_type(&self) -> &str {
-        "Delay"
+        "Echo"
     }
 
     fn name(&self) -> &str {
