@@ -124,6 +124,54 @@ impl Action for SetLayerPropertiesAction {
         Ok(())
     }
 
+    fn execute_backend(
+        &mut self,
+        backend: &mut crate::action::BackendContext,
+        _document: &crate::document::Document,
+    ) -> Result<(), String> {
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        for &layer_id in &self.layer_ids {
+            if let Some(&track_id) = backend.layer_to_track_map.get(&layer_id) {
+                match &self.property {
+                    LayerProperty::Volume(v) => controller.set_track_volume(track_id, *v as f32),
+                    LayerProperty::Muted(m) => controller.set_track_mute(track_id, *m),
+                    LayerProperty::Soloed(s) => controller.set_track_solo(track_id, *s),
+                    _ => {} // Locked/Opacity/Visible are UI-only
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_backend(
+        &mut self,
+        backend: &mut crate::action::BackendContext,
+        _document: &crate::document::Document,
+    ) -> Result<(), String> {
+        let controller = match backend.audio_controller.as_mut() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        for (i, &layer_id) in self.layer_ids.iter().enumerate() {
+            if let Some(&track_id) = backend.layer_to_track_map.get(&layer_id) {
+                if let Some(old_value) = &self.old_values[i] {
+                    match old_value {
+                        OldValue::Volume(v) => controller.set_track_volume(track_id, *v as f32),
+                        OldValue::Muted(m) => controller.set_track_mute(track_id, *m),
+                        OldValue::Soloed(s) => controller.set_track_solo(track_id, *s),
+                        _ => {} // Locked/Opacity/Visible are UI-only
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn description(&self) -> String {
         let property_name = match &self.property {
             LayerProperty::Volume(_) => "volume",

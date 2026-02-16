@@ -479,9 +479,11 @@ impl ExportOrchestrator {
     ) {
         println!("🧵 [EXPORT THREAD] run_audio_export started");
 
-        // Send start notification
+        // Send start notification with calculated total frames
+        let duration = settings.end_time - settings.start_time;
+        let total_frames = (duration * settings.sample_rate as f64).round() as usize;
         progress_tx
-            .send(ExportProgress::Started { total_frames: 0 })
+            .send(ExportProgress::Started { total_frames })
             .ok();
         println!("🧵 [EXPORT THREAD] Sent Started progress");
 

@@ -4,6 +4,10 @@ use super::project::Project;
 use crate::command::AudioEvent;
 use std::path::Path;
 
+/// Render chunk size for offline export. Matches the real-time playback buffer size
+/// so that MIDI events are processed at the same granularity, avoiding timing jitter.
+const EXPORT_CHUNK_FRAMES: usize = 256;
+
 /// Supported export formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -73,6 +77,21 @@ pub fn export_audio<P: AsRef<Path>>(
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
 ) -> Result<(), String>
 {
+    // Validate duration
+    let duration = settings.end_time - settings.start_time;
+    if duration <= 0.0 {
+        return Err(format!(
+            "Export duration is zero or negative (start={:.3}s, end={:.3}s). \
+             Check that the timeline has content.",
+            settings.start_time, settings.end_time
+        ));
+    }
+
+    let total_frames = (duration * settings.sample_rate as f64).round() as usize;
+    if total_frames == 0 {
+        return Err("Export would produce zero audio frames".to_string());
+    }
+
     // Reset all node graphs to clear stale effect buffers (echo, reverb, etc.)
     project.reset_all_graphs();
 
@@ -135,9 +154,7 @@ pub fn render_to_memory(
     println!("Export: duration={:.3}s, total_frames={}, total_samples={}, channels={}",
              duration, total_frames, total_samples, settings.channels);
 
-    // Render in chunks to avoid memory issues
-    const CHUNK_FRAMES: usize = 4096;
-    let chunk_samples = CHUNK_FRAMES * settings.channels as usize;
+    let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
 
     // Create buffer for rendering
     let mut render_buffer = vec![0.0f32; chunk_samples];
@@ -147,7 +164,7 @@ pub fn render_to_memory(
     let mut all_samples = Vec::with_capacity(total_samples);
 
     let mut playhead = settings.start_time;
-    let chunk_duration = CHUNK_FRAMES as f64 / settings.sample_rate as f64;
+    let chunk_duration = EXPORT_CHUNK_FRAMES as f64 / settings.sample_rate as f64;
     let mut frames_rendered = 0;
 
     // Render the entire timeline in chunks
@@ -345,9 +362,8 @@ fn export_mp3<P: AsRef<Path>>(
     let duration = settings.end_time - settings.start_time;
     let total_frames = (duration * settings.sample_rate as f64).round() as usize;
 
-    const CHUNK_FRAMES: usize = 4096;
-    let chunk_samples = CHUNK_FRAMES * settings.channels as usize;
-    let chunk_duration = CHUNK_FRAMES as f64 / settings.sample_rate as f64;
+    let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
+    let chunk_duration = EXPORT_CHUNK_FRAMES as f64 / settings.sample_rate as f64;
 
     // Create buffers for rendering
     let mut render_buffer = vec![0.0f32; chunk_samples];
@@ -513,9 +529,8 @@ fn export_aac<P: AsRef<Path>>(
     let duration = settings.end_time - settings.start_time;
     let total_frames = (duration * settings.sample_rate as f64).round() as usize;
 
-    const CHUNK_FRAMES: usize = 4096;
-    let chunk_samples = CHUNK_FRAMES * settings.channels as usize;
-    let chunk_duration = CHUNK_FRAMES as f64 / settings.sample_rate as f64;
+    let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
+    let chunk_duration = EXPORT_CHUNK_FRAMES as f64 / settings.sample_rate as f64;
 
     // Create buffers for rendering
     let mut render_buffer = vec![0.0f32; chunk_samples];
@@ -669,9 +684,13 @@ fn encode_complete_frame_mp3(
     channel_layout: ffmpeg_next::channel_layout::ChannelLayout,
     pts: i64,
 ) -> Result<(), String> {
+    if num_frames == 0 {
+        return Ok(());
+    }
+
     let channels = planar_samples.len();
 
-    // Create audio frame with exact size
+    // Create audio frame
     let mut frame = ffmpeg_next::frame::Audio::new(
         ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Planar),
         num_frames,
@@ -680,33 +699,23 @@ fn encode_complete_frame_mp3(
     frame.set_rate(sample_rate);
     frame.set_pts(Some(pts));
 
-    // Copy all planar samples to frame
-    for ch in 0..channels {
-        let plane = frame.data_mut(ch);
-        let src = &planar_samples[ch];
-
-        // Verify buffer size
-        let byte_size = num_frames * std::mem::size_of::<i16>();
-        if plane.len() < byte_size {
-            return Err(format!(
-                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                plane.len(), byte_size
-            ));
-        }
-
-        // Safe byte-level copy
-        for (i, &sample) in src.iter().enumerate() {
-            let bytes = sample.to_ne_bytes();
-            let offset = i * 2;
-            plane[offset..offset + 2].copy_from_slice(&bytes);
-        }
+    // Verify frame was allocated (check linesize[0] via planes())
+    if frame.planes() == 0 {
+        return Err("FFmpeg failed to allocate audio frame. Try exporting as WAV instead.".to_string());
     }
 
-    // Send frame to encoder
+    // Copy all planar samples to frame
+    // Use plane_mut::<i16> instead of data_mut — data_mut(ch) is buggy for planar audio:
+    // FFmpeg only sets linesize[0], so data_mut returns 0-length slices for ch > 0.
+    // plane_mut uses self.samples() for the length, which is correct for all planes.
+    for ch in 0..channels {
+        let plane = frame.plane_mut::<i16>(ch);
+        plane.copy_from_slice(&planar_samples[ch]);
+    }
+
     encoder.send_frame(&frame)
         .map_err(|e| format!("Failed to send frame: {}", e))?;
 
-    // Receive and write packets
     receive_and_write_packets(encoder, output)?;
 
     Ok(())
@@ -722,9 +731,13 @@ fn encode_complete_frame_aac(
     channel_layout: ffmpeg_next::channel_layout::ChannelLayout,
     pts: i64,
 ) -> Result<(), String> {
+    if num_frames == 0 {
+        return Ok(());
+    }
+
     let channels = planar_samples.len();
 
-    // Create audio frame with exact size
+    // Create audio frame
     let mut frame = ffmpeg_next::frame::Audio::new(
         ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
         num_frames,
@@ -733,33 +746,23 @@ fn encode_complete_frame_aac(
     frame.set_rate(sample_rate);
     frame.set_pts(Some(pts));
 
-    // Copy all planar samples to frame
-    for ch in 0..channels {
-        let plane = frame.data_mut(ch);
-        let src = &planar_samples[ch];
-
-        // Verify buffer size
-        let byte_size = num_frames * std::mem::size_of::<f32>();
-        if plane.len() < byte_size {
-            return Err(format!(
-                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                plane.len(), byte_size
-            ));
-        }
-
-        // Safe byte-level copy
-        for (i, &sample) in src.iter().enumerate() {
-            let bytes = sample.to_ne_bytes();
-            let offset = i * 4;
-            plane[offset..offset + 4].copy_from_slice(&bytes);
-        }
+    // Verify frame was allocated
+    if frame.planes() == 0 {
+        return Err("FFmpeg failed to allocate audio frame. Try exporting as WAV instead.".to_string());
     }
 
-    // Send frame to encoder
+    // Copy all planar samples to frame
+    // Use plane_mut::<f32> instead of data_mut — data_mut(ch) is buggy for planar audio:
+    // FFmpeg only sets linesize[0], so data_mut returns 0-length slices for ch > 0.
+    // plane_mut uses self.samples() for the length, which is correct for all planes.
+    for ch in 0..channels {
+        let plane = frame.plane_mut::<f32>(ch);
+        plane.copy_from_slice(&planar_samples[ch]);
+    }
+
     encoder.send_frame(&frame)
         .map_err(|e| format!("Failed to send frame: {}", e))?;
 
-    // Receive and write packets
     receive_and_write_packets(encoder, output)?;
 
     Ok(())

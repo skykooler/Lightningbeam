@@ -88,20 +88,18 @@ impl ExportDialog {
 
         let mut should_export = false;
         let mut should_close = false;
-        let mut open = self.open;
 
         let window_title = match self.export_type {
             ExportType::Audio => "Export Audio",
             ExportType::Video => "Export Video",
         };
 
-        egui::Window::new(window_title)
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        let modal_response = egui::Modal::new(egui::Id::new("export_dialog_modal"))
             .show(ctx, |ui| {
                 ui.set_width(500.0);
+
+                ui.heading(window_title);
+                ui.add_space(8.0);
 
                 // Error message (if any)
                 if let Some(error) = &self.error_message {
@@ -151,8 +149,10 @@ impl ExportDialog {
                 });
             });
 
-        // Update open state (in case user clicked X button)
-        self.open = open;
+        // Close on backdrop click or escape
+        if modal_response.backdrop_response.clicked() {
+            should_close = true;
+        }
 
         if should_close {
             self.close();
@@ -529,13 +529,12 @@ impl ExportProgressDialog {
 
         let mut should_cancel = false;
 
-        egui::Window::new("Exporting...")
-            .open(&mut self.open)
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        egui::Modal::new(egui::Id::new("export_progress_modal"))
             .show(ctx, |ui| {
                 ui.set_width(400.0);
+
+                ui.heading("Exporting...");
+                ui.add_space(8.0);
 
                 // Status message
                 ui.label(&self.message);

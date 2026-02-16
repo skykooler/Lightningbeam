@@ -2751,6 +2751,41 @@ impl EditorApp {
         }
         eprintln!("📊 [APPLY] Step 7: Fetched {} raw audio samples in {:.2}ms", raw_fetched, step7_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Rebuild MIDI event cache for all MIDI clips (needed for timeline/piano roll rendering)
+        let step8_start = std::time::Instant::now();
+        self.midi_event_cache.clear();
+        let midi_clip_ids: Vec<u32> = self.action_executor.document()
+            .audio_clips.values()
+            .filter_map(|clip| clip.midi_clip_id())
+            .collect();
+
+        let mut midi_fetched = 0;
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            for clip_id in midi_clip_ids {
+                // track_id is unused by the query, pass 0
+                match controller.query_midi_clip(0, clip_id) {
+                    Ok(clip_data) => {
+                        let processed_events: Vec<(f64, u8, u8, bool)> = clip_data.events.iter()
+                            .filter_map(|event| {
+                                let status_type = event.status & 0xF0;
+                                if status_type == 0x90 || status_type == 0x80 {
+                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
+                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        self.midi_event_cache.insert(clip_id, processed_events);
+                        midi_fetched += 1;
+                    }
+                    Err(e) => eprintln!("Failed to fetch MIDI clip {}: {}", clip_id, e),
+                }
+            }
+        }
+        eprintln!("📊 [APPLY] Step 8: Rebuilt MIDI event cache for {} clips in {:.2}ms", midi_fetched, step8_start.elapsed().as_secs_f64() * 1000.0);
+
         // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;

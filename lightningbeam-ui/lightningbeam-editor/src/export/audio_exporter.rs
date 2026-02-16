@@ -196,26 +196,13 @@ fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
         frame.set_rate(settings.sample_rate);
 
         // Copy planar samples to frame
+        // Use plane_mut::<i16> instead of data_mut — data_mut(ch) is buggy for planar audio:
+        // FFmpeg only sets linesize[0], so data_mut returns 0-length slices for ch > 0.
+        // plane_mut uses self.samples() for the length, which is correct for all planes.
         for ch in 0..settings.channels as usize {
-            let plane = frame.data_mut(ch);
+            let plane = frame.plane_mut::<i16>(ch);
             let offset = samples_encoded;
-            let src = &planar_samples[ch][offset..offset + chunk_size];
-
-            // Convert i16 samples to bytes and copy
-            let byte_size = chunk_size * std::mem::size_of::<i16>();
-            if plane.len() < byte_size {
-                return Err(format!(
-                    "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                    plane.len(), byte_size
-                ));
-            }
-
-            // Safe byte-level copy using slice operations
-            for (i, &sample) in src.iter().enumerate() {
-                let bytes = sample.to_ne_bytes();
-                let offset = i * 2;
-                plane[offset..offset + 2].copy_from_slice(&bytes);
-            }
+            plane.copy_from_slice(&planar_samples[ch][offset..offset + chunk_size]);
         }
 
         // Send frame to encoder

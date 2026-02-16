@@ -148,6 +148,70 @@ impl VirtualPianoPane {
         (start_note as u8, end_note as u8, white_key_width, 0.0)
     }
 
+    /// Render keys visually without any input handling (used when a modal is active)
+    fn render_keyboard_visual_only(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        visible_start: u8,
+        visible_end: u8,
+        white_key_width: f32,
+        offset_x: f32,
+        white_key_height: f32,
+        black_key_width: f32,
+        black_key_height: f32,
+    ) {
+        // Draw white keys
+        let mut white_pos = 0f32;
+        for note in visible_start..=visible_end {
+            if !Self::is_white_key(note) {
+                continue;
+            }
+            let x = rect.min.x + offset_x + (white_pos * white_key_width);
+            let key_rect = egui::Rect::from_min_size(
+                egui::pos2(x, rect.min.y),
+                egui::vec2(white_key_width - 1.0, white_key_height),
+            );
+            let color = if self.pressed_notes.contains(&note) {
+                egui::Color32::from_rgb(100, 150, 255)
+            } else {
+                egui::Color32::WHITE
+            };
+            ui.painter().rect_filled(key_rect, 2.0, color);
+            ui.painter().rect_stroke(
+                key_rect,
+                2.0,
+                egui::Stroke::new(1.0, egui::Color32::BLACK),
+                egui::StrokeKind::Middle,
+            );
+            white_pos += 1.0;
+        }
+
+        // Draw black keys
+        for note in visible_start..=visible_end {
+            if !Self::is_black_key(note) {
+                continue;
+            }
+            let mut white_keys_before = 0;
+            for n in visible_start..note {
+                if Self::is_white_key(n) {
+                    white_keys_before += 1;
+                }
+            }
+            let x = rect.min.x + offset_x + (white_keys_before as f32 * white_key_width) - (black_key_width / 2.0);
+            let key_rect = egui::Rect::from_min_size(
+                egui::pos2(x, rect.min.y),
+                egui::vec2(black_key_width, black_key_height),
+            );
+            let color = if self.pressed_notes.contains(&note) {
+                egui::Color32::from_rgb(50, 100, 200)
+            } else {
+                egui::Color32::BLACK
+            };
+            ui.painter().rect_filled(key_rect, 2.0, color);
+        }
+    }
+
     /// Render the piano keyboard
     fn render_keyboard(&mut self, ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState) {
         // Calculate visible range and key dimensions based on pane size
@@ -157,6 +221,20 @@ impl VirtualPianoPane {
         let white_key_height = rect.height();
         let black_key_width = white_key_width * self.black_key_width_ratio;
         let black_key_height = white_key_height * self.black_key_height_ratio;
+
+        // If a modal dialog is open, don't process mouse input — just render keys visually.
+        // We read raw input (ui.input) which bypasses egui's modal blocking, so we must check manually.
+        let modal_active = ui.ctx().memory(|m| m.top_modal_layer().is_some());
+        if modal_active {
+            // Release any held notes so they don't get stuck
+            if self.dragging_note.is_some() {
+                if let Some(note) = self.dragging_note.take() {
+                    self.send_note_off(note, shared);
+                }
+            }
+            self.render_keyboard_visual_only(ui, rect, visible_start, visible_end, white_key_width, offset_x, white_key_height, black_key_width, black_key_height);
+            return;
+        }
 
         // Count white keys before each note for positioning
         let mut white_key_positions: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
