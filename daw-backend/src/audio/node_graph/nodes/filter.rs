@@ -188,10 +188,10 @@ impl AudioNode for FilterNode {
         // Set filter to match current type
         match self.filter_type {
             FilterType::Lowpass => {
-                new_filter.set_lowpass(self.sample_rate as f32, self.cutoff, self.resonance);
+                new_filter.set_lowpass(self.cutoff, self.resonance, self.sample_rate as f32);
             }
             FilterType::Highpass => {
-                new_filter.set_highpass(self.sample_rate as f32, self.cutoff, self.resonance);
+                new_filter.set_highpass(self.cutoff, self.resonance, self.sample_rate as f32);
             }
         }
 

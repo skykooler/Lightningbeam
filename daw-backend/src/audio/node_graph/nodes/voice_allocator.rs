@@ -316,19 +316,20 @@ impl AudioNode for VoiceAllocatorNode {
                 // Note: playback_time is 0.0 since voice allocator doesn't track time
                 self.voice_instances[voice_idx].process(mix_slice, &midi_events, 0.0);
 
+                // Auto-deactivate releasing voices that have gone silent
+                if voice_state.releasing {
+                    let peak = mix_slice.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+                    if peak < 1e-6 {
+                        voice_state.active = false;
+                        voice_state.releasing = false;
+                        continue; // Don't mix silent output
+                    }
+                }
+
                 // Mix into output (accumulate)
                 for (i, sample) in mix_slice.iter().enumerate() {
                     output[i] += sample;
                 }
-            }
-        }
-
-        // Apply normalization to prevent clipping (divide by active voice count)
-        let active_count = self.voices[..self.voice_count].iter().filter(|v| v.active).count();
-        if active_count > 1 {
-            let scale = 1.0 / (active_count as f32).sqrt(); // Use sqrt for better loudness perception
-            for sample in output.iter_mut() {
-                *sample *= scale;
             }
         }
     }

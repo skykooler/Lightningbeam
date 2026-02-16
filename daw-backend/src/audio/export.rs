@@ -689,16 +689,24 @@ fn encode_complete_frame_mp3(
     frame.set_pts(Some(pts));
 
     // Copy all planar samples to frame
-    unsafe {
-        for ch in 0..channels {
-            let plane = frame.data_mut(ch);
-            let src = &planar_samples[ch];
+    for ch in 0..channels {
+        let plane = frame.data_mut(ch);
+        let src = &planar_samples[ch];
 
-            std::ptr::copy_nonoverlapping(
-                src.as_ptr() as *const u8,
-                plane.as_mut_ptr(),
-                num_frames * std::mem::size_of::<i16>(),
-            );
+        // Verify buffer size
+        let byte_size = num_frames * std::mem::size_of::<i16>();
+        if plane.len() < byte_size {
+            return Err(format!(
+                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
+                plane.len(), byte_size
+            ));
+        }
+
+        // Safe byte-level copy
+        for (i, &sample) in src.iter().enumerate() {
+            let bytes = sample.to_ne_bytes();
+            let offset = i * 2;
+            plane[offset..offset + 2].copy_from_slice(&bytes);
         }
     }
 
@@ -734,16 +742,24 @@ fn encode_complete_frame_aac(
     frame.set_pts(Some(pts));
 
     // Copy all planar samples to frame
-    unsafe {
-        for ch in 0..channels {
-            let plane = frame.data_mut(ch);
-            let src = &planar_samples[ch];
+    for ch in 0..channels {
+        let plane = frame.data_mut(ch);
+        let src = &planar_samples[ch];
 
-            std::ptr::copy_nonoverlapping(
-                src.as_ptr() as *const u8,
-                plane.as_mut_ptr(),
-                num_frames * std::mem::size_of::<f32>(),
-            );
+        // Verify buffer size
+        let byte_size = num_frames * std::mem::size_of::<f32>();
+        if plane.len() < byte_size {
+            return Err(format!(
+                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
+                plane.len(), byte_size
+            ));
+        }
+
+        // Safe byte-level copy
+        for (i, &sample) in src.iter().enumerate() {
+            let bytes = sample.to_ne_bytes();
+            let offset = i * 4;
+            plane[offset..offset + 4].copy_from_slice(&bytes);
         }
     }
 

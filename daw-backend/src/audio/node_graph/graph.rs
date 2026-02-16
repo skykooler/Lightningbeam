@@ -977,7 +977,6 @@ impl AudioGraph {
                     // If there's a template graph, deserialize and set it
                     if let Some(ref template_preset) = serialized_node.template_graph {
                         let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path)?;
-                        // Set the template graph (we'll need to add this method to VoiceAllocator)
                         *va.template_graph_mut() = template_graph;
                         va.rebuild_voices();
                     }
