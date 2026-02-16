@@ -1426,6 +1426,34 @@ impl Engine {
                 }
             }
 
+            Command::GraphSetGroups(track_id, groups) => {
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    graph.set_frontend_groups(groups);
+                }
+            }
+
+            Command::GraphSetGroupsInTemplate(track_id, voice_allocator_id, groups) => {
+                use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(voice_allocator_id as usize);
+                    if let Some(graph_node) = graph.get_node_mut(node_idx) {
+                        if let Some(va_node) = graph_node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
+                            va_node.template_graph_mut().set_frontend_groups(groups);
+                        }
+                    }
+                }
+            }
+
             Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags) => {
                 let graph = match self.project.get_track(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
@@ -3027,6 +3055,16 @@ impl EngineController {
     /// Set which node is the audio output in a track's instrument graph
     pub fn graph_set_output_node(&mut self, track_id: TrackId, node_id: u32) {
         let _ = self.command_tx.push(Command::GraphSetOutputNode(track_id, node_id));
+    }
+
+    /// Set frontend-only group definitions on a track's graph
+    pub fn graph_set_groups(&mut self, track_id: TrackId, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        let _ = self.command_tx.push(Command::GraphSetGroups(track_id, groups));
+    }
+
+    /// Set frontend-only group definitions on a VA template graph
+    pub fn graph_set_groups_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        let _ = self.command_tx.push(Command::GraphSetGroupsInTemplate(track_id, voice_allocator_id, groups));
     }
 
     /// Save the current graph as a preset

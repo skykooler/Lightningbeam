@@ -163,6 +163,11 @@ pub enum Command {
     /// Set which node is the audio output (track_id, node_index)
     GraphSetOutputNode(TrackId, u32),
 
+    /// Set frontend-only group definitions on a track's graph (track_id, serialized groups)
+    GraphSetGroups(TrackId, Vec<crate::audio::node_graph::preset::SerializedGroup>),
+    /// Set frontend-only group definitions on a VA template graph (track_id, voice_allocator_id, serialized groups)
+    GraphSetGroupsInTemplate(TrackId, u32, Vec<crate::audio::node_graph::preset::SerializedGroup>),
+
     /// Save current graph as a preset (track_id, preset_path, preset_name, description, tags)
     GraphSavePreset(TrackId, String, String, String, Vec<String>),
     /// Load a preset into a track's graph (track_id, preset_path)

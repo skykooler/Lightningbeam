@@ -79,6 +79,9 @@ pub trait GraphBackend: Send {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String>;
+
+    /// Get the state of a VoiceAllocator's template graph as JSON
+    fn query_template_state(&self, voice_allocator_id: u32) -> Result<String, String>;
 }
 
 /// Serializable graph state (for presets and save/load)

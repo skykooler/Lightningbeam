@@ -13,14 +13,50 @@ use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, DataType, GraphState, 
 use super::NodePath;
 use eframe::egui;
 use egui_node_graph2::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+type GroupId = u32;
+
+/// A connection that crosses a group boundary
+#[derive(Clone, Debug)]
+struct BoundaryConnection {
+    /// Node outside the group (backend ID)
+    external_node: u32,
+    /// Port index on the external node
+    external_port: usize,
+    /// Node inside the group (backend ID)
+    internal_node: u32,
+    /// Port index on the internal node
+    internal_port: usize,
+    /// Display name for the group port
+    port_name: String,
+    /// Signal type for the port
+    data_type: DataType,
+}
+
+/// A group of nodes collapsed into a single placeholder
+#[derive(Clone, Debug)]
+struct GroupDef {
+    id: GroupId,
+    name: String,
+    /// Backend node IDs of nodes belonging to this group
+    member_nodes: Vec<u32>,
+    /// Position of the group placeholder node
+    position: (f32, f32),
+    /// Connections from outside → inside the group
+    boundary_inputs: Vec<BoundaryConnection>,
+    /// Connections from inside → outside the group
+    boundary_outputs: Vec<BoundaryConnection>,
+    /// Parent group ID for nested groups (None = top-level group)
+    parent_group_id: Option<GroupId>,
+}
 
 /// What kind of container we've entered for subgraph editing
 #[derive(Clone, Debug)]
 enum SubgraphContext {
-    VoiceAllocator { frontend_id: NodeId, backend_id: BackendNodeId },
-    Group { frontend_id: NodeId, backend_id: BackendNodeId, name: String },
+    VoiceAllocator { backend_id: BackendNodeId },
+    Group { group_id: GroupId, name: String },
 }
 
 /// One level of subgraph editing — stores the parent state we'll restore on exit
@@ -36,6 +72,11 @@ struct SavedGraphState {
     node_id_map: HashMap<NodeId, BackendNodeId>,
     backend_to_frontend_map: HashMap<BackendNodeId, NodeId>,
     parameter_values: HashMap<InputId, f32>,
+    /// Groups are only saved/restored for VA transitions. For Group transitions,
+    /// groups persist in self (so sub-groups aren't lost on exit).
+    groups: Option<Vec<GroupDef>>,
+    next_group_id: Option<GroupId>,
+    group_placeholder_map: HashMap<NodeId, GroupId>,
 }
 
 /// Node graph pane with egui_node_graph2 integration
@@ -82,6 +123,19 @@ pub struct NodeGraphPane {
     /// Stack of subgraph contexts — empty = editing track-level graph,
     /// non-empty = editing nested subgraph(s). Supports arbitrary nesting depth.
     subgraph_stack: Vec<SubgraphFrame>,
+
+    /// Group definitions (frontend-only — backend graph stays flat)
+    groups: Vec<GroupDef>,
+    /// Next group ID to assign
+    next_group_id: GroupId,
+    /// Maps frontend NodeId → GroupId for group placeholder nodes
+    group_placeholder_map: HashMap<NodeId, GroupId>,
+    /// Group currently being renamed (shows text edit popup)
+    renaming_group: Option<(GroupId, String)>,
+    /// Right-click context menu state: (node_id, screen_pos)
+    node_context_menu: Option<(NodeId, egui::Pos2)>,
+    /// Cached node screen rects from last frame (for hit-testing)
+    last_node_rects: std::collections::HashMap<NodeId, egui::Rect>,
 }
 
 impl NodeGraphPane {
@@ -102,6 +156,12 @@ impl NodeGraphPane {
             dragging_node: None,
             insert_target: None,
             subgraph_stack: Vec::new(),
+            groups: Vec::new(),
+            next_group_id: 1,
+            group_placeholder_map: HashMap::new(),
+            renaming_group: None,
+            node_context_menu: None,
+            last_node_rects: HashMap::new(),
         }
     }
 
@@ -130,6 +190,12 @@ impl NodeGraphPane {
             dragging_node: None,
             insert_target: None,
             subgraph_stack: Vec::new(),
+            groups: Vec::new(),
+            next_group_id: 1,
+            group_placeholder_map: HashMap::new(),
+            renaming_group: None,
+            node_context_menu: None,
+            last_node_rects: HashMap::new(),
         };
 
         // Load existing graph from backend
@@ -312,6 +378,15 @@ impl NodeGraphPane {
                     }
                 }
                 NodeResponse::DeleteNodeFull { node_id, .. } => {
+                    // If this is a group placeholder, ungroup instead of deleting
+                    if let Some(&group_id) = self.group_placeholder_map.get(&node_id) {
+                        self.groups.retain(|g| g.id != group_id);
+                        // Will rebuild view after response handling
+                        self.rebuild_view();
+                        self.sync_groups_to_backend(shared);
+                        continue;
+                    }
+
                     // Node was deleted
                     if let Some(track_id) = self.track_id {
                         if let Some(&backend_id) = self.node_id_map.get(&node_id) {
@@ -343,6 +418,16 @@ impl NodeGraphPane {
                 NodeResponse::MoveNode { node, drag_delta: _ } => {
                     self.user_state.active_node = Some(node);
                     self.dragging_node = Some(node);
+
+                    // Update group placeholder position (frontend-only, no backend sync)
+                    if let Some(&group_id) = self.group_placeholder_map.get(&node) {
+                        if let Some(pos) = self.state.node_positions.get(node) {
+                            if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+                                group.position = (pos.x, pos.y);
+                            }
+                        }
+                        continue;
+                    }
 
                     // Sync updated position to backend
                     if let Some(&backend_id) = self.node_id_map.get(&node) {
@@ -384,7 +469,6 @@ impl NodeGraphPane {
                                     if let Some(&backend_id) = self.node_id_map.get(&node_id) {
                                         self.enter_subgraph(
                                             SubgraphContext::VoiceAllocator {
-                                                frontend_id: node_id,
                                                 backend_id,
                                             },
                                             shared,
@@ -394,12 +478,11 @@ impl NodeGraphPane {
                             }
                             NodeTemplate::Group => {
                                 // Groups can nest arbitrarily deep
-                                if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                                if let Some(&group_id) = self.group_placeholder_map.get(&node_id) {
                                     let name = node.label.clone();
                                     self.enter_subgraph(
                                         SubgraphContext::Group {
-                                            frontend_id: node_id,
-                                            backend_id,
+                                            group_id,
                                             name,
                                         },
                                         shared,
@@ -903,13 +986,26 @@ impl NodeGraphPane {
         context: SubgraphContext,
         shared: &mut crate::panes::SharedPaneState,
     ) {
-        // Save current state
+        let is_va = matches!(context, SubgraphContext::VoiceAllocator { .. });
+
+        // Only save/restore groups for VA transitions.
+        // For Group transitions, groups persist in self so sub-groups aren't lost.
+        let (saved_groups, saved_next_group_id) = if is_va {
+            (Some(std::mem::take(&mut self.groups)), Some(std::mem::replace(&mut self.next_group_id, 1)))
+        } else {
+            (None, None)
+        };
+
+        // Save current editor state
         let saved = SavedGraphState {
             state: std::mem::replace(&mut self.state, GraphEditorState::new(1.0)),
             user_state: std::mem::replace(&mut self.user_state, GraphState::default()),
             node_id_map: std::mem::take(&mut self.node_id_map),
             backend_to_frontend_map: std::mem::take(&mut self.backend_to_frontend_map),
             parameter_values: std::mem::take(&mut self.parameter_values),
+            groups: saved_groups,
+            next_group_id: saved_next_group_id,
+            group_placeholder_map: std::mem::take(&mut self.group_placeholder_map),
         };
 
         self.subgraph_stack.push(SubgraphFrame {
@@ -940,7 +1036,9 @@ impl NodeGraphPane {
                 }
             }
             SubgraphContext::Group { .. } => {
-                // TODO: query_subgraph_state when group backend is implemented
+                // Groups are frontend-only. Rebuild the view scoped to this group,
+                // showing member nodes, sub-group placeholders, and boundary indicators.
+                self.rebuild_view();
             }
         }
     }
@@ -953,6 +1051,14 @@ impl NodeGraphPane {
             self.node_id_map = frame.saved_state.node_id_map;
             self.backend_to_frontend_map = frame.saved_state.backend_to_frontend_map;
             self.parameter_values = frame.saved_state.parameter_values;
+            // Only restore groups if they were saved (VA transitions save them, Group transitions don't)
+            if let Some(groups) = frame.saved_state.groups {
+                self.groups = groups;
+            }
+            if let Some(next_id) = frame.saved_state.next_group_id {
+                self.next_group_id = next_id;
+            }
+            self.group_placeholder_map = frame.saved_state.group_placeholder_map;
         }
     }
 
@@ -983,142 +1089,137 @@ impl NodeGraphPane {
 
         // Create nodes in frontend
         for node in &graph_state.nodes {
-            let node_template = match node.node_type.as_str() {
-                "MidiInput" => NodeTemplate::MidiInput,
-                "AudioInput" => NodeTemplate::AudioInput,
-                "AutomationInput" => NodeTemplate::AutomationInput,
-                "Oscillator" => NodeTemplate::Oscillator,
-                "WavetableOscillator" => NodeTemplate::WavetableOscillator,
-                "FMSynth" => NodeTemplate::FmSynth,
-                "NoiseGenerator" => NodeTemplate::Noise,
-                "SimpleSampler" => NodeTemplate::SimpleSampler,
-                "MultiSampler" => NodeTemplate::MultiSampler,
-                "Filter" => NodeTemplate::Filter,
-                "Gain" => NodeTemplate::Gain,
-                "Echo" | "Delay" => NodeTemplate::Echo,
-                "Reverb" => NodeTemplate::Reverb,
-                "Chorus" => NodeTemplate::Chorus,
-                "Flanger" => NodeTemplate::Flanger,
-                "Phaser" => NodeTemplate::Phaser,
-                "Distortion" => NodeTemplate::Distortion,
-                "BitCrusher" => NodeTemplate::BitCrusher,
-                "Compressor" => NodeTemplate::Compressor,
-                "Limiter" => NodeTemplate::Limiter,
-                "EQ" => NodeTemplate::Eq,
-                "Pan" => NodeTemplate::Pan,
-                "RingModulator" => NodeTemplate::RingModulator,
-                "Vocoder" => NodeTemplate::Vocoder,
-                "ADSR" => NodeTemplate::Adsr,
-                "LFO" => NodeTemplate::Lfo,
-                "Mixer" => NodeTemplate::Mixer,
-                "Splitter" => NodeTemplate::Splitter,
-                "Constant" => NodeTemplate::Constant,
-                "MidiToCV" => NodeTemplate::MidiToCv,
-                "AudioToCV" => NodeTemplate::AudioToCv,
-                "Math" => NodeTemplate::Math,
-                "SampleHold" => NodeTemplate::SampleHold,
-                "SlewLimiter" => NodeTemplate::SlewLimiter,
-                "Quantizer" => NodeTemplate::Quantizer,
-                "EnvelopeFollower" => NodeTemplate::EnvelopeFollower,
-                "BPMDetector" => NodeTemplate::BpmDetector,
-                "Mod" => NodeTemplate::Mod,
-                "Oscilloscope" => NodeTemplate::Oscilloscope,
-                "VoiceAllocator" => NodeTemplate::VoiceAllocator,
-                "Group" => NodeTemplate::Group,
-                "TemplateInput" => NodeTemplate::TemplateInput,
-                "TemplateOutput" => NodeTemplate::TemplateOutput,
-                "AudioOutput" => NodeTemplate::AudioOutput,
-                _ => {
+            let node_template = match Self::backend_type_to_template(&node.node_type) {
+                Some(t) => t,
+                None => {
                     eprintln!("Unknown node type: {}", node.node_type);
                     continue;
                 }
             };
 
-            use egui_node_graph2::Node;
-            let frontend_id = self.state.graph.nodes.insert(Node {
-                id: NodeId::default(),
-                label: node.node_type.clone(),
-                inputs: vec![],
-                outputs: vec![],
-                user_data: NodeData { template: node_template },
-            });
-
-            node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
-
-            self.state.node_positions.insert(
-                frontend_id,
-                egui::pos2(node.position.0, node.position.1),
-            );
-
-            self.state.node_order.push(frontend_id);
-
-            let backend_id = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(node.id as usize));
-            self.node_id_map.insert(frontend_id, backend_id);
-            self.backend_to_frontend_map.insert(backend_id, frontend_id);
-
-            // Set parameter values from backend
-            if let Some(node_data) = self.state.graph.nodes.get(frontend_id) {
-                let input_ids: Vec<InputId> = node_data.inputs.iter().map(|(_, id)| *id).collect();
-                for input_id in input_ids {
-                    if let Some(input_param) = self.state.graph.inputs.get_mut(input_id) {
-                        if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &mut input_param.value {
-                            if let Some(&backend_value) = node.parameters.get(pid) {
-                                *value = backend_value as f32;
-                            }
-                        }
-                    }
-                }
-            }
+            self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
         }
 
         // Create connections in frontend
         for conn in &graph_state.connections {
-            let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.from_node as usize));
-            let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.to_node as usize));
+            self.add_connection_to_editor(conn.from_node, conn.from_port, conn.to_node, conn.to_port);
+        }
 
-            if let (Some(&from_id), Some(&to_id)) = (
-                self.backend_to_frontend_map.get(&from_backend),
-                self.backend_to_frontend_map.get(&to_backend),
-            ) {
-                if let Some(from_node) = self.state.graph.nodes.get(from_id) {
-                    if let Some((_name, output_id)) = from_node.outputs.get(conn.from_port) {
-                        if let Some(to_node) = self.state.graph.nodes.get(to_id) {
-                            if let Some((_name, input_id)) = to_node.inputs.get(conn.to_port) {
-                                let max_conns = self.state.graph.inputs.get(*input_id)
-                                    .and_then(|p| p.max_connections)
-                                    .map(|n| n.get() as usize)
-                                    .unwrap_or(usize::MAX);
-
-                                let current_count = self.state.graph.connections.get(*input_id)
-                                    .map(|c| c.len())
-                                    .unwrap_or(0);
-
-                                if current_count < max_conns {
-                                    if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
-                                        connections.push(*output_id);
-                                    } else {
-                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
-                                    }
-                                }
-                            }
-                        }
-                    }
+        // Restore groups from preset
+        self.groups.clear();
+        self.group_placeholder_map.clear();
+        self.next_group_id = 1;
+        if !graph_state.groups.is_empty() {
+            for sg in &graph_state.groups {
+                let group = GroupDef {
+                    id: sg.id,
+                    name: sg.name.clone(),
+                    member_nodes: sg.member_nodes.clone(),
+                    position: sg.position,
+                    boundary_inputs: sg.boundary_inputs.iter().map(|bc| BoundaryConnection {
+                        external_node: bc.external_node,
+                        external_port: bc.external_port,
+                        internal_node: bc.internal_node,
+                        internal_port: bc.internal_port,
+                        port_name: bc.port_name.clone(),
+                        data_type: match bc.data_type.as_str() {
+                            "Midi" => DataType::Midi,
+                            "CV" => DataType::CV,
+                            _ => DataType::Audio,
+                        },
+                    }).collect(),
+                    boundary_outputs: sg.boundary_outputs.iter().map(|bc| BoundaryConnection {
+                        external_node: bc.external_node,
+                        external_port: bc.external_port,
+                        internal_node: bc.internal_node,
+                        internal_port: bc.internal_port,
+                        port_name: bc.port_name.clone(),
+                        data_type: match bc.data_type.as_str() {
+                            "Midi" => DataType::Midi,
+                            "CV" => DataType::CV,
+                            _ => DataType::Audio,
+                        },
+                    }).collect(),
+                    parent_group_id: sg.parent_group_id,
+                };
+                if sg.id >= self.next_group_id {
+                    self.next_group_id = sg.id + 1;
                 }
+                self.groups.push(group);
             }
+            // Rebuild the view to show group placeholders instead of member nodes
+            self.rebuild_view();
         }
 
         Ok(())
     }
 
-    /// Get the VA backend node ID if we're editing inside a VoiceAllocator template
-    fn va_context(&self) -> Option<u32> {
-        match self.current_subgraph()? {
-            SubgraphContext::VoiceAllocator { backend_id, .. } => {
-                let BackendNodeId::Audio(idx) = *backend_id;
-                Some(idx.index() as u32)
-            }
-            _ => None,
+    /// Serialize a GroupDef to backend format
+    fn serialize_group(g: &GroupDef) -> daw_backend::audio::node_graph::SerializedGroup {
+        daw_backend::audio::node_graph::SerializedGroup {
+            id: g.id,
+            name: g.name.clone(),
+            member_nodes: g.member_nodes.clone(),
+            position: g.position,
+            boundary_inputs: g.boundary_inputs.iter().map(|bc| {
+                daw_backend::audio::node_graph::SerializedBoundaryConnection {
+                    external_node: bc.external_node,
+                    external_port: bc.external_port,
+                    internal_node: bc.internal_node,
+                    internal_port: bc.internal_port,
+                    port_name: bc.port_name.clone(),
+                    data_type: match bc.data_type {
+                        DataType::Audio => "Audio".to_string(),
+                        DataType::Midi => "Midi".to_string(),
+                        DataType::CV => "CV".to_string(),
+                    },
+                }
+            }).collect(),
+            boundary_outputs: g.boundary_outputs.iter().map(|bc| {
+                daw_backend::audio::node_graph::SerializedBoundaryConnection {
+                    external_node: bc.external_node,
+                    external_port: bc.external_port,
+                    internal_node: bc.internal_node,
+                    internal_port: bc.internal_port,
+                    port_name: bc.port_name.clone(),
+                    data_type: match bc.data_type {
+                        DataType::Audio => "Audio".to_string(),
+                        DataType::Midi => "Midi".to_string(),
+                        DataType::CV => "CV".to_string(),
+                    },
+                }
+            }).collect(),
+            parent_group_id: g.parent_group_id,
         }
+    }
+
+    /// Serialize frontend groups to backend format and send to backend for persistence
+    fn sync_groups_to_backend(&self, shared: &crate::panes::SharedPaneState) {
+        let Some(track_id) = self.track_id else { return };
+        let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) else { return };
+        let Some(audio_controller) = &shared.audio_controller else { return };
+
+        let serialized: Vec<_> = self.groups.iter().map(Self::serialize_group).collect();
+
+        let mut controller = audio_controller.lock().unwrap();
+        if let Some(va_id) = self.va_context() {
+            controller.graph_set_groups_in_template(backend_track_id, va_id, serialized);
+        } else {
+            controller.graph_set_groups(backend_track_id, serialized);
+        }
+    }
+
+    /// Get the VA backend node ID if we're editing inside a VoiceAllocator template.
+    /// Searches the entire subgraph stack, not just the top — so a Group inside a VA
+    /// still finds the VA context.
+    fn va_context(&self) -> Option<u32> {
+        for frame in self.subgraph_stack.iter().rev() {
+            if let SubgraphContext::VoiceAllocator { backend_id, .. } = &frame.context {
+                let BackendNodeId::Audio(idx) = *backend_id;
+                return Some(idx.index() as u32);
+            }
+        }
+        None
     }
 
     /// Whether we're currently editing inside a subgraph
@@ -1126,9 +1227,15 @@ impl NodeGraphPane {
         !self.subgraph_stack.is_empty()
     }
 
-    /// Get the current subgraph context (top of stack)
-    fn current_subgraph(&self) -> Option<&SubgraphContext> {
-        self.subgraph_stack.last().map(|f| &f.context)
+    /// Get the GroupId of the current group scope (if inside a group), for filtering sub-groups.
+    fn current_group_scope(&self) -> Option<GroupId> {
+        self.subgraph_stack.last().and_then(|frame| {
+            if let SubgraphContext::Group { group_id, .. } = &frame.context {
+                Some(*group_id)
+            } else {
+                None
+            }
+        })
     }
 
     /// Build breadcrumb segments for the current subgraph stack
@@ -1141,6 +1248,671 @@ impl NodeGraphPane {
             }
         }
         segments
+    }
+
+    /// Group the currently selected nodes into a new group
+    fn group_selected_nodes(&mut self, shared: &mut crate::panes::SharedPaneState) {
+        if self.state.selected_nodes.len() < 2 {
+            return;
+        }
+
+        // Don't allow grouping group placeholders
+        if self.state.selected_nodes.iter().any(|id| self.group_placeholder_map.contains_key(id)) {
+            return;
+        }
+
+        // Collect selected backend IDs
+        let selected_backend_ids: Vec<u32> = self.state.selected_nodes.iter()
+            .filter_map(|fid| self.node_id_map.get(fid))
+            .map(|bid| { let BackendNodeId::Audio(idx) = *bid; idx.index() as u32 })
+            .collect();
+
+        if selected_backend_ids.is_empty() {
+            return;
+        }
+
+        let selected_set: HashSet<u32> = selected_backend_ids.iter().copied().collect();
+
+        // Find boundary connections by scanning all connections in the editor
+        let mut boundary_inputs: Vec<BoundaryConnection> = Vec::new();
+        let mut boundary_outputs: Vec<BoundaryConnection> = Vec::new();
+
+        // Collect connection info: (input_id, vec of output_ids)
+        let connections: Vec<(InputId, Vec<OutputId>)> = self.state.graph.connections.iter()
+            .map(|(iid, oids)| (iid, oids.clone()))
+            .collect();
+
+        for (input_id, output_ids) in &connections {
+            let to_node_fid = self.state.graph.inputs.get(*input_id).map(|p| p.node);
+            for &output_id in output_ids {
+                let from_node_fid = self.state.graph.outputs.get(output_id).map(|p| p.node);
+
+                if let (Some(from_fid), Some(to_fid)) = (from_node_fid, to_node_fid) {
+                    let from_bid = self.node_id_map.get(&from_fid)
+                        .map(|b| { let BackendNodeId::Audio(idx) = *b; idx.index() as u32 });
+                    let to_bid = self.node_id_map.get(&to_fid)
+                        .map(|b| { let BackendNodeId::Audio(idx) = *b; idx.index() as u32 });
+
+                    if let (Some(from_b), Some(to_b)) = (from_bid, to_bid) {
+                        let from_in_group = selected_set.contains(&from_b);
+                        let to_in_group = selected_set.contains(&to_b);
+
+                        if !from_in_group && to_in_group {
+                            // Boundary input: external → internal
+                            let from_port = self.state.graph.nodes.get(from_fid)
+                                .and_then(|n| n.outputs.iter().position(|(_, id)| *id == output_id))
+                                .unwrap_or(0);
+                            let to_port = self.state.graph.nodes.get(to_fid)
+                                .and_then(|n| n.inputs.iter().position(|(_, id)| *id == *input_id))
+                                .unwrap_or(0);
+
+                            // Get port name from the input node's input label, and data type
+                            let (port_name, data_type) = self.state.graph.nodes.get(to_fid)
+                                .and_then(|n| n.inputs.get(to_port))
+                                .map(|(name, iid)| {
+                                    let dt = self.state.graph.inputs.get(*iid)
+                                        .map(|p| p.typ)
+                                        .unwrap_or(DataType::Audio);
+                                    (name.clone(), dt)
+                                })
+                                .unwrap_or_else(|| ("In".to_string(), DataType::Audio));
+
+                            boundary_inputs.push(BoundaryConnection {
+                                external_node: from_b,
+                                external_port: from_port,
+                                internal_node: to_b,
+                                internal_port: to_port,
+                                port_name,
+                                data_type,
+                            });
+                        } else if from_in_group && !to_in_group {
+                            // Boundary output: internal → external
+                            let from_port = self.state.graph.nodes.get(from_fid)
+                                .and_then(|n| n.outputs.iter().position(|(_, id)| *id == output_id))
+                                .unwrap_or(0);
+                            let to_port = self.state.graph.nodes.get(to_fid)
+                                .and_then(|n| n.inputs.iter().position(|(_, id)| *id == *input_id))
+                                .unwrap_or(0);
+
+                            // Get port name from the output node's output label, and data type
+                            let (port_name, data_type) = self.state.graph.nodes.get(from_fid)
+                                .and_then(|n| n.outputs.get(from_port))
+                                .map(|(name, oid)| {
+                                    let dt = self.state.graph.outputs.get(*oid)
+                                        .map(|p| p.typ)
+                                        .unwrap_or(DataType::Audio);
+                                    (name.clone(), dt)
+                                })
+                                .unwrap_or_else(|| ("Out".to_string(), DataType::Audio));
+
+                            boundary_outputs.push(BoundaryConnection {
+                                external_node: to_b,
+                                external_port: to_port,
+                                internal_node: from_b,
+                                internal_port: from_port,
+                                port_name,
+                                data_type,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate average position of selected nodes
+        let mut sum_x = 0.0f32;
+        let mut sum_y = 0.0f32;
+        let mut count = 0;
+        for &fid in &self.state.selected_nodes {
+            if let Some(pos) = self.state.node_positions.get(fid) {
+                sum_x += pos.x;
+                sum_y += pos.y;
+                count += 1;
+            }
+        }
+        let position = if count > 0 {
+            (sum_x / count as f32, sum_y / count as f32)
+        } else {
+            (0.0, 0.0)
+        };
+
+        // Inherit boundary connections from the parent group for any internal nodes
+        // that are being included in this sub-group. This handles the case where
+        // connections pass through the parent's Group Input/Output synthetic nodes
+        // (which don't have backend IDs and are invisible to the editor scan above).
+        if let Some(parent_gid) = self.current_group_scope() {
+            if let Some(parent_group) = self.groups.iter().find(|g| g.id == parent_gid).cloned() {
+                for bc in &parent_group.boundary_inputs {
+                    if selected_set.contains(&bc.internal_node) {
+                        // Check we don't already have this boundary from the editor scan
+                        let already_exists = boundary_inputs.iter().any(|existing|
+                            existing.internal_node == bc.internal_node &&
+                            existing.internal_port == bc.internal_port &&
+                            existing.external_node == bc.external_node &&
+                            existing.external_port == bc.external_port
+                        );
+                        if !already_exists {
+                            boundary_inputs.push(bc.clone());
+                        }
+                    }
+                }
+                for bc in &parent_group.boundary_outputs {
+                    if selected_set.contains(&bc.internal_node) {
+                        let already_exists = boundary_outputs.iter().any(|existing|
+                            existing.internal_node == bc.internal_node &&
+                            existing.internal_port == bc.internal_port &&
+                            existing.external_node == bc.external_node &&
+                            existing.external_port == bc.external_port
+                        );
+                        if !already_exists {
+                            boundary_outputs.push(bc.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let group = GroupDef {
+            id: self.next_group_id,
+            name: format!("Group {}", self.next_group_id),
+            member_nodes: selected_backend_ids,
+            position,
+            boundary_inputs,
+            boundary_outputs,
+            parent_group_id: self.current_group_scope(),
+        };
+        self.next_group_id += 1;
+        self.groups.push(group);
+
+        // Rebuild the view to show the group placeholder
+        self.rebuild_view();
+
+        // Sync groups to backend for persistence
+        self.sync_groups_to_backend(shared);
+    }
+
+    /// Ungroup a group, restoring member nodes to the current view.
+    /// Also promotes any child groups to the current scope.
+    fn ungroup(&mut self, group_id: GroupId, shared: &crate::panes::SharedPaneState) {
+        let parent = self.groups.iter().find(|g| g.id == group_id).and_then(|g| g.parent_group_id);
+        // Promote child groups: any group whose parent was the ungrouped group
+        // now becomes a child of the ungrouped group's parent
+        for g in &mut self.groups {
+            if g.parent_group_id == Some(group_id) {
+                g.parent_group_id = parent;
+            }
+        }
+        self.groups.retain(|g| g.id != group_id);
+        self.rebuild_view();
+        self.sync_groups_to_backend(shared);
+    }
+
+    /// Rebuild the graph view, scope-aware for nested groups.
+    /// - At top level (no group scope): shows all ungrouped nodes + root group placeholders
+    /// - Inside a group: shows that group's member nodes (minus sub-group members) + sub-group placeholders + boundary indicators
+    /// Context-aware: queries the template graph when inside a VA subgraph.
+    fn rebuild_view(&mut self) {
+        let backend = match &self.backend {
+            Some(b) => b,
+            None => return,
+        };
+        let json = if let Some(va_id) = self.va_context() {
+            match backend.query_template_state(va_id) {
+                Ok(json) => json,
+                Err(e) => { eprintln!("Failed to query template state: {}", e); return; }
+            }
+        } else {
+            match backend.get_state_json() {
+                Ok(json) => json,
+                Err(e) => { eprintln!("Failed to query backend: {}", e); return; }
+            }
+        };
+
+        let graph_state: daw_backend::audio::node_graph::GraphPreset = match serde_json::from_str(&json) {
+            Ok(state) => state,
+            Err(e) => { eprintln!("Failed to parse graph state: {}", e); return; }
+        };
+
+        let current_scope = self.current_group_scope();
+
+        // Determine which nodes are "in scope" (visible universe)
+        let scope_members: Option<HashSet<u32>> = current_scope.and_then(|gid| {
+            self.groups.iter().find(|g| g.id == gid)
+                .map(|g| g.member_nodes.iter().copied().collect())
+        });
+
+        // Get groups relevant to this scope (direct children)
+        let relevant_groups: Vec<GroupDef> = self.groups.iter()
+            .filter(|g| g.parent_group_id == current_scope)
+            .cloned()
+            .collect();
+
+        // Build set of node IDs hidden behind sub-group placeholders
+        let sub_grouped_ids: HashSet<u32> = relevant_groups.iter()
+            .flat_map(|g| g.member_nodes.iter().copied())
+            .collect();
+
+        // Clear editor state
+        self.state.graph.nodes.clear();
+        self.state.graph.inputs.clear();
+        self.state.graph.outputs.clear();
+        self.state.graph.connections.clear();
+        self.state.node_order.clear();
+        self.state.node_positions.clear();
+        self.state.selected_nodes.clear();
+        self.state.connection_in_progress = None;
+        self.state.ongoing_box_selection = None;
+        self.node_id_map.clear();
+        self.backend_to_frontend_map.clear();
+        self.group_placeholder_map.clear();
+        self.parameter_values.clear();
+
+        // Add visible nodes: in scope, not hidden by sub-groups
+        for node in &graph_state.nodes {
+            // If inside a group, only include nodes that are members of that group
+            if let Some(ref members) = scope_members {
+                if !members.contains(&node.id) {
+                    continue;
+                }
+            }
+            // Skip nodes hidden behind sub-group placeholders
+            if sub_grouped_ids.contains(&node.id) {
+                continue;
+            }
+
+            let node_template = match Self::backend_type_to_template(&node.node_type) {
+                Some(t) => t,
+                None => {
+                    eprintln!("Unknown node type: {}", node.node_type);
+                    continue;
+                }
+            };
+
+            self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
+        }
+
+        // Add sub-group placeholder nodes
+        for group in &relevant_groups {
+            let frontend_id = self.state.graph.nodes.insert(egui_node_graph2::Node {
+                id: NodeId::default(),
+                label: group.name.clone(),
+                inputs: vec![],
+                outputs: vec![],
+                user_data: NodeData { template: NodeTemplate::Group },
+            });
+
+            // Add dynamic input ports based on boundary inputs
+            for (i, bc) in group.boundary_inputs.iter().enumerate() {
+                let name = if group.boundary_inputs.len() == 1 {
+                    bc.port_name.clone()
+                } else {
+                    format!("{} {}", bc.port_name, i + 1)
+                };
+                self.state.graph.add_input_param(
+                    frontend_id,
+                    name.into(),
+                    bc.data_type,
+                    ValueType::float(0.0),
+                    InputParamKind::ConnectionOnly,
+                    true,
+                );
+            }
+
+            // Add dynamic output ports based on boundary outputs
+            for (i, bc) in group.boundary_outputs.iter().enumerate() {
+                let name = if group.boundary_outputs.len() == 1 {
+                    bc.port_name.clone()
+                } else {
+                    format!("{} {}", bc.port_name, i + 1)
+                };
+                self.state.graph.add_output_param(frontend_id, name.into(), bc.data_type);
+            }
+
+            self.state.node_positions.insert(frontend_id, egui::pos2(group.position.0, group.position.1));
+            self.state.node_order.push(frontend_id);
+            self.group_placeholder_map.insert(frontend_id, group.id);
+        }
+
+        // Add connections between visible nodes (skip connections involving sub-grouped nodes)
+        for conn in &graph_state.connections {
+            // If scoped, both endpoints must be in scope
+            if let Some(ref members) = scope_members {
+                if !members.contains(&conn.from_node) || !members.contains(&conn.to_node) {
+                    continue;
+                }
+            }
+            // Skip connections involving sub-grouped nodes
+            if sub_grouped_ids.contains(&conn.from_node) || sub_grouped_ids.contains(&conn.to_node) {
+                continue;
+            }
+
+            self.add_connection_to_editor(conn.from_node, conn.from_port, conn.to_node, conn.to_port);
+        }
+
+        // If inside a group, add synthetic Group Input / Group Output boundary indicator nodes
+        // BEFORE wiring sub-group boundaries, so sub-groups can wire to these nodes.
+        let mut group_input_fid: Option<NodeId> = None;
+        let mut group_output_fid: Option<NodeId> = None;
+        let scope_group = current_scope.and_then(|gid| {
+            self.groups.iter().find(|g| g.id == gid).cloned()
+        });
+
+        if let Some(ref scope_group) = scope_group {
+            // Group Input (for boundary inputs)
+            if !scope_group.boundary_inputs.is_empty() {
+                let min_x = graph_state.nodes.iter()
+                    .filter(|n| scope_group.member_nodes.contains(&n.id))
+                    .map(|n| n.position.0)
+                    .fold(f32::INFINITY, f32::min);
+
+                let gi_fid = self.state.graph.nodes.insert(egui_node_graph2::Node {
+                    id: NodeId::default(),
+                    label: "Group Input".to_string(),
+                    inputs: vec![],
+                    outputs: vec![],
+                    user_data: NodeData { template: NodeTemplate::Group },
+                });
+
+                for bc in &scope_group.boundary_inputs {
+                    self.state.graph.add_output_param(gi_fid, bc.port_name.clone().into(), bc.data_type);
+                }
+
+                self.state.node_positions.insert(gi_fid, egui::pos2(min_x - 250.0, 0.0));
+                self.state.node_order.push(gi_fid);
+                group_input_fid = Some(gi_fid);
+
+                // Wire Group Input outputs to visible internal nodes (not sub-grouped)
+                for (port_idx, bc) in scope_group.boundary_inputs.iter().enumerate() {
+                    if sub_grouped_ids.contains(&bc.internal_node) {
+                        continue; // Will be wired through sub-group placeholder below
+                    }
+                    let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(bc.internal_node as usize));
+                    if let Some(&to_fid) = self.backend_to_frontend_map.get(&to_backend) {
+                        if let Some(to_node) = self.state.graph.nodes.get(to_fid) {
+                            if let Some((_name, input_id)) = to_node.inputs.get(bc.internal_port) {
+                                if let Some(gi_node) = self.state.graph.nodes.get(gi_fid) {
+                                    if let Some((_name, output_id)) = gi_node.outputs.get(port_idx) {
+                                        if let Some(conns) = self.state.graph.connections.get_mut(*input_id) {
+                                            conns.push(*output_id);
+                                        } else {
+                                            self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Group Output (for boundary outputs)
+            if !scope_group.boundary_outputs.is_empty() {
+                let max_x = graph_state.nodes.iter()
+                    .filter(|n| scope_group.member_nodes.contains(&n.id))
+                    .map(|n| n.position.0)
+                    .fold(f32::NEG_INFINITY, f32::max);
+
+                let go_fid = self.state.graph.nodes.insert(egui_node_graph2::Node {
+                    id: NodeId::default(),
+                    label: "Group Output".to_string(),
+                    inputs: vec![],
+                    outputs: vec![],
+                    user_data: NodeData { template: NodeTemplate::Group },
+                });
+
+                for bc in &scope_group.boundary_outputs {
+                    self.state.graph.add_input_param(
+                        go_fid,
+                        bc.port_name.clone().into(),
+                        bc.data_type,
+                        ValueType::float(0.0),
+                        InputParamKind::ConnectionOnly,
+                        true,
+                    );
+                }
+
+                self.state.node_positions.insert(go_fid, egui::pos2(max_x + 250.0, 0.0));
+                self.state.node_order.push(go_fid);
+                group_output_fid = Some(go_fid);
+
+                // Wire visible internal nodes to Group Output inputs (not sub-grouped)
+                for (port_idx, bc) in scope_group.boundary_outputs.iter().enumerate() {
+                    if sub_grouped_ids.contains(&bc.internal_node) {
+                        continue; // Will be wired through sub-group placeholder below
+                    }
+                    let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(bc.internal_node as usize));
+                    if let Some(&from_fid) = self.backend_to_frontend_map.get(&from_backend) {
+                        if let Some(from_node) = self.state.graph.nodes.get(from_fid) {
+                            if let Some((_name, output_id)) = from_node.outputs.get(bc.internal_port) {
+                                if let Some(go_node) = self.state.graph.nodes.get(go_fid) {
+                                    if let Some((_name, input_id)) = go_node.inputs.get(port_idx) {
+                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add boundary connections to/from sub-group placeholders
+        for group in &relevant_groups {
+            let placeholder_fid = self.group_placeholder_map.iter()
+                .find(|(_, gid)| **gid == group.id)
+                .map(|(fid, _)| *fid);
+
+            if let Some(placeholder_fid) = placeholder_fid {
+                // Boundary inputs: external_node output → group input port
+                for (port_idx, bc) in group.boundary_inputs.iter().enumerate() {
+                    let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(bc.external_node as usize));
+                    if let Some(&from_fid) = self.backend_to_frontend_map.get(&from_backend) {
+                        // External node is visible in this scope — wire directly
+                        if let Some(from_node) = self.state.graph.nodes.get(from_fid) {
+                            if let Some((_name, output_id)) = from_node.outputs.get(bc.external_port) {
+                                if let Some(placeholder_node) = self.state.graph.nodes.get(placeholder_fid) {
+                                    if let Some((_name, input_id)) = placeholder_node.inputs.get(port_idx) {
+                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let (Some(ref sg), Some(gi_fid)) = (&scope_group, group_input_fid) {
+                        // External node is outside scope — wire from Group Input instead.
+                        // Find which Group Input port matches this boundary connection.
+                        if let Some(gi_port_idx) = sg.boundary_inputs.iter().position(|sbc|
+                            sbc.external_node == bc.external_node &&
+                            sbc.external_port == bc.external_port &&
+                            sbc.internal_node == bc.internal_node &&
+                            sbc.internal_port == bc.internal_port
+                        ) {
+                            if let Some(gi_node) = self.state.graph.nodes.get(gi_fid) {
+                                if let Some((_name, output_id)) = gi_node.outputs.get(gi_port_idx) {
+                                    if let Some(placeholder_node) = self.state.graph.nodes.get(placeholder_fid) {
+                                        if let Some((_name, input_id)) = placeholder_node.inputs.get(port_idx) {
+                                            self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Boundary outputs: group output port → external_node input
+                for (port_idx, bc) in group.boundary_outputs.iter().enumerate() {
+                    let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(bc.external_node as usize));
+                    if let Some(&to_fid) = self.backend_to_frontend_map.get(&to_backend) {
+                        // External node is visible in this scope — wire directly
+                        if let Some(to_node) = self.state.graph.nodes.get(to_fid) {
+                            if let Some((_name, input_id)) = to_node.inputs.get(bc.external_port) {
+                                if let Some(placeholder_node) = self.state.graph.nodes.get(placeholder_fid) {
+                                    if let Some((_name, output_id)) = placeholder_node.outputs.get(port_idx) {
+                                        if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
+                                            connections.push(*output_id);
+                                        } else {
+                                            self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if let (Some(ref sg), Some(go_fid)) = (&scope_group, group_output_fid) {
+                        // External node is outside scope — wire to Group Output instead.
+                        if let Some(go_port_idx) = sg.boundary_outputs.iter().position(|sbc|
+                            sbc.external_node == bc.external_node &&
+                            sbc.external_port == bc.external_port &&
+                            sbc.internal_node == bc.internal_node &&
+                            sbc.internal_port == bc.internal_port
+                        ) {
+                            if let Some(placeholder_node) = self.state.graph.nodes.get(placeholder_fid) {
+                                if let Some((_name, output_id)) = placeholder_node.outputs.get(port_idx) {
+                                    if let Some(go_node) = self.state.graph.nodes.get(go_fid) {
+                                        if let Some((_name, input_id)) = go_node.inputs.get(go_port_idx) {
+                                            if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
+                                                connections.push(*output_id);
+                                            } else {
+                                                self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Helper: map backend node type string to frontend NodeTemplate
+    fn backend_type_to_template(node_type: &str) -> Option<NodeTemplate> {
+        match node_type {
+            "MidiInput" => Some(NodeTemplate::MidiInput),
+            "AudioInput" => Some(NodeTemplate::AudioInput),
+            "AutomationInput" => Some(NodeTemplate::AutomationInput),
+            "Oscillator" => Some(NodeTemplate::Oscillator),
+            "WavetableOscillator" => Some(NodeTemplate::WavetableOscillator),
+            "FMSynth" => Some(NodeTemplate::FmSynth),
+            "NoiseGenerator" => Some(NodeTemplate::Noise),
+            "SimpleSampler" => Some(NodeTemplate::SimpleSampler),
+            "MultiSampler" => Some(NodeTemplate::MultiSampler),
+            "Filter" => Some(NodeTemplate::Filter),
+            "Gain" => Some(NodeTemplate::Gain),
+            "Echo" | "Delay" => Some(NodeTemplate::Echo),
+            "Reverb" => Some(NodeTemplate::Reverb),
+            "Chorus" => Some(NodeTemplate::Chorus),
+            "Flanger" => Some(NodeTemplate::Flanger),
+            "Phaser" => Some(NodeTemplate::Phaser),
+            "Distortion" => Some(NodeTemplate::Distortion),
+            "BitCrusher" => Some(NodeTemplate::BitCrusher),
+            "Compressor" => Some(NodeTemplate::Compressor),
+            "Limiter" => Some(NodeTemplate::Limiter),
+            "EQ" => Some(NodeTemplate::Eq),
+            "Pan" => Some(NodeTemplate::Pan),
+            "RingModulator" => Some(NodeTemplate::RingModulator),
+            "Vocoder" => Some(NodeTemplate::Vocoder),
+            "ADSR" => Some(NodeTemplate::Adsr),
+            "LFO" => Some(NodeTemplate::Lfo),
+            "Mixer" => Some(NodeTemplate::Mixer),
+            "Splitter" => Some(NodeTemplate::Splitter),
+            "Constant" => Some(NodeTemplate::Constant),
+            "MidiToCV" => Some(NodeTemplate::MidiToCv),
+            "AudioToCV" => Some(NodeTemplate::AudioToCv),
+            "Math" => Some(NodeTemplate::Math),
+            "SampleHold" => Some(NodeTemplate::SampleHold),
+            "SlewLimiter" => Some(NodeTemplate::SlewLimiter),
+            "Quantizer" => Some(NodeTemplate::Quantizer),
+            "EnvelopeFollower" => Some(NodeTemplate::EnvelopeFollower),
+            "BPMDetector" => Some(NodeTemplate::BpmDetector),
+            "Mod" => Some(NodeTemplate::Mod),
+            "Oscilloscope" => Some(NodeTemplate::Oscilloscope),
+            "VoiceAllocator" => Some(NodeTemplate::VoiceAllocator),
+            "Group" => Some(NodeTemplate::Group),
+            "TemplateInput" => Some(NodeTemplate::TemplateInput),
+            "TemplateOutput" => Some(NodeTemplate::TemplateOutput),
+            "AudioOutput" => Some(NodeTemplate::AudioOutput),
+            _ => None,
+        }
+    }
+
+    /// Helper: add a node to the editor state and return its frontend ID
+    fn add_node_to_editor(
+        &mut self,
+        node_template: NodeTemplate,
+        label: &str,
+        position: (f32, f32),
+        backend_node_id: u32,
+        parameters: &std::collections::HashMap<u32, f32>,
+    ) -> Option<NodeId> {
+        let frontend_id = self.state.graph.nodes.insert(egui_node_graph2::Node {
+            id: NodeId::default(),
+            label: label.to_string(),
+            inputs: vec![],
+            outputs: vec![],
+            user_data: NodeData { template: node_template },
+        });
+
+        node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
+
+        self.state.node_positions.insert(frontend_id, egui::pos2(position.0, position.1));
+        self.state.node_order.push(frontend_id);
+
+        let backend_id = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(backend_node_id as usize));
+        self.node_id_map.insert(frontend_id, backend_id);
+        self.backend_to_frontend_map.insert(backend_id, frontend_id);
+
+        // Set parameter values from backend
+        if let Some(node_data) = self.state.graph.nodes.get(frontend_id) {
+            let input_ids: Vec<InputId> = node_data.inputs.iter().map(|(_, id)| *id).collect();
+            for input_id in input_ids {
+                if let Some(input_param) = self.state.graph.inputs.get_mut(input_id) {
+                    if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &mut input_param.value {
+                        if let Some(&backend_value) = parameters.get(pid) {
+                            *value = backend_value as f32;
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(frontend_id)
+    }
+
+    /// Helper: add a connection to the editor state
+    fn add_connection_to_editor(&mut self, from_node: u32, from_port: usize, to_node: u32, to_port: usize) {
+        let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(from_node as usize));
+        let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(to_node as usize));
+
+        if let (Some(&from_fid), Some(&to_fid)) = (
+            self.backend_to_frontend_map.get(&from_backend),
+            self.backend_to_frontend_map.get(&to_backend),
+        ) {
+            if let Some(from_node) = self.state.graph.nodes.get(from_fid) {
+                if let Some((_name, output_id)) = from_node.outputs.get(from_port) {
+                    if let Some(to_node) = self.state.graph.nodes.get(to_fid) {
+                        if let Some((_name, input_id)) = to_node.inputs.get(to_port) {
+                            let max_conns = self.state.graph.inputs.get(*input_id)
+                                .and_then(|p| p.max_connections)
+                                .map(|n| n.get() as usize)
+                                .unwrap_or(usize::MAX);
+
+                            let current_count = self.state.graph.connections.get(*input_id)
+                                .map(|c| c.len())
+                                .unwrap_or(0);
+
+                            if current_count < max_conns {
+                                if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
+                                    connections.push(*output_id);
+                                } else {
+                                    self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1174,8 +1946,11 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                         };
 
                         if is_valid_track {
-                            // Reload graph for new track — exit any subgraph editing
+                            // Reload graph for new track — exit any subgraph editing and clear groups
                             self.subgraph_stack.clear();
+                            self.groups.clear();
+                            self.next_group_id = 1;
+                            self.group_placeholder_map.clear();
                             self.track_id = Some(new_track_id);
 
                             // Recreate backend
@@ -1339,8 +2114,213 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 )
             };
 
-            // Handle graph events and create actions
+            // Cache node rects for hit-testing, then handle response
+            self.last_node_rects = graph_response.node_rects.clone();
             self.handle_graph_response(graph_response, shared, graph_rect);
+
+            // Detect right-click on nodes — intercept the library's node finder and show our context menu instead
+            {
+                let secondary_clicked = ui.input(|i| i.pointer.secondary_released());
+                if secondary_clicked {
+                    if let Some(cursor_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                        // Hit-test against actual rendered node rects
+                        for (&fid, &node_rect) in &self.last_node_rects {
+                            if node_rect.contains(cursor_pos) {
+                                self.state.node_finder = None;
+                                self.node_context_menu = Some((fid, cursor_pos));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Draw node context menu
+            if let Some((ctx_node_id, menu_pos)) = self.node_context_menu {
+                let is_group = self.group_placeholder_map.contains_key(&ctx_node_id);
+                let group_id = self.group_placeholder_map.get(&ctx_node_id).copied();
+                let mut close_menu = false;
+                let mut action_delete = false;
+                let mut action_ungroup = false;
+                let mut action_rename = false;
+
+                let menu_response = egui::Area::new(ui.id().with("node_context_menu"))
+                    .fixed_pos(menu_pos)
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(120.0);
+                            if is_group {
+                                if ui.button("Rename Group").clicked() {
+                                    action_rename = true;
+                                    close_menu = true;
+                                }
+                                if ui.button("Ungroup").clicked() {
+                                    action_ungroup = true;
+                                    close_menu = true;
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("Delete").clicked() {
+                                action_delete = true;
+                                close_menu = true;
+                            }
+                        });
+                    });
+
+                // Close menu on click outside the menu area
+                let menu_rect = menu_response.response.rect;
+                let clicked_outside = ui.input(|i| {
+                    i.pointer.any_pressed()
+                        && i.pointer.latest_pos()
+                            .map(|p| !menu_rect.contains(p))
+                            .unwrap_or(false)
+                });
+                if clicked_outside {
+                    close_menu = true;
+                }
+
+                if action_rename {
+                    if let Some(gid) = group_id {
+                        if let Some(group) = self.groups.iter().find(|g| g.id == gid) {
+                            self.renaming_group = Some((gid, group.name.clone()));
+                        }
+                    }
+                }
+                if action_ungroup {
+                    if let Some(gid) = group_id {
+                        self.ungroup(gid, shared);
+                    }
+                }
+                if action_delete {
+                    if is_group {
+                        if let Some(gid) = group_id {
+                            self.groups.retain(|g| g.id != gid);
+                            self.rebuild_view();
+                            self.sync_groups_to_backend(shared);
+                        }
+                    } else {
+                        // Delete the node via the graph - queue the deletion
+                        if let Some(track_id) = self.track_id {
+                            if let Some(&backend_id) = self.node_id_map.get(&ctx_node_id) {
+                                let BackendNodeId::Audio(node_idx) = backend_id;
+                                if let Some(va_id) = self.va_context() {
+                                    if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                        if let Some(audio_controller) = &shared.audio_controller {
+                                            let mut controller = audio_controller.lock().unwrap();
+                                            controller.graph_remove_node_from_template(
+                                                backend_track_id, va_id, node_idx.index() as u32,
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let action = Box::new(actions::NodeGraphAction::RemoveNode(
+                                        actions::RemoveNodeAction::new(track_id, backend_id)
+                                    ));
+                                    self.pending_action = Some(action);
+                                }
+                                // Remove from editor state
+                                self.state.graph.nodes.remove(ctx_node_id);
+                                self.node_id_map.remove(&ctx_node_id);
+                                self.backend_to_frontend_map.remove(&backend_id);
+                            }
+                        }
+                    }
+                }
+                if close_menu {
+                    self.node_context_menu = None;
+                }
+            }
+
+            // Draw group rename popup
+            if let Some((group_id, ref mut new_name)) = self.renaming_group.clone() {
+                let mut close_rename = false;
+                let mut apply_rename = false;
+                let mut name_buf = new_name.clone();
+
+                let center = rect.center();
+                egui::Area::new(ui.id().with("group_rename_popup"))
+                    .fixed_pos(egui::pos2(center.x - 100.0, center.y - 30.0))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            ui.label("Rename Group:");
+                            let response = ui.text_edit_singleline(&mut name_buf);
+                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                apply_rename = true;
+                            }
+                            ui.horizontal(|ui| {
+                                if ui.button("OK").clicked() {
+                                    apply_rename = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close_rename = true;
+                                }
+                            });
+                            // Auto-focus the text field
+                            response.request_focus();
+                        });
+                    });
+
+                if apply_rename {
+                    if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+                        group.name = name_buf.clone();
+                    }
+                    // Update the placeholder node's label
+                    for (&fid, &gid) in &self.group_placeholder_map {
+                        if gid == group_id {
+                            if let Some(node) = self.state.graph.nodes.get_mut(fid) {
+                                node.label = name_buf;
+                            }
+                            break;
+                        }
+                    }
+                    self.renaming_group = None;
+                    self.sync_groups_to_backend(shared);
+                } else if close_rename {
+                    self.renaming_group = None;
+                } else {
+                    self.renaming_group = Some((group_id, name_buf));
+                }
+            }
+
+            // Handle pane-local keyboard shortcuts (only when pointer is over this pane)
+            if ui.rect_contains_pointer(rect) {
+                let ctrl_g = ui.input(|i| {
+                    i.key_pressed(egui::Key::G) && (i.modifiers.ctrl || i.modifiers.command)
+                });
+                if ctrl_g && !self.state.selected_nodes.is_empty() {
+                    self.group_selected_nodes(shared);
+                }
+
+                // Ctrl+Shift+G to ungroup
+                let ctrl_shift_g = ui.input(|i| {
+                    i.key_pressed(egui::Key::G) && (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift
+                });
+                if ctrl_shift_g {
+                    // Ungroup any selected group placeholders
+                    let group_ids_to_ungroup: Vec<GroupId> = self.state.selected_nodes.iter()
+                        .filter_map(|fid| self.group_placeholder_map.get(fid).copied())
+                        .collect();
+                    for gid in group_ids_to_ungroup {
+                        self.ungroup(gid, shared);
+                    }
+                }
+
+                // F2 to rename selected group
+                let f2 = ui.input(|i| i.key_pressed(egui::Key::F2));
+                if f2 && self.renaming_group.is_none() {
+                    // Find the first selected group placeholder
+                    if let Some(group_id) = self.state.selected_nodes.iter()
+                        .find_map(|fid| self.group_placeholder_map.get(fid).copied())
+                    {
+                        if let Some(group) = self.groups.iter().find(|g| g.id == group_id) {
+                            self.renaming_group = Some((group_id, group.name.clone()));
+                        }
+                    }
+                }
+            }
 
             // Check for parameter value changes and send updates to backend
             self.check_parameter_changes(shared);

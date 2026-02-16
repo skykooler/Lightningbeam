@@ -863,7 +863,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Oscilloscope,
             // Advanced
             NodeTemplate::VoiceAllocator,
-            NodeTemplate::Group,
+            // Note: Group is not in the node finder — groups are created via Ctrl+G selection.
             // Note: TemplateInput/TemplateOutput are excluded from the default finder.
             // They are added dynamically when editing inside a subgraph.
             // Outputs

@@ -80,6 +80,8 @@ pub struct GraphResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrai
     pub cursor_in_editor: bool,
     /// Is the mouse currently hovering the node finder?
     pub cursor_in_finder: bool,
+    /// Screen-space rects of all rendered nodes (for hit-testing)
+    pub node_rects: NodeRects,
 }
 impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
     for GraphResponse<UserResponse, NodeData>
@@ -89,6 +91,7 @@ impl<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> Default
             node_responses: Default::default(),
             cursor_in_editor: false,
             cursor_in_finder: false,
+            node_rects: NodeRects::new(),
         }
     }
 }
@@ -507,8 +510,8 @@ where
             );
 
             self.selected_nodes = node_rects
-                .into_iter()
-                .filter_map(|(node_id, rect)| {
+                .iter()
+                .filter_map(|(&node_id, &rect)| {
                     if selection_rect.intersects(rect) {
                         Some(node_id)
                     } else {
@@ -568,6 +571,7 @@ where
             node_responses: delayed_responses,
             cursor_in_editor,
             cursor_in_finder,
+            node_rects,
         }
     }
 }

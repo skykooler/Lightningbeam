@@ -67,6 +67,10 @@ pub struct GraphPreset {
 
     /// Which node index is the audio output (None if not set)
     pub output_node: Option<u32>,
+
+    /// Frontend-only group definitions (backend stores opaquely, does not interpret)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SerializedGroup>,
 }
 
 /// Metadata about the preset
@@ -121,6 +125,32 @@ pub struct SerializedNode {
     pub sample_data: Option<SampleData>,
 }
 
+/// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedGroup {
+    pub id: u32,
+    pub name: String,
+    pub member_nodes: Vec<u32>,
+    pub position: (f32, f32),
+    pub boundary_inputs: Vec<SerializedBoundaryConnection>,
+    pub boundary_outputs: Vec<SerializedBoundaryConnection>,
+    /// Parent group ID for nested groups (None = top-level group)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_group_id: Option<u32>,
+}
+
+/// Serialized boundary connection for group definitions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedBoundaryConnection {
+    pub external_node: u32,
+    pub external_port: usize,
+    pub internal_node: u32,
+    pub internal_port: usize,
+    pub port_name: String,
+    /// Signal type as string ("Audio", "Midi", "CV")
+    pub data_type: String,
+}
+
 /// Serialized connection between nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedConnection {
@@ -152,6 +182,7 @@ impl GraphPreset {
             connections: Vec::new(),
             midi_targets: Vec::new(),
             output_node: None,
+            groups: Vec::new(),
         }
     }
 
