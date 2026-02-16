@@ -228,6 +228,18 @@ impl Project {
         None
     }
 
+    /// Get oscilloscope data from a node inside a VoiceAllocator's best voice
+    pub fn get_voice_oscilloscope_data(&self, track_id: TrackId, va_node_id: u32, inner_node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+        if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
+            let graph = &track.instrument_graph;
+            let va_idx = petgraph::stable_graph::NodeIndex::new(va_node_id as usize);
+            let node = graph.get_node(va_idx)?;
+            let va = node.as_any().downcast_ref::<crate::audio::node_graph::nodes::VoiceAllocatorNode>()?;
+            return va.get_voice_oscilloscope_data(inner_node_id, sample_count);
+        }
+        None
+    }
+
     /// Get all root-level track IDs
     pub fn root_tracks(&self) -> &[TrackId] {
         &self.root_tracks

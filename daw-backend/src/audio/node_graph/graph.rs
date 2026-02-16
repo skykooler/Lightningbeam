@@ -98,6 +98,9 @@ pub struct AudioGraph {
 
     /// Cached topological sort order (invalidated on graph mutation)
     topo_cache: Option<Vec<NodeIndex>>,
+
+    /// Frontend-only group definitions (stored opaquely for persistence)
+    frontend_groups: Vec<crate::audio::node_graph::preset::SerializedGroup>,
 }
 
 impl AudioGraph {
@@ -117,6 +120,7 @@ impl AudioGraph {
             node_positions: std::collections::HashMap::new(),
             playback_time: 0.0,
             topo_cache: None,
+            frontend_groups: Vec::new(),
         }
     }
 
@@ -645,6 +649,10 @@ impl AudioGraph {
         self.graph.node_weight(idx).map(|n| &*n.node)
     }
 
+    pub fn get_node_mut(&mut self, idx: NodeIndex) -> Option<&mut (dyn AudioNode + 'static)> {
+        self.graph.node_weight_mut(idx).map(|n| &mut *n.node)
+    }
+
     /// Get oscilloscope data from a specific node
     pub fn get_oscilloscope_data(&self, idx: NodeIndex, sample_count: usize) -> Option<Vec<f32>> {
         self.get_node(idx).and_then(|node| node.get_oscilloscope_data(sample_count))
@@ -729,7 +737,15 @@ impl AudioGraph {
             }
         }
 
+        // Clone frontend groups
+        new_graph.frontend_groups = self.frontend_groups.clone();
+
         new_graph
+    }
+
+    /// Set frontend-only group definitions (stored opaquely for persistence)
+    pub fn set_frontend_groups(&mut self, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        self.frontend_groups = groups;
     }
 
     /// Serialize the graph to a preset
@@ -896,6 +912,9 @@ impl AudioGraph {
 
         // Output node
         preset.output_node = self.output_node.map(|idx| idx.index() as u32);
+
+        // Frontend groups (stored opaquely)
+        preset.groups = self.frontend_groups.clone();
 
         preset
     }
@@ -1117,6 +1136,9 @@ impl AudioGraph {
                 graph.output_node = Some(output_idx);
             }
         }
+
+        // Restore frontend groups (stored opaquely)
+        graph.frontend_groups = preset.groups.clone();
 
         Ok(graph)
     }

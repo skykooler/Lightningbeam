@@ -218,7 +218,7 @@ pub struct SharedPaneState<'a> {
     /// Whether to show waveforms as stacked stereo (true) or combined mono (false)
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads
-    pub project_generation: u64,
+    pub project_generation: &'a mut u64,
 }
 
 /// Trait for pane rendering

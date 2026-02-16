@@ -5,6 +5,7 @@
 use eframe::egui;
 use egui_node_graph2::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Signal types for audio node graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,10 +137,18 @@ pub struct NodeData {
     pub template: NodeTemplate,
 }
 
+/// Cached oscilloscope waveform data for rendering in node body
+pub struct OscilloscopeCache {
+    pub audio: Vec<f32>,
+    pub cv: Vec<f32>,
+}
+
 /// Custom graph state - can track selected nodes, etc.
 #[derive(Default)]
 pub struct GraphState {
     pub active_node: Option<NodeId>,
+    /// Oscilloscope data cached per node, populated before draw_graph_editor()
+    pub oscilloscope_data: HashMap<NodeId, OscilloscopeCache>,
 }
 
 /// User response type (empty for now)
@@ -782,15 +791,52 @@ impl NodeDataTrait for NodeData {
     fn bottom_ui(
         &self,
         ui: &mut egui::Ui,
-        _node_id: NodeId,
+        node_id: NodeId,
         _graph: &Graph<NodeData, DataType, ValueType>,
-        _user_state: &mut Self::UserState,
+        user_state: &mut Self::UserState,
     ) -> Vec<NodeResponse<Self::Response, NodeData>>
     where
         Self::Response: UserResponseTrait,
     {
-        // No custom UI for now
-        ui.label("");
+        if self.template == NodeTemplate::Oscilloscope {
+            let size = egui::vec2(200.0, 80.0);
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+
+            // Background
+            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x1a, 0x1a, 0x1a));
+
+            // Center line
+            let center_y = rect.center().y;
+            painter.line_segment(
+                [egui::pos2(rect.left(), center_y), egui::pos2(rect.right(), center_y)],
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a)),
+            );
+
+            if let Some(cache) = user_state.oscilloscope_data.get(&node_id) {
+                // Draw audio waveform (green)
+                if cache.audio.len() >= 2 {
+                    let points: Vec<egui::Pos2> = cache.audio.iter().enumerate().map(|(i, &sample)| {
+                        let x = rect.left() + (i as f32 / (cache.audio.len() - 1) as f32) * rect.width();
+                        let y = center_y - sample.clamp(-1.0, 1.0) * (rect.height() / 2.0);
+                        egui::pos2(x, y)
+                    }).collect();
+                    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0x4C, 0xAF, 0x50))));
+                }
+
+                // Draw CV waveform (orange) if present
+                if cache.cv.len() >= 2 {
+                    let points: Vec<egui::Pos2> = cache.cv.iter().enumerate().map(|(i, &sample)| {
+                        let x = rect.left() + (i as f32 / (cache.cv.len() - 1) as f32) * rect.width();
+                        let y = center_y - sample.clamp(-1.0, 1.0) * (rect.height() / 2.0);
+                        egui::pos2(x, y)
+                    }).collect();
+                    painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0xFF, 0x98, 0x00))));
+                }
+            }
+        } else {
+            ui.label("");
+        }
         vec![]
     }
 }
@@ -800,6 +846,22 @@ pub struct AllNodeTemplates;
 
 /// Iterator for subgraph node templates (includes TemplateInput/Output)
 pub struct SubgraphNodeTemplates;
+
+/// Node templates available inside a VoiceAllocator subgraph (no nested VA)
+pub struct VoiceAllocatorNodeTemplates;
+
+impl NodeTemplateIter for VoiceAllocatorNodeTemplates {
+    type Item = NodeTemplate;
+
+    fn all_kinds(&self) -> Vec<Self::Item> {
+        let mut templates = AllNodeTemplates.all_kinds();
+        // VA nodes can't be nested — signals inside a VA are monophonic
+        templates.retain(|t| *t != NodeTemplate::VoiceAllocator);
+        templates.push(NodeTemplate::TemplateInput);
+        templates.push(NodeTemplate::TemplateOutput);
+        templates
+    }
+}
 
 impl NodeTemplateIter for SubgraphNodeTemplates {
     type Item = NodeTemplate;
@@ -863,7 +925,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Oscilloscope,
             // Advanced
             NodeTemplate::VoiceAllocator,
-            NodeTemplate::Group,
+            // Note: Group is not in the node finder — groups are created via Ctrl+G selection.
             // Note: TemplateInput/TemplateOutput are excluded from the default finder.
             // They are added dynamically when editing inside a subgraph.
             // Outputs

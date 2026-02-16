@@ -1426,6 +1426,34 @@ impl Engine {
                 }
             }
 
+            Command::GraphSetGroups(track_id, groups) => {
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    graph.set_frontend_groups(groups);
+                }
+            }
+
+            Command::GraphSetGroupsInTemplate(track_id, voice_allocator_id, groups) => {
+                use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(voice_allocator_id as usize);
+                    if let Some(graph_node) = graph.get_node_mut(node_idx) {
+                        if let Some(va_node) = graph_node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
+                            va_node.template_graph_mut().set_frontend_groups(groups);
+                        }
+                    }
+                }
+            }
+
             Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags) => {
                 let graph = match self.project.get_track(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
@@ -1939,6 +1967,18 @@ impl Engine {
                     None => QueryResponse::OscilloscopeData(Err(format!(
                         "Failed to get oscilloscope data from track {} node {}",
                         track_id, node_id
+                    ))),
+                }
+            }
+            Query::GetVoiceOscilloscopeData(track_id, va_node_id, inner_node_id, sample_count) => {
+                match self.project.get_voice_oscilloscope_data(track_id, va_node_id, inner_node_id, sample_count) {
+                    Some((audio, cv)) => {
+                        use crate::command::OscilloscopeData;
+                        QueryResponse::OscilloscopeData(Ok(OscilloscopeData { audio, cv }))
+                    }
+                    None => QueryResponse::OscilloscopeData(Err(format!(
+                        "Failed to get voice oscilloscope data from track {} VA {} node {}",
+                        track_id, va_node_id, inner_node_id
                     ))),
                 }
             }
@@ -3029,6 +3069,16 @@ impl EngineController {
         let _ = self.command_tx.push(Command::GraphSetOutputNode(track_id, node_id));
     }
 
+    /// Set frontend-only group definitions on a track's graph
+    pub fn graph_set_groups(&mut self, track_id: TrackId, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        let _ = self.command_tx.push(Command::GraphSetGroups(track_id, groups));
+    }
+
+    /// Set frontend-only group definitions on a VA template graph
+    pub fn graph_set_groups_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        let _ = self.command_tx.push(Command::GraphSetGroupsInTemplate(track_id, voice_allocator_id, groups));
+    }
+
     /// Save the current graph as a preset
     pub fn graph_save_preset(&mut self, track_id: TrackId, preset_path: String, preset_name: String, description: String, tags: Vec<String>) {
         let _ = self.command_tx.push(Command::GraphSavePreset(track_id, preset_path, preset_name, description, tags));
@@ -3171,6 +3221,25 @@ impl EngineController {
                 return result;
             }
             // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query oscilloscope data from a node inside a VoiceAllocator's best voice
+    pub fn query_voice_oscilloscope_data(&mut self, track_id: TrackId, va_node_id: u32, inner_node_id: u32, sample_count: usize) -> Result<crate::command::OscilloscopeData, String> {
+        if let Err(_) = self.query_tx.push(Query::GetVoiceOscilloscopeData(track_id, va_node_id, inner_node_id, sample_count)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::OscilloscopeData(result)) = self.query_response_rx.pop() {
+                return result;
+            }
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
 

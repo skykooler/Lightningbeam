@@ -215,4 +215,9 @@ impl GraphBackend for AudioGraphBackend {
 
         Ok(())
     }
+
+    fn query_template_state(&self, voice_allocator_id: u32) -> Result<String, String> {
+        let mut controller = self.audio_controller.lock().unwrap();
+        controller.query_template_state(self.track_id, voice_allocator_id)
+    }
 }

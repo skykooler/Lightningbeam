@@ -4384,7 +4384,7 @@ impl eframe::App for EditorApp {
                 pending_menu_actions: &mut pending_menu_actions,
                 clipboard_manager: &mut self.clipboard_manager,
                 waveform_stereo: self.config.waveform_stereo,
-                project_generation: self.project_generation,
+                project_generation: &mut self.project_generation,
             };
 
             render_layout_node(
@@ -4660,7 +4660,7 @@ struct RenderContext<'a> {
     /// Whether to show waveforms as stacked stereo
     waveform_stereo: bool,
     /// Project generation counter (incremented on load)
-    project_generation: u64,
+    project_generation: &'a mut u64,
 }
 
 /// Recursively render a layout node with drag support

@@ -176,6 +176,35 @@ impl VoiceAllocatorNode {
             .unwrap_or(0)
     }
 
+    /// Get oscilloscope data from the most relevant voice's subgraph.
+    /// Priority: first active voice → first releasing voice → first voice.
+    pub fn get_voice_oscilloscope_data(&self, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+        let voice_idx = self.best_voice_index();
+        let graph = &self.voice_instances[voice_idx];
+        let node_idx = petgraph::stable_graph::NodeIndex::new(node_id as usize);
+        let audio = graph.get_oscilloscope_data(node_idx, sample_count)?;
+        let cv = graph.get_oscilloscope_cv_data(node_idx, sample_count).unwrap_or_default();
+        Some((audio, cv))
+    }
+
+    /// Find the best voice index to observe: first active → first releasing → 0
+    fn best_voice_index(&self) -> usize {
+        // First active (non-releasing) voice
+        for (i, v) in self.voices[..self.voice_count].iter().enumerate() {
+            if v.active && !v.releasing {
+                return i;
+            }
+        }
+        // First releasing voice
+        for (i, v) in self.voices[..self.voice_count].iter().enumerate() {
+            if v.active && v.releasing {
+                return i;
+            }
+        }
+        // Fallback to first voice
+        0
+    }
+
     /// Find all voices playing a specific note (held, not yet releasing)
     fn find_voices_for_note_off(&self, note: u8) -> Vec<usize> {
         self.voices[..self.voice_count]
