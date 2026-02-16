@@ -281,29 +281,19 @@ impl AudioGraph {
             // This is tricky with trait objects, so we'll need to use Any
             // For now, let's use a different approach - store the node pointer temporarily
 
-            // Check node type first
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            // Get mutable reference and downcast using raw pointers
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            // Add node to template graph
+            let node_idx = va.template_graph_mut().add_node(node);
+            let node_id = node_idx.index() as u32;
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            // This is safe because we know the concrete type
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            // Rebuild voice instances from template
+            va.rebuild_voices();
 
-                // Add node to template graph
-                let node_idx = va.template_graph_mut().add_node(node);
-                let node_id = node_idx.index() as u32;
-
-                // Rebuild voice instances from template
-                va.rebuild_voices();
-
-                return Ok(node_id);
-            }
+            return Ok(node_id);
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -322,31 +312,22 @@ impl AudioGraph {
 
         // Get the VoiceAllocator node
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            // Check node type first
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            // Get mutable reference and downcast using raw pointers
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            // Connect in template graph
+            let from_idx = NodeIndex::new(from_node as usize);
+            let to_idx = NodeIndex::new(to_node as usize);
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            va.template_graph_mut().connect(from_idx, from_port, to_idx, to_port)
+                .map_err(|e| format!("{:?}", e))?;
 
-                // Connect in template graph
-                let from_idx = NodeIndex::new(from_node as usize);
-                let to_idx = NodeIndex::new(to_node as usize);
+            // Rebuild voice instances from template
+            va.rebuild_voices();
 
-                va.template_graph_mut().connect(from_idx, from_port, to_idx, to_port)
-                    .map_err(|e| format!("{:?}", e))?;
-
-                // Rebuild voice instances from template
-                va.rebuild_voices();
-
-                return Ok(());
-            }
+            return Ok(());
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -364,25 +345,18 @@ impl AudioGraph {
         use crate::audio::node_graph::nodes::VoiceAllocatorNode;
 
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            let from_idx = NodeIndex::new(from_node as usize);
+            let to_idx = NodeIndex::new(to_node as usize);
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            va.template_graph_mut().disconnect(from_idx, from_port, to_idx, to_port);
+            va.rebuild_voices();
 
-                let from_idx = NodeIndex::new(from_node as usize);
-                let to_idx = NodeIndex::new(to_node as usize);
-
-                va.template_graph_mut().disconnect(from_idx, from_port, to_idx, to_port);
-                va.rebuild_voices();
-
-                return Ok(());
-            }
+            return Ok(());
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -397,23 +371,16 @@ impl AudioGraph {
         use crate::audio::node_graph::nodes::VoiceAllocatorNode;
 
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            let node_idx = NodeIndex::new(node_id as usize);
+            va.template_graph_mut().remove_node(node_idx);
+            va.rebuild_voices();
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
-
-                let node_idx = NodeIndex::new(node_id as usize);
-                va.template_graph_mut().remove_node(node_idx);
-                va.rebuild_voices();
-
-                return Ok(());
-            }
+            return Ok(());
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -430,28 +397,21 @@ impl AudioGraph {
         use crate::audio::node_graph::nodes::VoiceAllocatorNode;
 
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
+
+            let node_idx = NodeIndex::new(node_id as usize);
+            if let Some(template_node) = va.template_graph_mut().get_graph_node_mut(node_idx) {
+                template_node.node.set_parameter(param_id, value);
+            } else {
+                return Err("Node not found in template".to_string());
             }
 
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            va.rebuild_voices();
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
-
-                let node_idx = NodeIndex::new(node_id as usize);
-                if let Some(template_node) = va.template_graph_mut().get_graph_node_mut(node_idx) {
-                    template_node.node.set_parameter(param_id, value);
-                } else {
-                    return Err("Node not found in template".to_string());
-                }
-
-                va.rebuild_voices();
-
-                return Ok(());
-            }
+            return Ok(());
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -468,16 +428,8 @@ impl AudioGraph {
         use crate::audio::node_graph::nodes::VoiceAllocatorNode;
 
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return;
-            }
-
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
-
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            if let Some(va) = graph_node.node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
                 let node_idx = NodeIndex::new(node_id as usize);
                 va.template_graph_mut().set_node_position(node_idx, x, y);
             }
@@ -655,30 +607,21 @@ impl AudioGraph {
             let num_midi_outputs = outputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
 
             // Create mutable slices for audio/CV outputs
-            let mut output_slices: Vec<&mut [f32]> = Vec::with_capacity(num_audio_cv_outputs);
-            for i in 0..num_audio_cv_outputs {
-                if i < node.output_buffers.len() {
-                    // Safety: We need to work around borrowing rules here
-                    // This is safe because each output buffer is independent
-                    let buffer = &mut node.output_buffers[i] as *mut Vec<f32>;
-                    unsafe {
-                        let slice = &mut (&mut *buffer)[..process_size.min((*buffer).len())];
-                        output_slices.push(slice);
-                    }
-                }
-            }
+            // Each buffer is independent, so this is safe
+            let mut output_slices: Vec<&mut [f32]> = node.output_buffers
+                .iter_mut()
+                .take(num_audio_cv_outputs)
+                .map(|buf| {
+                    let len = buf.len();
+                    &mut buf[..process_size.min(len)]
+                })
+                .collect();
 
             // Create mutable references for MIDI outputs
-            let mut midi_output_refs: Vec<&mut Vec<MidiEvent>> = Vec::with_capacity(num_midi_outputs);
-            for i in 0..num_midi_outputs {
-                if i < node.midi_output_buffers.len() {
-                    // Safety: Similar to above
-                    let buffer = &mut node.midi_output_buffers[i] as *mut Vec<MidiEvent>;
-                    unsafe {
-                        midi_output_refs.push(&mut *buffer);
-                    }
-                }
-            }
+            let mut midi_output_refs: Vec<&mut Vec<MidiEvent>> = node.midi_output_buffers
+                .iter_mut()
+                .take(num_midi_outputs)
+                .collect();
 
             // Process the node with both audio/CV and MIDI
             node.node.process(&input_slices, &mut output_slices, &midi_input_slices, &mut midi_output_refs, self.sample_rate);
@@ -811,14 +754,9 @@ impl AudioGraph {
                 }
 
                 // For VoiceAllocator nodes, serialize the template graph
-                // We need to downcast to access template_graph()
-                // This is safe because we know the node type
                 if node.node_type() == "VoiceAllocator" {
-                    // Use Any to downcast
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const VoiceAllocatorNode;
-                    unsafe {
-                        let va_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(va_node) = node.as_any().downcast_ref::<VoiceAllocatorNode>() {
                         let template_preset = va_node.template_graph().to_preset("template");
                         serialized.template_graph = Some(Box::new(template_preset));
                     }
@@ -830,10 +768,8 @@ impl AudioGraph {
                     use crate::audio::node_graph::preset::{EmbeddedSampleData, SampleData};
                     use base64::{Engine as _, engine::general_purpose};
 
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const SimpleSamplerNode;
-                    unsafe {
-                        let sampler_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(sampler_node) = node.as_any().downcast_ref::<SimpleSamplerNode>() {
                         if let Some(sample_path) = sampler_node.get_sample_path() {
                             // Check file size
                             let should_embed = std::fs::metadata(sample_path)
@@ -877,10 +813,8 @@ impl AudioGraph {
                     use crate::audio::node_graph::preset::{EmbeddedSampleData, LayerData, SampleData};
                     use base64::{Engine as _, engine::general_purpose};
 
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const MultiSamplerNode;
-                    unsafe {
-                        let multi_sampler_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(multi_sampler_node) = node.as_any().downcast_ref::<MultiSamplerNode>() {
                         let layers_info = multi_sampler_node.get_layers_info();
                         if !layers_info.is_empty() {
                             let layers: Vec<LayerData> = layers_info
@@ -1070,10 +1004,8 @@ impl AudioGraph {
                     crate::audio::node_graph::preset::SampleData::SimpleSampler { file_path, embedded_data } => {
                         // Load sample into SimpleSampler
                         if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut SimpleSamplerNode;
-                            unsafe {
-                                let sampler_node = &mut *node_ptr;
+                            // Downcast using safe Any trait
+                            if let Some(sampler_node) = graph_node.node.as_any_mut().downcast_mut::<SimpleSamplerNode>() {
 
                                 // Try embedded data first, then fall back to file path
                                 if let Some(ref embedded) = embedded_data {
@@ -1104,10 +1036,8 @@ impl AudioGraph {
                     crate::audio::node_graph::preset::SampleData::MultiSampler { layers } => {
                         // Load layers into MultiSampler
                         if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut MultiSamplerNode;
-                            unsafe {
-                                let multi_sampler_node = &mut *node_ptr;
+                            // Downcast using safe Any trait
+                            if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                                 for layer in layers {
                                     // Try embedded data first, then fall back to file path
                                     if let Some(ref embedded) = layer.embedded_data {

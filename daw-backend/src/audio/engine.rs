@@ -1531,12 +1531,8 @@ impl Engine {
 
                     // Get the VoiceAllocator node and serialize its template
                     if let Some(node) = graph.get_node(va_idx) {
-                        // Downcast to VoiceAllocatorNode
-                        let node_ptr = node as *const dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *const VoiceAllocatorNode;
-
-                        unsafe {
-                            let va_node = &*node_ptr;
+                        // Downcast to VoiceAllocatorNode using safe Any trait
+                        if let Some(va_node) = node.as_any().downcast_ref::<VoiceAllocatorNode>() {
                             let template_preset = va_node.template_graph().to_preset(&preset_name);
 
                             // Write to file
@@ -1558,12 +1554,8 @@ impl Engine {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                        // Downcast to SimpleSamplerNode
-                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *mut SimpleSamplerNode;
-
-                        unsafe {
-                            let sampler_node = &mut *node_ptr;
+                        // Downcast to SimpleSamplerNode using safe Any trait
+                        if let Some(sampler_node) = graph_node.node.as_any_mut().downcast_mut::<SimpleSamplerNode>() {
                             if let Err(e) = sampler_node.load_sample_from_file(&file_path) {
                                 eprintln!("Failed to load sample: {}", e);
                             }
@@ -1580,12 +1572,8 @@ impl Engine {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                        // Downcast to MultiSamplerNode
-                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *mut MultiSamplerNode;
-
-                        unsafe {
-                            let multi_sampler_node = &mut *node_ptr;
+                        // Downcast to MultiSamplerNode using safe Any trait
+                        if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                             if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to add sample layer: {}", e);
                             }
@@ -1602,12 +1590,8 @@ impl Engine {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                        // Downcast to MultiSamplerNode
-                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *mut MultiSamplerNode;
-
-                        unsafe {
-                            let multi_sampler_node = &mut *node_ptr;
+                        // Downcast to MultiSamplerNode using safe Any trait
+                        if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                             if let Err(e) = multi_sampler_node.update_layer(layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to update sample layer: {}", e);
                             }
@@ -1624,12 +1608,8 @@ impl Engine {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                        // Downcast to MultiSamplerNode
-                        let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *mut MultiSamplerNode;
-
-                        unsafe {
-                            let multi_sampler_node = &mut *node_ptr;
+                        // Downcast to MultiSamplerNode using safe Any trait
+                        if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                             if let Err(e) = multi_sampler_node.remove_layer(layer_index) {
                                 eprintln!("Failed to remove sample layer: {}", e);
                             }
@@ -1939,16 +1919,15 @@ impl Engine {
                     let graph = &mut track.instrument_graph;
                     let node_idx = NodeIndex::new(voice_allocator_id as usize);
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
-                        // Downcast to VoiceAllocatorNode
-                        let node_ptr = &*graph_node.node as *const dyn crate::audio::node_graph::AudioNode;
-                        let node_ptr = node_ptr as *const VoiceAllocatorNode;
-                        unsafe {
-                            let va_node = &*node_ptr;
+                        // Downcast to VoiceAllocatorNode using safe Any trait
+                        if let Some(va_node) = graph_node.node.as_any().downcast_ref::<VoiceAllocatorNode>() {
                             let template_preset = va_node.template_graph().to_preset("template");
                             match template_preset.to_json() {
                                 Ok(json) => QueryResponse::GraphState(Ok(json)),
                                 Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize template: {:?}", e))),
                             }
+                        } else {
+                            QueryResponse::GraphState(Err("Node is not a VoiceAllocatorNode".to_string()))
                         }
                     } else {
                         QueryResponse::GraphState(Err("Voice allocator node not found".to_string()))
