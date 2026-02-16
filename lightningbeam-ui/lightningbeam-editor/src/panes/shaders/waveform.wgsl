@@ -59,7 +59,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Clip to the clip rectangle
     if frag_x < params.clip_rect.x || frag_x > params.clip_rect.z ||
        frag_y < params.clip_rect.y || frag_y > params.clip_rect.w {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Fragment X position → audio time
@@ -70,7 +70,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Audio time → frame index
     let frame_f = audio_time * params.sample_rate - params.segment_start_frame;
     if frame_f < 0.0 || frame_f >= params.total_frames {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Determine mip level based on how many audio frames map to one pixel
@@ -117,6 +117,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         if frag_y >= y_top_adj && frag_y <= y_bot_adj {
             return params.tint_color;
         }
+        return vec4(0.0, 0.0, 0.0, 0.0);
     } else {
         // Split stereo mode: left channel in top half, right channel in bottom half
         let half_height = clip_height * 0.5;
@@ -152,7 +153,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 return params.tint_color;
             }
         }
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
-
-    discard;
 }
