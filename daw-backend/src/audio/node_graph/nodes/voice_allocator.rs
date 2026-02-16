@@ -9,6 +9,7 @@ const DEFAULT_VOICES: usize = 8;
 #[derive(Clone)]
 struct VoiceState {
     active: bool,
+    releasing: bool, // Note-off received, still processing (e.g. ADSR release)
     note: u8,
     age: u32, // For voice stealing
     pending_events: Vec<MidiEvent>, // MIDI events to send to this voice
@@ -18,6 +19,7 @@ impl VoiceState {
     fn new() -> Self {
         Self {
             active: false,
+            releasing: false,
             note: 0,
             age: 0,
             pending_events: Vec::new(),
@@ -145,9 +147,9 @@ impl VoiceAllocatorNode {
         }
     }
 
-    /// Find a free voice, or steal the oldest one
+    /// Find a free voice, or steal one
+    /// Priority: inactive → oldest releasing → oldest held
     fn find_voice_for_note_on(&mut self) -> usize {
-        // Only search within active voice_count
         // First, look for an inactive voice
         for (i, voice) in self.voices[..self.voice_count].iter().enumerate() {
             if !voice.active {
@@ -155,7 +157,17 @@ impl VoiceAllocatorNode {
             }
         }
 
-        // No free voices, steal the oldest one within voice_count
+        // No inactive voices — steal the oldest releasing voice
+        if let Some((i, _)) = self.voices[..self.voice_count]
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.releasing)
+            .max_by_key(|(_, v)| v.age)
+        {
+            return i;
+        }
+
+        // No releasing voices either — steal the oldest held voice
         self.voices[..self.voice_count]
             .iter()
             .enumerate()
@@ -164,13 +176,13 @@ impl VoiceAllocatorNode {
             .unwrap_or(0)
     }
 
-    /// Find all voices playing a specific note
+    /// Find all voices playing a specific note (held, not yet releasing)
     fn find_voices_for_note_off(&self, note: u8) -> Vec<usize> {
         self.voices[..self.voice_count]
             .iter()
             .enumerate()
             .filter_map(|(i, v)| {
-                if v.active && v.note == note {
+                if v.active && !v.releasing && v.note == note {
                     Some(i)
                 } else {
                     None
@@ -206,6 +218,7 @@ impl AudioNode for VoiceAllocatorNode {
                     // Stop voices beyond the new count
                     for voice in &mut self.voices[new_count..] {
                         voice.active = false;
+                        voice.releasing = false;
                     }
                 }
             }
@@ -229,25 +242,26 @@ impl AudioNode for VoiceAllocatorNode {
                 if event.data2 > 0 {
                     let voice_idx = self.find_voice_for_note_on();
                     self.voices[voice_idx].active = true;
+                    self.voices[voice_idx].releasing = false;
                     self.voices[voice_idx].note = event.data1;
                     self.voices[voice_idx].age = 0;
 
                     // Store MIDI event for this voice to process
                     self.voices[voice_idx].pending_events.push(*event);
                 } else {
-                    // Velocity = 0 means note off - send to ALL voices playing this note
+                    // Velocity = 0 means note off — mark releasing, keep active for ADSR release
                     let voice_indices = self.find_voices_for_note_off(event.data1);
                     for voice_idx in voice_indices {
-                        self.voices[voice_idx].active = false;
+                        self.voices[voice_idx].releasing = true;
                         self.voices[voice_idx].pending_events.push(*event);
                     }
                 }
             }
             0x80 => {
-                // Note off - send to ALL voices playing this note
+                // Note off — mark releasing, keep active for ADSR release
                 let voice_indices = self.find_voices_for_note_off(event.data1);
                 for voice_idx in voice_indices {
-                    self.voices[voice_idx].active = false;
+                    self.voices[voice_idx].releasing = true;
                     self.voices[voice_idx].pending_events.push(*event);
                 }
             }
@@ -322,6 +336,7 @@ impl AudioNode for VoiceAllocatorNode {
     fn reset(&mut self) {
         for voice in &mut self.voices {
             voice.active = false;
+            voice.releasing = false;
             voice.pending_events.clear();
         }
         for graph in &mut self.voice_instances {
