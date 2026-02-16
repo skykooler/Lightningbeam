@@ -769,6 +769,26 @@ pub fn extract_audio_from_video(path: &str) -> Result<Option<ExtractedAudio>, St
                 // Extract f32 samples (interleaved format)
                 let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
                 let total_samples = resampled_frame.samples() * frame_channels;
+
+                // Safety checks before creating slice from FFmpeg data
+                // 1. Verify f32 alignment (required: 4 bytes)
+                if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+                    return Err("FFmpeg audio data is not properly aligned for f32".to_string());
+                }
+
+                // 2. Verify the frame actually has enough data
+                let byte_size = resampled_frame.data(0).len();
+                let expected_bytes = total_samples * std::mem::size_of::<f32>();
+                if byte_size < expected_bytes {
+                    return Err(format!(
+                        "FFmpeg frame buffer too small: {} bytes, need {} bytes",
+                        byte_size, expected_bytes
+                    ));
+                }
+
+                // SAFETY: We verified alignment and bounds above.
+                // The slice lifetime is tied to resampled_frame which lives until
+                // after extend_from_slice completes.
                 let samples_slice = unsafe {
                     std::slice::from_raw_parts(data_ptr, total_samples)
                 };
@@ -800,6 +820,26 @@ pub fn extract_audio_from_video(path: &str) -> Result<Option<ExtractedAudio>, St
 
         let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
         let total_samples = resampled_frame.samples() * frame_channels;
+
+        // Safety checks before creating slice from FFmpeg data
+        // 1. Verify f32 alignment (required: 4 bytes)
+        if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
+            return Err("FFmpeg audio data is not properly aligned for f32".to_string());
+        }
+
+        // 2. Verify the frame actually has enough data
+        let byte_size = resampled_frame.data(0).len();
+        let expected_bytes = total_samples * std::mem::size_of::<f32>();
+        if byte_size < expected_bytes {
+            return Err(format!(
+                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
+                byte_size, expected_bytes
+            ));
+        }
+
+        // SAFETY: We verified alignment and bounds above.
+        // The slice lifetime is tied to resampled_frame which lives until
+        // after extend_from_slice completes.
         let samples_slice = unsafe {
             std::slice::from_raw_parts(data_ptr, total_samples)
         };

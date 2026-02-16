@@ -195,17 +195,16 @@ fn encode_pcm_to_mp3(
         frame.set_rate(sample_rate);
 
         // Copy planar samples to frame
-        unsafe {
-            for ch in 0..channels as usize {
-                let plane = frame.data_mut(ch);
-                let offset = samples_encoded;
-                let src = &planar_samples[ch][offset..offset + chunk_size];
+        for ch in 0..channels as usize {
+            let plane = frame.data_mut(ch);
+            let offset = samples_encoded;
+            let src = &planar_samples[ch][offset..offset + chunk_size];
 
-                std::ptr::copy_nonoverlapping(
-                    src.as_ptr() as *const u8,
-                    plane.as_mut_ptr(),
-                    chunk_size * std::mem::size_of::<i16>(),
-                );
+            // Safe byte-level copy
+            for (i, &sample) in src.iter().enumerate() {
+                let bytes = sample.to_ne_bytes();
+                let byte_offset = i * 2;
+                plane[byte_offset..byte_offset + 2].copy_from_slice(&bytes);
             }
         }
 
@@ -360,17 +359,16 @@ fn encode_pcm_to_aac(
         frame.set_rate(sample_rate);
 
         // Copy planar samples to frame
-        unsafe {
-            for ch in 0..channels as usize {
-                let plane = frame.data_mut(ch);
-                let offset = samples_encoded;
-                let src = &planar_samples[ch][offset..offset + chunk_size];
+        for ch in 0..channels as usize {
+            let plane = frame.data_mut(ch);
+            let offset = samples_encoded;
+            let src = &planar_samples[ch][offset..offset + chunk_size];
 
-                std::ptr::copy_nonoverlapping(
-                    src.as_ptr() as *const u8,
-                    plane.as_mut_ptr(),
-                    chunk_size * std::mem::size_of::<f32>(),
-                );
+            // Safe byte-level copy
+            for (i, &sample) in src.iter().enumerate() {
+                let bytes = sample.to_ne_bytes();
+                let byte_offset = i * 4;
+                plane[byte_offset..byte_offset + 4].copy_from_slice(&bytes);
             }
         }
 

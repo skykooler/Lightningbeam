@@ -1182,16 +1182,18 @@ impl ExportOrchestrator {
         );
 
         // Copy YUV planes to frame
-        unsafe {
-            let y_dest = video_frame.data_mut(0);
-            std::ptr::copy_nonoverlapping(y_plane.as_ptr(), y_dest.as_mut_ptr(), y_plane.len());
+        // Use safe slice copy - LLVM optimizes this to memcpy, same performance as copy_nonoverlapping
+        let y_dest = video_frame.data_mut(0);
+        let y_len = y_plane.len().min(y_dest.len());
+        y_dest[..y_len].copy_from_slice(&y_plane[..y_len]);
 
-            let u_dest = video_frame.data_mut(1);
-            std::ptr::copy_nonoverlapping(u_plane.as_ptr(), u_dest.as_mut_ptr(), u_plane.len());
+        let u_dest = video_frame.data_mut(1);
+        let u_len = u_plane.len().min(u_dest.len());
+        u_dest[..u_len].copy_from_slice(&u_plane[..u_len]);
 
-            let v_dest = video_frame.data_mut(2);
-            std::ptr::copy_nonoverlapping(v_plane.as_ptr(), v_dest.as_mut_ptr(), v_plane.len());
-        }
+        let v_dest = video_frame.data_mut(2);
+        let v_len = v_plane.len().min(v_dest.len());
+        v_dest[..v_len].copy_from_slice(&v_plane[..v_len]);
 
         // Set PTS (presentation timestamp) in encoder's time base
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)

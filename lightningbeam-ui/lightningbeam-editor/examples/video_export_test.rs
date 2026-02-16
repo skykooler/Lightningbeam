@@ -115,17 +115,18 @@ fn main() -> Result<(), String> {
             height,
         );
 
-        // Copy YUV planes
-        unsafe {
-            let y_plane = video_frame.data_mut(0);
-            std::ptr::copy_nonoverlapping(y.as_ptr(), y_plane.as_mut_ptr(), y.len());
+        // Copy YUV planes (safe slice copy)
+        let y_plane = video_frame.data_mut(0);
+        let y_len = y.len().min(y_plane.len());
+        y_plane[..y_len].copy_from_slice(&y[..y_len]);
 
-            let u_plane = video_frame.data_mut(1);
-            std::ptr::copy_nonoverlapping(u.as_ptr(), u_plane.as_mut_ptr(), u.len());
+        let u_plane = video_frame.data_mut(1);
+        let u_len = u.len().min(u_plane.len());
+        u_plane[..u_len].copy_from_slice(&u[..u_len]);
 
-            let v_plane = video_frame.data_mut(2);
-            std::ptr::copy_nonoverlapping(v.as_ptr(), v_plane.as_mut_ptr(), v.len());
-        }
+        let v_plane = video_frame.data_mut(2);
+        let v_len = v.len().min(v_plane.len());
+        v_plane[..v_len].copy_from_slice(&v[..v_len]);
 
         // Set PTS
         let timestamp = frame_num as f64 / framerate;

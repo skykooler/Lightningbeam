@@ -198,17 +198,25 @@ fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
         frame.set_rate(settings.sample_rate);
 
         // Copy planar samples to frame
-        unsafe {
-            for ch in 0..settings.channels as usize {
-                let plane = frame.data_mut(ch);
-                let offset = samples_encoded;
-                let src = &planar_samples[ch][offset..offset + chunk_size];
+        for ch in 0..settings.channels as usize {
+            let plane = frame.data_mut(ch);
+            let offset = samples_encoded;
+            let src = &planar_samples[ch][offset..offset + chunk_size];
 
-                std::ptr::copy_nonoverlapping(
-                    src.as_ptr() as *const u8,
-                    plane.as_mut_ptr(),
-                    chunk_size * std::mem::size_of::<i16>(),
-                );
+            // Convert i16 samples to bytes and copy
+            let byte_size = chunk_size * std::mem::size_of::<i16>();
+            if plane.len() < byte_size {
+                return Err(format!(
+                    "FFmpeg frame buffer too small: {} bytes, need {} bytes",
+                    plane.len(), byte_size
+                ));
+            }
+
+            // Safe byte-level copy using slice operations
+            for (i, &sample) in src.iter().enumerate() {
+                let bytes = sample.to_ne_bytes();
+                let offset = i * 2;
+                plane[offset..offset + 2].copy_from_slice(&bytes);
             }
         }
 
