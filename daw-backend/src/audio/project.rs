@@ -349,7 +349,6 @@ impl Project {
         &mut self,
         output: &mut [f32],
         audio_pool: &AudioClipPool,
-        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
         playhead_seconds: f64,
         sample_rate: u32,
@@ -374,7 +373,6 @@ impl Project {
                 track_id,
                 output,
                 audio_pool,
-                midi_pool,
                 buffer_pool,
                 ctx,
                 any_solo,
@@ -389,7 +387,6 @@ impl Project {
         track_id: TrackId,
         output: &mut [f32],
         audio_pool: &AudioClipPool,
-        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
         ctx: RenderContext,
         any_solo: bool,
@@ -437,7 +434,8 @@ impl Project {
             }
             Some(TrackNode::Midi(track)) => {
                 // Render MIDI track directly into output
-                track.render(output, midi_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Access midi_clip_pool from self - safe because we only need immutable access
+                track.render(output, &self.midi_clip_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Group(group)) => {
                 // Read group properties and transform context (index-based child iteration to avoid clone)
@@ -462,7 +460,6 @@ impl Project {
                         child_id,
                         &mut group_buffer,
                         audio_pool,
-                        midi_pool,
                         buffer_pool,
                         child_ctx,
                         any_solo,

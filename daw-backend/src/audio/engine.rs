@@ -317,15 +317,9 @@ impl Engine {
             self.project.reset_read_ahead_targets();
 
             // Render the entire project hierarchy into the mix buffer
-            // Note: We need to use a raw pointer to avoid borrow checker issues
-            // The midi_clip_pool is part of project, so we extract a reference before mutable borrow
-            let midi_pool_ptr = &self.project.midi_clip_pool as *const _;
-            // SAFETY: The midi_clip_pool is not mutated during render, only read
-            let midi_pool_ref = unsafe { &*midi_pool_ptr };
             self.project.render(
                 &mut self.mix_buffer,
                 &self.audio_pool,
-                midi_pool_ref,
                 &mut self.buffer_pool,
                 playhead_seconds,
                 self.sample_rate,
@@ -2149,15 +2143,11 @@ impl Engine {
             Query::ExportAudio(settings, output_path) => {
                 // Perform export directly - this will block the audio thread but that's okay
                 // since we're exporting and not playing back anyway
-                // Use raw pointer to get midi_pool reference before mutable borrow of project
-                let midi_pool_ptr: *const _ = &self.project.midi_clip_pool;
-                let midi_pool_ref = unsafe { &*midi_pool_ptr };
 
                 // Pass event_tx directly - Rust allows borrowing different fields simultaneously
                 match crate::audio::export_audio(
                     &mut self.project,
                     &self.audio_pool,
-                    midi_pool_ref,
                     &settings,
                     &output_path,
                     Some(&mut self.event_tx),

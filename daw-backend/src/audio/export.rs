@@ -1,5 +1,4 @@
 use super::buffer_pool::BufferPool;
-use super::midi_pool::MidiClipPool;
 use super::pool::AudioPool;
 use super::project::Project;
 use crate::command::AudioEvent;
@@ -69,7 +68,6 @@ impl Default for ExportSettings {
 pub fn export_audio<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
@@ -87,7 +85,7 @@ pub fn export_audio<P: AsRef<Path>>(
     // Ensure export mode is disabled even if an error occurs.
     let result = match settings.format {
         ExportFormat::Wav | ExportFormat::Flac => {
-            let samples = render_to_memory(project, pool, midi_pool, settings, event_tx.as_mut().map(|tx| &mut **tx))?;
+            let samples = render_to_memory(project, pool, settings, event_tx.as_mut().map(|tx| &mut **tx))?;
             // Signal that rendering is done and we're now writing the file
             if let Some(ref mut tx) = event_tx {
                 let _ = tx.push(AudioEvent::ExportFinalizing);
@@ -99,10 +97,10 @@ pub fn export_audio<P: AsRef<Path>>(
             }
         }
         ExportFormat::Mp3 => {
-            export_mp3(project, pool, midi_pool, settings, output_path, event_tx)
+            export_mp3(project, pool, settings, output_path, event_tx)
         }
         ExportFormat::Aac => {
-            export_aac(project, pool, midi_pool, settings, output_path, event_tx)
+            export_aac(project, pool, settings, output_path, event_tx)
         }
     };
 
@@ -125,7 +123,6 @@ pub fn export_audio<P: AsRef<Path>>(
 pub fn render_to_memory(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
 ) -> Result<Vec<f32>, String>
@@ -162,7 +159,6 @@ pub fn render_to_memory(
         project.render(
             &mut render_buffer,
             pool,
-            midi_pool,
             &mut buffer_pool,
             playhead,
             settings.sample_rate,
@@ -302,7 +298,6 @@ fn write_flac<P: AsRef<Path>>(
 fn export_mp3<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
@@ -382,7 +377,6 @@ fn export_mp3<P: AsRef<Path>>(
         project.render(
             &mut render_buffer,
             pool,
-            midi_pool,
             &mut buffer_pool,
             playhead,
             settings.sample_rate,
@@ -472,7 +466,6 @@ fn export_mp3<P: AsRef<Path>>(
 fn export_aac<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
     settings: &ExportSettings,
     output_path: P,
     mut event_tx: Option<&mut rtrb::Producer<AudioEvent>>,
@@ -552,7 +545,6 @@ fn export_aac<P: AsRef<Path>>(
         project.render(
             &mut render_buffer,
             pool,
-            midi_pool,
             &mut buffer_pool,
             playhead,
             settings.sample_rate,

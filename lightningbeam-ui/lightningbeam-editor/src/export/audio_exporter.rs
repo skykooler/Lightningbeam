@@ -54,7 +54,7 @@ pub fn export_audio<P: AsRef<Path>>(
 fn export_audio_daw_backend<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
+    _midi_pool: &MidiClipPool,
     settings: &AudioExportSettings,
     output_path: P,
 ) -> Result<(), String> {
@@ -78,7 +78,6 @@ fn export_audio_daw_backend<P: AsRef<Path>>(
     daw_backend::audio::export::export_audio(
         project,
         pool,
-        midi_pool,
         &daw_settings,
         output_path,
         None,
@@ -89,7 +88,7 @@ fn export_audio_daw_backend<P: AsRef<Path>>(
 fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
+    _midi_pool: &MidiClipPool,
     settings: &AudioExportSettings,
     output_path: P,
     cancel_flag: &Arc<AtomicBool>,
@@ -114,7 +113,6 @@ fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
     let pcm_samples = render_to_memory(
         project,
         pool,
-        midi_pool,
         &daw_settings,
         None, // No progress events for now
     )?;
@@ -292,7 +290,7 @@ fn receive_and_write_packets(
 fn export_audio_ffmpeg_aac<P: AsRef<Path>>(
     project: &mut Project,
     pool: &AudioPool,
-    midi_pool: &MidiClipPool,
+    _midi_pool: &MidiClipPool,
     settings: &AudioExportSettings,
     output_path: P,
     cancel_flag: &Arc<AtomicBool>,
@@ -317,7 +315,6 @@ fn export_audio_ffmpeg_aac<P: AsRef<Path>>(
     let pcm_samples = render_to_memory(
         project,
         pool,
-        midi_pool,
         &daw_settings,
         None, // No progress events for now
     )?;
