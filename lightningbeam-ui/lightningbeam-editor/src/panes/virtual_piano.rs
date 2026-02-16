@@ -758,13 +758,24 @@ impl PaneRenderer for VirtualPianoPane {
             return;
         }
 
-        // Request keyboard focus to prevent tool shortcuts from firing
-        // This sets wants_keyboard_input() to true
+        // Request keyboard focus to prevent tool shortcuts from firing,
+        // but yield to text input widgets (node finder search, group rename, etc.)
         let piano_id = ui.id().with("virtual_piano_keyboard");
-        ui.memory_mut(|m| m.request_focus(piano_id));
+        let other_has_focus = ui.memory(|m| {
+            m.focused().map_or(false, |id| id != piano_id)
+        });
+        if !other_has_focus {
+            ui.memory_mut(|m| m.request_focus(piano_id));
+        }
 
-        // Handle keyboard input FIRST
-        self.handle_keyboard_input(ui, shared);
+        // Handle keyboard input (skip when a text field has focus)
+        if other_has_focus {
+            if !self.active_key_presses.is_empty() {
+                self.release_all_keyboard_notes(shared);
+            }
+        } else {
+            self.handle_keyboard_input(ui, shared);
+        }
 
         // Calculate visible range (needed for both rendering and labels)
         let (visible_start, visible_end, white_key_width, offset_x) =
