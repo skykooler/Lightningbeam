@@ -3,8 +3,13 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    // Only bundle libs on Linux
-    if env::var("CARGO_CFG_TARGET_OS").unwrap() != "linux" {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+
+    if target_os == "windows" {
+        bundle_windows_dlls();
+    }
+
+    if target_os != "linux" {
         return;
     }
 
@@ -77,6 +82,50 @@ fn main() {
     // Set rpath to look in ./lib and $ORIGIN/lib
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/lib");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+}
+
+fn bundle_windows_dlls() {
+    let ffmpeg_dir = match env::var("FFMPEG_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => return,
+    };
+
+    let bin_dir = ffmpeg_dir.join("bin");
+    if !bin_dir.exists() {
+        println!("cargo:warning=FFMPEG_DIR/bin not found, skipping DLL bundling");
+        return;
+    }
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let target_dir = PathBuf::from(&out_dir)
+        .parent().unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
+        .to_path_buf();
+
+    let dlls = [
+        "avcodec-62.dll",
+        "avdevice-62.dll",
+        "avfilter-11.dll",
+        "avformat-62.dll",
+        "avutil-60.dll",
+        "swresample-6.dll",
+        "swscale-9.dll",
+    ];
+
+    for dll in &dlls {
+        let src = bin_dir.join(dll);
+        let dst = target_dir.join(dll);
+        if src.exists() {
+            if let Err(e) = fs::copy(&src, &dst) {
+                println!("cargo:warning=Failed to copy {}: {}", dll, e);
+            }
+        } else {
+            println!("cargo:warning=FFmpeg DLL not found: {}", src.display());
+        }
+    }
+
+    println!("cargo:warning=Bundled FFmpeg DLLs to {}", target_dir.display());
 }
 
 fn copy_library(lib_name: &str, search_paths: &[&str], lib_dir: &PathBuf) {
