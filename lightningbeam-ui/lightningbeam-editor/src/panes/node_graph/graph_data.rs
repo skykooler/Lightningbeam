@@ -68,6 +68,11 @@ pub enum NodeTemplate {
 
     // Advanced
     VoiceAllocator,
+    Group,
+
+    // Subgraph I/O (only visible when editing inside a container node)
+    TemplateInput,
+    TemplateOutput,
 
     // Outputs
     AudioOutput,
@@ -117,6 +122,9 @@ impl NodeTemplate {
             NodeTemplate::Mod => "Mod",
             NodeTemplate::Oscilloscope => "Oscilloscope",
             NodeTemplate::VoiceAllocator => "VoiceAllocator",
+            NodeTemplate::Group => "Group",
+            NodeTemplate::TemplateInput => "TemplateInput",
+            NodeTemplate::TemplateOutput => "TemplateOutput",
             NodeTemplate::AudioOutput => "AudioOutput",
         }
     }
@@ -282,6 +290,10 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::Oscilloscope => "Oscilloscope".into(),
             // Advanced
             NodeTemplate::VoiceAllocator => "Voice Allocator".into(),
+            NodeTemplate::Group => "Group".into(),
+            // Subgraph I/O
+            NodeTemplate::TemplateInput => "Template Input".into(),
+            NodeTemplate::TemplateOutput => "Template Output".into(),
             // Outputs
             NodeTemplate::AudioOutput => "Audio Output".into(),
         }
@@ -301,7 +313,8 @@ impl NodeTemplateTrait for NodeTemplate {
             | NodeTemplate::SampleHold | NodeTemplate::SlewLimiter | NodeTemplate::Quantizer
             | NodeTemplate::EnvelopeFollower | NodeTemplate::BpmDetector | NodeTemplate::Mod => vec!["Utilities"],
             NodeTemplate::Oscilloscope => vec!["Analysis"],
-            NodeTemplate::VoiceAllocator => vec!["Advanced"],
+            NodeTemplate::VoiceAllocator | NodeTemplate::Group => vec!["Advanced"],
+            NodeTemplate::TemplateInput | NodeTemplate::TemplateOutput => vec!["Subgraph I/O"],
             NodeTemplate::AudioOutput => vec!["Outputs"],
         }
     }
@@ -667,7 +680,23 @@ impl NodeTemplateTrait for NodeTemplate {
             }
             NodeTemplate::VoiceAllocator => {
                 graph.add_input_param(node_id, "MIDI In".into(), DataType::Midi, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Voices".into(), DataType::CV,
+                    ValueType::float_param(8.0, 1.0, 16.0, "", 0, None), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Group => {
+                // Ports are dynamic based on subgraph TemplateInput/Output nodes.
+                // Start with one audio pass-through by default.
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::TemplateInput => {
+                // Inside a VA template: provides MIDI from the allocator
+                graph.add_output_param(node_id, "MIDI Out".into(), DataType::Midi);
+            }
+            NodeTemplate::TemplateOutput => {
+                // Inside a VA template: sends audio back to the allocator
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
             }
         }
     }
@@ -766,8 +795,22 @@ impl NodeDataTrait for NodeData {
     }
 }
 
-// Iterator for all node templates
+// Iterator for all node templates (track-level graph)
 pub struct AllNodeTemplates;
+
+/// Iterator for subgraph node templates (includes TemplateInput/Output)
+pub struct SubgraphNodeTemplates;
+
+impl NodeTemplateIter for SubgraphNodeTemplates {
+    type Item = NodeTemplate;
+
+    fn all_kinds(&self) -> Vec<Self::Item> {
+        let mut templates = AllNodeTemplates.all_kinds();
+        templates.push(NodeTemplate::TemplateInput);
+        templates.push(NodeTemplate::TemplateOutput);
+        templates
+    }
+}
 
 impl NodeTemplateIter for AllNodeTemplates {
     type Item = NodeTemplate;
@@ -820,6 +863,9 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Oscilloscope,
             // Advanced
             NodeTemplate::VoiceAllocator,
+            NodeTemplate::Group,
+            // Note: TemplateInput/TemplateOutput are excluded from the default finder.
+            // They are added dynamically when editing inside a subgraph.
             // Outputs
             NodeTemplate::AudioOutput,
         ]

@@ -1131,8 +1131,10 @@ impl Engine {
                     // Save position
                     graph.set_node_position(node_idx, x, y);
 
-                    // Automatically set MIDI-receiving nodes as MIDI targets
-                    if node_type == "MidiInput" || node_type == "VoiceAllocator" {
+                    // Automatically set MIDI source nodes as MIDI targets
+                    // VoiceAllocator receives MIDI through its input port via connections,
+                    // not directly — it needs a MidiInput node connected to its MIDI In
+                    if node_type == "MidiInput" {
                         graph.set_midi_target(node_idx, true);
                     }
 
@@ -1149,7 +1151,7 @@ impl Engine {
                 }
             }
 
-            Command::GraphAddNodeToTemplate(track_id, voice_allocator_id, node_type, _x, _y) => {
+            Command::GraphAddNodeToTemplate(track_id, voice_allocator_id, node_type, x, y) => {
                 if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                     let graph = &mut track.instrument_graph;
                     {
@@ -1209,7 +1211,9 @@ impl Engine {
                         // Add node to VoiceAllocator's template graph
                         match graph.add_node_to_voice_allocator_template(va_idx, node) {
                             Ok(node_id) => {
-                                println!("Added node {} (ID: {}) to VoiceAllocator {} template", node_type, node_id, voice_allocator_id);
+                                // Set node position in the template graph
+                                graph.set_position_in_voice_allocator_template(va_idx, node_id, x, y);
+                                println!("Added node {} (ID: {}) to VoiceAllocator {} template at ({}, {})", node_type, node_id, voice_allocator_id, x, y);
                                 let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
                             }
                             Err(e) => {
@@ -1298,6 +1302,58 @@ impl Engine {
                 }
             }
 
+            Command::GraphDisconnectInTemplate(track_id, voice_allocator_id, from, from_port, to, to_port) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                    match graph.disconnect_in_voice_allocator_template(va_idx, from, from_port, to, to_port) {
+                        Ok(()) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                        }
+                        Err(e) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("Failed to disconnect in template: {}", e)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Command::GraphRemoveNodeFromTemplate(track_id, voice_allocator_id, node_index) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                    match graph.remove_node_from_voice_allocator_template(va_idx, node_index) {
+                        Ok(()) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                        }
+                        Err(e) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("Failed to remove node from template: {}", e)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Command::GraphSetParameterInTemplate(track_id, voice_allocator_id, node_index, param_id, value) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let va_idx = NodeIndex::new(voice_allocator_id as usize);
+
+                    if let Err(e) = graph.set_parameter_in_voice_allocator_template(va_idx, node_index, param_id, value) {
+                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                            track_id,
+                            format!("Failed to set parameter in template: {}", e)
+                        ));
+                    }
+                }
+            }
+
             Command::GraphDisconnect(track_id, from, from_port, to, to_port) => {
                 eprintln!("[AUDIO ENGINE] GraphDisconnect: track={}, from={}, from_port={}, to={}, to_port={}", track_id, from, from_port, to, to_port);
                 let graph = match self.project.get_track_mut(track_id) {
@@ -1343,6 +1399,14 @@ impl Engine {
                 if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_index as usize);
                     graph.set_node_position(node_idx, x, y);
+                }
+            }
+
+            Command::GraphSetNodePositionInTemplate(track_id, voice_allocator_id, node_index, x, y) => {
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let va_idx = NodeIndex::new(voice_allocator_id as usize);
+                    graph.set_position_in_voice_allocator_template(va_idx, node_index, x, y);
                 }
             }
 
@@ -2945,6 +3009,18 @@ impl EngineController {
         let _ = self.command_tx.push(Command::GraphConnectInTemplate(track_id, voice_allocator_id, from_node, from_port, to_node, to_port));
     }
 
+    pub fn graph_disconnect_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, from_node: u32, from_port: usize, to_node: u32, to_port: usize) {
+        let _ = self.command_tx.push(Command::GraphDisconnectInTemplate(track_id, voice_allocator_id, from_node, from_port, to_node, to_port));
+    }
+
+    pub fn graph_remove_node_from_template(&mut self, track_id: TrackId, voice_allocator_id: u32, node_id: u32) {
+        let _ = self.command_tx.push(Command::GraphRemoveNodeFromTemplate(track_id, voice_allocator_id, node_id));
+    }
+
+    pub fn graph_set_parameter_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, node_id: u32, param_id: u32, value: f32) {
+        let _ = self.command_tx.push(Command::GraphSetParameterInTemplate(track_id, voice_allocator_id, node_id, param_id, value));
+    }
+
     /// Remove a node from a track's instrument graph
     pub fn graph_remove_node(&mut self, track_id: TrackId, node_id: u32) {
         let _ = self.command_tx.push(Command::GraphRemoveNode(track_id, node_id));
@@ -2968,6 +3044,10 @@ impl EngineController {
     /// Set the UI position of a node in a track's graph
     pub fn graph_set_node_position(&mut self, track_id: TrackId, node_id: u32, x: f32, y: f32) {
         let _ = self.command_tx.push(Command::GraphSetNodePosition(track_id, node_id, x, y));
+    }
+
+    pub fn graph_set_node_position_in_template(&mut self, track_id: TrackId, voice_allocator_id: u32, node_id: u32, x: f32, y: f32) {
+        let _ = self.command_tx.push(Command::GraphSetNodePositionInTemplate(track_id, voice_allocator_id, node_id, x, y));
     }
 
     /// Set which node receives MIDI events in a track's instrument graph

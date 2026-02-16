@@ -146,10 +146,18 @@ pub enum Command {
     GraphConnectInTemplate(TrackId, u32, u32, usize, u32, usize),
     /// Disconnect two nodes in a track's graph (track_id, from_node, from_port, to_node, to_port)
     GraphDisconnect(TrackId, u32, usize, u32, usize),
+    /// Disconnect nodes in a VoiceAllocator template (track_id, voice_allocator_node_id, from_node, from_port, to_node, to_port)
+    GraphDisconnectInTemplate(TrackId, u32, u32, usize, u32, usize),
+    /// Remove a node from a VoiceAllocator's template graph (track_id, voice_allocator_node_id, node_index)
+    GraphRemoveNodeFromTemplate(TrackId, u32, u32),
     /// Set a parameter on a node (track_id, node_index, param_id, value)
     GraphSetParameter(TrackId, u32, u32, f32),
+    /// Set a parameter on a node in a VoiceAllocator's template graph (track_id, voice_allocator_node_id, node_index, param_id, value)
+    GraphSetParameterInTemplate(TrackId, u32, u32, u32, f32),
     /// Set the UI position of a node (track_id, node_index, x, y)
     GraphSetNodePosition(TrackId, u32, f32, f32),
+    /// Set the UI position of a node in a VoiceAllocator's template (track_id, voice_allocator_id, node_index, x, y)
+    GraphSetNodePositionInTemplate(TrackId, u32, u32, f32, f32),
     /// Set which node receives MIDI events (track_id, node_index, enabled)
     GraphSetMidiTarget(TrackId, u32, bool),
     /// Set which node is the audio output (track_id, node_index)

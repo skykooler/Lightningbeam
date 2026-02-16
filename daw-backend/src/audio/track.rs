@@ -3,7 +3,7 @@ use super::clip::{AudioClipInstance, AudioClipInstanceId};
 use super::midi::{MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::node_graph::AudioGraph;
-use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
+use super::node_graph::nodes::{AudioInputNode, AudioOutputNode, MidiInputNode};
 use super::node_graph::preset::GraphPreset;
 use super::pool::AudioClipPool;
 use serde::{Serialize, Deserialize};
@@ -365,12 +365,27 @@ impl MidiTrack {
         // Use a large buffer size that can accommodate any callback
         let default_buffer_size = 8192;
 
+        // Create default instrument graph with MidiInput and AudioOutput
+        let mut instrument_graph = AudioGraph::new(sample_rate, default_buffer_size);
+
+        // Add MidiInput node (entry point for MIDI events)
+        let midi_input_node = Box::new(MidiInputNode::new("MIDI Input"));
+        let midi_input_id = instrument_graph.add_node(midi_input_node);
+        instrument_graph.set_node_position(midi_input_id, 100.0, 150.0);
+        instrument_graph.set_midi_target(midi_input_id, true);
+
+        // Add AudioOutput node (final audio output)
+        let audio_output_node = Box::new(AudioOutputNode::new("Audio Output"));
+        let audio_output_id = instrument_graph.add_node(audio_output_node);
+        instrument_graph.set_node_position(audio_output_id, 700.0, 150.0);
+        instrument_graph.set_output_node(Some(audio_output_id));
+
         Self {
             id,
             name,
             clip_instances: Vec::new(),
             instrument_graph_preset: None,
-            instrument_graph: AudioGraph::new(sample_rate, default_buffer_size),
+            instrument_graph,
             volume: 1.0,
             muted: false,
             solo: false,

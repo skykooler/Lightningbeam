@@ -62,6 +62,8 @@ pub enum NodeResponse<UserResponse: UserResponseTrait, NodeData: NodeDataTrait> 
         node: NodeId,
         drag_delta: Vec2,
     },
+    /// Emitted when a node's title bar is double-clicked.
+    DoubleClick(NodeId),
     User(UserResponse),
 }
 
@@ -478,6 +480,9 @@ where
                             }
                         }
                     }
+                }
+                NodeResponse::DoubleClick(_) => {
+                    // Handled by user code.
                 }
                 NodeResponse::User(_) => {
                     // These are handled by the user code.
@@ -1170,6 +1175,11 @@ where
         if responses.is_empty() && window_response.clicked_by(PointerButton::Primary) {
             responses.push(NodeResponse::SelectNode(self.node_id));
             responses.push(NodeResponse::RaiseNode(self.node_id));
+        }
+
+        // Double-click detection (emitted alongside other responses)
+        if window_response.double_clicked() {
+            responses.push(NodeResponse::DoubleClick(self.node_id));
         }
 
         responses

@@ -9,12 +9,34 @@ pub mod graph_data;
 pub mod node_types;
 
 use backend::{BackendNodeId, GraphBackend};
-use graph_data::{AllNodeTemplates, DataType, GraphState, NodeData, NodeTemplate, ValueType};
+use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, DataType, GraphState, NodeData, NodeTemplate, ValueType};
 use super::NodePath;
 use eframe::egui;
 use egui_node_graph2::*;
 use std::collections::HashMap;
 use uuid::Uuid;
+
+/// What kind of container we've entered for subgraph editing
+#[derive(Clone, Debug)]
+enum SubgraphContext {
+    VoiceAllocator { frontend_id: NodeId, backend_id: BackendNodeId },
+    Group { frontend_id: NodeId, backend_id: BackendNodeId, name: String },
+}
+
+/// One level of subgraph editing — stores the parent state we'll restore on exit
+struct SubgraphFrame {
+    context: SubgraphContext,
+    saved_state: SavedGraphState,
+}
+
+/// Saved graph editor state for restoring when exiting a subgraph
+struct SavedGraphState {
+    state: GraphEditorState<NodeData, DataType, ValueType, NodeTemplate, GraphState>,
+    user_state: GraphState,
+    node_id_map: HashMap<NodeId, BackendNodeId>,
+    backend_to_frontend_map: HashMap<BackendNodeId, NodeId>,
+    parameter_values: HashMap<InputId, f32>,
+}
 
 /// Node graph pane with egui_node_graph2 integration
 pub struct NodeGraphPane {
@@ -56,6 +78,10 @@ pub struct NodeGraphPane {
     dragging_node: Option<NodeId>,
     /// Connection that would be targeted for insertion (highlighted during drag)
     insert_target: Option<(InputId, OutputId)>,
+
+    /// Stack of subgraph contexts — empty = editing track-level graph,
+    /// non-empty = editing nested subgraph(s). Supports arbitrary nesting depth.
+    subgraph_stack: Vec<SubgraphFrame>,
 }
 
 impl NodeGraphPane {
@@ -74,8 +100,8 @@ impl NodeGraphPane {
             parameter_values: HashMap::new(),
             last_project_generation: 0,
             dragging_node: None,
-
             insert_target: None,
+            subgraph_stack: Vec::new(),
         }
     }
 
@@ -102,8 +128,8 @@ impl NodeGraphPane {
             parameter_values: HashMap::new(),
             last_project_generation: 0,
             dragging_node: None,
-
             insert_target: None,
+            subgraph_stack: Vec::new(),
         };
 
         // Load existing graph from backend
@@ -116,166 +142,13 @@ impl NodeGraphPane {
 
     /// Load the graph state from the backend and populate the frontend
     fn load_graph_from_backend(&mut self) -> Result<(), String> {
-        let graph_state = if let Some(backend) = &self.backend {
-            backend.get_state()?
+        let json = if let Some(backend) = &self.backend {
+            backend.get_state_json()?
         } else {
             return Err("No backend available".to_string());
         };
 
-        // Clear existing graph
-        self.state.graph.nodes.clear();
-        self.state.graph.inputs.clear();
-        self.state.graph.outputs.clear();
-        self.state.graph.connections.clear();
-        self.state.node_order.clear();
-        self.state.node_positions.clear();
-        self.state.selected_nodes.clear();
-        self.state.connection_in_progress = None;
-        self.state.ongoing_box_selection = None;
-        self.node_id_map.clear();
-        self.backend_to_frontend_map.clear();
-
-        // Create nodes in frontend
-        for node in &graph_state.nodes {
-            // Parse node type from string (e.g., "Oscillator" -> NodeTemplate::Oscillator)
-            let node_template = match node.node_type.as_str() {
-                // Inputs
-                "MidiInput" => graph_data::NodeTemplate::MidiInput,
-                "AudioInput" => graph_data::NodeTemplate::AudioInput,
-                "AutomationInput" => graph_data::NodeTemplate::AutomationInput,
-                // Generators
-                "Oscillator" => graph_data::NodeTemplate::Oscillator,
-                "WavetableOscillator" => graph_data::NodeTemplate::WavetableOscillator,
-                "FMSynth" => graph_data::NodeTemplate::FmSynth,
-                "NoiseGenerator" => graph_data::NodeTemplate::Noise,
-                "SimpleSampler" => graph_data::NodeTemplate::SimpleSampler,
-                "MultiSampler" => graph_data::NodeTemplate::MultiSampler,
-                // Effects
-                "Filter" => graph_data::NodeTemplate::Filter,
-                "Gain" => graph_data::NodeTemplate::Gain,
-                "Echo" | "Delay" => graph_data::NodeTemplate::Echo,
-                "Reverb" => graph_data::NodeTemplate::Reverb,
-                "Chorus" => graph_data::NodeTemplate::Chorus,
-                "Flanger" => graph_data::NodeTemplate::Flanger,
-                "Phaser" => graph_data::NodeTemplate::Phaser,
-                "Distortion" => graph_data::NodeTemplate::Distortion,
-                "BitCrusher" => graph_data::NodeTemplate::BitCrusher,
-                "Compressor" => graph_data::NodeTemplate::Compressor,
-                "Limiter" => graph_data::NodeTemplate::Limiter,
-                "EQ" => graph_data::NodeTemplate::Eq,
-                "Pan" => graph_data::NodeTemplate::Pan,
-                "RingModulator" => graph_data::NodeTemplate::RingModulator,
-                "Vocoder" => graph_data::NodeTemplate::Vocoder,
-                // Utilities
-                "ADSR" => graph_data::NodeTemplate::Adsr,
-                "LFO" => graph_data::NodeTemplate::Lfo,
-                "Mixer" => graph_data::NodeTemplate::Mixer,
-                "Splitter" => graph_data::NodeTemplate::Splitter,
-                "Constant" => graph_data::NodeTemplate::Constant,
-                "MidiToCV" => graph_data::NodeTemplate::MidiToCv,
-                "AudioToCV" => graph_data::NodeTemplate::AudioToCv,
-                "Math" => graph_data::NodeTemplate::Math,
-                "SampleHold" => graph_data::NodeTemplate::SampleHold,
-                "SlewLimiter" => graph_data::NodeTemplate::SlewLimiter,
-                "Quantizer" => graph_data::NodeTemplate::Quantizer,
-                "EnvelopeFollower" => graph_data::NodeTemplate::EnvelopeFollower,
-                "BPMDetector" => graph_data::NodeTemplate::BpmDetector,
-                "Mod" => graph_data::NodeTemplate::Mod,
-                // Analysis
-                "Oscilloscope" => graph_data::NodeTemplate::Oscilloscope,
-                // Advanced
-                "VoiceAllocator" => graph_data::NodeTemplate::VoiceAllocator,
-                // Outputs
-                "AudioOutput" => graph_data::NodeTemplate::AudioOutput,
-                _ => {
-                    eprintln!("Unknown node type: {}", node.node_type);
-                    continue;
-                }
-            };
-
-            // Create node directly in the graph
-            use egui_node_graph2::Node;
-            let frontend_id = self.state.graph.nodes.insert(Node {
-                id: egui_node_graph2::NodeId::default(), // Will be replaced by insert
-                label: node.node_type.clone(),
-                inputs: vec![],
-                outputs: vec![],
-                user_data: graph_data::NodeData { template: node_template },
-            });
-
-            // Build the node's inputs and outputs (this adds them to graph.inputs and graph.outputs)
-            // build_node() automatically populates the node's inputs/outputs vectors with correct names and order
-            node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
-
-            // Set position
-            self.state.node_positions.insert(
-                frontend_id,
-                egui::pos2(node.position.0, node.position.1),
-            );
-
-            // Add to node order for rendering
-            self.state.node_order.push(frontend_id);
-
-            // Map frontend ID to backend ID
-            let backend_id = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(node.id as usize));
-            self.node_id_map.insert(frontend_id, backend_id);
-            self.backend_to_frontend_map.insert(backend_id, frontend_id);
-
-            // Set parameter values from backend
-            if let Some(node_data) = self.state.graph.nodes.get(frontend_id) {
-                let input_ids: Vec<InputId> = node_data.inputs.iter().map(|(_, id)| *id).collect();
-                for input_id in input_ids {
-                    if let Some(input_param) = self.state.graph.inputs.get_mut(input_id) {
-                        if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &mut input_param.value {
-                            if let Some(&backend_value) = node.parameters.get(pid) {
-                                *value = backend_value as f32;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Create connections in frontend
-        for conn in &graph_state.connections {
-            let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.from_node as usize));
-            let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.to_node as usize));
-
-            if let (Some(&from_id), Some(&to_id)) = (
-                self.backend_to_frontend_map.get(&from_backend),
-                self.backend_to_frontend_map.get(&to_backend),
-            ) {
-                // Find output param on from_node
-                if let Some(from_node) = self.state.graph.nodes.get(from_id) {
-                    if let Some((_name, output_id)) = from_node.outputs.get(conn.from_port) {
-                        // Find input param on to_node
-                        if let Some(to_node) = self.state.graph.nodes.get(to_id) {
-                            if let Some((_name, input_id)) = to_node.inputs.get(conn.to_port) {
-                                // Check max_connections to avoid panic in egui_node_graph2 rendering
-                                let max_conns = self.state.graph.inputs.get(*input_id)
-                                    .and_then(|p| p.max_connections)
-                                    .map(|n| n.get() as usize)
-                                    .unwrap_or(usize::MAX);
-
-                                let current_count = self.state.graph.connections.get(*input_id)
-                                    .map(|c| c.len())
-                                    .unwrap_or(0);
-
-                                if current_count < max_conns {
-                                    if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
-                                        connections.push(*output_id);
-                                    } else {
-                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        self.load_graph_from_json(&json)
     }
 
     fn handle_graph_response(
@@ -305,12 +178,43 @@ impl NodeGraphPane {
                         let position = (center_graph.x, center_graph.y);
 
                         if let Some(track_id) = self.track_id {
-                            let action = Box::new(actions::NodeGraphAction::AddNode(
-                                actions::AddNodeAction::new(track_id, node_type.clone(), position)
-                            ));
-                            self.pending_action = Some(action);
-                            // Track this addition so we can update ID mappings after execution
-                            self.pending_node_addition = Some((node_id, node_type, position));
+                            if let Some(va_id) = self.va_context() {
+                                // Inside VA template — call template command directly
+                                if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                    if let Some(audio_controller) = &shared.audio_controller {
+                                        let mut controller = audio_controller.lock().unwrap();
+                                        controller.graph_add_node_to_template(
+                                            backend_track_id, va_id, node_type.clone(),
+                                            position.0, position.1,
+                                        );
+                                        // Query template state to get the new node's backend ID
+                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                        if let Ok(json) = controller.query_template_state(backend_track_id, va_id) {
+                                            if let Ok(state) = serde_json::from_str::<daw_backend::audio::node_graph::GraphPreset>(&json) {
+                                                // Find the new node by type and position
+                                                if let Some(backend_node) = state.nodes.iter().find(|n| {
+                                                    n.node_type == node_type &&
+                                                    (n.position.0 - position.0).abs() < 1.0 &&
+                                                    (n.position.1 - position.1).abs() < 1.0
+                                                }) {
+                                                    let backend_id = BackendNodeId::Audio(
+                                                        petgraph::stable_graph::NodeIndex::new(backend_node.id as usize)
+                                                    );
+                                                    self.node_id_map.insert(node_id, backend_id);
+                                                    self.backend_to_frontend_map.insert(backend_id, node_id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Normal track graph — use action system
+                                let action = Box::new(actions::NodeGraphAction::AddNode(
+                                    actions::AddNodeAction::new(track_id, node_type.clone(), position)
+                                ));
+                                self.pending_action = Some(action);
+                                self.pending_node_addition = Some((node_id, node_type, position));
+                            }
                         }
                     }
                 }
@@ -335,16 +239,29 @@ impl NodeGraphPane {
                             let to_backend = self.node_id_map.get(&to_node_id);
 
                             if let (Some(&from_id), Some(&to_id)) = (from_backend, to_backend) {
-                                let action = Box::new(actions::NodeGraphAction::Connect(
-                                    actions::ConnectAction::new(
-                                        track_id,
-                                        from_id,
-                                        from_port,
-                                        to_id,
-                                        to_port,
-                                    )
-                                ));
-                                self.pending_action = Some(action);
+                                let BackendNodeId::Audio(from_idx) = from_id;
+                                let BackendNodeId::Audio(to_idx) = to_id;
+
+                                if let Some(va_id) = self.va_context() {
+                                    // Inside VA template
+                                    if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                        if let Some(audio_controller) = &shared.audio_controller {
+                                            let mut controller = audio_controller.lock().unwrap();
+                                            controller.graph_connect_in_template(
+                                                backend_track_id, va_id,
+                                                from_idx.index() as u32, from_port,
+                                                to_idx.index() as u32, to_port,
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let action = Box::new(actions::NodeGraphAction::Connect(
+                                        actions::ConnectAction::new(
+                                            track_id, from_id, from_port, to_id, to_port,
+                                        )
+                                    ));
+                                    self.pending_action = Some(action);
+                                }
                             }
                         }
                     }
@@ -352,12 +269,10 @@ impl NodeGraphPane {
                 NodeResponse::DisconnectEvent { output, input } => {
                     // Connection was removed
                     if let Some(track_id) = self.track_id {
-                        // Get the nodes that own these params
                         let from_node = self.state.graph.outputs.get(output).map(|o| o.node);
                         let to_node = self.state.graph.inputs.get(input).map(|i| i.node);
 
                         if let (Some(from_node_id), Some(to_node_id)) = (from_node, to_node) {
-                            // Find port indices
                             let from_port = self.state.graph.nodes.get(from_node_id)
                                 .and_then(|n| n.outputs.iter().position(|(_, id)| *id == output))
                                 .unwrap_or(0);
@@ -365,21 +280,33 @@ impl NodeGraphPane {
                                 .and_then(|n| n.inputs.iter().position(|(_, id)| *id == input))
                                 .unwrap_or(0);
 
-                            // Map frontend IDs to backend IDs
                             let from_backend = self.node_id_map.get(&from_node_id);
                             let to_backend = self.node_id_map.get(&to_node_id);
 
                             if let (Some(&from_id), Some(&to_id)) = (from_backend, to_backend) {
-                                let action = Box::new(actions::NodeGraphAction::Disconnect(
-                                    actions::DisconnectAction::new(
-                                        track_id,
-                                        from_id,
-                                        from_port,
-                                        to_id,
-                                        to_port,
-                                    )
-                                ));
-                                self.pending_action = Some(action);
+                                let BackendNodeId::Audio(from_idx) = from_id;
+                                let BackendNodeId::Audio(to_idx) = to_id;
+
+                                if let Some(va_id) = self.va_context() {
+                                    // Inside VA template
+                                    if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                        if let Some(audio_controller) = &shared.audio_controller {
+                                            let mut controller = audio_controller.lock().unwrap();
+                                            controller.graph_disconnect_in_template(
+                                                backend_track_id, va_id,
+                                                from_idx.index() as u32, from_port,
+                                                to_idx.index() as u32, to_port,
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    let action = Box::new(actions::NodeGraphAction::Disconnect(
+                                        actions::DisconnectAction::new(
+                                            track_id, from_id, from_port, to_id, to_port,
+                                        )
+                                    ));
+                                    self.pending_action = Some(action);
+                                }
                             }
                         }
                     }
@@ -388,10 +315,24 @@ impl NodeGraphPane {
                     // Node was deleted
                     if let Some(track_id) = self.track_id {
                         if let Some(&backend_id) = self.node_id_map.get(&node_id) {
-                            let action = Box::new(actions::NodeGraphAction::RemoveNode(
-                                actions::RemoveNodeAction::new(track_id, backend_id)
-                            ));
-                            self.pending_action = Some(action);
+                            let BackendNodeId::Audio(node_idx) = backend_id;
+
+                            if let Some(va_id) = self.va_context() {
+                                // Inside VA template
+                                if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                    if let Some(audio_controller) = &shared.audio_controller {
+                                        let mut controller = audio_controller.lock().unwrap();
+                                        controller.graph_remove_node_from_template(
+                                            backend_track_id, va_id, node_idx.index() as u32,
+                                        );
+                                    }
+                                }
+                            } else {
+                                let action = Box::new(actions::NodeGraphAction::RemoveNode(
+                                    actions::RemoveNodeAction::new(track_id, backend_id)
+                                ));
+                                self.pending_action = Some(action);
+                            }
 
                             // Remove from ID map
                             self.node_id_map.remove(&node_id);
@@ -412,14 +353,60 @@ impl NodeGraphPane {
                             if let Some(audio_controller) = &shared.audio_controller {
                                 if let Some(&backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid)) {
                                     let mut controller = audio_controller.lock().unwrap();
-                                    controller.graph_set_node_position(
-                                        backend_track_id,
-                                        node_index,
-                                        pos.x,
-                                        pos.y,
+                                    if let Some(va_id) = self.va_context() {
+                                        controller.graph_set_node_position_in_template(
+                                            backend_track_id,
+                                            va_id,
+                                            node_index,
+                                            pos.x,
+                                            pos.y,
+                                        );
+                                    } else {
+                                        controller.graph_set_node_position(
+                                            backend_track_id,
+                                            node_index,
+                                            pos.x,
+                                            pos.y,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                NodeResponse::DoubleClick(node_id) => {
+                    // Check if this is a container node we can enter
+                    if let Some(node) = self.state.graph.nodes.get(node_id) {
+                        match node.user_data.template {
+                            NodeTemplate::VoiceAllocator => {
+                                // VA can only be entered at track level (depth 0)
+                                if !self.in_subgraph() {
+                                    if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                                        self.enter_subgraph(
+                                            SubgraphContext::VoiceAllocator {
+                                                frontend_id: node_id,
+                                                backend_id,
+                                            },
+                                            shared,
+                                        );
+                                    }
+                                }
+                            }
+                            NodeTemplate::Group => {
+                                // Groups can nest arbitrarily deep
+                                if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                                    let name = node.label.clone();
+                                    self.enter_subgraph(
+                                        SubgraphContext::Group {
+                                            frontend_id: node_id,
+                                            backend_id,
+                                            name,
+                                        },
+                                        shared,
                                     );
                                 }
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -481,7 +468,7 @@ impl NodeGraphPane {
         }
     }
 
-    fn check_parameter_changes(&mut self) {
+    fn check_parameter_changes(&mut self, shared: &mut crate::panes::SharedPaneState) {
         // Check all input parameters for value changes
         let mut _checked_count = 0;
         let mut _connection_only_count = 0;
@@ -518,24 +505,36 @@ impl NodeGraphPane {
             };
 
             if has_changed {
-                // Value has changed, create SetParameterAction
+                // Value has changed — send update to backend
                 if let Some(track_id) = self.track_id {
                     let node_id = input_param.node;
 
-                    // Get backend node ID and use stored param ID
                     if let Some(&backend_id) = self.node_id_map.get(&node_id) {
                         if let Some(param_id) = backend_param_id {
-                            eprintln!("[DEBUG] Parameter changed: node {:?} param {} from {:?} to {}",
-                                backend_id, param_id, previous_value, current_value);
-                            let action = Box::new(actions::NodeGraphAction::SetParameter(
-                                actions::SetParameterAction::new(
-                                    track_id,
-                                    backend_id,
-                                    param_id,
-                                    current_value as f64,
-                                )
-                            ));
-                            self.pending_action = Some(action);
+                            let BackendNodeId::Audio(node_idx) = backend_id;
+
+                            if let Some(va_id) = self.va_context() {
+                                // Inside VA template — call template command directly
+                                if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                                    if let Some(audio_controller) = &shared.audio_controller {
+                                        let mut controller = audio_controller.lock().unwrap();
+                                        controller.graph_set_parameter_in_template(
+                                            backend_track_id, va_id,
+                                            node_idx.index() as u32, param_id, current_value,
+                                        );
+                                    }
+                                }
+                            } else {
+                                let action = Box::new(actions::NodeGraphAction::SetParameter(
+                                    actions::SetParameterAction::new(
+                                        track_id,
+                                        backend_id,
+                                        param_id,
+                                        current_value as f64,
+                                    )
+                                ));
+                                self.pending_action = Some(action);
+                            }
                         }
                     }
                 }
@@ -897,6 +896,252 @@ impl NodeGraphPane {
             self.state.graph.connections.insert(target_input, vec![drag_output_id]);
         }
     }
+
+    /// Enter a subgraph for editing (VA template or Group internals)
+    fn enter_subgraph(
+        &mut self,
+        context: SubgraphContext,
+        shared: &mut crate::panes::SharedPaneState,
+    ) {
+        // Save current state
+        let saved = SavedGraphState {
+            state: std::mem::replace(&mut self.state, GraphEditorState::new(1.0)),
+            user_state: std::mem::replace(&mut self.user_state, GraphState::default()),
+            node_id_map: std::mem::take(&mut self.node_id_map),
+            backend_to_frontend_map: std::mem::take(&mut self.backend_to_frontend_map),
+            parameter_values: std::mem::take(&mut self.parameter_values),
+        };
+
+        self.subgraph_stack.push(SubgraphFrame {
+            context: context.clone(),
+            saved_state: saved,
+        });
+
+        // Load the subgraph state from backend
+        match &context {
+            SubgraphContext::VoiceAllocator { backend_id, .. } => {
+                let BackendNodeId::Audio(va_idx) = *backend_id;
+                if let Some(track_id) = self.track_id {
+                    if let Some(&backend_track_id) = shared.layer_to_track_map.get(&track_id) {
+                        if let Some(audio_controller) = &shared.audio_controller {
+                            let mut controller = audio_controller.lock().unwrap();
+                            match controller.query_template_state(backend_track_id, va_idx.index() as u32) {
+                                Ok(json) => {
+                                    if let Err(e) = self.load_graph_from_json(&json) {
+                                        eprintln!("Failed to load template state: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to query template state: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SubgraphContext::Group { .. } => {
+                // TODO: query_subgraph_state when group backend is implemented
+            }
+        }
+    }
+
+    /// Exit the current subgraph level, restoring parent state
+    fn exit_subgraph(&mut self) {
+        if let Some(frame) = self.subgraph_stack.pop() {
+            self.state = frame.saved_state.state;
+            self.user_state = frame.saved_state.user_state;
+            self.node_id_map = frame.saved_state.node_id_map;
+            self.backend_to_frontend_map = frame.saved_state.backend_to_frontend_map;
+            self.parameter_values = frame.saved_state.parameter_values;
+        }
+    }
+
+    /// Exit to a specific depth in the subgraph stack (0 = track level)
+    fn exit_to_level(&mut self, target_depth: usize) {
+        while self.subgraph_stack.len() > target_depth {
+            self.exit_subgraph();
+        }
+    }
+
+    /// Load graph state from a JSON string (used for both track graphs and subgraphs)
+    fn load_graph_from_json(&mut self, json: &str) -> Result<(), String> {
+        let graph_state: daw_backend::audio::node_graph::GraphPreset =
+            serde_json::from_str(json).map_err(|e| format!("Failed to parse graph state: {}", e))?;
+
+        // Clear existing graph
+        self.state.graph.nodes.clear();
+        self.state.graph.inputs.clear();
+        self.state.graph.outputs.clear();
+        self.state.graph.connections.clear();
+        self.state.node_order.clear();
+        self.state.node_positions.clear();
+        self.state.selected_nodes.clear();
+        self.state.connection_in_progress = None;
+        self.state.ongoing_box_selection = None;
+        self.node_id_map.clear();
+        self.backend_to_frontend_map.clear();
+
+        // Create nodes in frontend
+        for node in &graph_state.nodes {
+            let node_template = match node.node_type.as_str() {
+                "MidiInput" => NodeTemplate::MidiInput,
+                "AudioInput" => NodeTemplate::AudioInput,
+                "AutomationInput" => NodeTemplate::AutomationInput,
+                "Oscillator" => NodeTemplate::Oscillator,
+                "WavetableOscillator" => NodeTemplate::WavetableOscillator,
+                "FMSynth" => NodeTemplate::FmSynth,
+                "NoiseGenerator" => NodeTemplate::Noise,
+                "SimpleSampler" => NodeTemplate::SimpleSampler,
+                "MultiSampler" => NodeTemplate::MultiSampler,
+                "Filter" => NodeTemplate::Filter,
+                "Gain" => NodeTemplate::Gain,
+                "Echo" | "Delay" => NodeTemplate::Echo,
+                "Reverb" => NodeTemplate::Reverb,
+                "Chorus" => NodeTemplate::Chorus,
+                "Flanger" => NodeTemplate::Flanger,
+                "Phaser" => NodeTemplate::Phaser,
+                "Distortion" => NodeTemplate::Distortion,
+                "BitCrusher" => NodeTemplate::BitCrusher,
+                "Compressor" => NodeTemplate::Compressor,
+                "Limiter" => NodeTemplate::Limiter,
+                "EQ" => NodeTemplate::Eq,
+                "Pan" => NodeTemplate::Pan,
+                "RingModulator" => NodeTemplate::RingModulator,
+                "Vocoder" => NodeTemplate::Vocoder,
+                "ADSR" => NodeTemplate::Adsr,
+                "LFO" => NodeTemplate::Lfo,
+                "Mixer" => NodeTemplate::Mixer,
+                "Splitter" => NodeTemplate::Splitter,
+                "Constant" => NodeTemplate::Constant,
+                "MidiToCV" => NodeTemplate::MidiToCv,
+                "AudioToCV" => NodeTemplate::AudioToCv,
+                "Math" => NodeTemplate::Math,
+                "SampleHold" => NodeTemplate::SampleHold,
+                "SlewLimiter" => NodeTemplate::SlewLimiter,
+                "Quantizer" => NodeTemplate::Quantizer,
+                "EnvelopeFollower" => NodeTemplate::EnvelopeFollower,
+                "BPMDetector" => NodeTemplate::BpmDetector,
+                "Mod" => NodeTemplate::Mod,
+                "Oscilloscope" => NodeTemplate::Oscilloscope,
+                "VoiceAllocator" => NodeTemplate::VoiceAllocator,
+                "Group" => NodeTemplate::Group,
+                "TemplateInput" => NodeTemplate::TemplateInput,
+                "TemplateOutput" => NodeTemplate::TemplateOutput,
+                "AudioOutput" => NodeTemplate::AudioOutput,
+                _ => {
+                    eprintln!("Unknown node type: {}", node.node_type);
+                    continue;
+                }
+            };
+
+            use egui_node_graph2::Node;
+            let frontend_id = self.state.graph.nodes.insert(Node {
+                id: NodeId::default(),
+                label: node.node_type.clone(),
+                inputs: vec![],
+                outputs: vec![],
+                user_data: NodeData { template: node_template },
+            });
+
+            node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
+
+            self.state.node_positions.insert(
+                frontend_id,
+                egui::pos2(node.position.0, node.position.1),
+            );
+
+            self.state.node_order.push(frontend_id);
+
+            let backend_id = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(node.id as usize));
+            self.node_id_map.insert(frontend_id, backend_id);
+            self.backend_to_frontend_map.insert(backend_id, frontend_id);
+
+            // Set parameter values from backend
+            if let Some(node_data) = self.state.graph.nodes.get(frontend_id) {
+                let input_ids: Vec<InputId> = node_data.inputs.iter().map(|(_, id)| *id).collect();
+                for input_id in input_ids {
+                    if let Some(input_param) = self.state.graph.inputs.get_mut(input_id) {
+                        if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &mut input_param.value {
+                            if let Some(&backend_value) = node.parameters.get(pid) {
+                                *value = backend_value as f32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create connections in frontend
+        for conn in &graph_state.connections {
+            let from_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.from_node as usize));
+            let to_backend = BackendNodeId::Audio(petgraph::stable_graph::NodeIndex::new(conn.to_node as usize));
+
+            if let (Some(&from_id), Some(&to_id)) = (
+                self.backend_to_frontend_map.get(&from_backend),
+                self.backend_to_frontend_map.get(&to_backend),
+            ) {
+                if let Some(from_node) = self.state.graph.nodes.get(from_id) {
+                    if let Some((_name, output_id)) = from_node.outputs.get(conn.from_port) {
+                        if let Some(to_node) = self.state.graph.nodes.get(to_id) {
+                            if let Some((_name, input_id)) = to_node.inputs.get(conn.to_port) {
+                                let max_conns = self.state.graph.inputs.get(*input_id)
+                                    .and_then(|p| p.max_connections)
+                                    .map(|n| n.get() as usize)
+                                    .unwrap_or(usize::MAX);
+
+                                let current_count = self.state.graph.connections.get(*input_id)
+                                    .map(|c| c.len())
+                                    .unwrap_or(0);
+
+                                if current_count < max_conns {
+                                    if let Some(connections) = self.state.graph.connections.get_mut(*input_id) {
+                                        connections.push(*output_id);
+                                    } else {
+                                        self.state.graph.connections.insert(*input_id, vec![*output_id]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the VA backend node ID if we're editing inside a VoiceAllocator template
+    fn va_context(&self) -> Option<u32> {
+        match self.current_subgraph()? {
+            SubgraphContext::VoiceAllocator { backend_id, .. } => {
+                let BackendNodeId::Audio(idx) = *backend_id;
+                Some(idx.index() as u32)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether we're currently editing inside a subgraph
+    fn in_subgraph(&self) -> bool {
+        !self.subgraph_stack.is_empty()
+    }
+
+    /// Get the current subgraph context (top of stack)
+    fn current_subgraph(&self) -> Option<&SubgraphContext> {
+        self.subgraph_stack.last().map(|f| &f.context)
+    }
+
+    /// Build breadcrumb segments for the current subgraph stack
+    fn breadcrumb_segments(&self) -> Vec<String> {
+        let mut segments = vec!["Track Graph".to_string()];
+        for frame in &self.subgraph_stack {
+            match &frame.context {
+                SubgraphContext::VoiceAllocator { .. } => segments.push("Voice Allocator".to_string()),
+                SubgraphContext::Group { name, .. } => segments.push(format!("Group '{}'", name)),
+            }
+        }
+        segments
+    }
 }
 
 impl crate::panes::PaneRenderer for NodeGraphPane {
@@ -929,7 +1174,8 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                         };
 
                         if is_valid_track {
-                            // Reload graph for new track
+                            // Reload graph for new track — exit any subgraph editing
+                            self.subgraph_stack.clear();
                             self.track_id = Some(new_track_id);
 
                             // Recreate backend
@@ -973,8 +1219,75 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
         let bg_color = bg_style.background_color.unwrap_or(egui::Color32::from_gray(45));
         let grid_color = grid_style.background_color.unwrap_or(egui::Color32::from_gray(55));
 
+        // Draw breadcrumb bar when editing a subgraph
+        let breadcrumb_height = if self.in_subgraph() { 28.0 } else { 0.0 };
+        let graph_rect = if self.in_subgraph() {
+            // Draw breadcrumb bar at top
+            let breadcrumb_rect = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(rect.width(), breadcrumb_height),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(breadcrumb_rect, 0.0, egui::Color32::from_gray(35));
+            painter.line_segment(
+                [breadcrumb_rect.left_bottom(), breadcrumb_rect.right_bottom()],
+                egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
+            );
+
+            // Draw clickable breadcrumb segments
+            let segments = self.breadcrumb_segments();
+            let mut x = rect.min.x + 8.0;
+            let y = rect.min.y + 6.0;
+            let mut clicked_level: Option<usize> = None;
+
+            for (i, segment) in segments.iter().enumerate() {
+                let is_last = i == segments.len() - 1;
+                let text_color = if is_last {
+                    egui::Color32::from_gray(220)
+                } else {
+                    egui::Color32::from_rgb(100, 180, 255)
+                };
+
+                let font_id = egui::FontId::proportional(13.0);
+                let galley = painter.layout_no_wrap(segment.clone(), font_id, text_color);
+                let text_rect = egui::Rect::from_min_size(egui::pos2(x, y), galley.size());
+
+                if !is_last {
+                    let response = ui.interact(text_rect, ui.id().with(("breadcrumb", i)), egui::Sense::click());
+                    if response.clicked() {
+                        clicked_level = Some(i);
+                    }
+                    if response.hovered() {
+                        painter.rect_stroke(text_rect.expand(2.0), 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(80)), egui::StrokeKind::Outside);
+                    }
+                }
+
+                painter.galley(egui::pos2(x, y), galley, text_color);
+                x += text_rect.width();
+
+                if !is_last {
+                    let sep = " > ";
+                    let sep_galley = painter.layout_no_wrap(sep.to_string(), egui::FontId::proportional(13.0), egui::Color32::from_gray(100));
+                    painter.galley(egui::pos2(x, y), sep_galley, egui::Color32::from_gray(100));
+                    x += 20.0;
+                }
+            }
+
+            if let Some(level) = clicked_level {
+                self.exit_to_level(level);
+            }
+
+            // Shrink graph rect to below breadcrumb
+            egui::Rect::from_min_max(
+                egui::pos2(rect.min.x, rect.min.y + breadcrumb_height),
+                rect.max,
+            )
+        } else {
+            rect
+        };
+
         // Allocate the rect and render the graph editor within it
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(graph_rect), |ui| {
             // Check for scroll input to override library's default zoom behavior
             // Only handle scroll when mouse is over the node graph area
             let pointer_over_graph = ui.rect_contains_pointer(rect);
@@ -1007,21 +1320,30 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
             // Draw dot grid background with pan/zoom
             let pan_zoom = &self.state.pan_zoom;
-            Self::draw_dot_grid_background(ui, rect, bg_color, grid_color, pan_zoom);
+            Self::draw_dot_grid_background(ui, graph_rect, bg_color, grid_color, pan_zoom);
 
-            // Draw the graph editor (library will process scroll as zoom by default)
-            let graph_response = self.state.draw_graph_editor(
-                ui,
-                AllNodeTemplates,
-                &mut self.user_state,
-                Vec::default(),
-            );
+            // Draw the graph editor with context-aware node templates
+            let graph_response = if self.in_subgraph() {
+                self.state.draw_graph_editor(
+                    ui,
+                    SubgraphNodeTemplates,
+                    &mut self.user_state,
+                    Vec::default(),
+                )
+            } else {
+                self.state.draw_graph_editor(
+                    ui,
+                    AllNodeTemplates,
+                    &mut self.user_state,
+                    Vec::default(),
+                )
+            };
 
             // Handle graph events and create actions
-            self.handle_graph_response(graph_response, shared, rect);
+            self.handle_graph_response(graph_response, shared, graph_rect);
 
             // Check for parameter value changes and send updates to backend
-            self.check_parameter_changes();
+            self.check_parameter_changes(shared);
 
             // Execute any parameter change actions
             self.execute_pending_action(shared);

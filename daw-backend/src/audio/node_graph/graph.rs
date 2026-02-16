@@ -352,6 +352,138 @@ impl AudioGraph {
         Err("VoiceAllocator node not found".to_string())
     }
 
+    /// Disconnect two nodes in a VoiceAllocator's template graph
+    pub fn disconnect_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        from_node: u32,
+        from_port: usize,
+        to_node: u32,
+        to_port: usize,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            if graph_node.node.node_type() != "VoiceAllocator" {
+                return Err("Node is not a VoiceAllocator".to_string());
+            }
+
+            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+
+            // SAFETY: We just checked that this is a VoiceAllocator
+            unsafe {
+                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
+                let va = &mut *va_ptr;
+
+                let from_idx = NodeIndex::new(from_node as usize);
+                let to_idx = NodeIndex::new(to_node as usize);
+
+                va.template_graph_mut().disconnect(from_idx, from_port, to_idx, to_port);
+                va.rebuild_voices();
+
+                return Ok(());
+            }
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Remove a node from a VoiceAllocator's template graph
+    pub fn remove_node_from_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            if graph_node.node.node_type() != "VoiceAllocator" {
+                return Err("Node is not a VoiceAllocator".to_string());
+            }
+
+            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+
+            // SAFETY: We just checked that this is a VoiceAllocator
+            unsafe {
+                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
+                let va = &mut *va_ptr;
+
+                let node_idx = NodeIndex::new(node_id as usize);
+                va.template_graph_mut().remove_node(node_idx);
+                va.rebuild_voices();
+
+                return Ok(());
+            }
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Set a parameter on a node in a VoiceAllocator's template graph
+    pub fn set_parameter_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+        param_id: u32,
+        value: f32,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            if graph_node.node.node_type() != "VoiceAllocator" {
+                return Err("Node is not a VoiceAllocator".to_string());
+            }
+
+            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+
+            // SAFETY: We just checked that this is a VoiceAllocator
+            unsafe {
+                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
+                let va = &mut *va_ptr;
+
+                let node_idx = NodeIndex::new(node_id as usize);
+                if let Some(template_node) = va.template_graph_mut().get_graph_node_mut(node_idx) {
+                    template_node.node.set_parameter(param_id, value);
+                } else {
+                    return Err("Node not found in template".to_string());
+                }
+
+                va.rebuild_voices();
+
+                return Ok(());
+            }
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Set the position of a node in a VoiceAllocator's template graph
+    pub fn set_position_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+        x: f32,
+        y: f32,
+    ) {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            if graph_node.node.node_type() != "VoiceAllocator" {
+                return;
+            }
+
+            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+
+            // SAFETY: We just checked that this is a VoiceAllocator
+            unsafe {
+                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
+                let va = &mut *va_ptr;
+                let node_idx = NodeIndex::new(node_id as usize);
+                va.template_graph_mut().set_node_position(node_idx, x, y);
+            }
+        }
+    }
+
     /// Process the graph and produce audio output
     pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: f64) {
         // Update playback time

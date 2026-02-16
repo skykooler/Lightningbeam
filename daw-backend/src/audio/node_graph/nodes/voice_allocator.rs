@@ -72,8 +72,19 @@ impl VoiceAllocatorNode {
             Parameter::new(PARAM_VOICE_COUNT, "Voices", 1.0, MAX_VOICES as f32, DEFAULT_VOICES as f32, ParameterUnit::Generic),
         ];
 
-        // Create empty template graph
-        let template_graph = AudioGraph::new(sample_rate, buffer_size);
+        // Create template graph with default TemplateInput and TemplateOutput nodes
+        let mut template_graph = AudioGraph::new(sample_rate, buffer_size);
+        {
+            use super::template_io::{TemplateInputNode, TemplateOutputNode};
+            let input_node = Box::new(TemplateInputNode::new("Template Input"));
+            let output_node = Box::new(TemplateOutputNode::new("Template Output"));
+            let input_idx = template_graph.add_node(input_node);
+            let output_idx = template_graph.add_node(output_node);
+            template_graph.set_node_position(input_idx, -200.0, 0.0);
+            template_graph.set_node_position(output_idx, 200.0, 0.0);
+            template_graph.set_midi_target(input_idx, true);
+            template_graph.set_output_node(Some(output_idx));
+        }
 
         // Create voice instances (initially empty clones of template)
         let voice_instances: Vec<AudioGraph> = (0..MAX_VOICES)

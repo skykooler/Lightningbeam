@@ -125,9 +125,13 @@ impl GraphBackend for AudioGraphBackend {
         Ok(())
     }
 
-    fn get_state(&self) -> Result<GraphState, String> {
+    fn get_state_json(&self) -> Result<String, String> {
         let mut controller = self.audio_controller.lock().unwrap();
-        let json = controller.query_graph_state(self.track_id)?;
+        controller.query_graph_state(self.track_id)
+    }
+
+    fn get_state(&self) -> Result<GraphState, String> {
+        let json = self.get_state_json()?;
 
         // Parse the GraphPreset JSON from backend
         let preset: daw_backend::audio::node_graph::GraphPreset =

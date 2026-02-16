@@ -55,6 +55,9 @@ pub trait GraphBackend: Send {
     /// Get current graph state (for serialization)
     fn get_state(&self) -> Result<GraphState, String>;
 
+    /// Get current graph state as raw JSON (GraphPreset format from backend)
+    fn get_state_json(&self) -> Result<String, String>;
+
     /// Load graph state (for presets)
     fn load_state(&mut self, state: &GraphState) -> Result<(), String>;
 
