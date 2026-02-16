@@ -135,7 +135,15 @@ impl NodeTemplate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeData {
     pub template: NodeTemplate,
+    /// Display name of loaded sample (for SimpleSampler/MultiSampler nodes)
+    #[serde(default)]
+    pub sample_display_name: Option<String>,
+    /// Root note (MIDI note number) for original-pitch playback (default 69 = A4)
+    #[serde(default = "default_root_note")]
+    pub root_note: u8,
 }
+
+fn default_root_note() -> u8 { 69 }
 
 /// Cached oscilloscope waveform data for rendering in node body
 pub struct OscilloscopeCache {
@@ -143,12 +151,69 @@ pub struct OscilloscopeCache {
     pub cv: Vec<f32>,
 }
 
+/// Info about an audio clip available for sampler selection
+pub struct SamplerClipInfo {
+    pub name: String,
+    pub pool_index: usize,
+}
+
+/// Info about an asset folder available for multi-sampler
+pub struct SamplerFolderInfo {
+    pub folder_id: uuid::Uuid,
+    pub name: String,
+    /// Pool indices of audio clips in this folder
+    pub clip_pool_indices: Vec<(String, usize)>,
+}
+
+/// Pending sampler load request from bottom_ui(), handled by the node graph pane
+pub enum PendingSamplerLoad {
+    /// Load a single clip from the audio pool into a SimpleSampler
+    SimpleFromPool { node_id: NodeId, backend_node_id: u32, pool_index: usize, name: String },
+    /// Open a file dialog to load into a SimpleSampler
+    SimpleFromFile { node_id: NodeId, backend_node_id: u32 },
+    /// Load a single clip from the audio pool as a MultiSampler layer
+    MultiFromPool { node_id: NodeId, backend_node_id: u32, pool_index: usize, name: String },
+    /// Load all clips in a folder as MultiSampler layers
+    MultiFromFolder { node_id: NodeId, folder_id: uuid::Uuid },
+    /// Open a file/folder dialog to load into a MultiSampler
+    MultiFromFilesystem { node_id: NodeId, backend_node_id: u32 },
+}
+
 /// Custom graph state - can track selected nodes, etc.
-#[derive(Default)]
 pub struct GraphState {
     pub active_node: Option<NodeId>,
     /// Oscilloscope data cached per node, populated before draw_graph_editor()
     pub oscilloscope_data: HashMap<NodeId, OscilloscopeCache>,
+    /// Audio clips available for sampler selection, populated before draw
+    pub available_clips: Vec<SamplerClipInfo>,
+    /// Asset folders available for multi-sampler, populated before draw
+    pub available_folders: Vec<SamplerFolderInfo>,
+    /// Pending sample load request from bottom_ui popup
+    pub pending_sampler_load: Option<PendingSamplerLoad>,
+    /// Search text for the sampler clip picker popup
+    pub sampler_search_text: String,
+    /// Mapping from frontend NodeId to backend node index, populated before draw
+    pub node_backend_ids: HashMap<NodeId, u32>,
+    /// Pending root note changes from bottom_ui (node_id, backend_node_id, new_root_note)
+    pub pending_root_note_changes: Vec<(NodeId, u32, u8)>,
+    /// Time scale per oscilloscope node (in milliseconds)
+    pub oscilloscope_time_scale: HashMap<NodeId, f32>,
+}
+
+impl Default for GraphState {
+    fn default() -> Self {
+        Self {
+            active_node: None,
+            oscilloscope_data: HashMap::new(),
+            available_clips: Vec::new(),
+            available_folders: Vec::new(),
+            pending_sampler_load: None,
+            sampler_search_text: String::new(),
+            node_backend_ids: HashMap::new(),
+            pending_root_note_changes: Vec::new(),
+            oscilloscope_time_scale: HashMap::new(),
+        }
+    }
 }
 
 /// User response type (empty for now)
@@ -333,7 +398,7 @@ impl NodeTemplateTrait for NodeTemplate {
     }
 
     fn user_data(&self, _user_state: &mut Self::UserState) -> Self::NodeData {
-        NodeData { template: *self }
+        NodeData { template: *self, sample_display_name: None, root_note: 69 }
     }
 
     fn build_node(
@@ -498,6 +563,7 @@ impl NodeTemplateTrait for NodeTemplate {
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::SimpleSampler => {
+                graph.add_input_param(node_id, "V/Oct".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_input_param(node_id, "Gate".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
@@ -781,6 +847,14 @@ impl WidgetValueTrait for ValueType {
     }
 }
 
+const NOTE_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+fn midi_note_name(note: u8) -> String {
+    let octave = (note as i32 / 12) - 1;
+    let name = NOTE_NAMES[note as usize % 12];
+    format!("{}{}", name, octave)
+}
+
 // Implement NodeDataTrait for custom node UI (optional)
 impl NodeDataTrait for NodeData {
     type Response = UserResponse;
@@ -798,7 +872,123 @@ impl NodeDataTrait for NodeData {
     where
         Self::Response: UserResponseTrait,
     {
-        if self.template == NodeTemplate::Oscilloscope {
+        if self.template == NodeTemplate::SimpleSampler || self.template == NodeTemplate::MultiSampler {
+            let is_multi = self.template == NodeTemplate::MultiSampler;
+            let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
+            let default_text = if is_multi { "Select samples..." } else { "Select sample..." };
+            let button_text = self.sample_display_name.as_deref().unwrap_or(default_text);
+
+            let button = ui.button(button_text);
+            if button.clicked() {
+                user_state.sampler_search_text.clear();
+            }
+            let popup_id = egui::Popup::default_response_id(&button);
+
+            let mut close_popup = false;
+            egui::Popup::from_toggle_button_response(&button)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                ui.set_min_width(200.0);
+                ui.text_edit_singleline(&mut user_state.sampler_search_text);
+                ui.separator();
+                let search = user_state.sampler_search_text.to_lowercase();
+
+                // Folders section (multi-sampler only)
+                if is_multi && !user_state.available_folders.is_empty() {
+                    ui.label(egui::RichText::new("Folders").small().weak());
+                    for folder in &user_state.available_folders {
+                        if !search.is_empty() && !folder.name.to_lowercase().contains(&search) {
+                            continue;
+                        }
+                        let label = format!("📁 {} ({} clips)", folder.name, folder.clip_pool_indices.len());
+                        if ui.selectable_label(false, label).clicked() {
+                            user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromFolder {
+                                node_id,
+                                folder_id: folder.folder_id,
+                            });
+                            close_popup = true;
+                        }
+                    }
+                    ui.separator();
+                }
+
+                // Audio clips list
+                if is_multi {
+                    ui.label(egui::RichText::new("Audio Clips").small().weak());
+                }
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for clip in &user_state.available_clips {
+                        if !search.is_empty() && !clip.name.to_lowercase().contains(&search) {
+                            continue;
+                        }
+                        if ui.selectable_label(false, &clip.name).clicked() {
+                            if is_multi {
+                                user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromPool {
+                                    node_id,
+                                    backend_node_id,
+                                    pool_index: clip.pool_index,
+                                    name: clip.name.clone(),
+                                });
+                            } else {
+                                user_state.pending_sampler_load = Some(PendingSamplerLoad::SimpleFromPool {
+                                    node_id,
+                                    backend_node_id,
+                                    pool_index: clip.pool_index,
+                                    name: clip.name.clone(),
+                                });
+                            }
+                            close_popup = true;
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button("Open...").clicked() {
+                    if is_multi {
+                        user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromFilesystem {
+                            node_id,
+                            backend_node_id,
+                        });
+                    } else {
+                        user_state.pending_sampler_load = Some(PendingSamplerLoad::SimpleFromFile {
+                            node_id,
+                            backend_node_id,
+                        });
+                    }
+                    close_popup = true;
+                }
+            });
+
+            if close_popup {
+                egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+
+            // Root note selector
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Root:").weak());
+                let note_name = midi_note_name(self.root_note);
+                let root_btn = ui.button(&note_name);
+                let root_popup_id = egui::Popup::default_response_id(&root_btn);
+                let mut close_root = false;
+                egui::Popup::from_toggle_button_response(&root_btn)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                    ui.set_min_width(120.0);
+                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                        // Show notes from C1 (24) to C7 (96)
+                        for note in (24..=96).rev() {
+                            let name = midi_note_name(note);
+                            if ui.selectable_label(note == self.root_note, &name).clicked() {
+                                user_state.pending_root_note_changes.push((node_id, backend_node_id, note));
+                                close_root = true;
+                            }
+                        }
+                    });
+                });
+                if close_root {
+                    egui::Popup::close_id(ui.ctx(), root_popup_id);
+                }
+            });
+        } else if self.template == NodeTemplate::Oscilloscope {
             let size = egui::vec2(200.0, 80.0);
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             let painter = ui.painter_at(rect);
@@ -834,6 +1024,15 @@ impl NodeDataTrait for NodeData {
                     painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, egui::Color32::from_rgb(0xFF, 0x98, 0x00))));
                 }
             }
+
+            // Time window slider
+            let time_ms = user_state.oscilloscope_time_scale.entry(node_id).or_insert(100.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().slider_width = 140.0;
+                ui.add(egui::Slider::new(time_ms, 10.0..=1000.0)
+                    .suffix(" ms")
+                    .logarithmic(true));
+            });
         } else {
             ui.label("");
         }

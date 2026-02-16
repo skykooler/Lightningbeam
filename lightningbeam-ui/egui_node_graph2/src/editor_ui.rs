@@ -332,7 +332,9 @@ where
                 ports: &SlotMap<Key, Value>,
                 port_locations: &PortLocations,
                 cursor_pos: Pos2,
+                zoom: f32,
             ) -> Pos2 {
+                let snap_distance = DISTANCE_TO_CONNECT * zoom;
                 ports
                     .iter()
                     .find_map(|(port_id, _)| {
@@ -352,7 +354,7 @@ where
                                             .unwrap()
                                     })
                                     .filter(|nearest_hook| {
-                                        nearest_hook.distance(cursor_pos) < DISTANCE_TO_CONNECT
+                                        nearest_hook.distance(cursor_pos) < snap_distance
                                     })
                                     .copied()
                             })
@@ -372,6 +374,7 @@ where
                         &self.graph.inputs,
                         &port_locations,
                         cursor_pos,
+                        self.pan_zoom.zoom,
                     ),
                 ),
                 AnyParameterId::Input(_) => (
@@ -381,6 +384,7 @@ where
                         &self.graph.outputs,
                         &port_locations,
                         cursor_pos,
+                        self.pan_zoom.zoom,
                     ),
                     start_pos,
                 ),

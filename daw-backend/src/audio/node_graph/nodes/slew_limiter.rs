@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 
 const PARAM_RISE_TIME: u32 = 0;
@@ -90,9 +90,8 @@ impl AudioNode for SlewLimiterNode {
             return;
         }
 
-        let input = inputs[0];
         let output = &mut outputs[0];
-        let length = input.len().min(output.len());
+        let length = output.len();
 
         // Calculate maximum change per sample
         let sample_duration = 1.0 / sample_rate as f32;
@@ -111,7 +110,9 @@ impl AudioNode for SlewLimiterNode {
         };
 
         for i in 0..length {
-            let target = input[i];
+            // Use cv_input_or_default to handle unconnected inputs (NaN sentinel)
+            // Default to last_value so output holds steady when unconnected
+            let target = cv_input_or_default(inputs, 0, i, self.last_value);
             let difference = target - self.last_value;
 
             let max_change = if difference > 0.0 {

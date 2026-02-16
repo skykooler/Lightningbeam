@@ -177,8 +177,14 @@ pub enum Command {
 
     /// Load a sample into a SimpleSampler node (track_id, node_id, file_path)
     SamplerLoadSample(TrackId, u32, String),
+    /// Load a sample from the audio pool into a SimpleSampler node (track_id, node_id, pool_index)
+    SamplerLoadFromPool(TrackId, u32, usize),
+    /// Set the root note (original pitch) for a SimpleSampler node (track_id, node_id, midi_note)
+    SamplerSetRootNote(TrackId, u32, u8),
     /// Add a sample layer to a MultiSampler node (track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode)
     MultiSamplerAddLayer(TrackId, u32, String, u8, u8, u8, u8, u8, Option<usize>, Option<usize>, LoopMode),
+    /// Add a sample layer from the audio pool to a MultiSampler node (track_id, node_id, pool_index, key_min, key_max, root_key)
+    MultiSamplerAddLayerFromPool(TrackId, u32, usize, u8, u8, u8),
     /// Update a MultiSampler layer's configuration (track_id, node_id, layer_index, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode)
     MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8, Option<usize>, Option<usize>, LoopMode),
     /// Remove a layer from a MultiSampler node (track_id, node_id, layer_index)

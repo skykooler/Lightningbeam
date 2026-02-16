@@ -101,8 +101,7 @@ impl OscilloscopeNode {
 
         let inputs = vec![
             NodePort::new("Audio In", SignalType::Audio, 0),
-            NodePort::new("V/oct", SignalType::CV, 1),
-            NodePort::new("CV In", SignalType::CV, 2),
+            NodePort::new("CV In", SignalType::CV, 1),
         ];
 
         let outputs = vec![
@@ -223,13 +222,24 @@ impl AudioNode for OscilloscopeNode {
         let output = &mut outputs[0];
         let len = input.len().min(output.len());
 
-        // Read V/oct input if available and update trigger period
+        // Read CV input if available (port 1) — used for both display and V/Oct triggering
         if inputs.len() > 1 && !inputs[1].is_empty() {
-            self.voct_value = inputs[1][0]; // Use first sample of V/oct input
-            let frequency = Self::voct_to_frequency(self.voct_value);
-            // Calculate period in samples, clamped to reasonable range
-            let period_samples = (sample_rate as f32 / frequency).max(1.0);
-            self.trigger_period = period_samples as usize;
+            let cv_input = inputs[1];
+            let cv_len = len.min(cv_input.len());
+
+            // Check if connected (not NaN sentinel)
+            if cv_len > 0 && !cv_input[0].is_nan() {
+                // Update V/Oct trigger period from CV value
+                self.voct_value = cv_input[0];
+                let frequency = Self::voct_to_frequency(self.voct_value);
+                let period_samples = (sample_rate as f32 / frequency).max(1.0);
+                self.trigger_period = period_samples as usize;
+
+                // Capture CV samples to buffer
+                if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
+                    cv_buffer.write(&cv_input[..cv_len]);
+                }
+            }
         }
 
         // Update sample counter for V/oct triggering
@@ -243,14 +253,6 @@ impl AudioNode for OscilloscopeNode {
         // Capture audio samples to buffer
         if let Ok(mut buffer) = self.buffer.lock() {
             buffer.write(&input[..len]);
-        }
-
-        // Capture CV samples if CV input is connected (input 2)
-        if inputs.len() > 2 && !inputs[2].is_empty() {
-            let cv_input = inputs[2];
-            if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
-                cv_buffer.write(&cv_input[..len.min(cv_input.len())]);
-            }
         }
 
         // Update last sample for trigger detection (use left channel, frame 0)

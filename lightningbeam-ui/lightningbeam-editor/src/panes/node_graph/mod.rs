@@ -560,6 +560,100 @@ impl NodeGraphPane {
         }
     }
 
+    fn handle_pending_sampler_load(
+        &mut self,
+        load: graph_data::PendingSamplerLoad,
+        shared: &mut crate::panes::SharedPaneState,
+    ) {
+        let backend_track_id = match self.backend_track_id {
+            Some(id) => id,
+            None => return,
+        };
+        let controller_arc = match &shared.audio_controller {
+            Some(c) => std::sync::Arc::clone(c),
+            None => return,
+        };
+
+        match load {
+            graph_data::PendingSamplerLoad::SimpleFromPool { node_id, backend_node_id, pool_index, name } => {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.sampler_load_from_pool(backend_track_id, backend_node_id, pool_index);
+                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                    node.user_data.sample_display_name = Some(name);
+                }
+            }
+            graph_data::PendingSamplerLoad::SimpleFromFile { node_id, backend_node_id } => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "aiff"])
+                    .pick_file()
+                {
+                    let path_str = path.to_string_lossy().to_string();
+                    let file_name = path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Sample".to_string());
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.sampler_load_sample(backend_track_id, backend_node_id, path_str);
+                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                        node.user_data.sample_display_name = Some(file_name);
+                    }
+                }
+            }
+            graph_data::PendingSamplerLoad::MultiFromPool { node_id, backend_node_id, pool_index, name } => {
+                let mut controller = controller_arc.lock().unwrap();
+                // Add as a single layer spanning full key range, root_key = 60 (C4)
+                controller.multi_sampler_add_layer_from_pool(
+                    backend_track_id, backend_node_id, pool_index,
+                    0, 127, 60,
+                );
+                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                    node.user_data.sample_display_name = Some(name);
+                }
+            }
+            graph_data::PendingSamplerLoad::MultiFromFolder { node_id, folder_id } => {
+                // Find folder clips from available_folders
+                let folder_clips: Vec<(String, usize)> = self.user_state.available_folders.iter()
+                    .find(|f| f.folder_id == folder_id)
+                    .map(|f| f.clip_pool_indices.clone())
+                    .unwrap_or_default();
+
+                if !folder_clips.is_empty() {
+                    // TODO: Add MultiSamplerLoadFromPool command to avoid disk re-reads.
+                    // For now, folder loading is a placeholder — the UI is wired up but
+                    // loading multi-sampler layers from pool requires a new backend command.
+                    let folder_name = self.user_state.available_folders.iter()
+                        .find(|f| f.folder_id == folder_id)
+                        .map(|f| f.name.clone())
+                        .unwrap_or_else(|| "Folder".to_string());
+                    eprintln!("MultiSampler folder load not yet implemented for folder: {}", folder_name);
+                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                        node.user_data.sample_display_name = Some(format!("📁 {}", folder_name));
+                    }
+                }
+            }
+            graph_data::PendingSamplerLoad::MultiFromFilesystem { node_id, backend_node_id } => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "aiff"])
+                    .pick_file()
+                {
+                    let path_str = path.to_string_lossy().to_string();
+                    let file_name = path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Sample".to_string());
+                    let mut controller = controller_arc.lock().unwrap();
+                    // Add as layer spanning full key range
+                    controller.multi_sampler_add_layer(
+                        backend_track_id, backend_node_id, path_str,
+                        0, 127, 60, 0, 127, None, None,
+                        daw_backend::audio::node_graph::nodes::LoopMode::OneShot,
+                    );
+                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                        node.user_data.sample_display_name = Some(file_name);
+                    }
+                }
+            }
+        }
+    }
+
     fn check_parameter_changes(&mut self, shared: &mut crate::panes::SharedPaneState) {
         // Check all input parameters for value changes
         let mut _checked_count = 0;
@@ -1554,7 +1648,7 @@ impl NodeGraphPane {
                 label: group.name.clone(),
                 inputs: vec![],
                 outputs: vec![],
-                user_data: NodeData { template: NodeTemplate::Group },
+                user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
             });
 
             // Add dynamic input ports based on boundary inputs
@@ -1626,7 +1720,7 @@ impl NodeGraphPane {
                     label: "Group Input".to_string(),
                     inputs: vec![],
                     outputs: vec![],
-                    user_data: NodeData { template: NodeTemplate::Group },
+                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
                 });
 
                 for bc in &scope_group.boundary_inputs {
@@ -1673,7 +1767,7 @@ impl NodeGraphPane {
                     label: "Group Output".to_string(),
                     inputs: vec![],
                     outputs: vec![],
-                    user_data: NodeData { template: NodeTemplate::Group },
+                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
                 });
 
                 for bc in &scope_group.boundary_outputs {
@@ -1866,7 +1960,7 @@ impl NodeGraphPane {
             label: label.to_string(),
             inputs: vec![],
             outputs: vec![],
-            user_data: NodeData { template: node_template },
+            user_data: NodeData { template: node_template, sample_display_name: None, root_note: 69 },
         });
 
         node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
@@ -2042,10 +2136,14 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
                     let mut controller = audio_controller.lock().unwrap();
                     for (node_id, backend_node_id) in oscilloscope_nodes {
+                        // Calculate sample count from per-node time scale (default 100ms)
+                        let time_ms = self.user_state.oscilloscope_time_scale
+                            .get(&node_id).copied().unwrap_or(100.0);
+                        let sample_count = ((time_ms / 1000.0) * 48000.0) as usize;
                         let result = if let Some(va_id) = va_backend_id {
-                            controller.query_voice_oscilloscope_data(backend_track_id, va_id, backend_node_id, 4800)
+                            controller.query_voice_oscilloscope_data(backend_track_id, va_id, backend_node_id, sample_count)
                         } else {
-                            controller.query_oscilloscope_data(backend_track_id, backend_node_id, 4800)
+                            controller.query_oscilloscope_data(backend_track_id, backend_node_id, sample_count)
                         };
                         if let Ok(data) = result {
                             self.user_state.oscilloscope_data.insert(node_id, graph_data::OscilloscopeCache {
@@ -2172,6 +2270,55 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             let zoom_before = self.state.pan_zoom.zoom;
             let pan_before = self.state.pan_zoom.pan;
 
+            // Populate sampler clip list and node backend ID map for bottom_ui()
+            {
+                use lightningbeam_core::clip::AudioClipType;
+
+                let doc = shared.action_executor.document();
+
+                // Available audio clips
+                self.user_state.available_clips = doc.audio_clips.values()
+                    .filter_map(|clip| match &clip.clip_type {
+                        AudioClipType::Sampled { audio_pool_index } => Some(graph_data::SamplerClipInfo {
+                            name: clip.name.clone(),
+                            pool_index: *audio_pool_index,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                self.user_state.available_clips.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+                // Available folders (with their contained audio clips)
+                self.user_state.available_folders = doc.audio_folders.folders.values()
+                    .map(|folder| {
+                        let clips_in_folder: Vec<(String, usize)> = doc.audio_clips.values()
+                            .filter(|clip| clip.folder_id == Some(folder.id))
+                            .filter_map(|clip| match &clip.clip_type {
+                                AudioClipType::Sampled { audio_pool_index } => Some((clip.name.clone(), *audio_pool_index)),
+                                _ => None,
+                            })
+                            .collect();
+                        graph_data::SamplerFolderInfo {
+                            folder_id: folder.id,
+                            name: folder.name.clone(),
+                            clip_pool_indices: clips_in_folder,
+                        }
+                    })
+                    .filter(|f| !f.clip_pool_indices.is_empty())
+                    .collect();
+                self.user_state.available_folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+                // Node backend ID map
+                self.user_state.node_backend_ids = self.node_id_map.iter()
+                    .map(|(&node_id, backend_id)| {
+                        let id = match backend_id {
+                            BackendNodeId::Audio(idx) => idx.index() as u32,
+                        };
+                        (node_id, id)
+                    })
+                    .collect();
+            }
+
             // Draw dot grid background with pan/zoom
             let pan_zoom = &self.state.pan_zoom;
             Self::draw_dot_grid_background(ui, graph_rect, bg_color, grid_color, pan_zoom);
@@ -2203,6 +2350,27 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             // Cache node rects for hit-testing, then handle response
             self.last_node_rects = graph_response.node_rects.clone();
             self.handle_graph_response(graph_response, shared, graph_rect);
+
+            // Handle pending sampler load requests from bottom_ui()
+            if let Some(load) = self.user_state.pending_sampler_load.take() {
+                self.handle_pending_sampler_load(load, shared);
+            }
+
+            // Handle pending root note changes
+            if !self.user_state.pending_root_note_changes.is_empty() {
+                let changes: Vec<_> = self.user_state.pending_root_note_changes.drain(..).collect();
+                if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        for (node_id, backend_node_id, root_note) in changes {
+                            controller.sampler_set_root_note(backend_track_id, backend_node_id, root_note);
+                            if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                                node.user_data.root_note = root_note;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Detect right-click on nodes — intercept the library's node finder and show our context menu instead
             {

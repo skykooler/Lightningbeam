@@ -466,6 +466,66 @@ impl Engine {
         }
     }
 
+    /// Read audio from pool as mono f32 samples.
+    /// Handles all storage types: InMemory/Mapped use read_samples(),
+    /// Compressed falls back to decoding from the file path.
+    fn read_mono_from_pool(pool: &crate::audio::pool::AudioClipPool, pool_index: usize) -> Option<(Vec<f32>, f32)> {
+        let audio_file = pool.get_file(pool_index)?;
+        let channels = audio_file.channels as usize;
+        let frames = audio_file.frames as usize;
+        let sample_rate = audio_file.sample_rate as f32;
+
+        // Try read_samples first (works for InMemory and Mapped)
+        let mut mono_samples = vec![0.0f32; frames];
+        let read_count = if channels == 1 {
+            audio_file.read_samples(0, frames, 0, &mut mono_samples)
+        } else {
+            let mut channel_buf = vec![0.0f32; frames];
+            let mut count = 0;
+            for ch in 0..channels {
+                count = audio_file.read_samples(0, frames, ch, &mut channel_buf);
+                for (i, &s) in channel_buf.iter().enumerate() {
+                    mono_samples[i] += s;
+                }
+            }
+            let scale = 1.0 / channels as f32;
+            for s in &mut mono_samples {
+                *s *= scale;
+            }
+            count
+        };
+
+        if read_count > 0 {
+            return Some((mono_samples, sample_rate));
+        }
+
+        // Compressed storage: decode from file path using sample_loader
+        let path = audio_file.path.to_string_lossy();
+        if !path.starts_with("<embedded") {
+            if let Ok(sample_data) = crate::audio::sample_loader::load_audio_file(&*path) {
+                return Some((sample_data.samples, sample_data.sample_rate as f32));
+            }
+        }
+
+        // Last resort: try interleaved data() and mix down
+        let data = audio_file.data();
+        if !data.is_empty() && channels > 0 {
+            let actual_frames = data.len() / channels;
+            let mut mono = vec![0.0f32; actual_frames];
+            for frame in 0..actual_frames {
+                let mut sum = 0.0f32;
+                for ch in 0..channels {
+                    sum += data[frame * channels + ch];
+                }
+                mono[frame] = sum / channels as f32;
+            }
+            return Some((mono, sample_rate));
+        }
+
+        eprintln!("[read_mono_from_pool] Failed to read audio from pool_index={}", pool_index);
+        None
+    }
+
     /// Handle a command from the UI thread
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
@@ -1586,6 +1646,38 @@ impl Engine {
                 }
             }
 
+            Command::SamplerLoadFromPool(track_id, node_id, pool_index) => {
+                use crate::audio::node_graph::nodes::SimpleSamplerNode;
+
+                let sample_result = Self::read_mono_from_pool(&self.audio_pool, pool_index);
+
+                if let Some((mono_samples, sample_rate)) = sample_result {
+                    if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                        let graph = &mut track.instrument_graph;
+                        let node_idx = NodeIndex::new(node_id as usize);
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            if let Some(sampler_node) = graph_node.node.as_any_mut().downcast_mut::<SimpleSamplerNode>() {
+                                sampler_node.set_sample(mono_samples, sample_rate);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::SamplerSetRootNote(track_id, node_id, root_note) => {
+                use crate::audio::node_graph::nodes::SimpleSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(sampler_node) = graph_node.node.as_any_mut().downcast_mut::<SimpleSamplerNode>() {
+                            sampler_node.set_root_note(root_note);
+                        }
+                    }
+                }
+            }
+
             Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) => {
                 use crate::audio::node_graph::nodes::MultiSamplerNode;
 
@@ -1598,6 +1690,29 @@ impl Engine {
                         if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                             if let Err(e) = multi_sampler_node.load_layer_from_file(&file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode) {
                                 eprintln!("Failed to add sample layer: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::MultiSamplerAddLayerFromPool(track_id, node_id, pool_index, key_min, key_max, root_key) => {
+                use crate::audio::node_graph::nodes::MultiSamplerNode;
+                use crate::audio::node_graph::nodes::LoopMode;
+
+                let sample_result = Self::read_mono_from_pool(&self.audio_pool, pool_index);
+
+                if let Some((mono_samples, sample_rate)) = sample_result {
+                    if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                        let graph = &mut track.instrument_graph;
+                        let node_idx = NodeIndex::new(node_id as usize);
+                        if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                            if let Some(multi_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
+                                multi_node.add_layer(
+                                    mono_samples, sample_rate,
+                                    key_min, key_max, root_key,
+                                    0, 127, None, None, LoopMode::OneShot,
+                                );
                             }
                         }
                     }
@@ -3099,9 +3214,24 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SamplerLoadSample(track_id, node_id, file_path));
     }
 
+    /// Load a sample from the audio pool into a SimpleSampler node
+    pub fn sampler_load_from_pool(&mut self, track_id: TrackId, node_id: u32, pool_index: usize) {
+        let _ = self.command_tx.push(Command::SamplerLoadFromPool(track_id, node_id, pool_index));
+    }
+
+    /// Set the root note for a SimpleSampler node
+    pub fn sampler_set_root_note(&mut self, track_id: TrackId, node_id: u32, root_note: u8) {
+        let _ = self.command_tx.push(Command::SamplerSetRootNote(track_id, node_id, root_note));
+    }
+
     /// Add a sample layer to a MultiSampler node
     pub fn multi_sampler_add_layer(&mut self, track_id: TrackId, node_id: u32, file_path: String, key_min: u8, key_max: u8, root_key: u8, velocity_min: u8, velocity_max: u8, loop_start: Option<usize>, loop_end: Option<usize>, loop_mode: crate::audio::node_graph::nodes::LoopMode) {
         let _ = self.command_tx.push(Command::MultiSamplerAddLayer(track_id, node_id, file_path, key_min, key_max, root_key, velocity_min, velocity_max, loop_start, loop_end, loop_mode));
+    }
+
+    /// Add a sample layer from the audio pool to a MultiSampler node
+    pub fn multi_sampler_add_layer_from_pool(&mut self, track_id: TrackId, node_id: u32, pool_index: usize, key_min: u8, key_max: u8, root_key: u8) {
+        let _ = self.command_tx.push(Command::MultiSamplerAddLayerFromPool(track_id, node_id, pool_index, key_min, key_max, root_key));
     }
 
     /// Update a MultiSampler layer's configuration
