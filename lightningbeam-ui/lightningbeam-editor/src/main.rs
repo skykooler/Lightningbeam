@@ -2157,7 +2157,12 @@ impl EditorApp {
                 println!("Menu: Export");
                 // Open export dialog with calculated timeline endpoint
                 let timeline_endpoint = self.action_executor.document().calculate_timeline_endpoint();
-                self.export_dialog.open(timeline_endpoint);
+                // Derive project name from the .beam file path, falling back to document name
+                let project_name = self.current_file_path.as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.action_executor.document().name.clone());
+                self.export_dialog.open(timeline_endpoint, &project_name);
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
