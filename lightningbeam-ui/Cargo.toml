@@ -69,3 +69,14 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.cpal]
 opt-level = 2
+
+# Use local egui fork with ibus/Wayland text input fix
+[patch.crates-io]
+egui = { path = "../../egui-fork/crates/egui" }
+eframe = { path = "../../egui-fork/crates/eframe" }
+egui_extras = { path = "../../egui-fork/crates/egui_extras" }
+egui-wgpu = { path = "../../egui-fork/crates/egui-wgpu" }
+egui-winit = { path = "../../egui-fork/crates/egui-winit" }
+epaint = { path = "../../egui-fork/crates/epaint" }
+ecolor = { path = "../../egui-fork/crates/ecolor" }
+emath = { path = "../../egui-fork/crates/emath" }
