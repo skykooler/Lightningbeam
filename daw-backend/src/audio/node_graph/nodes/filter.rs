@@ -29,6 +29,8 @@ pub struct FilterNode {
     resonance: f32,
     filter_type: FilterType,
     sample_rate: u32,
+    /// Last cutoff frequency applied to filter coefficients (for change detection with CV modulation)
+    last_applied_cutoff: f32,
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -62,6 +64,7 @@ impl FilterNode {
             resonance: 0.707,
             filter_type: FilterType::Lowpass,
             sample_rate: 44100,
+            last_applied_cutoff: 1000.0,
             inputs,
             outputs,
             parameters,
@@ -150,11 +153,20 @@ impl AudioNode for FilterNode {
         output[..len].copy_from_slice(&input[..len]);
 
         // Check for CV modulation (modulates cutoff)
+        // CV input (0..1) scales the cutoff: 0 = 20 Hz, 1 = base cutoff * 2
         // Sample CV at the start of the buffer - per-sample would be too expensive
-        let cutoff_cv = cv_input_or_default(inputs, 1, 0, self.cutoff);
-        if (cutoff_cv - self.cutoff).abs() > 0.01 {
-            // CV changed significantly, update filter
-            let new_cutoff = cutoff_cv.clamp(20.0, 20000.0);
+        let cutoff_cv_raw = cv_input_or_default(inputs, 1, 0, f32::NAN);
+        let effective_cutoff = if cutoff_cv_raw.is_nan() {
+            self.cutoff
+        } else {
+            // Map CV (0..1) to frequency range around the base cutoff
+            // 0.5 = base cutoff, 0 = cutoff / 4, 1 = cutoff * 4 (two octaves each way)
+            let octave_shift = (cutoff_cv_raw.clamp(0.0, 1.0) - 0.5) * 4.0;
+            self.cutoff * 2.0_f32.powf(octave_shift)
+        };
+        if (effective_cutoff - self.last_applied_cutoff).abs() > 0.01 {
+            let new_cutoff = effective_cutoff.clamp(20.0, 20000.0);
+            self.last_applied_cutoff = new_cutoff;
             match self.filter_type {
                 FilterType::Lowpass => {
                     self.filter.set_lowpass(new_cutoff, self.resonance, self.sample_rate as f32);
@@ -202,6 +214,7 @@ impl AudioNode for FilterNode {
             resonance: self.resonance,
             filter_type: self.filter_type,
             sample_rate: self.sample_rate,
+            last_applied_cutoff: self.cutoff,
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),

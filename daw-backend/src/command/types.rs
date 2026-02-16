@@ -319,6 +319,9 @@ pub enum Query {
     GetTemplateState(TrackId, u32),
     /// Get oscilloscope data from a node (track_id, node_id, sample_count)
     GetOscilloscopeData(TrackId, u32, usize),
+    /// Get oscilloscope data from a node inside a VoiceAllocator's best voice
+    /// (track_id, va_node_id, inner_node_id, sample_count)
+    GetVoiceOscilloscopeData(TrackId, u32, u32, usize),
     /// Get MIDI clip data (track_id, clip_id)
     GetMidiClip(TrackId, MidiClipId),
     /// Get keyframes from an AutomationInput node (track_id, node_id)

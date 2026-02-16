@@ -49,7 +49,7 @@ impl PaneType {
             PaneType::PianoRoll => "Piano Roll",
             PaneType::VirtualPiano => "Virtual Piano",
             PaneType::NodeEditor => "Node Editor",
-            PaneType::PresetBrowser => "Preset Browser",
+            PaneType::PresetBrowser => "Instrument Browser",
             PaneType::AssetLibrary => "Asset Library",
             PaneType::ShaderEditor => "Shader Editor",
         }

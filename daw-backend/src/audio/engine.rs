@@ -1970,6 +1970,18 @@ impl Engine {
                     ))),
                 }
             }
+            Query::GetVoiceOscilloscopeData(track_id, va_node_id, inner_node_id, sample_count) => {
+                match self.project.get_voice_oscilloscope_data(track_id, va_node_id, inner_node_id, sample_count) {
+                    Some((audio, cv)) => {
+                        use crate::command::OscilloscopeData;
+                        QueryResponse::OscilloscopeData(Ok(OscilloscopeData { audio, cv }))
+                    }
+                    None => QueryResponse::OscilloscopeData(Err(format!(
+                        "Failed to get voice oscilloscope data from track {} VA {} node {}",
+                        track_id, va_node_id, inner_node_id
+                    ))),
+                }
+            }
             Query::GetMidiClip(_track_id, clip_id) => {
                 // Get MIDI clip data from the pool
                 if let Some(clip) = self.project.midi_clip_pool.get_clip(clip_id) {
@@ -3209,6 +3221,25 @@ impl EngineController {
                 return result;
             }
             // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query oscilloscope data from a node inside a VoiceAllocator's best voice
+    pub fn query_voice_oscilloscope_data(&mut self, track_id: TrackId, va_node_id: u32, inner_node_id: u32, sample_count: usize) -> Result<crate::command::OscilloscopeData, String> {
+        if let Err(_) = self.query_tx.push(Query::GetVoiceOscilloscopeData(track_id, va_node_id, inner_node_id, sample_count)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::OscilloscopeData(result)) = self.query_response_rx.pop() {
+                return result;
+            }
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
 

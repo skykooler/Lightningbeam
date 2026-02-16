@@ -9,7 +9,7 @@ pub mod graph_data;
 pub mod node_types;
 
 use backend::{BackendNodeId, GraphBackend};
-use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, DataType, GraphState, NodeData, NodeTemplate, ValueType};
+use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, VoiceAllocatorNodeTemplates, DataType, GraphState, NodeData, NodeTemplate, ValueType};
 use super::NodePath;
 use eframe::egui;
 use egui_node_graph2::*;
@@ -136,6 +136,11 @@ pub struct NodeGraphPane {
     node_context_menu: Option<(NodeId, egui::Pos2)>,
     /// Cached node screen rects from last frame (for hit-testing)
     last_node_rects: std::collections::HashMap<NodeId, egui::Rect>,
+
+    /// Last time we polled oscilloscope data (~20 FPS)
+    last_oscilloscope_poll: std::time::Instant,
+    /// Backend track ID (u32) for oscilloscope queries
+    backend_track_id: Option<u32>,
 }
 
 impl NodeGraphPane {
@@ -162,6 +167,8 @@ impl NodeGraphPane {
             renaming_group: None,
             node_context_menu: None,
             last_node_rects: HashMap::new(),
+            last_oscilloscope_poll: std::time::Instant::now(),
+            backend_track_id: None,
         }
     }
 
@@ -196,6 +203,8 @@ impl NodeGraphPane {
             renaming_group: None,
             node_context_menu: None,
             last_node_rects: HashMap::new(),
+            last_oscilloscope_poll: std::time::Instant::now(),
+            backend_track_id: Some(backend_track_id),
         };
 
         // Load existing graph from backend
@@ -1227,6 +1236,13 @@ impl NodeGraphPane {
         !self.subgraph_stack.is_empty()
     }
 
+    /// True if any frame in the subgraph stack is a VoiceAllocator
+    fn inside_voice_allocator(&self) -> bool {
+        self.subgraph_stack.iter().any(|frame| {
+            matches!(&frame.context, SubgraphContext::VoiceAllocator { .. })
+        })
+    }
+
     /// Get the GroupId of the current group scope (if inside a group), for filtering sub-groups.
     fn current_group_scope(&self) -> Option<GroupId> {
         self.subgraph_stack.last().and_then(|frame| {
@@ -1926,9 +1942,9 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
     ) {
         // Check if we need to reload for a different track or project reload
         let current_track = *shared.active_layer_id;
-        let generation_changed = shared.project_generation != self.last_project_generation;
+        let generation_changed = *shared.project_generation != self.last_project_generation;
         if generation_changed {
-            self.last_project_generation = shared.project_generation;
+            self.last_project_generation = *shared.project_generation;
         }
 
         // If selected track changed or project was reloaded, reload the graph
@@ -1954,6 +1970,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                             self.track_id = Some(new_track_id);
 
                             // Recreate backend
+                            self.backend_track_id = Some(backend_track_id);
                             self.backend = Some(Box::new(audio_backend::AudioGraphBackend::new(
                                 backend_track_id,
                                 (*audio_controller).clone(),
@@ -1987,6 +2004,68 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             painter.galley(text_pos, galley, text_color);
             return;
         }
+        // Poll oscilloscope data at ~20 FPS
+        let has_oscilloscopes;
+        if self.last_oscilloscope_poll.elapsed() >= std::time::Duration::from_millis(50) {
+            self.last_oscilloscope_poll = std::time::Instant::now();
+
+            // Find all Oscilloscope nodes in the current graph
+            let oscilloscope_nodes: Vec<(NodeId, u32)> = self.state.graph.iter_nodes()
+                .filter(|&node_id| {
+                    self.state.graph.nodes.get(node_id)
+                        .map(|n| n.user_data.template == NodeTemplate::Oscilloscope)
+                        .unwrap_or(false)
+                })
+                .filter_map(|node_id| {
+                    self.node_id_map.get(&node_id).and_then(|backend_id| {
+                        match backend_id {
+                            BackendNodeId::Audio(idx) => Some((node_id, idx.index() as u32)),
+                        }
+                    })
+                })
+                .collect();
+
+            has_oscilloscopes = !oscilloscope_nodes.is_empty();
+
+            if has_oscilloscopes {
+                if let (Some(backend_track_id), Some(audio_controller)) = (self.backend_track_id, &shared.audio_controller) {
+                    // Check if we're inside a VoiceAllocator subgraph
+                    let va_backend_id = self.subgraph_stack.iter().rev().find_map(|frame| {
+                        if let SubgraphContext::VoiceAllocator { backend_id } = &frame.context {
+                            match backend_id {
+                                BackendNodeId::Audio(idx) => Some(idx.index() as u32),
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                    let mut controller = audio_controller.lock().unwrap();
+                    for (node_id, backend_node_id) in oscilloscope_nodes {
+                        let result = if let Some(va_id) = va_backend_id {
+                            controller.query_voice_oscilloscope_data(backend_track_id, va_id, backend_node_id, 4800)
+                        } else {
+                            controller.query_oscilloscope_data(backend_track_id, backend_node_id, 4800)
+                        };
+                        if let Ok(data) = result {
+                            self.user_state.oscilloscope_data.insert(node_id, graph_data::OscilloscopeCache {
+                                audio: data.audio,
+                                cv: data.cv,
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Between polls, check if we have cached oscilloscope data
+            has_oscilloscopes = !self.user_state.oscilloscope_data.is_empty();
+        }
+
+        // Continuously repaint when oscilloscopes are present
+        if has_oscilloscopes {
+            ui.ctx().request_repaint();
+        }
+
         // Get colors from theme
         let bg_style = shared.theme.style(".node-graph-background", ui.ctx());
         let grid_style = shared.theme.style(".node-graph-grid", ui.ctx());
@@ -2098,7 +2177,14 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             Self::draw_dot_grid_background(ui, graph_rect, bg_color, grid_color, pan_zoom);
 
             // Draw the graph editor with context-aware node templates
-            let graph_response = if self.in_subgraph() {
+            let graph_response = if self.inside_voice_allocator() {
+                self.state.draw_graph_editor(
+                    ui,
+                    VoiceAllocatorNodeTemplates,
+                    &mut self.user_state,
+                    Vec::default(),
+                )
+            } else if self.in_subgraph() {
                 self.state.draw_graph_editor(
                     ui,
                     SubgraphNodeTemplates,
