@@ -53,6 +53,7 @@ pub struct Engine {
     // Recording state
     recording_state: Option<RecordingState>,
     input_rx: Option<rtrb::Consumer<f32>>,
+    recording_mirror_tx: Option<rtrb::Producer<f32>>,
     recording_progress_counter: usize,
 
     // MIDI recording state
@@ -130,6 +131,7 @@ impl Engine {
             next_clip_id: 0,
             recording_state: None,
             input_rx: None,
+            recording_mirror_tx: None,
             recording_progress_counter: 0,
             midi_recording_state: None,
             midi_input_manager: None,
@@ -149,6 +151,11 @@ impl Engine {
     /// Set the input ringbuffer consumer for recording
     pub fn set_input_rx(&mut self, input_rx: rtrb::Consumer<f32>) {
         self.input_rx = Some(input_rx);
+    }
+
+    /// Set the recording mirror producer for streaming audio to UI during recording
+    pub fn set_recording_mirror_tx(&mut self, tx: rtrb::Producer<f32>) {
+        self.recording_mirror_tx = Some(tx);
     }
 
     /// Set the MIDI input manager for external MIDI devices
@@ -393,8 +400,24 @@ impl Engine {
 
                 // Add samples to recording
                 if !self.recording_sample_buffer.is_empty() {
+                    // Calculate how many samples will be skipped (stale buffer data)
+                    let skip = if recording.paused {
+                        self.recording_sample_buffer.len()
+                    } else {
+                        recording.samples_to_skip.min(self.recording_sample_buffer.len())
+                    };
+
                     match recording.add_samples(&self.recording_sample_buffer) {
                         Ok(_flushed) => {
+                            // Mirror non-skipped samples to UI for live waveform display
+                            if skip < self.recording_sample_buffer.len() {
+                                if let Some(ref mut mirror_tx) = self.recording_mirror_tx {
+                                    for &sample in &self.recording_sample_buffer[skip..] {
+                                        let _ = mirror_tx.push(sample);
+                                    }
+                                }
+                            }
+
                             // Update clip duration every callback for sample-accurate timing
                             let duration = recording.duration();
                             let clip_id = recording.clip_id;
@@ -2540,7 +2563,7 @@ impl Engine {
                     }
 
                     // Notify UI that recording has started
-                    let _ = self.event_tx.push(AudioEvent::RecordingStarted(track_id, clip_id));
+                    let _ = self.event_tx.push(AudioEvent::RecordingStarted(track_id, clip_id, self.sample_rate, self.channels));
                 }
                 Err(e) => {
                     // Send error event to UI

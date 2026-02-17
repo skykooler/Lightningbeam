@@ -667,9 +667,11 @@ struct EditorApp {
     audio_pools_with_new_waveforms: HashSet<usize>,
     /// Raw audio sample cache for GPU waveform rendering
     /// Format: pool_index -> (samples, sample_rate, channels)
-    raw_audio_cache: HashMap<usize, (Vec<f32>, u32, u32)>,
+    raw_audio_cache: HashMap<usize, (Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices that need GPU texture upload (set when raw audio arrives, cleared after upload)
     waveform_gpu_dirty: HashSet<usize>,
+    /// Consumer for recording audio mirror (streams recorded samples to UI for live waveform)
+    recording_mirror_rx: Option<rtrb::Consumer<f32>>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
     /// Application configuration (recent files, etc.)
@@ -771,12 +773,13 @@ impl EditorApp {
         let action_executor = lightningbeam_core::action::ActionExecutor::new(document);
 
         // Initialize audio system and destructure it for sharing
-        let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx) =
+        let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx, recording_mirror_rx) =
             match daw_backend::AudioSystem::new(None, config.audio_buffer_size) {
-                Ok(audio_system) => {
+                Ok(mut audio_system) => {
                     println!("✅ Audio engine initialized successfully");
 
                     // Extract components
+                    let mirror_rx = audio_system.take_recording_mirror_rx();
                     let stream = audio_system.stream;
                     let sample_rate = audio_system.sample_rate;
                     let channels = audio_system.channels;
@@ -788,7 +791,7 @@ impl EditorApp {
                     // Spawn file operations worker
                     let file_command_tx = FileOperationsWorker::spawn(controller.clone());
 
-                    (Some(stream), Some(controller), event_rx, sample_rate, channels, file_command_tx)
+                    (Some(stream), Some(controller), event_rx, sample_rate, channels, file_command_tx, mirror_rx)
                 }
                 Err(e) => {
                     eprintln!("❌ Failed to initialize audio engine: {}", e);
@@ -796,7 +799,7 @@ impl EditorApp {
 
                     // Create a dummy channel for file operations (won't be used)
                     let (tx, _rx) = std::sync::mpsc::channel();
-                    (None, None, None, 48000, 2, tx)
+                    (None, None, None, 48000, 2, tx, None)
                 }
             };
 
@@ -872,6 +875,7 @@ impl EditorApp {
             audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
             raw_audio_cache: HashMap::new(),
             waveform_gpu_dirty: HashSet::new(),
+            recording_mirror_rx,
             current_file_path: None, // No file loaded initially
             config,
             file_command_tx,
@@ -2701,7 +2705,7 @@ impl EditorApp {
                     let mut controller = controller_arc.lock().unwrap();
                     match controller.get_pool_audio_samples(pool_index) {
                         Ok((samples, sr, ch)) => {
-                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                            self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
                             self.waveform_gpu_dirty.insert(pool_index);
                             raw_fetched += 1;
                         }
@@ -3516,7 +3520,7 @@ impl EditorApp {
                         let mut controller = controller_arc.lock().unwrap();
                         match controller.get_pool_audio_samples(pool_index) {
                             Ok((samples, sr, ch)) => {
-                                self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
                                 self.waveform_gpu_dirty.insert(pool_index);
                             }
                             Err(e) => eprintln!("Failed to fetch raw audio for extracted audio: {}", e),
@@ -3738,6 +3742,24 @@ impl eframe::App for EditorApp {
             ctx.request_repaint();
         }
 
+        // Drain recording mirror buffer for live waveform display
+        if self.is_recording {
+            if let Some(ref mut mirror_rx) = self.recording_mirror_rx {
+                let mut drained = 0usize;
+                if let Some(entry) = self.raw_audio_cache.get_mut(&usize::MAX) {
+                    let samples = Arc::make_mut(&mut entry.0);
+                    while let Ok(sample) = mirror_rx.pop() {
+                        samples.push(sample);
+                        drained += 1;
+                    }
+                }
+                if drained > 0 {
+                    self.waveform_gpu_dirty.insert(usize::MAX);
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         // Poll audio events from the audio engine
         if let Some(event_rx) = &mut self.audio_event_rx {
             let mut polled_events = false;
@@ -3777,7 +3799,7 @@ impl eframe::App for EditorApp {
                                     let mut controller = controller_arc.lock().unwrap();
                                     match controller.get_pool_audio_samples(pool_index) {
                                         Ok((samples, sr, ch)) => {
-                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                            self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
                                             self.waveform_gpu_dirty.insert(pool_index);
                                             self.audio_pools_with_new_waveforms.insert(pool_index);
                                         }
@@ -3789,7 +3811,7 @@ impl eframe::App for EditorApp {
                             ctx.request_repaint();
                         }
                         // Recording events
-                        AudioEvent::RecordingStarted(track_id, backend_clip_id) => {
+                        AudioEvent::RecordingStarted(track_id, backend_clip_id, rec_sample_rate, rec_channels) => {
                             println!("🎤 Recording started on track {:?}, backend_clip_id={}", track_id, backend_clip_id);
 
                             // Create clip in document and add instance to layer
@@ -3817,6 +3839,10 @@ impl eframe::App for EditorApp {
                                 // Store mapping for later updates
                                 self.recording_clips.insert(layer_id, backend_clip_id);
                             }
+
+                            // Initialize live waveform cache for recording
+                            self.raw_audio_cache.insert(usize::MAX, (Arc::new(Vec::new()), rec_sample_rate, rec_channels));
+
                             ctx.request_repaint();
                         }
                         AudioEvent::RecordingProgress(_clip_id, duration) => {
@@ -3850,12 +3876,16 @@ impl eframe::App for EditorApp {
                         AudioEvent::RecordingStopped(_backend_clip_id, pool_index, _waveform) => {
                             println!("🎤 Recording stopped: pool_index={}", pool_index);
 
+                            // Clean up live recording waveform cache
+                            self.raw_audio_cache.remove(&usize::MAX);
+                            self.waveform_gpu_dirty.remove(&usize::MAX);
+
                             // Fetch raw audio samples for GPU waveform rendering
                             if let Some(ref controller_arc) = self.audio_controller {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.get_pool_audio_samples(pool_index) {
                                     Ok((samples, sr, ch)) => {
-                                        self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                        self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
                                         self.waveform_gpu_dirty.insert(pool_index);
                                         self.audio_pools_with_new_waveforms.insert(pool_index);
                                     }
@@ -4074,7 +4104,7 @@ impl eframe::App for EditorApp {
                                     let mut controller = controller_arc.lock().unwrap();
                                     match controller.get_pool_audio_samples(pool_index) {
                                         Ok((samples, sr, ch)) => {
-                                            self.raw_audio_cache.insert(pool_index, (samples, sr, ch));
+                                            self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
                                             self.waveform_gpu_dirty.insert(pool_index);
                                         }
                                         Err(e) => eprintln!("Failed to fetch raw audio for pool {}: {}", pool_index, e),
@@ -4088,9 +4118,9 @@ impl eframe::App for EditorApp {
                         AudioEvent::AudioDecodeProgress { pool_index, samples, sample_rate, channels } => {
                             // Samples arrive as deltas — append to existing cache
                             if let Some(entry) = self.raw_audio_cache.get_mut(&pool_index) {
-                                entry.0.extend_from_slice(&samples);
+                                Arc::make_mut(&mut entry.0).extend_from_slice(&samples);
                             } else {
-                                self.raw_audio_cache.insert(pool_index, (samples, sample_rate, channels));
+                                self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sample_rate, channels));
                             }
                             self.waveform_gpu_dirty.insert(pool_index);
                             ctx.request_repaint();
@@ -4680,7 +4710,7 @@ struct RenderContext<'a> {
     /// Audio pool indices with new raw audio data this frame (for thumbnail invalidation)
     audio_pools_with_new_waveforms: &'a HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
-    raw_audio_cache: &'a HashMap<usize, (Vec<f32>, u32, u32)>,
+    raw_audio_cache: &'a HashMap<usize, (Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices needing GPU texture upload
     waveform_gpu_dirty: &'a mut HashSet<usize>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)

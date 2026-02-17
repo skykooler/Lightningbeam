@@ -20,7 +20,7 @@ use crate::widgets::ImeTextField;
 /// Derive min/max peak pairs from raw audio samples for thumbnail rendering.
 /// Downsamples to `num_peaks` (min, max) pairs by scanning chunks of samples.
 fn peaks_from_raw_audio(
-    raw: &(Vec<f32>, u32, u32), // (samples, sample_rate, channels)
+    raw: &(std::sync::Arc<Vec<f32>>, u32, u32), // (samples, sample_rate, channels)
     num_peaks: usize,
 ) -> Vec<(f32, f32)> {
     let (samples, _sr, channels) = raw;

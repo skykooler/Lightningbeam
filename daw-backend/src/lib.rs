@@ -39,6 +39,8 @@ pub struct AudioSystem {
     pub channels: u32,
     /// Event receiver for polling audio events (only present when no EventEmitter is provided)
     pub event_rx: Option<rtrb::Consumer<AudioEvent>>,
+    /// Consumer for recording audio mirror (streams recorded samples to UI for live waveform)
+    recording_mirror_rx: Option<rtrb::Consumer<f32>>,
 }
 
 impl AudioSystem {
@@ -85,9 +87,13 @@ impl AudioSystem {
         let input_buffer_size = (sample_rate * channels * 10) as usize;
         let (mut input_tx, input_rx) = rtrb::RingBuffer::new(input_buffer_size);
 
+        // Create mirror ringbuffer for streaming recorded audio to UI (live waveform)
+        let (mirror_tx, mirror_rx) = rtrb::RingBuffer::new(input_buffer_size);
+
         // Create engine
         let mut engine = Engine::new(sample_rate, channels, command_rx, event_tx, query_rx, query_response_tx);
         engine.set_input_rx(input_rx);
+        engine.set_recording_mirror_tx(mirror_tx);
         let controller = engine.get_controller(command_tx, query_tx, query_response_rx);
 
         // Initialize MIDI input manager for external MIDI devices
@@ -151,6 +157,7 @@ impl AudioSystem {
                     sample_rate,
                     channels,
                     event_rx: None, // No event receiver when audio device unavailable
+                    recording_mirror_rx: None,
                 });
             }
         };
@@ -176,6 +183,7 @@ impl AudioSystem {
                     sample_rate,
                     channels,
                     event_rx: None,
+                    recording_mirror_rx: None,
                 });
             }
         };
@@ -207,6 +215,7 @@ impl AudioSystem {
                     sample_rate,
                     channels,
                     event_rx: None,
+                    recording_mirror_rx: None,
                 });
             }
         };
@@ -232,7 +241,13 @@ impl AudioSystem {
             sample_rate,
             channels,
             event_rx: event_rx_option,
+            recording_mirror_rx: Some(mirror_rx),
         })
+    }
+
+    /// Take the recording mirror consumer for streaming recorded audio to UI
+    pub fn take_recording_mirror_rx(&mut self) -> Option<rtrb::Consumer<f32>> {
+        self.recording_mirror_rx.take()
     }
 
     /// Spawn a background thread to emit events from the ringbuffer

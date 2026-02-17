@@ -104,7 +104,7 @@ pub struct WaveformCallback {
 
 /// Raw audio data waiting to be uploaded to GPU
 pub struct PendingUpload {
-    pub samples: Vec<f32>,
+    pub samples: std::sync::Arc<Vec<f32>>,
     pub sample_rate: u32,
     pub channels: u32,
 }
@@ -378,10 +378,21 @@ impl WaveformGpuResources {
 
         let total_frames = new_total_frames;
 
+        // For live recording (pool_index == usize::MAX), pre-allocate extra texture
+        // height to avoid frequent full recreates as recording grows.
+        // Allocate 60 seconds ahead so incremental updates can fill without recreating.
+        let alloc_frames = if pool_index == usize::MAX {
+            let extra = sample_rate as usize * 60; // 60s of mono frames (texture is per-frame, not per-sample)
+            total_frames + extra
+        } else {
+            total_frames
+        };
+
         let max_frames_per_segment = (TEX_WIDTH as u64)
             * (device.limits().max_texture_dimension_2d as u64);
+        // Use alloc_frames for texture sizing but total_frames for data
         let segment_count =
-            ((total_frames as u64 + max_frames_per_segment - 1) / max_frames_per_segment) as usize;
+            ((total_frames as u64 + max_frames_per_segment - 1) / max_frames_per_segment).max(1) as usize;
         let frames_per_segment = if segment_count == 1 {
             total_frames as u32
         } else {
@@ -400,7 +411,13 @@ impl WaveformGpuResources {
                 .min(total_frames as u64);
             let seg_frame_count = (seg_end_frame - seg_start_frame) as u32;
 
-            let tex_height = (seg_frame_count + TEX_WIDTH - 1) / TEX_WIDTH;
+            // Allocate texture large enough for future growth (recording) or exact fit (normal)
+            let alloc_seg_frames = if pool_index == usize::MAX {
+                (alloc_frames as u32).min(seg_frame_count + sample_rate * 60)
+            } else {
+                seg_frame_count
+            };
+            let tex_height = (alloc_seg_frames + TEX_WIDTH - 1) / TEX_WIDTH;
             let mip_count = compute_mip_count(TEX_WIDTH, tex_height);
 
             // Create texture with mip levels
@@ -422,8 +439,10 @@ impl WaveformGpuResources {
             });
 
             // Pack raw samples into Rgba16Float data for mip 0
-            let texel_count = (TEX_WIDTH * tex_height) as usize;
-            let mut mip0_data: Vec<half::f16> = vec![half::f16::ZERO; texel_count * 4];
+            // Only pack rows containing actual data (not the pre-allocated empty region)
+            let data_height = (seg_frame_count + TEX_WIDTH - 1) / TEX_WIDTH;
+            let data_texel_count = (TEX_WIDTH * data_height) as usize;
+            let mut mip0_data: Vec<half::f16> = vec![half::f16::ZERO; data_texel_count * 4];
 
             for frame in 0..seg_frame_count as usize {
                 let global_frame = seg_start_frame as usize + frame;
@@ -447,26 +466,28 @@ impl WaveformGpuResources {
                 mip0_data[texel_offset + 3] = half::f16::from_f32(right);
             }
 
-            // Upload mip 0
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                bytemuck::cast_slice(&mip0_data),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(TEX_WIDTH * 8),
-                    rows_per_image: Some(tex_height),
-                },
-                wgpu::Extent3d {
-                    width: TEX_WIDTH,
-                    height: tex_height,
-                    depth_or_array_layers: 1,
-                },
-            );
+            // Upload mip 0 (only rows with actual data)
+            if data_height > 0 {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&mip0_data),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(TEX_WIDTH * 8),
+                        rows_per_image: Some(data_height),
+                    },
+                    wgpu::Extent3d {
+                        width: TEX_WIDTH,
+                        height: data_height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
 
             // Generate mipmaps via compute shader
             let cmds = self.generate_mipmaps(
@@ -528,7 +549,7 @@ impl WaveformGpuResources {
                 uniform_buffers,
                 frames_per_segment,
                 total_frames: total_frames as u64,
-                tex_height: (total_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH,
+                tex_height: (alloc_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH,
                 sample_rate,
                 channels,
             },

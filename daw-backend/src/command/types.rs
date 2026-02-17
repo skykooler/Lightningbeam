@@ -235,8 +235,8 @@ pub enum AudioEvent {
     BufferPoolStats(BufferPoolStats),
     /// Automation lane created (track_id, lane_id, parameter_id)
     AutomationLaneCreated(TrackId, AutomationLaneId, ParameterId),
-    /// Recording started (track_id, clip_id)
-    RecordingStarted(TrackId, ClipId),
+    /// Recording started (track_id, clip_id, sample_rate, channels)
+    RecordingStarted(TrackId, ClipId, u32, u32),
     /// Recording progress update (clip_id, current_duration)
     RecordingProgress(ClipId, f64),
     /// Recording stopped (clip_id, pool_index, waveform)

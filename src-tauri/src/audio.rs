@@ -83,7 +83,7 @@ impl EventEmitter for TauriEventEmitter {
             AudioEvent::PlaybackPosition(time) => {
                 SerializedAudioEvent::PlaybackPosition { time }
             }
-            AudioEvent::RecordingStarted(track_id, clip_id) => {
+            AudioEvent::RecordingStarted(track_id, clip_id, _, _) => {
                 SerializedAudioEvent::RecordingStarted { track_id, clip_id }
             }
             AudioEvent::RecordingProgress(clip_id, duration) => {

@@ -198,7 +198,7 @@ pub struct SharedPaneState<'a> {
     /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
-    pub raw_audio_cache: &'a std::collections::HashMap<usize, (Vec<f32>, u32, u32)>,
+    pub raw_audio_cache: &'a std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices needing GPU waveform texture upload
     pub waveform_gpu_dirty: &'a mut std::collections::HashSet<usize>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)

@@ -86,8 +86,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mip_frame = frame_f / reduction;
 
     // Convert 1D mip-space index to 2D UV coordinates
-    let mip_tex_width = params.tex_width / pow(2.0, f32(mip_floor));
-    let mip_tex_height = ceil(params.total_frames / reduction / mip_tex_width);
+    // Use actual texture dimensions (not computed from total_frames) because the
+    // texture may be pre-allocated larger for live recording.
+    let mip_dims = textureDimensions(peak_tex, mip_floor);
+    let mip_tex_width = f32(mip_dims.x);
+    let mip_tex_height = f32(mip_dims.y);
     let texel_x = mip_frame % mip_tex_width;
     let texel_y = floor(mip_frame / mip_tex_width);
     let uv = vec2((texel_x + 0.5) / mip_tex_width, (texel_y + 0.5) / mip_tex_height);

@@ -925,7 +925,7 @@ impl TimelinePane {
         active_layer_id: &Option<uuid::Uuid>,
         selection: &lightningbeam_core::selection::Selection,
         midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
-        raw_audio_cache: &std::collections::HashMap<usize, (Vec<f32>, u32, u32)>,
+        raw_audio_cache: &std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
         target_format: wgpu::TextureFormat,
         waveform_stereo: bool,
@@ -1292,9 +1292,74 @@ impl TimelinePane {
                                             }
                                         }
                                     }
-                                    // Recording in progress: no visualization yet
+                                    // Recording in progress: show live waveform
                                     lightningbeam_core::clip::AudioClipType::Recording => {
-                                        // Could show a pulsing "Recording..." indicator here
+                                        let rec_pool_idx = usize::MAX;
+                                        if let Some((samples, sr, ch)) = raw_audio_cache.get(&rec_pool_idx) {
+                                            let total_frames = samples.len() / (*ch).max(1) as usize;
+                                            if total_frames > 0 {
+                                                let audio_file_duration = total_frames as f64 / *sr as f64;
+                                                let screen_size = ui.ctx().content_rect().size();
+
+                                                let pending_upload = if waveform_gpu_dirty.contains(&rec_pool_idx) {
+                                                    waveform_gpu_dirty.remove(&rec_pool_idx);
+                                                    Some(crate::waveform_gpu::PendingUpload {
+                                                        samples: samples.clone(),
+                                                        sample_rate: *sr,
+                                                        channels: *ch,
+                                                    })
+                                                } else {
+                                                    None
+                                                };
+
+                                                let tint = [
+                                                    bright_color.r() as f32 / 255.0,
+                                                    bright_color.g() as f32 / 255.0,
+                                                    bright_color.b() as f32 / 255.0,
+                                                    bright_color.a() as f32 / 255.0,
+                                                ];
+
+                                                let clip_screen_start = rect.min.x + ((instance_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32;
+                                                let clip_screen_end = clip_screen_start + (preview_clip_duration * self.pixels_per_second as f64) as f32;
+                                                let waveform_rect = egui::Rect::from_min_max(
+                                                    egui::pos2(clip_screen_start.max(clip_rect.min.x), clip_rect.min.y),
+                                                    egui::pos2(clip_screen_end.min(clip_rect.max.x), clip_rect.max.y),
+                                                );
+
+                                                if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
+                                                    let instance_id = clip_instance.id.as_u128() as u64;
+                                                    let callback = crate::waveform_gpu::WaveformCallback {
+                                                        pool_index: rec_pool_idx,
+                                                        segment_index: 0,
+                                                        params: crate::waveform_gpu::WaveformParams {
+                                                            clip_rect: [waveform_rect.min.x, waveform_rect.min.y, waveform_rect.max.x, waveform_rect.max.y],
+                                                            viewport_start_time: self.viewport_start_time as f32,
+                                                            pixels_per_second: self.pixels_per_second as f32,
+                                                            audio_duration: audio_file_duration as f32,
+                                                            sample_rate: *sr as f32,
+                                                            clip_start_time: clip_screen_start,
+                                                            trim_start: preview_trim_start as f32,
+                                                            tex_width: crate::waveform_gpu::tex_width() as f32,
+                                                            total_frames: total_frames as f32,
+                                                            segment_start_frame: 0.0,
+                                                            display_mode: if waveform_stereo { 1.0 } else { 0.0 },
+                                                            _pad1: [0.0, 0.0],
+                                                            tint_color: tint,
+                                                            screen_size: [screen_size.x, screen_size.y],
+                                                            _pad: [0.0, 0.0],
+                                                        },
+                                                        target_format,
+                                                        pending_upload,
+                                                        instance_id,
+                                                    };
+
+                                                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                                                        waveform_rect,
+                                                        callback,
+                                                    ));
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
