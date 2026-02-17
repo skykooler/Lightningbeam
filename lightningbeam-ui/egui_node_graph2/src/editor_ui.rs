@@ -912,9 +912,10 @@ where
 
             let resp = ui.allocate_rect(port_rect, sense);
 
-            // Check if the mouse is within the port's interaction rect
+            // Check if the mouse is within snap distance of the port center
+            // Uses circular distance to match snap_to_ports() behavior
             let close_enough = if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
-                port_rect.contains(pointer_pos)
+                port_pos.distance(pointer_pos) < DISTANCE_TO_CONNECT * pan_zoom.zoom
             } else {
                 false
             };
