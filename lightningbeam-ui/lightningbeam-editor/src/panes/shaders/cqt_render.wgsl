@@ -90,7 +90,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Clip to view rectangle
     if frag_x < params.clip_rect.x || frag_x > params.clip_rect.z ||
        frag_y < params.clip_rect.y || frag_y > params.clip_rect.w {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Compute the content rect in screen space
@@ -110,7 +110,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         corner_radius
     );
     if dist > 0.0 {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Fragment X -> audio time -> global CQT column
@@ -118,28 +118,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let audio_time = timeline_time - params.clip_start_time + params.trim_start;
 
     if audio_time < 0.0 || audio_time > params.audio_duration {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     let global_col = audio_time * params.sample_rate / params.hop_size;
 
     // Check if this column is in the cached range
     if global_col < params.cache_valid_start || global_col >= params.cache_valid_end {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Fragment Y -> MIDI note -> CQT bin (direct mapping!)
     let note = params.max_note - ((frag_y - params.clip_rect.y + params.scroll_y) / params.note_height);
 
     if note < params.min_note || note > params.max_note {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // CQT bin: each octave has bins_per_octave bins, starting from min_note
     let bin = (note - params.min_note) * params.bins_per_octave / 12.0;
 
     if bin < 0.0 || bin >= params.freq_bins {
-        discard;
+        return vec4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Map global column to ring buffer position (accounting for stride)

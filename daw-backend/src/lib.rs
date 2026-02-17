@@ -67,14 +67,12 @@ impl AudioSystem {
             .ok_or("No output device available")?;
 
         let default_output_config = output_device.default_output_config().map_err(|e| e.to_string())?;
-        let sample_rate = default_output_config.sample_rate().0;
+        let sample_rate = default_output_config.sample_rate();
         let channels = default_output_config.channels() as u32;
         let debug_audio = std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1");
-        if debug_audio {
-            eprintln!("[AUDIO DEBUG] Device: {:?}", output_device.name());
-            eprintln!("[AUDIO DEBUG] Default config: {:?}", default_output_config);
-            eprintln!("[AUDIO DEBUG] Default buffer size: {:?}", default_output_config.buffer_size());
-        }
+
+        eprintln!("[AUDIO] Device: {:?}, format={:?}, rate={}, channels={}",
+            output_device.name().unwrap_or_default(), default_output_config.sample_format(), sample_rate, channels);
 
         // Create queues
         let (command_tx, command_rx) = rtrb::RingBuffer::new(512); // Larger buffer for MIDI + UI commands
@@ -107,36 +105,23 @@ impl AudioSystem {
             }
         }
 
-        // Build output stream with configurable buffer size
-        let mut output_config: cpal::StreamConfig = default_output_config.clone().into();
+        // Build output stream
+        let mut output_config: cpal::StreamConfig = default_output_config.into();
 
-        // Set the requested buffer size
-        output_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+        // WASAPI shared mode on Windows does not support fixed buffer sizes.
+        // Use the device default on Windows; honor the requested size on other platforms.
+        if cfg!(target_os = "windows") {
+            output_config.buffer_size = cpal::BufferSize::Default;
+        } else {
+            output_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+        }
 
         let mut output_buffer = vec![0.0f32; 16384];
 
-        if debug_audio {
-            eprintln!("[AUDIO DEBUG] Output config: sr={} Hz, ch={}, buf={:?}",
-                output_config.sample_rate.0, output_config.channels, output_config.buffer_size);
-            if let cpal::BufferSize::Fixed(size) = output_config.buffer_size {
-                let latency_ms = (size as f64 / output_config.sample_rate.0 as f64) * 1000.0;
-                eprintln!("[AUDIO DEBUG] Expected latency: {:.2} ms", latency_ms);
-            }
-        }
-
-        let mut callback_log_count: u32 = 0;
-        let cb_debug = debug_audio;
         let output_stream = output_device
             .build_output_stream(
                 &output_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if cb_debug && callback_log_count < 10 {
-                        let frames = data.len() / output_config.channels as usize;
-                        let latency_ms = (frames as f64 / output_config.sample_rate.0 as f64) * 1000.0;
-                        eprintln!("[AUDIO CB #{}] {} samples ({} frames, {:.2} ms)",
-                                 callback_log_count, data.len(), frames, latency_ms);
-                        callback_log_count += 1;
-                    }
                     let buf = &mut output_buffer[..data.len()];
                     buf.fill(0.0);
                     engine.process(buf);
@@ -145,7 +130,7 @@ impl AudioSystem {
                 |err| eprintln!("Output stream error: {}", err),
                 None,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("Failed to build output stream: {e:?}"))?;
 
         // Get input device
         let input_device = match host.default_input_device() {
@@ -170,13 +155,10 @@ impl AudioSystem {
             }
         };
 
-        // Get input config matching output sample rate and channels if possible
+        // Get input config - use the input device's own default config
         let input_config = match input_device.default_input_config() {
             Ok(config) => {
-                let mut cfg: cpal::StreamConfig = config.into();
-                // Try to match output sample rate and channels
-                cfg.sample_rate = cpal::SampleRate(sample_rate);
-                cfg.channels = channels as u16;
+                let cfg: cpal::StreamConfig = config.into();
                 cfg
             }
             Err(e) => {
@@ -193,25 +175,41 @@ impl AudioSystem {
                     stream: output_stream,
                     sample_rate,
                     channels,
-                    event_rx: None, // No event receiver when audio device unavailable
+                    event_rx: None,
                 });
             }
         };
 
         // Build input stream that feeds into the ringbuffer
-        let input_stream = input_device
+        let input_stream = match input_device
             .build_input_stream(
                 &input_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Push input samples to ringbuffer for recording
                     for &sample in data {
                         let _ = input_tx.push(sample);
                     }
                 },
                 |err| eprintln!("Input stream error: {}", err),
                 None,
-            )
-            .map_err(|e| e.to_string())?;
+            ) {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("Warning: Could not build input stream: {}, recording will be disabled", e);
+                output_stream.play().map_err(|e| e.to_string())?;
+
+                if let Some(emitter) = event_emitter {
+                    Self::spawn_emitter_thread(event_rx, emitter);
+                }
+
+                return Ok(Self {
+                    controller,
+                    stream: output_stream,
+                    sample_rate,
+                    channels,
+                    event_rx: None,
+                });
+            }
+        };
 
         // Start both streams
         output_stream.play().map_err(|e| e.to_string())?;

@@ -183,64 +183,90 @@ enum SplitPreviewMode {
     },
 }
 
+/// Rasterize an embedded SVG and upload it as an egui texture
+fn rasterize_svg(svg_data: &[u8], name: &str, render_size: u32, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let tree = resvg::usvg::Tree::from_data(svg_data, &resvg::usvg::Options::default()).ok()?;
+    let pixmap_size = tree.size().to_int_size();
+    let scale_x = render_size as f32 / pixmap_size.width() as f32;
+    let scale_y = render_size as f32 / pixmap_size.height() as f32;
+    let scale = scale_x.min(scale_y);
+
+    let final_size = resvg::usvg::Size::from_wh(
+        pixmap_size.width() as f32 * scale,
+        pixmap_size.height() as f32 * scale,
+    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
+
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(
+        final_size.width() as u32,
+        final_size.height() as u32,
+    )?;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+    let rgba_data = pixmap.data();
+    let size = [pixmap.width() as usize, pixmap.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
+    Some(ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR))
+}
+
+/// Embedded pane icon SVGs
+mod pane_icons {
+    pub static STAGE: &[u8] = include_bytes!("../../../src/assets/stage.svg");
+    pub static TIMELINE: &[u8] = include_bytes!("../../../src/assets/timeline.svg");
+    pub static TOOLBAR: &[u8] = include_bytes!("../../../src/assets/toolbar.svg");
+    pub static INFOPANEL: &[u8] = include_bytes!("../../../src/assets/infopanel.svg");
+    pub static PIANO_ROLL: &[u8] = include_bytes!("../../../src/assets/piano-roll.svg");
+    pub static PIANO: &[u8] = include_bytes!("../../../src/assets/piano.svg");
+    pub static NODE_EDITOR: &[u8] = include_bytes!("../../../src/assets/node-editor.svg");
+}
+
+/// Embedded tool icon SVGs
+mod tool_icons {
+    pub static SELECT: &[u8] = include_bytes!("../../../src/assets/select.svg");
+    pub static DRAW: &[u8] = include_bytes!("../../../src/assets/draw.svg");
+    pub static TRANSFORM: &[u8] = include_bytes!("../../../src/assets/transform.svg");
+    pub static RECTANGLE: &[u8] = include_bytes!("../../../src/assets/rectangle.svg");
+    pub static ELLIPSE: &[u8] = include_bytes!("../../../src/assets/ellipse.svg");
+    pub static PAINT_BUCKET: &[u8] = include_bytes!("../../../src/assets/paint_bucket.svg");
+    pub static EYEDROPPER: &[u8] = include_bytes!("../../../src/assets/eyedropper.svg");
+    pub static LINE: &[u8] = include_bytes!("../../../src/assets/line.svg");
+    pub static POLYGON: &[u8] = include_bytes!("../../../src/assets/polygon.svg");
+    pub static BEZIER_EDIT: &[u8] = include_bytes!("../../../src/assets/bezier_edit.svg");
+    pub static TEXT: &[u8] = include_bytes!("../../../src/assets/text.svg");
+}
+
+/// Embedded focus icon SVGs
+mod focus_icons {
+    pub static ANIMATION: &[u8] = include_bytes!("../../../src/assets/focus-animation.svg");
+    pub static MUSIC: &[u8] = include_bytes!("../../../src/assets/focus-music.svg");
+    pub static VIDEO: &[u8] = include_bytes!("../../../src/assets/focus-video.svg");
+}
+
 /// Icon cache for pane type icons
 struct IconCache {
     icons: HashMap<PaneType, egui::TextureHandle>,
-    assets_path: std::path::PathBuf,
 }
 
 impl IconCache {
     fn new() -> Self {
-        let assets_path = std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/home/skyler".to_string())
-        ).join("Dev/Lightningbeam-2/src/assets");
-
         Self {
             icons: HashMap::new(),
-            assets_path,
         }
     }
 
     fn get_or_load(&mut self, pane_type: PaneType, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&pane_type) {
-            // Load SVG and rasterize using resvg
-            let icon_path = self.assets_path.join(pane_type.icon_file());
-            if let Ok(svg_data) = std::fs::read(&icon_path) {
-                // Rasterize at reasonable size for pane icons
-                let render_size = 64;
-
-                if let Ok(tree) = resvg::usvg::Tree::from_data(&svg_data, &resvg::usvg::Options::default()) {
-                    let pixmap_size = tree.size().to_int_size();
-                    let scale_x = render_size as f32 / pixmap_size.width() as f32;
-                    let scale_y = render_size as f32 / pixmap_size.height() as f32;
-                    let scale = scale_x.min(scale_y);
-
-                    let final_size = resvg::usvg::Size::from_wh(
-                        pixmap_size.width() as f32 * scale,
-                        pixmap_size.height() as f32 * scale,
-                    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
-
-                    if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(
-                        final_size.width() as u32,
-                        final_size.height() as u32,
-                    ) {
-                        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-                        resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-                        // Convert RGBA8 to egui ColorImage
-                        let rgba_data = pixmap.data();
-                        let size = [pixmap.width() as usize, pixmap.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
-
-                        // Upload to GPU
-                        let texture = ctx.load_texture(
-                            pane_type.icon_file(),
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        self.icons.insert(pane_type, texture);
-                    }
-                }
+            let svg_data = match pane_type {
+                PaneType::Stage | PaneType::Outliner | PaneType::PresetBrowser | PaneType::AssetLibrary => pane_icons::STAGE,
+                PaneType::Timeline => pane_icons::TIMELINE,
+                PaneType::Toolbar => pane_icons::TOOLBAR,
+                PaneType::Infopanel => pane_icons::INFOPANEL,
+                PaneType::PianoRoll => pane_icons::PIANO_ROLL,
+                PaneType::VirtualPiano => pane_icons::PIANO,
+                PaneType::NodeEditor | PaneType::ShaderEditor => pane_icons::NODE_EDITOR,
+            };
+            if let Some(texture) = rasterize_svg(svg_data, pane_type.icon_file(), 64, ctx) {
+                self.icons.insert(pane_type, texture);
             }
         }
         self.icons.get(&pane_type)
@@ -250,61 +276,32 @@ impl IconCache {
 /// Icon cache for tool icons
 struct ToolIconCache {
     icons: HashMap<Tool, egui::TextureHandle>,
-    assets_path: std::path::PathBuf,
 }
 
 impl ToolIconCache {
     fn new() -> Self {
-        let assets_path = std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/home/skyler".to_string())
-        ).join("Dev/Lightningbeam-2/src/assets");
-
         Self {
             icons: HashMap::new(),
-            assets_path,
         }
     }
 
     fn get_or_load(&mut self, tool: Tool, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&tool) {
-            // Load SVG and rasterize at high resolution using resvg
-            let icon_path = self.assets_path.join(tool.icon_file());
-            if let Ok(svg_data) = std::fs::read(&icon_path) {
-                // Rasterize at 3x size for crisp display (180px for 60px display)
-                let render_size = 180;
-
-                if let Ok(tree) = resvg::usvg::Tree::from_data(&svg_data, &resvg::usvg::Options::default()) {
-                    let pixmap_size = tree.size().to_int_size();
-                    let scale_x = render_size as f32 / pixmap_size.width() as f32;
-                    let scale_y = render_size as f32 / pixmap_size.height() as f32;
-                    let scale = scale_x.min(scale_y);
-
-                    let final_size = resvg::usvg::Size::from_wh(
-                        pixmap_size.width() as f32 * scale,
-                        pixmap_size.height() as f32 * scale,
-                    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
-
-                    if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(
-                        final_size.width() as u32,
-                        final_size.height() as u32,
-                    ) {
-                        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-                        resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-                        // Convert RGBA8 to egui ColorImage
-                        let rgba_data = pixmap.data();
-                        let size = [pixmap.width() as usize, pixmap.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
-
-                        // Upload to GPU
-                        let texture = ctx.load_texture(
-                            tool.icon_file(),
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        self.icons.insert(tool, texture);
-                    }
-                }
+            let svg_data = match tool {
+                Tool::Select => tool_icons::SELECT,
+                Tool::Draw => tool_icons::DRAW,
+                Tool::Transform => tool_icons::TRANSFORM,
+                Tool::Rectangle => tool_icons::RECTANGLE,
+                Tool::Ellipse => tool_icons::ELLIPSE,
+                Tool::PaintBucket => tool_icons::PAINT_BUCKET,
+                Tool::Eyedropper => tool_icons::EYEDROPPER,
+                Tool::Line => tool_icons::LINE,
+                Tool::Polygon => tool_icons::POLYGON,
+                Tool::BezierEdit => tool_icons::BEZIER_EDIT,
+                Tool::Text => tool_icons::TEXT,
+            };
+            if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
+                self.icons.insert(tool, texture);
             }
         }
         self.icons.get(&tool)
@@ -314,74 +311,33 @@ impl ToolIconCache {
 /// Icon cache for focus card icons (start screen)
 struct FocusIconCache {
     icons: HashMap<FocusIcon, egui::TextureHandle>,
-    assets_path: std::path::PathBuf,
 }
 
 impl FocusIconCache {
     fn new() -> Self {
-        let assets_path = std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/home/skyler".to_string())
-        ).join("Dev/Lightningbeam-2/src/assets");
-
         Self {
             icons: HashMap::new(),
-            assets_path,
         }
     }
 
     fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&icon) {
-            // Determine which SVG file to load
-            let svg_filename = match icon {
-                FocusIcon::Animation => "focus-animation.svg",
-                FocusIcon::Music => "focus-music.svg",
-                FocusIcon::Video => "focus-video.svg",
+            let (svg_bytes, svg_filename) = match icon {
+                FocusIcon::Animation => (focus_icons::ANIMATION, "focus-animation.svg"),
+                FocusIcon::Music => (focus_icons::MUSIC, "focus-music.svg"),
+                FocusIcon::Video => (focus_icons::VIDEO, "focus-video.svg"),
             };
 
-            let icon_path = self.assets_path.join(svg_filename);
-            if let Ok(svg_data) = std::fs::read_to_string(&icon_path) {
-                // Replace currentColor with the actual color
-                let color_hex = format!(
-                    "#{:02x}{:02x}{:02x}",
-                    icon_color.r(), icon_color.g(), icon_color.b()
-                );
-                let svg_with_color = svg_data.replace("currentColor", &color_hex);
+            // Replace currentColor with the actual color
+            let svg_data = String::from_utf8_lossy(svg_bytes);
+            let color_hex = format!(
+                "#{:02x}{:02x}{:02x}",
+                icon_color.r(), icon_color.g(), icon_color.b()
+            );
+            let svg_with_color = svg_data.replace("currentColor", &color_hex);
 
-                // Rasterize at 2x size for crisp display
-                let render_size = 120;
-
-                if let Ok(tree) = resvg::usvg::Tree::from_data(svg_with_color.as_bytes(), &resvg::usvg::Options::default()) {
-                    let pixmap_size = tree.size().to_int_size();
-                    let scale_x = render_size as f32 / pixmap_size.width() as f32;
-                    let scale_y = render_size as f32 / pixmap_size.height() as f32;
-                    let scale = scale_x.min(scale_y);
-
-                    let final_size = resvg::usvg::Size::from_wh(
-                        pixmap_size.width() as f32 * scale,
-                        pixmap_size.height() as f32 * scale,
-                    ).unwrap_or(resvg::usvg::Size::from_wh(render_size as f32, render_size as f32).unwrap());
-
-                    if let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(
-                        final_size.width() as u32,
-                        final_size.height() as u32,
-                    ) {
-                        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-                        resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-                        // Convert RGBA8 to egui ColorImage
-                        let rgba_data = pixmap.data();
-                        let size = [pixmap.width() as usize, pixmap.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba_data);
-
-                        // Upload to GPU
-                        let texture = ctx.load_texture(
-                            svg_filename,
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        );
-                        self.icons.insert(icon, texture);
-                    }
-                }
+            if let Some(texture) = rasterize_svg(svg_with_color.as_bytes(), svg_filename, 120, ctx) {
+                self.icons.insert(icon, texture);
             }
         }
         self.icons.get(&icon)

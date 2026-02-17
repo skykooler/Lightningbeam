@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cpal = "0.15"
+cpal = "0.17"
 symphonia = { version = "0.5", features = ["all"] }
 rtrb = "0.3"
 midly = "0.5"
