@@ -6,6 +6,7 @@ use eframe::egui;
 use egui_node_graph2::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::widgets;
 
 /// Signal types for audio node graph
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -887,9 +888,10 @@ impl NodeDataTrait for NodeData {
             let mut close_popup = false;
             egui::Popup::from_toggle_button_response(&button)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .width(160.0)
                 .show(|ui| {
-                ui.set_min_width(200.0);
-                ui.text_edit_singleline(&mut user_state.sampler_search_text);
+                let search_width = ui.available_width();
+                ui.add_sized([search_width, 0.0], egui::TextEdit::singleline(&mut user_state.sampler_search_text).hint_text("Search..."));
                 ui.separator();
                 let search = user_state.sampler_search_text.to_lowercase();
 
@@ -901,7 +903,7 @@ impl NodeDataTrait for NodeData {
                             continue;
                         }
                         let label = format!("📁 {} ({} clips)", folder.name, folder.clip_pool_indices.len());
-                        if ui.selectable_label(false, label).clicked() {
+                        if widgets::list_item(ui, false, &label) {
                             user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromFolder {
                                 node_id,
                                 folder_id: folder.folder_id,
@@ -916,31 +918,29 @@ impl NodeDataTrait for NodeData {
                 if is_multi {
                     ui.label(egui::RichText::new("Audio Clips").small().weak());
                 }
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for clip in &user_state.available_clips {
-                        if !search.is_empty() && !clip.name.to_lowercase().contains(&search) {
-                            continue;
-                        }
-                        if ui.selectable_label(false, &clip.name).clicked() {
-                            if is_multi {
-                                user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromPool {
-                                    node_id,
-                                    backend_node_id,
-                                    pool_index: clip.pool_index,
-                                    name: clip.name.clone(),
-                                });
-                            } else {
-                                user_state.pending_sampler_load = Some(PendingSamplerLoad::SimpleFromPool {
-                                    node_id,
-                                    backend_node_id,
-                                    pool_index: clip.pool_index,
-                                    name: clip.name.clone(),
-                                });
-                            }
-                            close_popup = true;
-                        }
+                let filtered_clips: Vec<&SamplerClipInfo> = user_state.available_clips.iter()
+                    .filter(|clip| search.is_empty() || clip.name.to_lowercase().contains(&search))
+                    .collect();
+                let items = filtered_clips.iter().map(|clip| (false, clip.name.as_str()));
+                if let Some(idx) = widgets::scrollable_list(ui, 200.0, items) {
+                    let clip = filtered_clips[idx];
+                    if is_multi {
+                        user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromPool {
+                            node_id,
+                            backend_node_id,
+                            pool_index: clip.pool_index,
+                            name: clip.name.clone(),
+                        });
+                    } else {
+                        user_state.pending_sampler_load = Some(PendingSamplerLoad::SimpleFromPool {
+                            node_id,
+                            backend_node_id,
+                            pool_index: clip.pool_index,
+                            name: clip.name.clone(),
+                        });
                     }
-                });
+                    close_popup = true;
+                }
                 ui.separator();
                 if ui.button("Open...").clicked() {
                     if is_multi {
@@ -971,18 +971,17 @@ impl NodeDataTrait for NodeData {
                 let mut close_root = false;
                 egui::Popup::from_toggle_button_response(&root_btn)
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .width(80.0)
                     .show(|ui| {
-                    ui.set_min_width(120.0);
-                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        // Show notes from C1 (24) to C7 (96)
-                        for note in (24..=96).rev() {
-                            let name = midi_note_name(note);
-                            if ui.selectable_label(note == self.root_note, &name).clicked() {
-                                user_state.pending_root_note_changes.push((node_id, backend_node_id, note));
-                                close_root = true;
-                            }
-                        }
-                    });
+                    let notes: Vec<(u8, String)> = (24..=96).rev()
+                        .map(|n| (n, midi_note_name(n)))
+                        .collect();
+                    let items = notes.iter().map(|(n, name)| (*n == self.root_note, name.as_str()));
+                    if let Some(idx) = widgets::scrollable_list(ui, 200.0, items) {
+                        let (note, _) = &notes[idx];
+                        user_state.pending_root_note_changes.push((node_id, backend_node_id, *note));
+                        close_root = true;
+                    }
                 });
                 if close_root {
                     egui::Popup::close_id(ui.ctx(), root_popup_id);

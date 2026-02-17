@@ -587,12 +587,27 @@ impl NodeGraphPane {
                     .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "aiff"])
                     .pick_file()
                 {
-                    let path_str = path.to_string_lossy().to_string();
                     let file_name = path.file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| "Sample".to_string());
+
+                    // Import into audio pool + asset library, then load from pool
                     let mut controller = controller_arc.lock().unwrap();
-                    controller.sampler_load_sample(backend_track_id, backend_node_id, path_str);
+                    match controller.import_audio_sync(path.to_path_buf()) {
+                        Ok(pool_index) => {
+                            // Add to document asset library
+                            let metadata = daw_backend::io::read_metadata(&path).ok();
+                            let duration = metadata.as_ref().map(|m| m.duration).unwrap_or(0.0);
+                            let clip = lightningbeam_core::clip::AudioClip::new_sampled(&file_name, pool_index, duration);
+                            shared.action_executor.document_mut().add_audio_clip(clip);
+
+                            // Load into sampler from pool
+                            controller.sampler_load_from_pool(backend_track_id, backend_node_id, pool_index);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to import audio '{}': {}", path.display(), e);
+                        }
+                    }
                     if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
                         node.user_data.sample_display_name = Some(file_name);
                     }
@@ -635,17 +650,28 @@ impl NodeGraphPane {
                     .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "aiff"])
                     .pick_file()
                 {
-                    let path_str = path.to_string_lossy().to_string();
                     let file_name = path.file_stem()
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| "Sample".to_string());
                     let mut controller = controller_arc.lock().unwrap();
-                    // Add as layer spanning full key range
-                    controller.multi_sampler_add_layer(
-                        backend_track_id, backend_node_id, path_str,
-                        0, 127, 60, 0, 127, None, None,
-                        daw_backend::audio::node_graph::nodes::LoopMode::OneShot,
-                    );
+                    // Import into audio pool + asset library, then load from pool
+                    match controller.import_audio_sync(path.to_path_buf()) {
+                        Ok(pool_index) => {
+                            let metadata = daw_backend::io::read_metadata(&path).ok();
+                            let duration = metadata.as_ref().map(|m| m.duration).unwrap_or(0.0);
+                            let clip = lightningbeam_core::clip::AudioClip::new_sampled(&file_name, pool_index, duration);
+                            shared.action_executor.document_mut().add_audio_clip(clip);
+
+                            // Add as layer spanning full key range
+                            controller.multi_sampler_add_layer_from_pool(
+                                backend_track_id, backend_node_id, pool_index,
+                                0, 127, 60,
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to import audio '{}': {}", path.display(), e);
+                        }
+                    }
                     if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
                         node.user_data.sample_display_name = Some(file_name);
                     }
