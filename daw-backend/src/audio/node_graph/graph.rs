@@ -445,12 +445,13 @@ impl AudioGraph {
         // Update playback time
         self.playback_time = playback_time;
 
-        // Update playback time for all automation nodes before processing
-        use super::nodes::AutomationInputNode;
+        // Update playback time for all time-dependent nodes before processing
+        use super::nodes::{AutomationInputNode, BeatNode};
         for node in self.graph.node_weights_mut() {
-            // Try to downcast to AutomationInputNode and update its playback time
             if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
                 auto_node.set_playback_time(playback_time);
+            } else if let Some(beat_node) = node.node.as_any_mut().downcast_mut::<BeatNode>() {
+                beat_node.set_playback_time(playback_time);
             }
         }
 
@@ -967,6 +968,7 @@ impl AudioGraph {
                 "Chorus" => Box::new(ChorusNode::new("Chorus")),
                 "Compressor" => Box::new(CompressorNode::new("Compressor")),
                 "Constant" => Box::new(ConstantNode::new("Constant")),
+                "Beat" => Box::new(BeatNode::new("Beat")),
                 "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
                 "Limiter" => Box::new(LimiterNode::new("Limiter")),
                 "Math" => Box::new(MathNode::new("Math")),

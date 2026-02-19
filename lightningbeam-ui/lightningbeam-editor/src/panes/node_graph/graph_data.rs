@@ -23,6 +23,7 @@ pub enum NodeTemplate {
     MidiInput,
     AudioInput,
     AutomationInput,
+    Beat,
 
     // Generators
     Oscillator,
@@ -121,6 +122,7 @@ impl NodeTemplate {
             NodeTemplate::Quantizer => "Quantizer",
             NodeTemplate::EnvelopeFollower => "EnvelopeFollower",
             NodeTemplate::BpmDetector => "BpmDetector",
+            NodeTemplate::Beat => "Beat",
             NodeTemplate::Mod => "Mod",
             NodeTemplate::Oscilloscope => "Oscilloscope",
             NodeTemplate::VoiceAllocator => "VoiceAllocator",
@@ -360,6 +362,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::Quantizer => "Quantizer".into(),
             NodeTemplate::EnvelopeFollower => "Envelope Follower".into(),
             NodeTemplate::BpmDetector => "BPM Detector".into(),
+            NodeTemplate::Beat => "Beat".into(),
             NodeTemplate::Mod => "Modulator".into(),
             // Analysis
             NodeTemplate::Oscilloscope => "Oscilloscope".into(),
@@ -376,7 +379,7 @@ impl NodeTemplateTrait for NodeTemplate {
 
     fn node_finder_categories(&self, _user_state: &mut Self::UserState) -> Vec<&'static str> {
         match self {
-            NodeTemplate::MidiInput | NodeTemplate::AudioInput | NodeTemplate::AutomationInput => vec!["Inputs"],
+            NodeTemplate::MidiInput | NodeTemplate::AudioInput | NodeTemplate::AutomationInput | NodeTemplate::Beat => vec!["Inputs"],
             NodeTemplate::Oscillator | NodeTemplate::WavetableOscillator | NodeTemplate::FmSynth
             | NodeTemplate::Noise | NodeTemplate::SimpleSampler | NodeTemplate::MultiSampler => vec!["Generators"],
             NodeTemplate::Filter | NodeTemplate::Gain | NodeTemplate::Echo | NodeTemplate::Reverb
@@ -744,6 +747,16 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::BpmDetector => {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_output_param(node_id, "BPM".into(), DataType::CV);
+            }
+            NodeTemplate::Beat => {
+                graph.add_input_param(node_id, "Resolution".into(), DataType::CV,
+                    ValueType::float_param(2.0, 0.0, 6.0, "", 0,
+                        Some(&["1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_output_param(node_id, "BPM".into(), DataType::CV);
+                graph.add_output_param(node_id, "Beat Phase".into(), DataType::CV);
+                graph.add_output_param(node_id, "Bar Phase".into(), DataType::CV);
+                graph.add_output_param(node_id, "Gate".into(), DataType::CV);
             }
             NodeTemplate::Mod => {
                 graph.add_input_param(node_id, "Carrier".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
@@ -1118,6 +1131,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Quantizer,
             NodeTemplate::EnvelopeFollower,
             NodeTemplate::BpmDetector,
+            NodeTemplate::Beat,
             NodeTemplate::Mod,
             // Analysis
             NodeTemplate::Oscilloscope,
