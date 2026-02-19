@@ -59,6 +59,7 @@ pub enum NodeTemplate {
     MidiToCv,
     AudioToCv,
     Arpeggiator,
+    Sequencer,
     Math,
     SampleHold,
     SlewLimiter,
@@ -118,6 +119,7 @@ impl NodeTemplate {
             NodeTemplate::MidiToCv => "MidiToCV",
             NodeTemplate::AudioToCv => "AudioToCV",
             NodeTemplate::Arpeggiator => "Arpeggiator",
+            NodeTemplate::Sequencer => "Sequencer",
             NodeTemplate::Math => "Math",
             NodeTemplate::SampleHold => "SampleHold",
             NodeTemplate::SlewLimiter => "SlewLimiter",
@@ -201,6 +203,8 @@ pub struct GraphState {
     pub node_backend_ids: HashMap<NodeId, u32>,
     /// Pending root note changes from bottom_ui (node_id, backend_node_id, new_root_note)
     pub pending_root_note_changes: Vec<(NodeId, u32, u8)>,
+    /// Pending sequencer grid changes from bottom_ui (node_id, param_id, new_bitmask_value)
+    pub pending_sequencer_changes: Vec<(NodeId, u32, f32)>,
     /// Time scale per oscilloscope node (in milliseconds)
     pub oscilloscope_time_scale: HashMap<NodeId, f32>,
 }
@@ -216,6 +220,7 @@ impl Default for GraphState {
             sampler_search_text: String::new(),
             node_backend_ids: HashMap::new(),
             pending_root_note_changes: Vec::new(),
+            pending_sequencer_changes: Vec::new(),
             oscilloscope_time_scale: HashMap::new(),
         }
     }
@@ -359,6 +364,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::MidiToCv => "MIDI to CV".into(),
             NodeTemplate::AudioToCv => "Audio to CV".into(),
             NodeTemplate::Arpeggiator => "Arpeggiator".into(),
+            NodeTemplate::Sequencer => "Step Sequencer".into(),
             NodeTemplate::Math => "Math".into(),
             NodeTemplate::SampleHold => "Sample & Hold".into(),
             NodeTemplate::SlewLimiter => "Slew Limiter".into(),
@@ -390,7 +396,7 @@ impl NodeTemplateTrait for NodeTemplate {
             | NodeTemplate::BitCrusher | NodeTemplate::Compressor | NodeTemplate::Limiter | NodeTemplate::Eq
             | NodeTemplate::Pan | NodeTemplate::RingModulator | NodeTemplate::Vocoder => vec!["Effects"],
             NodeTemplate::Adsr | NodeTemplate::Lfo | NodeTemplate::Mixer | NodeTemplate::Splitter
-            | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Arpeggiator | NodeTemplate::Math
+            | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Arpeggiator | NodeTemplate::Sequencer | NodeTemplate::Math
             | NodeTemplate::SampleHold | NodeTemplate::SlewLimiter | NodeTemplate::Quantizer
             | NodeTemplate::EnvelopeFollower | NodeTemplate::BpmDetector | NodeTemplate::Mod => vec!["Utilities"],
             NodeTemplate::Oscilloscope => vec!["Analysis"],
@@ -744,6 +750,44 @@ impl NodeTemplateTrait for NodeTemplate {
                 graph.add_output_param(node_id, "V/Oct".into(), DataType::CV);
                 graph.add_output_param(node_id, "Gate".into(), DataType::CV);
             }
+            NodeTemplate::Sequencer => {
+                graph.add_input_param(node_id, "Phase".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Mode".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 1.0, "", 0,
+                        Some(&["One/Cycle", "All/Cycle"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Steps".into(), DataType::CV,
+                    ValueType::float_param(2.0, 0.0, 2.0, "", 1,
+                        Some(&["4", "8", "16"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Scale".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 1.0, "", 2,
+                        Some(&["Chromatic", "Diatonic"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Key".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 11.0, "", 3,
+                        Some(&["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Scale Type".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 7.0, "", 4,
+                        Some(&["Major","Minor","Dorian","Mixolydian",
+                                "Penta Maj","Penta Min","Blues","Harm Minor"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Octave".into(), DataType::CV,
+                    ValueType::float_param(4.0, 0.0, 8.0, "", 5,
+                        Some(&["0","1","2","3","4","5","6","7","8"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Velocity".into(), DataType::CV,
+                    ValueType::float_param(100.0, 1.0, 127.0, "", 6, None),
+                    InputParamKind::ConstantOnly, true);
+                // Hidden row bitmask parameters (managed by grid UI)
+                for row in 0..16u32 {
+                    graph.add_input_param(node_id, format!("Row{}", row).into(), DataType::CV,
+                        ValueType::float_param(0.0, 0.0, 65535.0, "", 7 + row, None),
+                        InputParamKind::ConstantOnly, false);
+                }
+                graph.add_output_param(node_id, "MIDI Out".into(), DataType::Midi);
+            }
             NodeTemplate::Math => {
                 graph.add_input_param(node_id, "A".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOrConstant, true);
                 graph.add_input_param(node_id, "B".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOrConstant, true);
@@ -1070,6 +1114,168 @@ impl NodeDataTrait for NodeData {
                     .suffix(" ms")
                     .logarithmic(true));
             });
+        } else if self.template == NodeTemplate::Sequencer {
+            // Read grid parameters from graph inputs
+            let node = &_graph[node_id];
+
+            let num_steps = {
+                let v = node.get_input("Steps").ok()
+                    .and_then(|id| if let ValueType::Float { value, .. } = &_graph.get_input(id).value { Some(*value) } else { None })
+                    .unwrap_or(2.0);
+                match v.round() as i32 { 0 => 4usize, 1 => 8, _ => 16 }
+            };
+            let scale_mode_val = node.get_input("Scale").ok()
+                .and_then(|id| if let ValueType::Float { value, .. } = &_graph.get_input(id).value { Some(*value) } else { None })
+                .unwrap_or(0.0);
+            let key_val = node.get_input("Key").ok()
+                .and_then(|id| if let ValueType::Float { value, .. } = &_graph.get_input(id).value { Some(*value) } else { None })
+                .unwrap_or(0.0) as u8;
+            let scale_type_val = node.get_input("Scale Type").ok()
+                .and_then(|id| if let ValueType::Float { value, .. } = &_graph.get_input(id).value { Some(*value) } else { None })
+                .unwrap_or(0.0) as usize;
+            let octave_val = node.get_input("Octave").ok()
+                .and_then(|id| if let ValueType::Float { value, .. } = &_graph.get_input(id).value { Some(*value) } else { None })
+                .unwrap_or(4.0) as u8;
+            let is_diatonic = scale_mode_val.round() as i32 >= 1;
+
+            // Read row bitmasks
+            let num_rows = 8usize;
+            let mut row_patterns = [0u16; 16];
+            for row in 0..num_rows {
+                let name = format!("Row{}", row);
+                if let Ok(input_id) = node.get_input(&name) {
+                    if let ValueType::Float { value, .. } = &_graph.get_input(input_id).value {
+                        row_patterns[row] = value.round() as u16;
+                    }
+                }
+            }
+
+            // Scale intervals for diatonic mode
+            const SCALES: &[&[u8]] = &[
+                &[0,2,4,5,7,9,11], &[0,2,3,5,7,8,10], &[0,2,3,5,7,9,10], &[0,2,4,5,7,9,10],
+                &[0,2,4,7,9], &[0,3,5,7,10], &[0,3,5,6,7,10], &[0,2,3,5,7,8,11],
+            ];
+            const NOTE_NAMES: &[&str] = &["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+            let row_to_note_name = |row: usize| -> String {
+                let base = key_val as u16 + octave_val as u16 * 12;
+                let midi_note = if is_diatonic {
+                    let scale = SCALES[scale_type_val.min(SCALES.len() - 1)];
+                    let oct_off = row / scale.len();
+                    let degree = row % scale.len();
+                    base + oct_off as u16 * 12 + scale[degree] as u16
+                } else {
+                    base + row as u16
+                };
+                let midi_note = (midi_note as u8).min(127);
+                let name = NOTE_NAMES[(midi_note % 12) as usize];
+                let oct = midi_note / 12;
+                format!("{}{}", name, oct)
+            };
+
+            // Grid layout
+            let label_width = 28.0f32;
+            let cell_size = 14.0f32;
+            let grid_width = num_steps as f32 * cell_size;
+            let grid_height = num_rows as f32 * cell_size;
+            let total_width = label_width + grid_width;
+            let total_height = grid_height;
+
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(total_width, total_height),
+                egui::Sense::click(),
+            );
+            let painter = ui.painter_at(rect);
+
+            let grid_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + label_width, rect.top()),
+                egui::vec2(grid_width, grid_height),
+            );
+
+            // Background
+            painter.rect_filled(grid_rect, 0.0, egui::Color32::from_rgb(0x1a, 0x1a, 0x1a));
+
+            // Draw cells (bottom row = row 0 = lowest pitch)
+            let active_color = egui::Color32::from_rgb(0x4C, 0xAF, 0x50);
+            let hover_color = egui::Color32::from_rgb(0x66, 0xBB, 0x6A);
+            let grid_line_color = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+
+            // Get hover position
+            let hover_cell = response.hover_pos().and_then(|pos| {
+                if grid_rect.contains(pos) {
+                    let col = ((pos.x - grid_rect.left()) / cell_size).floor() as usize;
+                    let visual_row = ((pos.y - grid_rect.top()) / cell_size).floor() as usize;
+                    if col < num_steps && visual_row < num_rows {
+                        Some((num_rows - 1 - visual_row, col))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            for visual_row in 0..num_rows {
+                let row = num_rows - 1 - visual_row; // flip: top = highest pitch
+                for col in 0..num_steps {
+                    let cell_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            grid_rect.left() + col as f32 * cell_size,
+                            grid_rect.top() + visual_row as f32 * cell_size,
+                        ),
+                        egui::vec2(cell_size, cell_size),
+                    );
+                    let active = row_patterns[row] & (1 << col) != 0;
+                    let hovered = hover_cell == Some((row, col));
+
+                    if active {
+                        let color = if hovered { hover_color } else { active_color };
+                        painter.rect_filled(cell_rect.shrink(0.5), 1.0, color);
+                    } else if hovered {
+                        painter.rect_filled(cell_rect.shrink(0.5), 1.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a));
+                    }
+                }
+            }
+
+            // Grid lines
+            for i in 0..=num_steps {
+                let x = grid_rect.left() + i as f32 * cell_size;
+                let color = if i % 4 == 0 { egui::Color32::from_rgb(0x55, 0x55, 0x55) } else { grid_line_color };
+                painter.line_segment(
+                    [egui::pos2(x, grid_rect.top()), egui::pos2(x, grid_rect.bottom())],
+                    egui::Stroke::new(1.0, color),
+                );
+            }
+            for i in 0..=num_rows {
+                let y = grid_rect.top() + i as f32 * cell_size;
+                painter.line_segment(
+                    [egui::pos2(grid_rect.left(), y), egui::pos2(grid_rect.right(), y)],
+                    egui::Stroke::new(1.0, grid_line_color),
+                );
+            }
+
+            // Note labels on the left
+            for visual_row in 0..num_rows {
+                let row = num_rows - 1 - visual_row;
+                let label = row_to_note_name(row);
+                let y = grid_rect.top() + visual_row as f32 * cell_size + cell_size * 0.5;
+                painter.text(
+                    egui::pos2(rect.left() + label_width - 2.0, y),
+                    egui::Align2::RIGHT_CENTER,
+                    &label,
+                    egui::FontId::monospace(8.0),
+                    egui::Color32::from_rgb(0x99, 0x99, 0x99),
+                );
+            }
+
+            // Handle click to toggle cell
+            if response.clicked() {
+                if let Some((row, col)) = hover_cell {
+                    let new_bitmask = row_patterns[row] ^ (1 << col);
+                    let param_id = 7 + row as u32;
+                    user_state.pending_sequencer_changes.push((node_id, param_id, new_bitmask as f32));
+                }
+            }
         } else {
             ui.label("");
         }
@@ -1151,6 +1357,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::MidiToCv,
             NodeTemplate::AudioToCv,
             NodeTemplate::Arpeggiator,
+            NodeTemplate::Sequencer,
             NodeTemplate::Math,
             NodeTemplate::SampleHold,
             NodeTemplate::SlewLimiter,

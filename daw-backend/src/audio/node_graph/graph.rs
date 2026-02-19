@@ -991,6 +991,7 @@ impl AudioGraph {
                 "Constant" => Box::new(ConstantNode::new("Constant")),
                 "Beat" => Box::new(BeatNode::new("Beat")),
                 "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator")),
+                "Sequencer" => Box::new(SequencerNode::new("Sequencer")),
                 "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
                 "Limiter" => Box::new(LimiterNode::new("Limiter")),
                 "Math" => Box::new(MathNode::new("Math")),

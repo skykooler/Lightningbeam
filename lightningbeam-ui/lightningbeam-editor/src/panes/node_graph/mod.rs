@@ -1964,6 +1964,7 @@ impl NodeGraphPane {
             "Mod" => Some(NodeTemplate::Mod),
             "Oscilloscope" => Some(NodeTemplate::Oscilloscope),
             "Arpeggiator" => Some(NodeTemplate::Arpeggiator),
+            "Sequencer" => Some(NodeTemplate::Sequencer),
             "Beat" => Some(NodeTemplate::Beat),
             "VoiceAllocator" => Some(NodeTemplate::VoiceAllocator),
             "Group" => Some(NodeTemplate::Group),
@@ -2394,6 +2395,30 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                             controller.sampler_set_root_note(backend_track_id, backend_node_id, root_note);
                             if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
                                 node.user_data.root_note = root_note;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle pending sequencer grid changes
+            if !self.user_state.pending_sequencer_changes.is_empty() {
+                let changes: Vec<_> = self.user_state.pending_sequencer_changes.drain(..).collect();
+                if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        for (node_id, param_id, value) in changes {
+                            // Send to backend
+                            if let Some(backend_id) = self.node_id_map.get(&node_id) {
+                                let BackendNodeId::Audio(node_idx) = backend_id;
+                                controller.graph_set_parameter(backend_track_id, node_idx.index() as u32, param_id, value);
+                            }
+                            // Update frontend graph value
+                            let row_name = format!("Row{}", param_id - 7);
+                            if let Ok(input_id) = self.state.graph[node_id].get_input(&row_name) {
+                                if let ValueType::Float { value: ref mut v, .. } = self.state.graph.inputs[input_id].value {
+                                    *v = value;
+                                }
                             }
                         }
                     }
