@@ -2,7 +2,7 @@
 Version=1.0
 Type=Application
 Name=Lightningbeam Editor
-Comment=Animation and video editing software
+Comment=Multimedia editor for audio, video and 2D animation
 Exec=lightningbeam-editor
 Icon=lightningbeam-editor
 Terminal=false

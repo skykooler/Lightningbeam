@@ -2,6 +2,8 @@
 name = "lightningbeam-editor"
 version = "0.1.0"
 edition = "2021"
+description = "Multimedia editor for audio, video and 2D animation"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 lightningbeam-core = { path = "../lightningbeam-core" }
@@ -60,3 +62,62 @@ notify-rust = { workspace = true }
 
 # Debug overlay - memory tracking
 memory-stats = "1.1"
+
+[package.metadata.deb]
+name = "lightningbeam-editor"
+maintainer = "Skyler"
+copyright = "2025-2026"
+extended-description = "GPU-accelerated multimedia editor for audio, video and 2D animation"
+license-file = ["../../LICENSE", "0"]
+section = "video"
+priority = "optional"
+depends = "libasound2, libwayland-client0, libx11-6, libvulkan1"
+assets = [
+    ["target/release/lightningbeam-editor", "usr/bin/", "755"],
+    ["assets/com.lightningbeam.editor.desktop", "usr/share/applications/", "644"],
+    ["assets/com.lightningbeam.editor.appdata.xml", "usr/share/metainfo/", "644"],
+    ["assets/icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png", "644"],
+    ["assets/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png", "644"],
+    ["assets/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "lightningbeam-editor"
+license = "GPL-3.0-or-later"
+summary = "Multimedia editor for audio, video and 2D animation"
+
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"
+wayland = "*"
+libX11 = "*"
+vulkan-loader = "*"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/lightningbeam-editor"
+dest = "/usr/bin/lightningbeam-editor"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/com.lightningbeam.editor.desktop"
+dest = "/usr/share/applications/com.lightningbeam.editor.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/com.lightningbeam.editor.appdata.xml"
+dest = "/usr/share/metainfo/com.lightningbeam.editor.appdata.xml"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/32x32.png"
+dest = "/usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/128x128.png"
+dest = "/usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/256x256.png"
+dest = "/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
+mode = "644"

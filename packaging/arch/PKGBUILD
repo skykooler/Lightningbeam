@@ -1,0 +1,66 @@
+# Maintainer: Skyler
+pkgname=lightningbeam-editor
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Multimedia editor for audio, video and 2D animation"
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+depends=(
+    'alsa-lib'
+    'wayland'
+    'libx11'
+    'vulkan-icd-loader'
+    'ffmpeg'
+)
+makedepends=(
+    'cargo'
+    'rust'
+    'clang'
+    'pkg-config'
+    'ffmpeg'
+)
+# Build from local git repo — adjust source for AUR publishing
+source=()
+sha256sums=()
+
+# Set to the repo root (adjust as needed)
+_repodir="${startdir}/../.."
+
+build() {
+    cd "$_repodir/lightningbeam-ui"
+
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+
+    cargo build --release --bin lightningbeam-editor
+}
+
+package() {
+    cd "$_repodir"
+
+    # Install binary
+    install -Dm755 lightningbeam-ui/target/release/lightningbeam-editor \
+        "$pkgdir/usr/bin/lightningbeam-editor"
+
+    # Desktop file
+    install -Dm644 lightningbeam-ui/lightningbeam-editor/assets/com.lightningbeam.editor.desktop \
+        "$pkgdir/usr/share/applications/com.lightningbeam.editor.desktop"
+
+    # AppStream metainfo
+    install -Dm644 lightningbeam-ui/lightningbeam-editor/assets/com.lightningbeam.editor.appdata.xml \
+        "$pkgdir/usr/share/metainfo/com.lightningbeam.editor.appdata.xml"
+
+    # Icons
+    install -Dm644 lightningbeam-ui/lightningbeam-editor/assets/icons/32x32.png \
+        "$pkgdir/usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png"
+    install -Dm644 lightningbeam-ui/lightningbeam-editor/assets/icons/128x128.png \
+        "$pkgdir/usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png"
+    install -Dm644 lightningbeam-ui/lightningbeam-editor/assets/icons/256x256.png \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
+
+    # Factory presets
+    cd src/assets/instruments
+    find . -type f ! -name 'README.md' | while read -r f; do
+        install -Dm644 "$f" "$pkgdir/usr/share/lightningbeam-editor/presets/$f"
+    done
+}

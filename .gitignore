@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Git
+.gitignore
+
+# Build
+src-tauri/gen
+src-tauri/target
+lightningbeam-core/target
+daw-backend/target
+target/
+
+# Packaging build artifacts
+packaging/output/
+packaging/AppDir/
+packaging/squashfs-root/
+
+# Wrapper script (generated, not needed with static FFmpeg)
+lightningbeam-ui/lightningbeam-editor/debian/

@@ -65,12 +65,26 @@ impl PresetBrowserPane {
         self.presets.clear();
         self.categories.clear();
 
-        // Factory presets: resolve from CARGO_MANIFEST_DIR (lightningbeam-editor crate)
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let factory_dir = manifest_dir.join("../../src/assets/instruments");
+        // Factory presets: check installed location first, fall back to dev source tree
+        let factory_dirs = [
+            // Installed location (Linux packages / AppImage)
+            PathBuf::from("/usr/share/lightningbeam-editor/presets"),
+            // Next to the binary (AppImage / portable)
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("presets")))
+                .unwrap_or_default(),
+            // Development: relative to CARGO_MANIFEST_DIR
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/assets/instruments"),
+        ];
 
-        if let Ok(factory_dir) = factory_dir.canonicalize() {
-            self.scan_directory(&factory_dir, &factory_dir, true);
+        for dir in &factory_dirs {
+            if let Ok(factory_dir) = dir.canonicalize() {
+                if factory_dir.is_dir() {
+                    self.scan_directory(&factory_dir, &factory_dir, true);
+                    break;
+                }
+            }
         }
 
         // User presets
