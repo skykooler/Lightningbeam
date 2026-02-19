@@ -96,7 +96,7 @@ where
                                 ui.set_width(scroll_area_width);
                                 ui.set_min_height(1000.);
                                 for (category, kinds) in categories {
-                                    let filtered_kinds: Vec<_> = kinds
+                                    let mut filtered_kinds: Vec<_> = kinds
                                         .into_iter()
                                         .map(|kind| {
                                             let kind_name =
@@ -109,6 +109,7 @@ where
                                                 .contains(self.query.to_lowercase().as_str())
                                         })
                                         .collect();
+                                    filtered_kinds.sort_by(|a, b| a.1.cmp(&b.1));
 
                                     if !filtered_kinds.is_empty() {
                                         let default_open = !self.query.is_empty();
