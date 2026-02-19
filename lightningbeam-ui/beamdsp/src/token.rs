@@ -58,6 +58,9 @@ pub enum TokenKind {
     Canvas,
     Spacer,
 
+    // Draw block
+    Draw,
+
     // Literals
     FloatLit(f32),
     IntLit(i32),
@@ -133,6 +136,7 @@ impl TokenKind {
             "param" => TokenKind::Param,
             "canvas" => TokenKind::Canvas,
             "spacer" => TokenKind::Spacer,
+            "draw" => TokenKind::Draw,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             _ => TokenKind::Ident(s.to_string()),

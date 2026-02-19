@@ -37,6 +37,7 @@ struct Compiler {
     vars: Vec<(String, VarLoc)>,
     next_local: u16,
     scope_stack: Vec<u16>, // local count at scope entry
+    draw_context: bool,     // true when compiling a draw {} block
 }
 
 impl Compiler {
@@ -48,6 +49,7 @@ impl Compiler {
             vars: Vec::new(),
             next_local: 0,
             scope_stack: Vec::new(),
+            draw_context: false,
         }
     }
 
@@ -210,6 +212,55 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile the draw block into separate bytecode (for the DrawVM)
+    fn compile_draw(&mut self, script: &Script) -> Result<(), CompileError> {
+        self.draw_context = true;
+
+        // Register params (same as process)
+        for (i, param) in script.params.iter().enumerate() {
+            self.vars.push((param.name.clone(), VarLoc::Param(i as u16)));
+        }
+
+        // Register state variables (draw gets its own copy)
+        let mut scalar_idx: u16 = 0;
+        let mut array_idx: u16 = 0;
+        for state in &script.state {
+            match &state.ty {
+                StateType::F32 => {
+                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::F32)));
+                    scalar_idx += 1;
+                }
+                StateType::Int => {
+                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::Int)));
+                    scalar_idx += 1;
+                }
+                StateType::Bool => {
+                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::Bool)));
+                    scalar_idx += 1;
+                }
+                StateType::ArrayF32(_) => {
+                    self.vars.push((state.name.clone(), VarLoc::StateArray(array_idx, VType::F32)));
+                    array_idx += 1;
+                }
+                StateType::ArrayInt(_) => {
+                    self.vars.push((state.name.clone(), VarLoc::StateArray(array_idx, VType::Int)));
+                    array_idx += 1;
+                }
+                StateType::Sample => {} // no samples in draw context
+            }
+        }
+
+        // Compile draw block
+        if let Some(draw) = &script.draw {
+            for stmt in draw {
+                self.compile_stmt(stmt)?;
+            }
+        }
+
+        self.emit(OpCode::Halt);
+        Ok(())
+    }
+
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
         match stmt {
             Stmt::Let { name, init, .. } => {
@@ -233,6 +284,10 @@ impl Compiler {
                             }
                             VarLoc::StateScalar(idx, _) => {
                                 self.emit(OpCode::StoreState);
+                                self.emit_u16(idx);
+                            }
+                            VarLoc::Param(idx) if self.draw_context => {
+                                self.emit(OpCode::StoreParam);
                                 self.emit_u16(idx);
                             }
                             _ => {
@@ -336,8 +391,11 @@ impl Compiler {
                 self.pop_scope();
             }
             Stmt::ExprStmt(expr) => {
+                let is_void = self.is_void_call(expr);
                 self.compile_expr(expr)?;
-                self.emit(OpCode::Pop);
+                if !is_void {
+                    self.emit(OpCode::Pop);
+                }
             }
         }
         Ok(())
@@ -548,6 +606,18 @@ impl Compiler {
         Ok(())
     }
 
+    /// Returns true if the expression is a call to a void function (no return value).
+    fn is_void_call(&self, expr: &Expr) -> bool {
+        if let Expr::Call(name, _, _) = expr {
+            matches!(name.as_str(),
+                "fill_circle" | "stroke_circle" | "stroke_arc" |
+                "line" | "fill_rect" | "stroke_rect"
+            )
+        } else {
+            false
+        }
+    }
+
     fn compile_call(&mut self, name: &str, args: &[Expr], span: Span) -> Result<(), CompileError> {
         match name {
             // 1-arg math → push arg, emit opcode
@@ -717,6 +787,48 @@ impl Compiler {
                 }
             }
 
+            // Draw builtins (only valid in draw context)
+            "fill_circle" | "stroke_circle" | "stroke_arc" | "line" |
+            "fill_rect" | "stroke_rect" |
+            "mouse_x" | "mouse_y" | "mouse_down" if self.draw_context => {
+                match name {
+                    "fill_circle" => {
+                        // fill_circle(cx, cy, r, color)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawFillCircle);
+                    }
+                    "stroke_circle" => {
+                        // stroke_circle(cx, cy, r, color, width)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawStrokeCircle);
+                    }
+                    "stroke_arc" => {
+                        // stroke_arc(cx, cy, r, start_deg, end_deg, color, width)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawStrokeArc);
+                    }
+                    "line" => {
+                        // line(x1, y1, x2, y2, color, width)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawLine);
+                    }
+                    "fill_rect" => {
+                        // fill_rect(x, y, w, h, color)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawFillRect);
+                    }
+                    "stroke_rect" => {
+                        // stroke_rect(x, y, w, h, color, width)
+                        for arg in args { self.compile_expr(arg)?; }
+                        self.emit(OpCode::DrawStrokeRect);
+                    }
+                    "mouse_x" => { self.emit(OpCode::MouseX); }
+                    "mouse_y" => { self.emit(OpCode::MouseY); }
+                    "mouse_down" => { self.emit(OpCode::MouseDown); }
+                    _ => unreachable!(),
+                }
+            }
+
             _ => {
                 return Err(CompileError::new(format!("Unknown function: {}", name), span));
             }
@@ -793,7 +905,7 @@ impl Compiler {
 }
 
 /// Compile a validated AST into bytecode VM and UI declaration
-pub fn compile(script: &Script) -> Result<(ScriptVM, UiDeclaration), CompileError> {
+pub fn compile(script: &Script) -> Result<(ScriptVM, UiDeclaration, Option<crate::vm::DrawVM>), CompileError> {
     let mut compiler = Compiler::new();
     compiler.compile_script(script)?;
 
@@ -843,7 +955,24 @@ pub fn compile(script: &Script) -> Result<(ScriptVM, UiDeclaration), CompileErro
         UiDeclaration { elements }
     };
 
-    Ok((vm, ui_decl))
+    // Compile draw block if present
+    let draw_vm = if script.draw.is_some() {
+        let mut draw_compiler = Compiler::new();
+        draw_compiler.compile_draw(script)?;
+        Some(crate::vm::DrawVM::new(
+            draw_compiler.code,
+            draw_compiler.constants_f32,
+            draw_compiler.constants_i32,
+            script.params.len(),
+            &param_defaults,
+            num_state_scalars,
+            &state_array_sizes,
+        ))
+    } else {
+        None
+    };
+
+    Ok((vm, ui_decl, draw_vm))
 }
 
 #[cfg(test)]
@@ -859,7 +988,8 @@ mod tests {
         let mut parser = Parser::new(&tokens);
         let script = parser.parse()?;
         let validated = validator::validate(&script)?;
-        compile(validated)
+        let (vm, ui, _draw_vm) = compile(validated)?;
+        Ok((vm, ui))
     }
 
     #[test]
@@ -987,5 +1117,44 @@ mod tests {
         assert_eq!(ui.elements.len(), 2);
         assert!(matches!(&ui.elements[0], UiElement::Sample(n) if n == "clip"));
         assert!(matches!(&ui.elements[1], UiElement::Param(n) if n == "gain"));
+    }
+
+    #[test]
+    fn test_draw_block() {
+        let src = r#"
+            name "Knob"
+            category utility
+            params { volume: 0.75 [0.0, 1.0] "" }
+            outputs { out: audio }
+            ui { canvas [80, 80] }
+            draw {
+                let cx = 40.0;
+                let cy = 40.0;
+                fill_circle(cx, cy, 35.0, 0x333333FF);
+                let angle = volume * 270.0 - 135.0;
+                stroke_arc(cx, cy, 30.0, -135.0, angle, 0x4488FFFF, 3.0);
+            }
+            process {
+                for i in 0..buffer_size {
+                    out[i] = 0.0;
+                }
+            }
+        "#;
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(&tokens);
+        let script = parser.parse().unwrap();
+        let validated = validator::validate(&script).unwrap();
+        let (_vm, _ui, draw_vm) = compile(validated).unwrap();
+
+        // Draw VM should exist
+        let mut dvm = draw_vm.expect("draw_vm should be Some");
+        assert!(!dvm.bytecode.is_empty());
+
+        // Execute should succeed without stack errors
+        dvm.execute().unwrap();
+
+        // Should have produced draw commands
+        assert_eq!(dvm.draw_commands.len(), 2); // fill_circle + stroke_arc
     }
 }

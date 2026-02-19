@@ -86,6 +86,7 @@ impl<'a> Parser<'a> {
         let mut state = Vec::new();
         let mut ui = None;
         let mut process = Vec::new();
+        let mut draw = None;
 
         while *self.peek() != TokenKind::Eof {
             match self.peek() {
@@ -131,6 +132,10 @@ impl<'a> Parser<'a> {
                     self.advance();
                     process = self.parse_block()?;
                 }
+                TokenKind::Draw => {
+                    self.advance();
+                    draw = Some(self.parse_block()?);
+                }
                 _ => {
                     return Err(CompileError::new(
                         format!("Unexpected token {:?} at top level", self.peek()),
@@ -156,6 +161,7 @@ impl<'a> Parser<'a> {
             state,
             ui,
             process,
+            draw,
         })
     }
 

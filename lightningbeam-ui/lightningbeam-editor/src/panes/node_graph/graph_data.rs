@@ -241,6 +241,10 @@ pub struct GraphState {
     pub pending_load_script_file: Option<NodeId>,
     /// Pending script sample load request from bottom_ui sample picker
     pub pending_script_sample_load: Option<PendingScriptSampleLoad>,
+    /// Draw VMs for canvas rendering, keyed by node ID
+    pub draw_vms: HashMap<NodeId, beamdsp::DrawVM>,
+    /// Pending param changes from draw block (node_id, param_index, new_value)
+    pub pending_draw_param_changes: Vec<(NodeId, u32, f32)>,
 }
 
 impl Default for GraphState {
@@ -261,6 +265,8 @@ impl Default for GraphState {
             pending_new_script: None,
             pending_load_script_file: None,
             pending_script_sample_load: None,
+            draw_vms: HashMap::new(),
+            pending_draw_param_changes: Vec::new(),
         }
     }
 }
@@ -1362,7 +1368,21 @@ impl NodeDataTrait for NodeData {
                 egui::Popup::close_id(ui.ctx(), popup_id);
             }
 
-            // Render declarative UI elements (sample pickers, groups)
+            // Sync param values from node input ports to draw VM
+            if let Some(draw_vm) = user_state.draw_vms.get_mut(&node_id) {
+                if let Some(node) = _graph.nodes.get(node_id) {
+                    for (_name, input_id) in &node.inputs {
+                        if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &_graph.get_input(*input_id).value {
+                            let idx = *pid as usize;
+                            if idx < draw_vm.params.len() {
+                                draw_vm.params[idx] = *value;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Render declarative UI elements (sample pickers, groups, canvas)
             if let Some(ref ui_decl) = self.ui_declaration {
                 let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
                 render_script_ui_elements(
@@ -1373,6 +1393,8 @@ impl NodeDataTrait for NodeData {
                     &user_state.available_clips,
                     &mut user_state.sampler_search_text,
                     &mut user_state.pending_script_sample_load,
+                    &mut user_state.draw_vms,
+                    &mut user_state.pending_draw_param_changes,
                 );
             }
         } else {
@@ -1382,7 +1404,17 @@ impl NodeDataTrait for NodeData {
     }
 }
 
-/// Render UiDeclaration elements for Script nodes (sample pickers, groups, spacers)
+/// Convert a u32 RGBA color to egui Color32
+fn color_from_u32(c: u32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        ((c >> 24) & 0xFF) as u8,
+        ((c >> 16) & 0xFF) as u8,
+        ((c >> 8) & 0xFF) as u8,
+        (c & 0xFF) as u8,
+    )
+}
+
+/// Render UiDeclaration elements for Script nodes (sample pickers, groups, canvas, spacers)
 fn render_script_ui_elements(
     ui: &mut egui::Ui,
     node_id: NodeId,
@@ -1393,9 +1425,121 @@ fn render_script_ui_elements(
     available_clips: &[SamplerClipInfo],
     search_text: &mut String,
     pending_load: &mut Option<PendingScriptSampleLoad>,
+    draw_vms: &mut HashMap<NodeId, beamdsp::DrawVM>,
+    pending_param_changes: &mut Vec<(NodeId, u32, f32)>,
 ) {
     for element in elements {
         match element {
+            beamdsp::UiElement::Canvas { width, height } => {
+                let size = egui::vec2(*width, *height);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                let painter = ui.painter_at(rect);
+
+                // Dark background
+                painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x1a, 0x1a, 0x1a));
+
+                if let Some(draw_vm) = draw_vms.get_mut(&node_id) {
+                    // Set mouse state
+                    if let Some(pos) = response.hover_pos() {
+                        draw_vm.mouse.x = pos.x - rect.left();
+                        draw_vm.mouse.y = pos.y - rect.top();
+                    }
+                    draw_vm.mouse.down = response.dragged() || response.drag_started();
+
+                    // Save params before execution to detect changes
+                    let params_before: Vec<f32> = draw_vm.params.clone();
+
+                    // Execute draw block
+                    if let Err(e) = draw_vm.execute() {
+                        painter.text(
+                            rect.center(), egui::Align2::CENTER_CENTER,
+                            &format!("draw error: {}", e),
+                            egui::FontId::monospace(9.0), egui::Color32::RED,
+                        );
+                    } else {
+                        // Render draw commands
+                        for cmd in &draw_vm.draw_commands {
+                            match cmd {
+                                beamdsp::DrawCommand::FillCircle { cx, cy, r, color } => {
+                                    painter.circle_filled(
+                                        egui::pos2(rect.left() + cx, rect.top() + cy),
+                                        *r, color_from_u32(*color),
+                                    );
+                                }
+                                beamdsp::DrawCommand::StrokeCircle { cx, cy, r, color, width } => {
+                                    painter.circle_stroke(
+                                        egui::pos2(rect.left() + cx, rect.top() + cy),
+                                        *r, egui::Stroke::new(*width, color_from_u32(*color)),
+                                    );
+                                }
+                                beamdsp::DrawCommand::StrokeArc { cx, cy, r, start_deg, end_deg, color, width } => {
+                                    // Generate arc as polyline
+                                    let center = egui::pos2(rect.left() + cx, rect.top() + cy);
+                                    let start_rad = start_deg.to_radians();
+                                    let end_rad = end_deg.to_radians();
+                                    let arc_len = (end_rad - start_rad).abs();
+                                    let segments = ((arc_len * *r / 2.0).ceil() as usize).max(8).min(128);
+                                    let points: Vec<egui::Pos2> = (0..=segments)
+                                        .map(|i| {
+                                            let t = i as f32 / segments as f32;
+                                            let angle = start_rad + (end_rad - start_rad) * t;
+                                            egui::pos2(
+                                                center.x + angle.cos() * r,
+                                                center.y + angle.sin() * r,
+                                            )
+                                        })
+                                        .collect();
+                                    painter.add(egui::Shape::line(
+                                        points,
+                                        egui::Stroke::new(*width, color_from_u32(*color)),
+                                    ));
+                                }
+                                beamdsp::DrawCommand::Line { x1, y1, x2, y2, color, width } => {
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(rect.left() + x1, rect.top() + y1),
+                                            egui::pos2(rect.left() + x2, rect.top() + y2),
+                                        ],
+                                        egui::Stroke::new(*width, color_from_u32(*color)),
+                                    );
+                                }
+                                beamdsp::DrawCommand::FillRect { x, y, w, h, color } => {
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(rect.left() + x, rect.top() + y),
+                                            egui::vec2(*w, *h),
+                                        ),
+                                        0.0, color_from_u32(*color),
+                                    );
+                                }
+                                beamdsp::DrawCommand::StrokeRect { x, y, w, h, color, width } => {
+                                    painter.rect_stroke(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(rect.left() + x, rect.top() + y),
+                                            egui::vec2(*w, *h),
+                                        ),
+                                        0.0,
+                                        egui::Stroke::new(*width, color_from_u32(*color)),
+                                        egui::StrokeKind::Outside,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Detect param changes from draw block (e.g. knob drag)
+                    for (i, (&before, &after)) in params_before.iter().zip(draw_vm.params.iter()).enumerate() {
+                        if (after - before).abs() > 1e-10 {
+                            pending_param_changes.push((node_id, i as u32, after));
+                        }
+                    }
+
+                    // Request repaint while interacting
+                    if draw_vm.mouse.down || response.hovered() {
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
             beamdsp::UiElement::Sample(slot_name) => {
                 // Find the slot index by name
                 let slot_index = sample_slot_names.iter().position(|n| n == slot_name);
@@ -1454,14 +1598,15 @@ fn render_script_ui_elements(
                             ui, node_id, backend_node_id,
                             children, sample_slot_names, script_sample_names,
                             available_clips, search_text, pending_load,
+                            draw_vms, pending_param_changes,
                         );
                     });
             }
             beamdsp::UiElement::Spacer(height) => {
                 ui.add_space(*height);
             }
-            beamdsp::UiElement::Param(_) | beamdsp::UiElement::Canvas { .. } => {
-                // Params are handled as inline input ports; Canvas is phase 6
+            beamdsp::UiElement::Param(_) => {
+                // Params are handled as inline input ports
             }
         }
     }

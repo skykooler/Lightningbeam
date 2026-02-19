@@ -105,7 +105,7 @@ fn beamdsp_syntax() -> Syntax {
             "if", "else", "for", "in", "let", "mut",
             "generator", "effect", "utility",
             "audio", "cv", "midi",
-            "param", "sample", "group", "canvas", "spacer",
+            "param", "sample", "group", "canvas", "spacer", "draw",
         ]),
         types: std::collections::BTreeSet::from([
             "f32", "int", "bool",
@@ -119,6 +119,9 @@ fn beamdsp_syntax() -> Syntax {
             "len", "cv_or", "float",
             "sample_len", "sample_read", "sample_rate_of",
             "sample_rate", "buffer_size",
+            "fill_circle", "stroke_circle", "stroke_arc",
+            "fill_rect", "stroke_rect", "line",
+            "mouse_x", "mouse_y", "mouse_down",
         ]),
     }
 }

@@ -12,6 +12,7 @@ pub struct Script {
     pub state: Vec<StateDecl>,
     pub ui: Option<Vec<UiElement>>,
     pub process: Block,
+    pub draw: Option<Block>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

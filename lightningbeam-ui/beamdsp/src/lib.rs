@@ -15,7 +15,7 @@ use parser::Parser;
 
 pub use error::ScriptError;
 pub use ui_decl::{UiDeclaration, UiElement};
-pub use vm::{ScriptVM, SampleSlot};
+pub use vm::{ScriptVM, SampleSlot, DrawVM, DrawCommand, MouseState};
 
 /// Compiled script metadata — everything needed to create a ScriptNode
 pub struct CompiledScript {
@@ -28,6 +28,7 @@ pub struct CompiledScript {
     pub sample_slots: Vec<String>,
     pub ui_declaration: UiDeclaration,
     pub source: String,
+    pub draw_vm: Option<DrawVM>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +56,7 @@ pub fn compile(source: &str) -> Result<CompiledScript, CompileError> {
 
     let validated = validator::validate(&script)?;
 
-    let (vm, ui_decl) = codegen::compile(&validated)?;
+    let (vm, ui_decl, draw_vm) = codegen::compile(&validated)?;
 
     let input_ports = script
         .inputs
@@ -104,5 +105,6 @@ pub fn compile(source: &str) -> Result<CompiledScript, CompileError> {
         sample_slots,
         ui_declaration: ui_decl,
         source: source.to_string(),
+        draw_vm,
     })
 }

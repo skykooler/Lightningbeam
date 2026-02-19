@@ -108,6 +108,22 @@ pub enum OpCode {
     LoadSampleRate = 140,
     LoadBufferSize = 141,
 
+    // Draw commands (pop args from stack, push to draw command buffer)
+    DrawFillCircle = 150,     // pops: color(i32), r, cy, cx
+    DrawStrokeCircle = 151,   // pops: width, color(i32), r, cy, cx
+    DrawStrokeArc = 152,      // pops: width, color(i32), end_deg, start_deg, r, cy, cx
+    DrawLine = 153,           // pops: width, color(i32), y2, x2, y1, x1
+    DrawFillRect = 154,       // pops: color(i32), h, w, y, x
+    DrawStrokeRect = 155,     // pops: width, color(i32), h, w, y, x
+
+    // Mouse input (push onto stack)
+    MouseX = 160,             // pushes canvas-relative X as f32
+    MouseY = 161,             // pushes canvas-relative Y as f32
+    MouseDown = 162,          // pushes 1.0 if pressed, 0.0 if not
+
+    // Param write (draw context only)
+    StoreParam = 170,         // u16 param index, pops value from stack
+
     Halt = 255,
 }
 
@@ -190,6 +206,16 @@ impl OpCode {
             130 => Some(OpCode::ArrayLen),
             140 => Some(OpCode::LoadSampleRate),
             141 => Some(OpCode::LoadBufferSize),
+            150 => Some(OpCode::DrawFillCircle),
+            151 => Some(OpCode::DrawStrokeCircle),
+            152 => Some(OpCode::DrawStrokeArc),
+            153 => Some(OpCode::DrawLine),
+            154 => Some(OpCode::DrawFillRect),
+            155 => Some(OpCode::DrawStrokeRect),
+            160 => Some(OpCode::MouseX),
+            161 => Some(OpCode::MouseY),
+            162 => Some(OpCode::MouseDown),
+            170 => Some(OpCode::StoreParam),
             255 => Some(OpCode::Halt),
             _ => None,
         }

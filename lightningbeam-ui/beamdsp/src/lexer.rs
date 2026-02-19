@@ -172,6 +172,28 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_number(&mut self, first: u8, span: Span) -> Result<Token, CompileError> {
+        // Check for hex literal: 0x...
+        if first == b'0' && self.peek() == Some(b'x') {
+            self.advance(); // skip 'x'
+            let mut hex = String::new();
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_hexdigit() {
+                    hex.push(self.advance() as char);
+                } else {
+                    break;
+                }
+            }
+            if hex.is_empty() {
+                return Err(CompileError::new("Expected hex digits after 0x", span));
+            }
+            let val = u32::from_str_radix(&hex, 16)
+                .map_err(|_| CompileError::new(format!("Invalid hex literal: 0x{}", hex), span))?;
+            return Ok(Token {
+                kind: TokenKind::IntLit(val as i32),
+                span,
+            });
+        }
+
         let mut s = String::new();
         s.push(first as char);
         let mut is_float = false;

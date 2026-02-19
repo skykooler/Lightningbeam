@@ -391,6 +391,12 @@ impl NodeGraphPane {
             node.user_data.ui_declaration = Some(compiled.ui_declaration.clone());
             node.user_data.sample_slot_names = compiled.sample_slots.clone();
         }
+        // Store draw VM in GraphState (needs &mut, can't live on immutable NodeData)
+        if let Some(draw_vm) = &compiled.draw_vm {
+            self.user_state.draw_vms.insert(node_id, draw_vm.clone());
+        } else {
+            self.user_state.draw_vms.remove(&node_id);
+        }
     }
 
     fn handle_graph_response(
@@ -2688,6 +2694,33 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                             if let Ok(input_id) = self.state.graph[node_id].get_input(&row_name) {
                                 if let ValueType::Float { value: ref mut v, .. } = self.state.graph.inputs[input_id].value {
                                     *v = value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle param changes from draw block (canvas knob drag etc.)
+            if !self.user_state.pending_draw_param_changes.is_empty() {
+                let changes: Vec<_> = self.user_state.pending_draw_param_changes.drain(..).collect();
+                if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        for (node_id, param_id, value) in changes {
+                            // Send to backend
+                            if let Some(backend_id) = self.node_id_map.get(&node_id) {
+                                let BackendNodeId::Audio(node_idx) = backend_id;
+                                controller.graph_set_parameter(backend_track_id, node_idx.index() as u32, param_id, value);
+                            }
+                            // Update frontend graph input port value
+                            if let Some(node) = self.state.graph.nodes.get(node_id) {
+                                for (_name, input_id) in &node.inputs {
+                                    if let ValueType::Float { value: ref mut v, backend_param_id: Some(pid), .. } = self.state.graph.inputs[*input_id].value {
+                                        if pid == param_id {
+                                            *v = value;
+                                        }
+                                    }
                                 }
                             }
                         }
