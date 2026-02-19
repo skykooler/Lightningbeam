@@ -219,6 +219,10 @@ pub struct SharedPaneState<'a> {
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads
     pub project_generation: &'a mut u64,
+    /// Script ID to open in the script editor (set by node graph "Edit Script" action)
+    pub script_to_edit: &'a mut Option<Uuid>,
+    /// Script ID that was just saved (triggers auto-recompile of nodes using it)
+    pub script_saved: &'a mut Option<Uuid>,
 }
 
 /// Trait for pane rendering
@@ -260,7 +264,7 @@ pub enum PaneInstance {
     NodeEditor(node_editor::NodeEditorPane),
     PresetBrowser(preset_browser::PresetBrowserPane),
     AssetLibrary(asset_library::AssetLibraryPane),
-    ShaderEditor(shader_editor::ShaderEditorPane),
+    ScriptEditor(shader_editor::ShaderEditorPane),
 }
 
 impl PaneInstance {
@@ -281,8 +285,8 @@ impl PaneInstance {
             PaneType::AssetLibrary => {
                 PaneInstance::AssetLibrary(asset_library::AssetLibraryPane::new())
             }
-            PaneType::ShaderEditor => {
-                PaneInstance::ShaderEditor(shader_editor::ShaderEditorPane::new())
+            PaneType::ScriptEditor => {
+                PaneInstance::ScriptEditor(shader_editor::ShaderEditorPane::new())
             }
         }
     }
@@ -300,7 +304,7 @@ impl PaneInstance {
             PaneInstance::NodeEditor(_) => PaneType::NodeEditor,
             PaneInstance::PresetBrowser(_) => PaneType::PresetBrowser,
             PaneInstance::AssetLibrary(_) => PaneType::AssetLibrary,
-            PaneInstance::ShaderEditor(_) => PaneType::ShaderEditor,
+            PaneInstance::ScriptEditor(_) => PaneType::ScriptEditor,
         }
     }
 }
@@ -318,7 +322,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.render_header(ui, shared),
             PaneInstance::PresetBrowser(p) => p.render_header(ui, shared),
             PaneInstance::AssetLibrary(p) => p.render_header(ui, shared),
-            PaneInstance::ShaderEditor(p) => p.render_header(ui, shared),
+            PaneInstance::ScriptEditor(p) => p.render_header(ui, shared),
         }
     }
 
@@ -340,7 +344,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::PresetBrowser(p) => p.render_content(ui, rect, path, shared),
             PaneInstance::AssetLibrary(p) => p.render_content(ui, rect, path, shared),
-            PaneInstance::ShaderEditor(p) => p.render_content(ui, rect, path, shared),
+            PaneInstance::ScriptEditor(p) => p.render_content(ui, rect, path, shared),
         }
     }
 
@@ -356,7 +360,7 @@ impl PaneRenderer for PaneInstance {
             PaneInstance::NodeEditor(p) => p.name(),
             PaneInstance::PresetBrowser(p) => p.name(),
             PaneInstance::AssetLibrary(p) => p.name(),
-            PaneInstance::ShaderEditor(p) => p.name(),
+            PaneInstance::ScriptEditor(p) => p.name(),
         }
     }
 }

@@ -123,6 +123,10 @@ pub struct SerializedNode {
     /// For sampler nodes: loaded sample data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_data: Option<SampleData>,
+
+    /// For Script nodes: BeamDSP source code
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_source: Option<String>,
 }
 
 /// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
@@ -217,6 +221,7 @@ impl SerializedNode {
             position: (0.0, 0.0),
             template_graph: None,
             sample_data: None,
+            script_source: None,
         }
     }
 

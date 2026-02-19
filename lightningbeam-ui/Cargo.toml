@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "lightningbeam-editor",
     "lightningbeam-core",
+    "beamdsp",
 ]
 
 [workspace.dependencies]
@@ -47,6 +48,9 @@ notify-rust = "4.11"
 # runs on a real-time thread with ~1.5ms deadlines at small buffer sizes,
 # so it cannot tolerate unoptimized code.
 [profile.dev.package.daw-backend]
+opt-level = 2
+
+[profile.dev.package.beamdsp]
 opt-level = 2
 
 # Also optimize symphonia (audio decoder) and cpal (audio I/O) — these

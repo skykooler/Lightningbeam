@@ -263,7 +263,7 @@ impl IconCache {
                 PaneType::Infopanel => pane_icons::INFOPANEL,
                 PaneType::PianoRoll => pane_icons::PIANO_ROLL,
                 PaneType::VirtualPiano => pane_icons::PIANO,
-                PaneType::NodeEditor | PaneType::ShaderEditor => pane_icons::NODE_EDITOR,
+                PaneType::NodeEditor | PaneType::ScriptEditor => pane_icons::NODE_EDITOR,
             };
             if let Some(texture) = rasterize_svg(svg_data, pane_type.icon_file(), 64, ctx) {
                 self.icons.insert(pane_type, texture);
@@ -644,8 +644,10 @@ struct EditorApp {
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
     // Clipboard
     clipboard_manager: lightningbeam_core::clipboard::ClipboardManager,
-    // Shader editor inter-pane communication
+    // Script editor inter-pane communication
     effect_to_load: Option<Uuid>, // Effect ID to load into shader editor (set by asset library)
+    script_to_edit: Option<Uuid>, // Script ID to open in editor (set by node graph)
+    script_saved: Option<Uuid>, // Script ID just saved (triggers auto-recompile)
     // Effect thumbnail invalidation queue (persists across frames until processed)
     effect_thumbnails_to_invalidate: Vec<Uuid>,
     // Import dialog state
@@ -863,8 +865,10 @@ impl EditorApp {
             recording_layer_id: None,         // Will be set when recording starts
             dragging_asset: None, // No asset being dragged initially
             clipboard_manager: lightningbeam_core::clipboard::ClipboardManager::new(),
-            effect_to_load: None, // No effect to load initially
-            effect_thumbnails_to_invalidate: Vec::new(), // No thumbnails to invalidate initially
+            effect_to_load: None,
+            script_to_edit: None,
+            script_saved: None,
+            effect_thumbnails_to_invalidate: Vec::new(),
             last_import_filter: ImportFilter::default(), // Default to "All Supported"
             stroke_width: 3.0,               // Default stroke width
             fill_enabled: true,              // Default to filling shapes
@@ -4455,6 +4459,8 @@ impl eframe::App for EditorApp {
                 clipboard_manager: &mut self.clipboard_manager,
                 waveform_stereo: self.config.waveform_stereo,
                 project_generation: &mut self.project_generation,
+                script_to_edit: &mut self.script_to_edit,
+                script_saved: &mut self.script_saved,
             };
 
             render_layout_node(
@@ -4731,6 +4737,10 @@ struct RenderContext<'a> {
     waveform_stereo: bool,
     /// Project generation counter (incremented on load)
     project_generation: &'a mut u64,
+    /// Script ID to open in the script editor (from node graph)
+    script_to_edit: &'a mut Option<Uuid>,
+    /// Script ID just saved (triggers auto-recompile of nodes using it)
+    script_saved: &'a mut Option<Uuid>,
 }
 
 /// Recursively render a layout node with drag support
@@ -5213,6 +5223,8 @@ fn render_pane(
                 clipboard_manager: ctx.clipboard_manager,
                 waveform_stereo: ctx.waveform_stereo,
                 project_generation: ctx.project_generation,
+                script_to_edit: ctx.script_to_edit,
+                script_saved: ctx.script_saved,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -5284,6 +5296,8 @@ fn render_pane(
                 clipboard_manager: ctx.clipboard_manager,
                 waveform_stereo: ctx.waveform_stereo,
                 project_generation: ctx.project_generation,
+                script_to_edit: ctx.script_to_edit,
+                script_saved: ctx.script_saved,
             };
 
             // Render pane content (header was already rendered above)
@@ -5407,7 +5421,7 @@ fn pane_color(pane_type: PaneType) -> egui::Color32 {
         PaneType::NodeEditor => egui::Color32::from_rgb(30, 45, 50),
         PaneType::PresetBrowser => egui::Color32::from_rgb(50, 45, 30),
         PaneType::AssetLibrary => egui::Color32::from_rgb(45, 50, 35),
-        PaneType::ShaderEditor => egui::Color32::from_rgb(35, 30, 55),
+        PaneType::ScriptEditor => egui::Color32::from_rgb(35, 30, 55),
     }
 }
 

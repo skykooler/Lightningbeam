@@ -175,6 +175,11 @@ pub enum Command {
     /// Save a VoiceAllocator's template graph as a preset (track_id, voice_allocator_id, preset_path, preset_name)
     GraphSaveTemplatePreset(TrackId, u32, String, String),
 
+    /// Compile and set a BeamDSP script on a Script node (track_id, node_id, source_code)
+    GraphSetScript(TrackId, u32, String),
+    /// Load audio sample data into a Script node's sample slot (track_id, node_id, slot_index, audio_data, sample_rate, name)
+    GraphSetScriptSample(TrackId, u32, usize, Vec<f32>, u32, String),
+
     /// Load a sample into a SimpleSampler node (track_id, node_id, file_path)
     SamplerLoadSample(TrackId, u32, String),
     /// Load a sample from the audio pool into a SimpleSampler node (track_id, node_id, pool_index)
@@ -266,6 +271,16 @@ pub enum AudioEvent {
     GraphPresetLoaded(TrackId),
     /// Preset has been saved to file (track_id, preset_path)
     GraphPresetSaved(TrackId, String),
+    /// Script compilation result (track_id, node_id, success, error, ui_declaration, source)
+    ScriptCompiled {
+        track_id: TrackId,
+        node_id: u32,
+        success: bool,
+        error: Option<String>,
+        ui_declaration: Option<beamdsp::UiDeclaration>,
+        source: String,
+    },
+
     /// Export progress (frames_rendered, total_frames)
     ExportProgress {
         frames_rendered: usize,

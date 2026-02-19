@@ -137,6 +137,10 @@ pub struct NodeGraphPane {
     /// Cached node screen rects from last frame (for hit-testing)
     last_node_rects: std::collections::HashMap<NodeId, egui::Rect>,
 
+    /// Script nodes loaded from preset that need script_id resolution
+    /// (frontend_node_id, script_source) — processed in render loop where document is available
+    pending_script_resolutions: Vec<(NodeId, String)>,
+
     /// Last time we polled oscilloscope data (~20 FPS)
     last_oscilloscope_poll: std::time::Instant,
     /// Backend track ID (u32) for oscilloscope queries
@@ -167,6 +171,7 @@ impl NodeGraphPane {
             renaming_group: None,
             node_context_menu: None,
             last_node_rects: HashMap::new(),
+            pending_script_resolutions: Vec::new(),
             last_oscilloscope_poll: std::time::Instant::now(),
             backend_track_id: None,
         }
@@ -203,6 +208,7 @@ impl NodeGraphPane {
             renaming_group: None,
             node_context_menu: None,
             last_node_rects: HashMap::new(),
+            pending_script_resolutions: Vec::new(),
             last_oscilloscope_poll: std::time::Instant::now(),
             backend_track_id: Some(backend_track_id),
         };
@@ -224,6 +230,167 @@ impl NodeGraphPane {
         };
 
         self.load_graph_from_json(&json)
+    }
+
+    /// Rebuild a Script node's ports and parameters to match a compiled script.
+    /// Performs a diff: ports with matching name+type keep their connections,
+    /// removed ports lose connections, new ports are added.
+    /// Parameters are added as ConnectionOrConstant inputs with inline widgets.
+    fn rebuild_script_node_ports(&mut self, node_id: NodeId, compiled: &beamdsp::CompiledScript) {
+        let signal_to_data_type = |sig: beamdsp::ast::SignalKind| match sig {
+            beamdsp::ast::SignalKind::Audio => DataType::Audio,
+            beamdsp::ast::SignalKind::Cv => DataType::CV,
+            beamdsp::ast::SignalKind::Midi => DataType::Midi,
+        };
+
+        let unit_str = |u: &str| -> &'static str {
+            match u { "Hz" => " Hz", "s" => " s", "dB" => " dB", "%" => "%", _ => "" }
+        };
+
+        // Collect what the new inputs should be: signal ports + param ports
+        // Signal ports use DataType matching their signal kind, ConnectionOnly
+        // Param ports use DataType::CV, ConnectionOrConstant with float_param value
+        let num_signal_inputs = compiled.input_ports.len();
+        let num_params = compiled.parameters.len();
+        let num_signal_outputs = compiled.output_ports.len();
+
+        // Check if everything already matches (ports + params + outputs)
+        let already_matches = if let Some(node) = self.state.graph.nodes.get(node_id) {
+            let expected_inputs = num_signal_inputs + num_params;
+            if node.inputs.len() != expected_inputs || node.outputs.len() != num_signal_outputs {
+                false
+            } else {
+                // Check signal inputs
+                let signals_match = node.inputs[..num_signal_inputs].iter()
+                    .zip(&compiled.input_ports)
+                    .all(|((name, id), port)| {
+                        name == &port.name
+                            && self.state.graph.inputs.get(*id)
+                                .map_or(false, |p| p.typ == signal_to_data_type(port.signal))
+                    });
+                // Check param inputs
+                let params_match = node.inputs[num_signal_inputs..].iter()
+                    .zip(&compiled.parameters)
+                    .all(|((name, id), param)| {
+                        name == &param.name
+                            && self.state.graph.inputs.get(*id)
+                                .map_or(false, |p| p.typ == DataType::CV)
+                    });
+                // Check outputs
+                let outputs_match = node.outputs.iter()
+                    .zip(&compiled.output_ports)
+                    .all(|((name, id), port)| {
+                        name == &port.name
+                            && self.state.graph.outputs.get(*id)
+                                .map_or(false, |p| p.typ == signal_to_data_type(port.signal))
+                    });
+                signals_match && params_match && outputs_match
+            }
+        } else {
+            return;
+        };
+
+        if already_matches {
+            if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                node.label = compiled.name.clone();
+            }
+            return;
+        }
+
+        // Build lookup of existing inputs: (name, type, kind) → InputId
+        let old_inputs: Vec<(String, InputId, DataType, InputParamKind)> = self.state.graph.nodes.get(node_id)
+            .map(|n| n.inputs.iter().filter_map(|(name, id)| {
+                let p = self.state.graph.inputs.get(*id)?;
+                Some((name.clone(), *id, p.typ, p.kind))
+            }).collect())
+            .unwrap_or_default();
+
+        let old_outputs: Vec<(String, OutputId, DataType)> = self.state.graph.nodes.get(node_id)
+            .map(|n| n.outputs.iter().filter_map(|(name, id)| {
+                let typ = self.state.graph.outputs.get(*id)?.typ;
+                Some((name.clone(), *id, typ))
+            }).collect())
+            .unwrap_or_default();
+
+        // Match signal inputs
+        let mut used_old_inputs: HashSet<InputId> = HashSet::new();
+        let mut new_input_ids: Vec<(String, InputId)> = Vec::new();
+
+        for port in &compiled.input_ports {
+            let dt = signal_to_data_type(port.signal);
+            if let Some((_, old_id, _, _)) = old_inputs.iter().find(|(name, id, typ, kind)| {
+                name == &port.name && *typ == dt
+                    && matches!(kind, InputParamKind::ConnectionOnly)
+                    && !used_old_inputs.contains(id)
+            }) {
+                used_old_inputs.insert(*old_id);
+                new_input_ids.push((port.name.clone(), *old_id));
+            } else {
+                let id = self.state.graph.add_input_param(
+                    node_id, port.name.clone(), dt,
+                    ValueType::float(0.0), InputParamKind::ConnectionOnly, true,
+                );
+                new_input_ids.push((port.name.clone(), id));
+            }
+        }
+
+        // Match param inputs
+        for (i, param) in compiled.parameters.iter().enumerate() {
+            if let Some((_, old_id, _, _)) = old_inputs.iter().find(|(name, id, typ, kind)| {
+                name == &param.name && *typ == DataType::CV
+                    && matches!(kind, InputParamKind::ConnectionOrConstant)
+                    && !used_old_inputs.contains(id)
+            }) {
+                used_old_inputs.insert(*old_id);
+                new_input_ids.push((param.name.clone(), *old_id));
+            } else {
+                let id = self.state.graph.add_input_param(
+                    node_id, param.name.clone(), DataType::CV,
+                    ValueType::float_param(param.default, param.min, param.max, unit_str(&param.unit), i as u32, None),
+                    InputParamKind::ConnectionOrConstant, true,
+                );
+                new_input_ids.push((param.name.clone(), id));
+            }
+        }
+
+        // Remove old inputs that weren't reused
+        for (_, old_id, _, _) in &old_inputs {
+            if !used_old_inputs.contains(old_id) {
+                self.state.graph.remove_input_param(*old_id);
+            }
+        }
+
+        // Match outputs
+        let mut used_old_outputs: HashSet<OutputId> = HashSet::new();
+        let mut new_output_ids: Vec<(String, OutputId)> = Vec::new();
+
+        for port in &compiled.output_ports {
+            let dt = signal_to_data_type(port.signal);
+            if let Some((_, old_id, _)) = old_outputs.iter().find(|(name, id, typ)| {
+                name == &port.name && *typ == dt && !used_old_outputs.contains(id)
+            }) {
+                used_old_outputs.insert(*old_id);
+                new_output_ids.push((port.name.clone(), *old_id));
+            } else {
+                let id = self.state.graph.add_output_param(node_id, port.name.clone(), dt);
+                new_output_ids.push((port.name.clone(), id));
+            }
+        }
+
+        for (_, old_id, _) in &old_outputs {
+            if !used_old_outputs.contains(old_id) {
+                self.state.graph.remove_output_param(*old_id);
+            }
+        }
+
+        // Set the node's port ordering and UI metadata
+        if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+            node.inputs = new_input_ids;
+            node.outputs = new_output_ids;
+            node.label = compiled.name.clone();
+            node.user_data.ui_declaration = Some(compiled.ui_declaration.clone());
+            node.user_data.sample_slot_names = compiled.sample_slots.clone();
+        }
     }
 
     fn handle_graph_response(
@@ -674,6 +841,82 @@ impl NodeGraphPane {
                     }
                     if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
                         node.user_data.sample_display_name = Some(file_name);
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_pending_script_sample_load(
+        &mut self,
+        load: graph_data::PendingScriptSampleLoad,
+        shared: &mut crate::panes::SharedPaneState,
+    ) {
+        let backend_track_id = match self.backend_track_id {
+            Some(id) => id,
+            None => return,
+        };
+        let controller_arc = match &shared.audio_controller {
+            Some(c) => std::sync::Arc::clone(c),
+            None => return,
+        };
+
+        match load {
+            graph_data::PendingScriptSampleLoad::FromPool { node_id, backend_node_id, slot_index, pool_index, name } => {
+                let mut controller = controller_arc.lock().unwrap();
+                match controller.get_pool_audio_samples(pool_index) {
+                    Ok((samples, sample_rate, _channels)) => {
+                        controller.send_command(daw_backend::Command::GraphSetScriptSample(
+                            backend_track_id, backend_node_id, slot_index,
+                            samples, sample_rate, name.clone(),
+                        ));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to get pool audio for script sample: {}", e);
+                        return;
+                    }
+                }
+                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                    node.user_data.script_sample_names.insert(slot_index, name);
+                }
+            }
+            graph_data::PendingScriptSampleLoad::FromFile { node_id, backend_node_id, slot_index } => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Audio", &["wav", "flac", "mp3", "ogg", "aiff"])
+                    .pick_file()
+                {
+                    let file_name = path.file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Sample".to_string());
+
+                    let mut controller = controller_arc.lock().unwrap();
+                    match controller.import_audio_sync(path.to_path_buf()) {
+                        Ok(pool_index) => {
+                            // Add to document asset library
+                            let metadata = daw_backend::io::read_metadata(&path).ok();
+                            let duration = metadata.as_ref().map(|m| m.duration).unwrap_or(0.0);
+                            let clip = lightningbeam_core::clip::AudioClip::new_sampled(&file_name, pool_index, duration);
+                            shared.action_executor.document_mut().add_audio_clip(clip);
+
+                            // Get the audio data and send to script node
+                            match controller.get_pool_audio_samples(pool_index) {
+                                Ok((samples, sample_rate, _channels)) => {
+                                    controller.send_command(daw_backend::Command::GraphSetScriptSample(
+                                        backend_track_id, backend_node_id, slot_index,
+                                        samples, sample_rate, file_name.clone(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to get pool audio for script sample: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to import audio '{}': {}", path.display(), e);
+                        }
+                    }
+                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                        node.user_data.script_sample_names.insert(slot_index, file_name);
                     }
                 }
             }
@@ -1217,6 +1460,7 @@ impl NodeGraphPane {
         self.backend_to_frontend_map.clear();
 
         // Create nodes in frontend
+        self.pending_script_resolutions.clear();
         for node in &graph_state.nodes {
             let node_template = match Self::backend_type_to_template(&node.node_type) {
                 Some(t) => t,
@@ -1226,7 +1470,21 @@ impl NodeGraphPane {
                 }
             };
 
-            self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
+            let frontend_id = self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
+
+            // For Script nodes: rebuild ports now (before connections), defer script_id resolution
+            if node.node_type == "Script" {
+                if let Some(ref source) = node.script_source {
+                    if let Some(fid) = frontend_id {
+                        // Rebuild ports/params immediately so connections map correctly
+                        if let Ok(compiled) = beamdsp::compile(source) {
+                            self.rebuild_script_node_ports(fid, &compiled);
+                        }
+                        // Defer script_id resolution to render loop (needs document access)
+                        self.pending_script_resolutions.push((fid, source.clone()));
+                    }
+                }
+            }
         }
 
         // Create connections in frontend
@@ -1674,7 +1932,7 @@ impl NodeGraphPane {
                 label: group.name.clone(),
                 inputs: vec![],
                 outputs: vec![],
-                user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
+                user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() },
             });
 
             // Add dynamic input ports based on boundary inputs
@@ -1746,7 +2004,7 @@ impl NodeGraphPane {
                     label: "Group Input".to_string(),
                     inputs: vec![],
                     outputs: vec![],
-                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
+                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() },
                 });
 
                 for bc in &scope_group.boundary_inputs {
@@ -1793,7 +2051,7 @@ impl NodeGraphPane {
                     label: "Group Output".to_string(),
                     inputs: vec![],
                     outputs: vec![],
-                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69 },
+                    user_data: NodeData { template: NodeTemplate::Group, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() },
                 });
 
                 for bc in &scope_group.boundary_outputs {
@@ -1965,6 +2223,7 @@ impl NodeGraphPane {
             "Oscilloscope" => Some(NodeTemplate::Oscilloscope),
             "Arpeggiator" => Some(NodeTemplate::Arpeggiator),
             "Sequencer" => Some(NodeTemplate::Sequencer),
+            "Script" => Some(NodeTemplate::Script),
             "Beat" => Some(NodeTemplate::Beat),
             "VoiceAllocator" => Some(NodeTemplate::VoiceAllocator),
             "Group" => Some(NodeTemplate::Group),
@@ -1989,7 +2248,7 @@ impl NodeGraphPane {
             label: label.to_string(),
             inputs: vec![],
             outputs: vec![],
-            user_data: NodeData { template: node_template, sample_display_name: None, root_note: 69 },
+            user_data: NodeData { template: node_template, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() },
         });
 
         node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
@@ -2337,6 +2596,12 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                     .collect();
                 self.user_state.available_folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
+                // Available scripts for Script node dropdown
+                self.user_state.available_scripts = doc.script_definitions()
+                    .map(|s| (s.id, s.name.clone()))
+                    .collect();
+                self.user_state.available_scripts.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+
                 // Node backend ID map
                 self.user_state.node_backend_ids = self.node_id_map.iter()
                     .map(|(&node_id, backend_id)| {
@@ -2385,6 +2650,11 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 self.handle_pending_sampler_load(load, shared);
             }
 
+            // Handle pending script sample load requests from bottom_ui()
+            if let Some(load) = self.user_state.pending_script_sample_load.take() {
+                self.handle_pending_script_sample_load(load, shared);
+            }
+
             // Handle pending root note changes
             if !self.user_state.pending_root_note_changes.is_empty() {
                 let changes: Vec<_> = self.user_state.pending_root_note_changes.drain(..).collect();
@@ -2425,6 +2695,160 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 }
             }
 
+            // Resolve Script nodes loaded from preset: find or create ScriptDefinitions
+            // (ports were already rebuilt during load_graph_from_json, this just sets script_id)
+            if !self.pending_script_resolutions.is_empty() {
+                let resolutions = std::mem::take(&mut self.pending_script_resolutions);
+                for (node_id, source) in resolutions {
+                    // Try to find an existing ScriptDefinition with matching source
+                    let existing_id = shared.action_executor.document()
+                        .script_definitions()
+                        .find(|s| s.source == source)
+                        .map(|s| s.id);
+
+                    let script_id = if let Some(id) = existing_id {
+                        id
+                    } else {
+                        // Create a new ScriptDefinition from the source
+                        use lightningbeam_core::script::ScriptDefinition;
+                        let name = beamdsp::compile(&source)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|_| "Imported Script".to_string());
+                        let script = ScriptDefinition::new(name, source.clone());
+                        let id = script.id;
+                        shared.action_executor.document_mut().add_script_definition(script);
+                        id
+                    };
+
+                    // Set script_id on the node
+                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                        node.user_data.script_id = Some(script_id);
+                    }
+                }
+            }
+
+            // Handle pending script assignment from Script node dropdown
+            if let Some((node_id, script_id)) = self.user_state.pending_script_assignment.take() {
+                // Update the node's script_id
+                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                    node.user_data.script_id = Some(script_id);
+                }
+                // Look up script source, compile locally to rebuild ports, and send to backend
+                let source = shared.action_executor.document()
+                    .get_script_definition(&script_id)
+                    .map(|s| s.source.clone());
+                if let Some(source) = source {
+                    // Compile locally to get port info and rebuild the node UI
+                    if let Ok(compiled) = beamdsp::compile(&source) {
+                        self.rebuild_script_node_ports(node_id, &compiled);
+                    }
+                    if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                        if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                            let BackendNodeId::Audio(node_idx) = backend_id;
+                            if let Some(controller_arc) = &shared.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                controller.send_command(daw_backend::Command::GraphSetScript(
+                                    backend_track_id, node_idx.index() as u32, source,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle "New script..." from dropdown
+            if let Some(node_id) = self.user_state.pending_new_script.take() {
+                use lightningbeam_core::script::ScriptDefinition;
+                let script = ScriptDefinition::new(
+                    "New Script".to_string(),
+                    "name \"New Script\"\ncategory effect\n\ninputs {\n    audio_in: audio\n}\n\noutputs {\n    audio_out: audio\n}\n\nprocess {\n    for i in 0..buffer_size {\n        audio_out[i * 2] = audio_in[i * 2];\n        audio_out[i * 2 + 1] = audio_in[i * 2 + 1];\n    }\n}\n".to_string(),
+                );
+                let script_id = script.id;
+                shared.action_executor.document_mut().add_script_definition(script);
+                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                    node.user_data.script_id = Some(script_id);
+                }
+                // Open in editor
+                *shared.script_to_edit = Some(script_id);
+            }
+
+            // Handle "Load from file..." from dropdown
+            if let Some(node_id) = self.user_state.pending_load_script_file.take() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Load BeamDSP Script")
+                    .add_filter("BeamDSP Script", &["bdsp"])
+                    .pick_file()
+                {
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        use lightningbeam_core::script::ScriptDefinition;
+                        let name = path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Imported Script")
+                            .to_string();
+                        let script = ScriptDefinition::new(name, source.clone());
+                        let script_id = script.id;
+                        shared.action_executor.document_mut().add_script_definition(script);
+                        if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                            node.user_data.script_id = Some(script_id);
+                        }
+                        // Compile locally to rebuild ports, then send to backend
+                        if let Ok(compiled) = beamdsp::compile(&source) {
+                            self.rebuild_script_node_ports(node_id, &compiled);
+                        }
+                        if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                            if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                                let BackendNodeId::Audio(node_idx) = backend_id;
+                                if let Some(controller_arc) = &shared.audio_controller {
+                                    let mut controller = controller_arc.lock().unwrap();
+                                    controller.send_command(daw_backend::Command::GraphSetScript(
+                                        backend_track_id, node_idx.index() as u32, source,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle script_saved: auto-recompile all Script nodes using that script
+            if let Some(saved_script_id) = shared.script_saved.take() {
+                let source = shared.action_executor.document()
+                    .get_script_definition(&saved_script_id)
+                    .map(|s| s.source.clone());
+                if let Some(source) = source {
+                    // Compile locally to get updated port info
+                    let compiled = beamdsp::compile(&source).ok();
+
+                    // Collect matching node IDs first (can't mutate graph while iterating)
+                    let matching_nodes: Vec<NodeId> = self.state.graph.nodes.iter()
+                        .filter(|(_, node)| node.user_data.script_id == Some(saved_script_id))
+                        .map(|(id, _)| id)
+                        .collect();
+
+                    // Rebuild ports for all matching nodes
+                    if let Some(ref compiled) = compiled {
+                        for &node_id in &matching_nodes {
+                            self.rebuild_script_node_ports(node_id, compiled);
+                        }
+                    }
+
+                    // Send to backend
+                    if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                        if let Some(controller_arc) = &shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            for &node_id in &matching_nodes {
+                                if let Some(&backend_id) = self.node_id_map.get(&node_id) {
+                                    let BackendNodeId::Audio(node_idx) = backend_id;
+                                    controller.send_command(daw_backend::Command::GraphSetScript(
+                                        backend_track_id, node_idx.index() as u32, source.clone(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Detect right-click on nodes — intercept the library's node finder and show our context menu instead
             {
                 let secondary_clicked = ui.input(|i| i.pointer.secondary_released());
@@ -2450,6 +2874,11 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 let mut action_delete = false;
                 let mut action_ungroup = false;
                 let mut action_rename = false;
+                let mut action_edit_script = false;
+
+                let is_script_node = self.state.graph.nodes.get(ctx_node_id)
+                    .map(|n| n.user_data.template == NodeTemplate::Script)
+                    .unwrap_or(false);
 
                 let menu_response = egui::Area::new(ui.id().with("node_context_menu"))
                     .fixed_pos(menu_pos)
@@ -2464,6 +2893,13 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                                 }
                                 if ui.button("Ungroup").clicked() {
                                     action_ungroup = true;
+                                    close_menu = true;
+                                }
+                                ui.separator();
+                            }
+                            if is_script_node {
+                                if ui.button("Edit Script").clicked() {
+                                    action_edit_script = true;
                                     close_menu = true;
                                 }
                                 ui.separator();
@@ -2532,6 +2968,13 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                                 self.backend_to_frontend_map.remove(&backend_id);
                             }
                         }
+                    }
+                }
+                if action_edit_script {
+                    if let Some(script_id) = self.state.graph.nodes.get(ctx_node_id)
+                        .and_then(|n| n.user_data.script_id)
+                    {
+                        *shared.script_to_edit = Some(script_id);
                     }
                 }
                 if close_menu {

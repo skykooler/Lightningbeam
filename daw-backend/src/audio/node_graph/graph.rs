@@ -906,6 +906,17 @@ impl AudioGraph {
                     }
                 }
 
+                // For Script nodes, serialize the source code
+                if node.node_type() == "Script" {
+                    use crate::audio::node_graph::nodes::ScriptNode;
+                    if let Some(script_node) = node.as_any().downcast_ref::<ScriptNode>() {
+                        let source = script_node.source_code();
+                        if !source.is_empty() {
+                            serialized.script_source = Some(source.to_string());
+                        }
+                    }
+                }
+
                 // Save position if available
                 if let Some(pos) = self.get_node_position(node_idx) {
                     serialized.set_position(pos.0, pos.1);
@@ -992,6 +1003,7 @@ impl AudioGraph {
                 "Beat" => Box::new(BeatNode::new("Beat")),
                 "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator")),
                 "Sequencer" => Box::new(SequencerNode::new("Sequencer")),
+                "Script" => Box::new(ScriptNode::new("Script")),
                 "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
                 "Limiter" => Box::new(LimiterNode::new("Limiter")),
                 "Math" => Box::new(MathNode::new("Math")),
@@ -1034,7 +1046,22 @@ impl AudioGraph {
             let node_idx = graph.add_node(node);
             index_map.insert(serialized_node.id, node_idx);
 
-            // Set parameters
+            // Restore script source for Script nodes (must come before parameter setting
+            // since set_script rebuilds parameters)
+            if let Some(ref source) = serialized_node.script_source {
+                if serialized_node.node_type == "Script" {
+                    use crate::audio::node_graph::nodes::ScriptNode;
+                    if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                        if let Some(script_node) = graph_node.node.as_any_mut().downcast_mut::<ScriptNode>() {
+                            if let Err(e) = script_node.set_script(source) {
+                                eprintln!("Warning: failed to compile script for node {}: {}", serialized_node.id, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Set parameters (after script compilation so param slots exist)
             for (&param_id, &value) in &serialized_node.parameters {
                 if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
                     graph_node.node.set_parameter(param_id, value);

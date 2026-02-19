@@ -68,6 +68,9 @@ pub enum NodeTemplate {
     BpmDetector,
     Mod,
 
+    // Scripting
+    Script,
+
     // Analysis
     Oscilloscope,
 
@@ -127,6 +130,7 @@ impl NodeTemplate {
             NodeTemplate::EnvelopeFollower => "EnvelopeFollower",
             NodeTemplate::BpmDetector => "BpmDetector",
             NodeTemplate::Beat => "Beat",
+            NodeTemplate::Script => "Script",
             NodeTemplate::Mod => "Mod",
             NodeTemplate::Oscilloscope => "Oscilloscope",
             NodeTemplate::VoiceAllocator => "VoiceAllocator",
@@ -148,6 +152,18 @@ pub struct NodeData {
     /// Root note (MIDI note number) for original-pitch playback (default 69 = A4)
     #[serde(default = "default_root_note")]
     pub root_note: u8,
+    /// BeamDSP script asset ID (for Script nodes — references a ScriptDefinition in the document)
+    #[serde(default)]
+    pub script_id: Option<uuid::Uuid>,
+    /// Declarative UI from compiled BeamDSP script (for rendering sample pickers, groups)
+    #[serde(skip)]
+    pub ui_declaration: Option<beamdsp::UiDeclaration>,
+    /// Sample slot names from compiled script (index → name, for sample picker mapping)
+    #[serde(skip)]
+    pub sample_slot_names: Vec<String>,
+    /// Display names of loaded samples per slot (slot_index → display name)
+    #[serde(skip)]
+    pub script_sample_names: HashMap<usize, String>,
 }
 
 fn default_root_note() -> u8 { 69 }
@@ -170,6 +186,14 @@ pub struct SamplerFolderInfo {
     pub name: String,
     /// Pool indices of audio clips in this folder
     pub clip_pool_indices: Vec<(String, usize)>,
+}
+
+/// Pending script sample load request from bottom_ui(), handled by the node graph pane
+pub enum PendingScriptSampleLoad {
+    /// Load from audio pool into a script sample slot
+    FromPool { node_id: NodeId, backend_node_id: u32, slot_index: usize, pool_index: usize, name: String },
+    /// Open file dialog to load into a script sample slot
+    FromFile { node_id: NodeId, backend_node_id: u32, slot_index: usize },
 }
 
 /// Pending sampler load request from bottom_ui(), handled by the node graph pane
@@ -207,6 +231,16 @@ pub struct GraphState {
     pub pending_sequencer_changes: Vec<(NodeId, u32, f32)>,
     /// Time scale per oscilloscope node (in milliseconds)
     pub oscilloscope_time_scale: HashMap<NodeId, f32>,
+    /// Available scripts for Script node dropdown, populated before draw
+    pub available_scripts: Vec<(uuid::Uuid, String)>,
+    /// Pending script assignment from dropdown (node_id, script_id)
+    pub pending_script_assignment: Option<(NodeId, uuid::Uuid)>,
+    /// Pending "New script..." from dropdown (node_id) — create new script and open in editor
+    pub pending_new_script: Option<NodeId>,
+    /// Pending "Load from file..." from dropdown (node_id) — open file dialog for .bdsp
+    pub pending_load_script_file: Option<NodeId>,
+    /// Pending script sample load request from bottom_ui sample picker
+    pub pending_script_sample_load: Option<PendingScriptSampleLoad>,
 }
 
 impl Default for GraphState {
@@ -222,6 +256,11 @@ impl Default for GraphState {
             pending_root_note_changes: Vec::new(),
             pending_sequencer_changes: Vec::new(),
             oscilloscope_time_scale: HashMap::new(),
+            available_scripts: Vec::new(),
+            pending_script_assignment: None,
+            pending_new_script: None,
+            pending_load_script_file: None,
+            pending_script_sample_load: None,
         }
     }
 }
@@ -373,6 +412,8 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::BpmDetector => "BPM Detector".into(),
             NodeTemplate::Beat => "Beat".into(),
             NodeTemplate::Mod => "Modulator".into(),
+            // Scripting
+            NodeTemplate::Script => "Script".into(),
             // Analysis
             NodeTemplate::Oscilloscope => "Oscilloscope".into(),
             // Advanced
@@ -399,6 +440,7 @@ impl NodeTemplateTrait for NodeTemplate {
             | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Arpeggiator | NodeTemplate::Sequencer | NodeTemplate::Math
             | NodeTemplate::SampleHold | NodeTemplate::SlewLimiter | NodeTemplate::Quantizer
             | NodeTemplate::EnvelopeFollower | NodeTemplate::BpmDetector | NodeTemplate::Mod => vec!["Utilities"],
+            NodeTemplate::Script => vec!["Advanced"],
             NodeTemplate::Oscilloscope => vec!["Analysis"],
             NodeTemplate::VoiceAllocator | NodeTemplate::Group => vec!["Advanced"],
             NodeTemplate::TemplateInput | NodeTemplate::TemplateOutput => vec!["Subgraph I/O"],
@@ -411,7 +453,7 @@ impl NodeTemplateTrait for NodeTemplate {
     }
 
     fn user_data(&self, _user_state: &mut Self::UserState) -> Self::NodeData {
-        NodeData { template: *self, sample_display_name: None, root_note: 69 }
+        NodeData { template: *self, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() }
     }
 
     fn build_node(
@@ -856,6 +898,12 @@ impl NodeTemplateTrait for NodeTemplate {
                 // Inside a VA template: sends audio back to the allocator
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
             }
+            NodeTemplate::Script => {
+                // Default Script node: single audio in/out
+                // Ports will be rebuilt when a script is compiled
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
         }
     }
 }
@@ -1276,10 +1324,146 @@ impl NodeDataTrait for NodeData {
                     user_state.pending_sequencer_changes.push((node_id, param_id, new_bitmask as f32));
                 }
             }
+        } else if self.template == NodeTemplate::Script {
+            let current_name = self.script_id
+                .and_then(|id| user_state.available_scripts.iter().find(|(sid, _)| *sid == id))
+                .map(|(_, name)| name.as_str())
+                .unwrap_or("No script");
+
+            let button = ui.button(current_name);
+            let popup_id = egui::Popup::default_response_id(&button);
+            let mut close_popup = false;
+
+            egui::Popup::from_toggle_button_response(&button)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .width(160.0)
+                .show(|ui| {
+                    if widgets::list_item(ui, false, "New script...") {
+                        user_state.pending_new_script = Some(node_id);
+                        close_popup = true;
+                    }
+                    if widgets::list_item(ui, false, "Load from file...") {
+                        user_state.pending_load_script_file = Some(node_id);
+                        close_popup = true;
+                    }
+                    if !user_state.available_scripts.is_empty() {
+                        ui.separator();
+                    }
+                    for (script_id, script_name) in &user_state.available_scripts {
+                        let selected = self.script_id == Some(*script_id);
+                        if widgets::list_item(ui, selected, script_name) {
+                            user_state.pending_script_assignment = Some((node_id, *script_id));
+                            close_popup = true;
+                        }
+                    }
+                });
+
+            if close_popup {
+                egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+
+            // Render declarative UI elements (sample pickers, groups)
+            if let Some(ref ui_decl) = self.ui_declaration {
+                let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
+                render_script_ui_elements(
+                    ui, node_id, backend_node_id,
+                    &ui_decl.elements,
+                    &self.sample_slot_names,
+                    &self.script_sample_names,
+                    &user_state.available_clips,
+                    &mut user_state.sampler_search_text,
+                    &mut user_state.pending_script_sample_load,
+                );
+            }
         } else {
             ui.label("");
         }
         vec![]
+    }
+}
+
+/// Render UiDeclaration elements for Script nodes (sample pickers, groups, spacers)
+fn render_script_ui_elements(
+    ui: &mut egui::Ui,
+    node_id: NodeId,
+    backend_node_id: u32,
+    elements: &[beamdsp::UiElement],
+    sample_slot_names: &[String],
+    script_sample_names: &HashMap<usize, String>,
+    available_clips: &[SamplerClipInfo],
+    search_text: &mut String,
+    pending_load: &mut Option<PendingScriptSampleLoad>,
+) {
+    for element in elements {
+        match element {
+            beamdsp::UiElement::Sample(slot_name) => {
+                // Find the slot index by name
+                let slot_index = sample_slot_names.iter().position(|n| n == slot_name);
+                let display = script_sample_names
+                    .get(&slot_index.unwrap_or(usize::MAX))
+                    .map(|s| s.as_str())
+                    .unwrap_or("No sample");
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(slot_name).weak());
+                    let button = ui.button(display);
+                    if let Some(slot_idx) = slot_index {
+                        let popup_id = egui::Popup::default_response_id(&button);
+                        let mut close = false;
+                        egui::Popup::from_toggle_button_response(&button)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .width(160.0)
+                            .show(|ui| {
+                                let search = search_text.to_lowercase();
+                                let filtered: Vec<&SamplerClipInfo> = available_clips.iter()
+                                    .filter(|c| search.is_empty() || c.name.to_lowercase().contains(&search))
+                                    .collect();
+                                let items = filtered.iter().map(|c| (false, c.name.as_str()));
+                                if let Some(idx) = widgets::scrollable_list(ui, 200.0, items) {
+                                    let clip = filtered[idx];
+                                    *pending_load = Some(PendingScriptSampleLoad::FromPool {
+                                        node_id,
+                                        backend_node_id,
+                                        slot_index: slot_idx,
+                                        pool_index: clip.pool_index,
+                                        name: clip.name.clone(),
+                                    });
+                                    close = true;
+                                }
+                                ui.separator();
+                                if ui.button("Open...").clicked() {
+                                    *pending_load = Some(PendingScriptSampleLoad::FromFile {
+                                        node_id,
+                                        backend_node_id,
+                                        slot_index: slot_idx,
+                                    });
+                                    close = true;
+                                }
+                            });
+                        if close {
+                            egui::Popup::close_id(ui.ctx(), popup_id);
+                        }
+                    }
+                });
+            }
+            beamdsp::UiElement::Group { label, children } => {
+                egui::CollapsingHeader::new(egui::RichText::new(label).weak())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        render_script_ui_elements(
+                            ui, node_id, backend_node_id,
+                            children, sample_slot_names, script_sample_names,
+                            available_clips, search_text, pending_load,
+                        );
+                    });
+            }
+            beamdsp::UiElement::Spacer(height) => {
+                ui.add_space(*height);
+            }
+            beamdsp::UiElement::Param(_) | beamdsp::UiElement::Canvas { .. } => {
+                // Params are handled as inline input ports; Canvas is phase 6
+            }
+        }
     }
 }
 
@@ -1370,6 +1554,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Oscilloscope,
             // Advanced
             NodeTemplate::VoiceAllocator,
+            NodeTemplate::Script,
             // Note: Group is not in the node finder — groups are created via Ctrl+G selection.
             // Note: TemplateInput/TemplateOutput are excluded from the default finder.
             // They are added dynamically when editing inside a subgraph.

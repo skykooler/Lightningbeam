@@ -7,6 +7,7 @@ use crate::asset_folder::AssetFolderTree;
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
 use crate::effect::EffectDefinition;
 use crate::layer::AnyLayer;
+use crate::script::ScriptDefinition;
 use crate::layout::LayoutNode;
 use crate::shape::ShapeColor;
 use serde::{Deserialize, Serialize};
@@ -146,6 +147,14 @@ pub struct Document {
     #[serde(default)]
     pub effect_folders: AssetFolderTree,
 
+    /// BeamDSP script definitions (audio DSP scripts for node graph)
+    #[serde(default)]
+    pub script_definitions: HashMap<Uuid, ScriptDefinition>,
+
+    /// Folder organization for script definitions
+    #[serde(default)]
+    pub script_folders: AssetFolderTree,
+
     /// Current UI layout state (serialized for save/load)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layout: Option<LayoutNode>,
@@ -181,6 +190,8 @@ impl Default for Document {
             audio_folders: AssetFolderTree::new(),
             image_folders: AssetFolderTree::new(),
             effect_folders: AssetFolderTree::new(),
+            script_definitions: HashMap::new(),
+            script_folders: AssetFolderTree::new(),
             ui_layout: None,
             ui_layout_base: None,
             current_time: 0.0,
@@ -492,6 +503,26 @@ impl Document {
     /// Get all effect definitions
     pub fn effect_definitions(&self) -> impl Iterator<Item = &EffectDefinition> {
         self.effect_definitions.values()
+    }
+
+    // === SCRIPT DEFINITION METHODS ===
+
+    pub fn add_script_definition(&mut self, definition: ScriptDefinition) -> Uuid {
+        let id = definition.id;
+        self.script_definitions.insert(id, definition);
+        id
+    }
+
+    pub fn get_script_definition(&self, id: &Uuid) -> Option<&ScriptDefinition> {
+        self.script_definitions.get(id)
+    }
+
+    pub fn get_script_definition_mut(&mut self, id: &Uuid) -> Option<&mut ScriptDefinition> {
+        self.script_definitions.get_mut(id)
+    }
+
+    pub fn script_definitions(&self) -> impl Iterator<Item = &ScriptDefinition> {
+        self.script_definitions.values()
     }
 
     // === CLIP OVERLAP DETECTION METHODS ===

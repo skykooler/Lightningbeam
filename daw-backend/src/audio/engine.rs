@@ -1169,6 +1169,7 @@ impl Engine {
                             "Beat" => Box::new(BeatNode::new("Beat".to_string())),
                             "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator".to_string())),
                             "Sequencer" => Box::new(SequencerNode::new("Sequencer".to_string())),
+                            "Script" => Box::new(ScriptNode::new("Script".to_string())),
                             "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
                             "Math" => Box::new(MathNode::new("Math".to_string())),
@@ -1259,6 +1260,7 @@ impl Engine {
                             "Beat" => Box::new(BeatNode::new("Beat".to_string())),
                             "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator".to_string())),
                             "Sequencer" => Box::new(SequencerNode::new("Sequencer".to_string())),
+                            "Script" => Box::new(ScriptNode::new("Script".to_string())),
                             "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
                             "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
                             "Math" => Box::new(MathNode::new("Math".to_string())),
@@ -1652,6 +1654,58 @@ impl Engine {
                                     eprintln!("Failed to save template preset: {}", e);
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            Command::GraphSetScript(track_id, node_id, source) => {
+                use crate::audio::node_graph::nodes::ScriptNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(script_node) = graph_node.node.as_any_mut().downcast_mut::<ScriptNode>() {
+                            match script_node.set_script(&source) {
+                                Ok(ui_decl) => {
+                                    // Send compile success event back to frontend
+                                    let _ = self.event_tx.push(AudioEvent::ScriptCompiled {
+                                        track_id,
+                                        node_id,
+                                        success: true,
+                                        error: None,
+                                        ui_declaration: Some(ui_decl),
+                                        source: source.clone(),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = self.event_tx.push(AudioEvent::ScriptCompiled {
+                                        track_id,
+                                        node_id,
+                                        success: false,
+                                        error: Some(e),
+                                        ui_declaration: None,
+                                        source,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Command::GraphSetScriptSample(track_id, node_id, slot_index, data, sample_rate, name) => {
+                use crate::audio::node_graph::nodes::ScriptNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(script_node) = graph_node.node.as_any_mut().downcast_mut::<ScriptNode>() {
+                            script_node.set_sample(slot_index, data, sample_rate, name);
                         }
                     }
                 }

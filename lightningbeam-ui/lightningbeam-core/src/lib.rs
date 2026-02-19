@@ -20,6 +20,7 @@ pub mod instance_group;
 pub mod effect;
 pub mod effect_layer;
 pub mod effect_registry;
+pub mod script;
 pub mod document;
 pub mod renderer;
 pub mod video;
