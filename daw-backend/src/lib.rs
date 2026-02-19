@@ -162,7 +162,7 @@ impl AudioSystem {
             }
         };
 
-        // Get input config - use the input device's own default config
+        // Get input config using the device's default (most compatible)
         let input_config = match input_device.default_input_config() {
             Ok(config) => {
                 let cfg: cpal::StreamConfig = config.into();
@@ -172,7 +172,6 @@ impl AudioSystem {
                 eprintln!("Warning: Could not get input config: {}, recording will be disabled", e);
                 output_stream.play().map_err(|e| e.to_string())?;
 
-                // Spawn emitter thread if provided
                 if let Some(emitter) = event_emitter {
                     Self::spawn_emitter_thread(event_rx, emitter);
                 }
@@ -188,13 +187,57 @@ impl AudioSystem {
             }
         };
 
-        // Build input stream that feeds into the ringbuffer
+        let input_sample_rate = input_config.sample_rate;
+        let input_channels = input_config.channels as u32;
+        let output_sample_rate = sample_rate;
+        let output_channels = channels;
+        let needs_resample = input_sample_rate != output_sample_rate || input_channels != output_channels;
+
+        if needs_resample {
+            eprintln!("[AUDIO] Input device: {}Hz {}ch -> resampling to {}Hz {}ch",
+                input_sample_rate, input_channels, output_sample_rate, output_channels);
+        }
+
+        // Build input stream with resampling if needed
         let input_stream = match input_device
             .build_input_stream(
                 &input_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    for &sample in data {
-                        let _ = input_tx.push(sample);
+                    if !needs_resample {
+                        for &sample in data {
+                            let _ = input_tx.push(sample);
+                        }
+                    } else {
+                        // Resample: linear interpolation from input rate to output rate
+                        let in_ch = input_channels as usize;
+                        let out_ch = output_channels as usize;
+                        let ratio = output_sample_rate as f64 / input_sample_rate as f64;
+                        let in_frames = data.len() / in_ch;
+                        let out_frames = (in_frames as f64 * ratio) as usize;
+
+                        for i in 0..out_frames {
+                            let src_pos = i as f64 / ratio;
+                            let src_idx = src_pos as usize;
+                            let frac = (src_pos - src_idx as f64) as f32;
+
+                            for ch in 0..out_ch {
+                                // Map output channel to input channel
+                                let in_ch_idx = ch.min(in_ch - 1);
+
+                                let s0 = if src_idx < in_frames {
+                                    data[src_idx * in_ch + in_ch_idx]
+                                } else {
+                                    0.0
+                                };
+                                let s1 = if src_idx + 1 < in_frames {
+                                    data[(src_idx + 1) * in_ch + in_ch_idx]
+                                } else {
+                                    s0
+                                };
+
+                                let _ = input_tx.push(s0 + frac * (s1 - s0));
+                            }
+                        }
                     }
                 },
                 |err| eprintln!("Input stream error: {}", err),
