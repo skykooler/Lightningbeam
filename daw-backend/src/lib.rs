@@ -71,10 +71,10 @@ impl AudioSystem {
         let default_output_config = output_device.default_output_config().map_err(|e| e.to_string())?;
         let sample_rate = default_output_config.sample_rate();
         let channels = default_output_config.channels() as u32;
-        let debug_audio = std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1");
+        let _debug_audio = std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1");
 
         eprintln!("[AUDIO] Device: {:?}, format={:?}, rate={}, channels={}",
-            output_device.name().unwrap_or_default(), default_output_config.sample_format(), sample_rate, channels);
+            output_device.description().map(|d| d.name().to_string()).unwrap_or_default(), default_output_config.sample_format(), sample_rate, channels);
 
         // Create queues
         let (command_tx, command_rx) = rtrb::RingBuffer::new(512); // Larger buffer for MIDI + UI commands

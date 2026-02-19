@@ -203,7 +203,7 @@ fn enumerate_audio_input_devices() -> Vec<String> {
         .ok()
         .map(|devices| {
             devices
-                .filter_map(|d| d.name().ok())
+                .filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
                 .collect()
         })
         .unwrap_or_default()

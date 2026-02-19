@@ -586,20 +586,19 @@ impl ShaderEditorPane {
             // Open dropdown for existing scripts (BeamDSP mode)
             if self.mode == EditorMode::BeamDSP && !available_scripts.is_empty() {
                 let open_btn = ui.button("Open");
-                let popup_id = egui::Id::new("script_editor_open_popup");
-                if open_btn.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
-                }
-                egui::popup_below_widget(ui, popup_id, &open_btn, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
-                    ui.set_min_width(160.0);
-                    for (id, name) in available_scripts {
-                        let is_current = self.editing_script_id == Some(*id);
-                        if ui.selectable_label(is_current, name).clicked() {
-                            open_script_id = Some(*id);
-                            ui.memory_mut(|m| m.close_popup(popup_id));
+                let popup_id = egui::Popup::default_response_id(&open_btn);
+                egui::Popup::from_toggle_button_response(&open_btn)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
+                        ui.set_min_width(160.0);
+                        for (id, name) in available_scripts {
+                            let is_current = self.editing_script_id == Some(*id);
+                            if ui.selectable_label(is_current, name).clicked() {
+                                open_script_id = Some(*id);
+                                egui::Popup::close_id(ui.ctx(), popup_id);
+                            }
                         }
-                    }
-                });
+                    });
             }
 
             ui.separator();
