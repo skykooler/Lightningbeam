@@ -40,8 +40,6 @@ pub enum ScriptError {
     ExecutionLimitExceeded,
     StackOverflow,
     StackUnderflow,
-    DivisionByZero,
-    IndexOutOfBounds { index: i32, len: usize },
     InvalidOpcode(u8),
 }
 
@@ -51,10 +49,6 @@ impl fmt::Display for ScriptError {
             ScriptError::ExecutionLimitExceeded => write!(f, "Execution limit exceeded (possible infinite loop)"),
             ScriptError::StackOverflow => write!(f, "Stack overflow"),
             ScriptError::StackUnderflow => write!(f, "Stack underflow"),
-            ScriptError::DivisionByZero => write!(f, "Division by zero"),
-            ScriptError::IndexOutOfBounds { index, len } => {
-                write!(f, "Index {} out of bounds (length {})", index, len)
-            }
             ScriptError::InvalidOpcode(op) => write!(f, "Invalid opcode: {}", op),
         }
     }

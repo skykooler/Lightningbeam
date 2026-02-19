@@ -177,8 +177,7 @@ impl AddNodeAction {
                 .get(&self.layer_id)
                 .ok_or("Track not found")?;
 
-            let BackendNodeId::Audio(node_idx) = backend_id;
-            controller.graph_remove_node(*track_id, node_idx.index() as u32);
+            controller.graph_remove_node(*track_id, backend_id.index());
         }
 
         Ok(())
@@ -231,8 +230,7 @@ impl RemoveNodeAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(node_idx) = self.backend_node_id;
-        controller.graph_remove_node(*track_id, node_idx.index() as u32);
+        controller.graph_remove_node(*track_id, self.backend_node_id.index());
 
         Ok(())
     }
@@ -341,14 +339,11 @@ impl ConnectAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(from_idx) = self.from_node;
-        let BackendNodeId::Audio(to_idx) = self.to_node;
-
         controller.graph_connect(
             *track_id,
-            from_idx.index() as u32,
+            self.from_node.index(),
             self.from_port,
-            to_idx.index() as u32,
+            self.to_node.index(),
             self.to_port,
         );
 
@@ -370,14 +365,11 @@ impl ConnectAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(from_idx) = self.from_node;
-        let BackendNodeId::Audio(to_idx) = self.to_node;
-
         controller.graph_disconnect(
             *track_id,
-            from_idx.index() as u32,
+            self.from_node.index(),
             self.from_port,
-            to_idx.index() as u32,
+            self.to_node.index(),
             self.to_port,
         );
 
@@ -433,14 +425,11 @@ impl DisconnectAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(from_idx) = self.from_node;
-        let BackendNodeId::Audio(to_idx) = self.to_node;
-
         controller.graph_disconnect(
             *track_id,
-            from_idx.index() as u32,
+            self.from_node.index(),
             self.from_port,
-            to_idx.index() as u32,
+            self.to_node.index(),
             self.to_port,
         );
 
@@ -463,14 +452,11 @@ impl DisconnectAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(from_idx) = self.from_node;
-        let BackendNodeId::Audio(to_idx) = self.to_node;
-
         controller.graph_connect(
             *track_id,
-            from_idx.index() as u32,
+            self.from_node.index(),
             self.from_port,
-            to_idx.index() as u32,
+            self.to_node.index(),
             self.to_port,
         );
 
@@ -522,14 +508,9 @@ impl SetParameterAction {
             .get(&self.layer_id)
             .ok_or("Track not found")?;
 
-        let BackendNodeId::Audio(node_idx) = self.backend_node_id;
-
-        eprintln!("[DEBUG] Setting parameter: track {} node {} param {} = {}",
-            track_id, node_idx.index(), self.param_id, self.new_value);
-
         controller.graph_set_parameter(
             *track_id,
-            node_idx.index() as u32,
+            self.backend_node_id.index(),
             self.param_id,
             self.new_value as f32,
         );
@@ -553,11 +534,9 @@ impl SetParameterAction {
                 .get(&self.layer_id)
                 .ok_or("Track not found")?;
 
-            let BackendNodeId::Audio(node_idx) = self.backend_node_id;
-
             controller.graph_set_parameter(
                 *track_id,
-                node_idx.index() as u32,
+                self.backend_node_id.index(),
                 self.param_id,
                 old_value as f32,
             );

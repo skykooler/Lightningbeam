@@ -3,18 +3,8 @@ use crate::error::CompileError;
 use crate::opcodes::OpCode;
 use crate::token::Span;
 use crate::ui_decl::{UiDeclaration, UiElement};
+use crate::validator::VType;
 use crate::vm::ScriptVM;
-
-/// Type tracked during codegen to select typed opcodes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VType {
-    F32,
-    Int,
-    Bool,
-    ArrayF32,
-    ArrayInt,
-    Sample,
-}
 
 /// Where a named variable lives in the VM
 #[derive(Debug, Clone, Copy)]
@@ -165,12 +155,39 @@ impl Compiler {
             }
         }
 
-        // Register params
+        self.register_params_and_state(script, true);
+
+        // Compile process block
+        for stmt in &script.process {
+            self.compile_stmt(stmt)?;
+        }
+
+        self.emit(OpCode::Halt);
+        Ok(())
+    }
+
+    /// Compile the draw block into separate bytecode (for the DrawVM)
+    fn compile_draw(&mut self, script: &Script) -> Result<(), CompileError> {
+        self.draw_context = true;
+        self.register_params_and_state(script, false);
+
+        // Compile draw block
+        if let Some(draw) = &script.draw {
+            for stmt in draw {
+                self.compile_stmt(stmt)?;
+            }
+        }
+
+        self.emit(OpCode::Halt);
+        Ok(())
+    }
+
+    /// Register params and state variables. If `include_samples` is true, also registers sample slots.
+    fn register_params_and_state(&mut self, script: &Script, include_samples: bool) {
         for (i, param) in script.params.iter().enumerate() {
             self.vars.push((param.name.clone(), VarLoc::Param(i as u16)));
         }
 
-        // Register state variables
         let mut scalar_idx: u16 = 0;
         let mut array_idx: u16 = 0;
         let mut sample_idx: u8 = 0;
@@ -196,69 +213,13 @@ impl Compiler {
                     self.vars.push((state.name.clone(), VarLoc::StateArray(array_idx, VType::Int)));
                     array_idx += 1;
                 }
-                StateType::Sample => {
+                StateType::Sample if include_samples => {
                     self.vars.push((state.name.clone(), VarLoc::SampleSlot(sample_idx)));
                     sample_idx += 1;
                 }
+                StateType::Sample => {}
             }
         }
-
-        // Compile process block
-        for stmt in &script.process {
-            self.compile_stmt(stmt)?;
-        }
-
-        self.emit(OpCode::Halt);
-        Ok(())
-    }
-
-    /// Compile the draw block into separate bytecode (for the DrawVM)
-    fn compile_draw(&mut self, script: &Script) -> Result<(), CompileError> {
-        self.draw_context = true;
-
-        // Register params (same as process)
-        for (i, param) in script.params.iter().enumerate() {
-            self.vars.push((param.name.clone(), VarLoc::Param(i as u16)));
-        }
-
-        // Register state variables (draw gets its own copy)
-        let mut scalar_idx: u16 = 0;
-        let mut array_idx: u16 = 0;
-        for state in &script.state {
-            match &state.ty {
-                StateType::F32 => {
-                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::F32)));
-                    scalar_idx += 1;
-                }
-                StateType::Int => {
-                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::Int)));
-                    scalar_idx += 1;
-                }
-                StateType::Bool => {
-                    self.vars.push((state.name.clone(), VarLoc::StateScalar(scalar_idx, VType::Bool)));
-                    scalar_idx += 1;
-                }
-                StateType::ArrayF32(_) => {
-                    self.vars.push((state.name.clone(), VarLoc::StateArray(array_idx, VType::F32)));
-                    array_idx += 1;
-                }
-                StateType::ArrayInt(_) => {
-                    self.vars.push((state.name.clone(), VarLoc::StateArray(array_idx, VType::Int)));
-                    array_idx += 1;
-                }
-                StateType::Sample => {} // no samples in draw context
-            }
-        }
-
-        // Compile draw block
-        if let Some(draw) = &script.draw {
-            for stmt in draw {
-                self.compile_stmt(stmt)?;
-            }
-        }
-
-        self.emit(OpCode::Halt);
-        Ok(())
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
@@ -1149,12 +1110,13 @@ mod tests {
 
         // Draw VM should exist
         let mut dvm = draw_vm.expect("draw_vm should be Some");
-        assert!(!dvm.bytecode.is_empty());
+        assert!(dvm.has_bytecode());
 
         // Execute should succeed without stack errors
         dvm.execute().unwrap();
 
         // Should have produced draw commands
         assert_eq!(dvm.draw_commands.len(), 2); // fill_circle + stroke_arc
+
     }
 }

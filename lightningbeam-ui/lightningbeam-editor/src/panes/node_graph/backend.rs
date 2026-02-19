@@ -13,6 +13,16 @@ pub enum BackendNodeId {
     // Future: Vfx(u32),
 }
 
+impl BackendNodeId {
+    /// Get the backend node index as a u32
+    pub fn index(self) -> u32 {
+        match self {
+            BackendNodeId::Audio(idx) => idx.index() as u32,
+        }
+    }
+
+}
+
 /// Abstract backend for node graph operations
 ///
 /// Implementations:
@@ -86,12 +96,14 @@ pub trait GraphBackend: Send {
 
 /// Serializable graph state (for presets and save/load)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GraphState {
     pub nodes: Vec<SerializedNode>,
     pub connections: Vec<SerializedConnection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SerializedNode {
     pub id: u32, // Frontend node ID (stable)
     pub node_type: String,
@@ -100,6 +112,7 @@ pub struct SerializedNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SerializedConnection {
     pub from_node: u32,
     pub from_port: usize,

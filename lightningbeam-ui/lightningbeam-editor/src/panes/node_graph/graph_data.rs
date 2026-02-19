@@ -168,6 +168,20 @@ pub struct NodeData {
 
 fn default_root_note() -> u8 { 69 }
 
+impl NodeData {
+    pub fn new(template: NodeTemplate) -> Self {
+        Self {
+            template,
+            sample_display_name: None,
+            root_note: 69,
+            script_id: None,
+            ui_declaration: None,
+            sample_slot_names: Vec::new(),
+            script_sample_names: HashMap::new(),
+        }
+    }
+}
+
 /// Cached oscilloscope waveform data for rendering in node body
 pub struct OscilloscopeCache {
     pub audio: Vec<f32>,
@@ -459,7 +473,7 @@ impl NodeTemplateTrait for NodeTemplate {
     }
 
     fn user_data(&self, _user_state: &mut Self::UserState) -> Self::NodeData {
-        NodeData { template: *self, sample_display_name: None, root_note: 69, script_id: None, ui_declaration: None, sample_slot_names: Vec::new(), script_sample_names: HashMap::new() }
+        NodeData::new(*self)
     }
 
     fn build_node(
@@ -1209,8 +1223,6 @@ impl NodeDataTrait for NodeData {
                 &[0,2,4,5,7,9,11], &[0,2,3,5,7,8,10], &[0,2,3,5,7,9,10], &[0,2,4,5,7,9,10],
                 &[0,2,4,7,9], &[0,3,5,7,10], &[0,3,5,6,7,10], &[0,2,3,5,7,8,11],
             ];
-            const NOTE_NAMES: &[&str] = &["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-
             let row_to_note_name = |row: usize| -> String {
                 let base = key_val as u16 + octave_val as u16 * 12;
                 let midi_note = if is_diatonic {
@@ -1374,8 +1386,9 @@ impl NodeDataTrait for NodeData {
                     for (_name, input_id) in &node.inputs {
                         if let ValueType::Float { value, backend_param_id: Some(pid), .. } = &_graph.get_input(*input_id).value {
                             let idx = *pid as usize;
-                            if idx < draw_vm.params.len() {
-                                draw_vm.params[idx] = *value;
+                            let params = draw_vm.params_mut();
+                            if idx < params.len() {
+                                params[idx] = *value;
                             }
                         }
                     }
@@ -1447,7 +1460,7 @@ fn render_script_ui_elements(
                     draw_vm.mouse.down = response.dragged() || response.drag_started();
 
                     // Save params before execution to detect changes
-                    let params_before: Vec<f32> = draw_vm.params.clone();
+                    let params_before: Vec<f32> = draw_vm.params().to_vec();
 
                     // Execute draw block
                     if let Err(e) = draw_vm.execute() {
@@ -1528,7 +1541,7 @@ fn render_script_ui_elements(
                     }
 
                     // Detect param changes from draw block (e.g. knob drag)
-                    for (i, (&before, &after)) in params_before.iter().zip(draw_vm.params.iter()).enumerate() {
+                    for (i, (&before, &after)) in params_before.iter().zip(draw_vm.params().iter()).enumerate() {
                         if (after - before).abs() > 1e-10 {
                             pending_param_changes.push((node_id, i as u32, after));
                         }

@@ -152,15 +152,17 @@ impl AudioNode for ScriptNode {
 
     fn set_parameter(&mut self, id: u32, value: f32) {
         let idx = id as usize;
-        if idx < self.vm.params.len() {
-            self.vm.params[idx] = value;
+        let params = self.vm.params_mut();
+        if idx < params.len() {
+            params[idx] = value;
         }
     }
 
     fn get_parameter(&self, id: u32) -> f32 {
         let idx = id as usize;
-        if idx < self.vm.params.len() {
-            self.vm.params[idx]
+        let params = self.vm.params();
+        if idx < params.len() {
+            params[idx]
         } else {
             0.0
         }

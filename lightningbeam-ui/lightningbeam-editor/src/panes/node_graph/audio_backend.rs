@@ -52,12 +52,10 @@ impl GraphBackend for AudioGraphBackend {
     }
 
     fn remove_node(&mut self, backend_id: BackendNodeId) -> Result<(), String> {
-        let BackendNodeId::Audio(node_idx) = backend_id;
-
         let mut controller = self.audio_controller.lock().unwrap();
-        controller.graph_remove_node(self.track_id, node_idx.index() as u32);
+        controller.graph_remove_node(self.track_id, backend_id.index());
 
-        self._node_index_to_stable.remove(&node_idx);
+        self._node_index_to_stable.remove(&NodeIndex::new(backend_id.index() as usize));
 
         Ok(())
     }
@@ -69,15 +67,12 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(from_idx) = output_node;
-        let BackendNodeId::Audio(to_idx) = input_node;
-
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_connect(
             self.track_id,
-            from_idx.index() as u32,
+            output_node.index(),
             output_port,
-            to_idx.index() as u32,
+            input_node.index(),
             input_port,
         );
 
@@ -91,15 +86,12 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(from_idx) = output_node;
-        let BackendNodeId::Audio(to_idx) = input_node;
-
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_disconnect(
             self.track_id,
-            from_idx.index() as u32,
+            output_node.index(),
             output_port,
-            to_idx.index() as u32,
+            input_node.index(),
             input_port,
         );
 
@@ -112,12 +104,10 @@ impl GraphBackend for AudioGraphBackend {
         param_id: u32,
         value: f64,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(node_idx) = backend_id;
-
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_set_parameter(
             self.track_id,
-            node_idx.index() as u32,
+            backend_id.index(),
             param_id,
             value as f32,
         );
@@ -172,12 +162,10 @@ impl GraphBackend for AudioGraphBackend {
         x: f32,
         y: f32,
     ) -> Result<BackendNodeId, String> {
-        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id;
-
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_add_node_to_template(
             self.track_id,
-            allocator_idx.index() as u32,
+            voice_allocator_id.index(),
             node_type.to_string(),
             x,
             y,
@@ -199,17 +187,13 @@ impl GraphBackend for AudioGraphBackend {
         input_node: BackendNodeId,
         input_port: usize,
     ) -> Result<(), String> {
-        let BackendNodeId::Audio(allocator_idx) = voice_allocator_id;
-        let BackendNodeId::Audio(from_idx) = output_node;
-        let BackendNodeId::Audio(to_idx) = input_node;
-
         let mut controller = self.audio_controller.lock().unwrap();
         controller.graph_connect_in_template(
             self.track_id,
-            allocator_idx.index() as u32,
-            from_idx.index() as u32,
+            voice_allocator_id.index(),
+            output_node.index(),
             output_port,
-            to_idx.index() as u32,
+            input_node.index(),
             input_port,
         );
 
