@@ -47,6 +47,9 @@ impl BeatResolution {
 
 /// Beat clock node — generates tempo-synced CV signals.
 ///
+/// When playing: synced to timeline position.
+/// When stopped: free-runs continuously at the set BPM.
+///
 /// Outputs:
 /// - BPM: constant CV proportional to tempo (bpm / 240)
 /// - Beat Phase: sawtooth 0→1 per beat subdivision
@@ -60,10 +63,8 @@ pub struct BeatNode {
     playback_time: f64,
     /// Previous playback_time to detect paused state
     prev_playback_time: f64,
-    /// Cached output values held when paused
-    held_beat_phase: f32,
-    held_bar_phase: f32,
-    held_gate: f32,
+    /// Free-running time accumulator for when playback is stopped
+    free_run_time: f64,
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -90,9 +91,7 @@ impl BeatNode {
             resolution: BeatResolution::Quarter,
             playback_time: 0.0,
             prev_playback_time: -1.0,
-            held_beat_phase: 0.0,
-            held_bar_phase: 0.0,
-            held_gate: 0.0,
+            free_run_time: 0.0,
             inputs,
             outputs,
             parameters,
@@ -149,29 +148,20 @@ impl AudioNode for BeatNode {
 
         let bpm_cv = (self.bpm / 240.0).clamp(0.0, 1.0);
         let len = outputs[0].len();
+        let sample_period = 1.0 / sample_rate as f64;
 
         // Detect paused: playback_time hasn't changed since last process()
         let paused = self.playback_time == self.prev_playback_time;
         self.prev_playback_time = self.playback_time;
 
-        if paused {
-            // Hold last values
-            for i in 0..len {
-                outputs[0][i] = bpm_cv;
-                outputs[1][i] = self.held_beat_phase;
-                outputs[2][i] = self.held_bar_phase;
-                outputs[3][i] = self.held_gate;
-            }
-            return;
-        }
-
         let beats_per_second = self.bpm as f64 / 60.0;
-        let sample_period = 1.0 / sample_rate as f64;
         let subs_per_beat = self.resolution.subdivisions_per_beat();
 
+        // Choose time source: timeline when playing, free-running when stopped
+        let base_time = if paused { self.free_run_time } else { self.playback_time };
+
         for i in 0..len {
-            // Derive beat position from timeline playback time
-            let time = self.playback_time + i as f64 * sample_period;
+            let time = base_time + i as f64 * sample_period;
             let beat_pos = time * beats_per_second;
 
             // Beat subdivision phase: 0→1 sawtooth
@@ -189,20 +179,14 @@ impl AudioNode for BeatNode {
             outputs[3][i] = gate;
         }
 
-        // Cache last sample's values for hold when paused
-        if len > 0 {
-            self.held_beat_phase = outputs[1][len - 1];
-            self.held_bar_phase = outputs[2][len - 1];
-            self.held_gate = outputs[3][len - 1];
-        }
+        // Advance free-run time (always ticks, so it's ready when playback stops)
+        self.free_run_time += len as f64 * sample_period;
     }
 
     fn reset(&mut self) {
         self.playback_time = 0.0;
         self.prev_playback_time = -1.0;
-        self.held_beat_phase = 0.0;
-        self.held_bar_phase = 0.0;
-        self.held_gate = 0.0;
+        self.free_run_time = 0.0;
     }
 
     fn node_type(&self) -> &str {
@@ -220,9 +204,7 @@ impl AudioNode for BeatNode {
             resolution: self.resolution,
             playback_time: 0.0,
             prev_playback_time: -1.0,
-            held_beat_phase: 0.0,
-            held_bar_phase: 0.0,
-            held_gate: 0.0,
+            free_run_time: 0.0,
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),

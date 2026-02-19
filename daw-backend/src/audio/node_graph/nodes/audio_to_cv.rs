@@ -1,16 +1,10 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, SignalType};
 use crate::audio::midi::MidiEvent;
 
-const PARAM_ATTACK: u32 = 0;
-const PARAM_RELEASE: u32 = 1;
-
-/// Audio to CV converter (Envelope Follower)
-/// Converts audio amplitude to control voltage
+/// Audio to CV converter
+/// Directly converts a stereo audio signal to mono CV (averages L+R channels)
 pub struct AudioToCVNode {
     name: String,
-    envelope: f32,       // Current envelope value
-    attack: f32,         // Attack time in seconds
-    release: f32,        // Release time in seconds
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -28,19 +22,11 @@ impl AudioToCVNode {
             NodePort::new("CV Out", SignalType::CV, 0),
         ];
 
-        let parameters = vec![
-            Parameter::new(PARAM_ATTACK, "Attack", 0.001, 1.0, 0.01, ParameterUnit::Time),
-            Parameter::new(PARAM_RELEASE, "Release", 0.001, 1.0, 0.1, ParameterUnit::Time),
-        ];
-
         Self {
             name,
-            envelope: 0.0,
-            attack: 0.01,
-            release: 0.1,
             inputs,
             outputs,
-            parameters,
+            parameters: Vec::new(),
         }
     }
 }
@@ -62,20 +48,10 @@ impl AudioNode for AudioToCVNode {
         &self.parameters
     }
 
-    fn set_parameter(&mut self, id: u32, value: f32) {
-        match id {
-            PARAM_ATTACK => self.attack = value.clamp(0.001, 1.0),
-            PARAM_RELEASE => self.release = value.clamp(0.001, 1.0),
-            _ => {}
-        }
-    }
+    fn set_parameter(&mut self, _id: u32, _value: f32) {}
 
-    fn get_parameter(&self, id: u32) -> f32 {
-        match id {
-            PARAM_ATTACK => self.attack,
-            PARAM_RELEASE => self.release,
-            _ => 0.0,
-        }
+    fn get_parameter(&self, _id: u32) -> f32 {
+        0.0
     }
 
     fn process(
@@ -84,7 +60,7 @@ impl AudioNode for AudioToCVNode {
         outputs: &mut [&mut [f32]],
         _midi_inputs: &[&[MidiEvent]],
         _midi_outputs: &mut [&mut Vec<MidiEvent>],
-        sample_rate: u32,
+        _sample_rate: u32,
     ) {
         if inputs.is_empty() || outputs.is_empty() {
             return;
@@ -95,39 +71,16 @@ impl AudioNode for AudioToCVNode {
 
         // Audio input is stereo (interleaved L/R), CV output is mono
         let audio_frames = input.len() / 2;
-        let cv_frames = output.len();
-        let frames = audio_frames.min(cv_frames);
-
-        // Calculate attack and release coefficients
-        let sample_rate_f32 = sample_rate as f32;
-        let attack_coeff = (-1.0 / (self.attack * sample_rate_f32)).exp();
-        let release_coeff = (-1.0 / (self.release * sample_rate_f32)).exp();
+        let frames = audio_frames.min(output.len());
 
         for frame in 0..frames {
-            // Get stereo samples
             let left = input[frame * 2];
             let right = input[frame * 2 + 1];
-
-            // Calculate RMS-like value (average of absolute values for simplicity)
-            let amplitude = (left.abs() + right.abs()) / 2.0;
-
-            // Envelope follower with attack/release
-            if amplitude > self.envelope {
-                // Attack: follow signal up quickly
-                self.envelope = amplitude * (1.0 - attack_coeff) + self.envelope * attack_coeff;
-            } else {
-                // Release: decay slowly
-                self.envelope = amplitude * (1.0 - release_coeff) + self.envelope * release_coeff;
-            }
-
-            // Output CV (mono)
-            output[frame] = self.envelope;
+            output[frame] = (left + right) * 0.5;
         }
     }
 
-    fn reset(&mut self) {
-        self.envelope = 0.0;
-    }
+    fn reset(&mut self) {}
 
     fn node_type(&self) -> &str {
         "AudioToCV"
@@ -140,9 +93,6 @@ impl AudioNode for AudioToCVNode {
     fn clone_node(&self) -> Box<dyn AudioNode> {
         Box::new(Self {
             name: self.name.clone(),
-            envelope: 0.0,      // Reset envelope
-            attack: self.attack,
-            release: self.release,
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),

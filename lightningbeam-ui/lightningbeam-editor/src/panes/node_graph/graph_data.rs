@@ -58,6 +58,7 @@ pub enum NodeTemplate {
     Constant,
     MidiToCv,
     AudioToCv,
+    Arpeggiator,
     Math,
     SampleHold,
     SlewLimiter,
@@ -116,6 +117,7 @@ impl NodeTemplate {
             NodeTemplate::Constant => "Constant",
             NodeTemplate::MidiToCv => "MidiToCV",
             NodeTemplate::AudioToCv => "AudioToCV",
+            NodeTemplate::Arpeggiator => "Arpeggiator",
             NodeTemplate::Math => "Math",
             NodeTemplate::SampleHold => "SampleHold",
             NodeTemplate::SlewLimiter => "SlewLimiter",
@@ -356,6 +358,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::Constant => "Constant".into(),
             NodeTemplate::MidiToCv => "MIDI to CV".into(),
             NodeTemplate::AudioToCv => "Audio to CV".into(),
+            NodeTemplate::Arpeggiator => "Arpeggiator".into(),
             NodeTemplate::Math => "Math".into(),
             NodeTemplate::SampleHold => "Sample & Hold".into(),
             NodeTemplate::SlewLimiter => "Slew Limiter".into(),
@@ -387,7 +390,7 @@ impl NodeTemplateTrait for NodeTemplate {
             | NodeTemplate::BitCrusher | NodeTemplate::Compressor | NodeTemplate::Limiter | NodeTemplate::Eq
             | NodeTemplate::Pan | NodeTemplate::RingModulator | NodeTemplate::Vocoder => vec!["Effects"],
             NodeTemplate::Adsr | NodeTemplate::Lfo | NodeTemplate::Mixer | NodeTemplate::Splitter
-            | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Math
+            | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Arpeggiator | NodeTemplate::Math
             | NodeTemplate::SampleHold | NodeTemplate::SlewLimiter | NodeTemplate::Quantizer
             | NodeTemplate::EnvelopeFollower | NodeTemplate::BpmDetector | NodeTemplate::Mod => vec!["Utilities"],
             NodeTemplate::Oscilloscope => vec!["Analysis"],
@@ -718,6 +721,28 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::AudioToCv => {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_output_param(node_id, "CV Out".into(), DataType::CV);
+            }
+            NodeTemplate::Arpeggiator => {
+                graph.add_input_param(node_id, "MIDI In".into(), DataType::Midi, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Phase".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Mode".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 1.0, "", 0,
+                        Some(&["One/Cycle", "All/Cycle"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Direction".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 3.0, "", 1,
+                        Some(&["Up", "Down", "Up/Down", "Random"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Octaves".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 3.0, "", 2,
+                        Some(&["1", "2", "3", "4"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Retrigger".into(), DataType::CV,
+                    ValueType::float_param(1.0, 0.0, 1.0, "", 3,
+                        Some(&["Off", "On"])),
+                    InputParamKind::ConstantOnly, true);
+                graph.add_output_param(node_id, "V/Oct".into(), DataType::CV);
+                graph.add_output_param(node_id, "Gate".into(), DataType::CV);
             }
             NodeTemplate::Math => {
                 graph.add_input_param(node_id, "A".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOrConstant, true);
@@ -1125,6 +1150,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::Constant,
             NodeTemplate::MidiToCv,
             NodeTemplate::AudioToCv,
+            NodeTemplate::Arpeggiator,
             NodeTemplate::Math,
             NodeTemplate::SampleHold,
             NodeTemplate::SlewLimiter,

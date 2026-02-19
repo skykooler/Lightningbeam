@@ -73,6 +73,12 @@ impl PresetBrowserPane {
             self.scan_directory(&factory_dir, &factory_dir, true);
         }
 
+        // User presets
+        let user_dir = user_presets_dir();
+        if user_dir.is_dir() {
+            self.scan_directory(&user_dir, &user_dir, false);
+        }
+
         // Sort presets alphabetically by name within each category
         self.presets.sort_by(|a, b| {
             a.category.cmp(&b.category).then(a.name.cmp(&b.name))

@@ -1963,6 +1963,8 @@ impl NodeGraphPane {
             "BPMDetector" => Some(NodeTemplate::BpmDetector),
             "Mod" => Some(NodeTemplate::Mod),
             "Oscilloscope" => Some(NodeTemplate::Oscilloscope),
+            "Arpeggiator" => Some(NodeTemplate::Arpeggiator),
+            "Beat" => Some(NodeTemplate::Beat),
             "VoiceAllocator" => Some(NodeTemplate::VoiceAllocator),
             "Group" => Some(NodeTemplate::Group),
             "TemplateInput" => Some(NodeTemplate::TemplateInput),

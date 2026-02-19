@@ -456,7 +456,9 @@ impl AudioGraph {
         }
 
         // Use the requested output buffer size for processing
+        // process_size is stereo (interleaved L/R), frame_count is mono
         let process_size = output_buffer.len();
+        let frame_count = process_size / 2;
 
         // Clear all output buffers (audio/CV and MIDI)
         for node in self.graph.node_weights_mut() {
@@ -499,6 +501,11 @@ impl AudioGraph {
             let inputs = self.graph[node_idx].node.inputs();
             let num_audio_cv_inputs = inputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
             let num_midi_inputs = inputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
+            // Collect audio/CV input signal types for correct buffer sizing
+            let audio_cv_input_types: Vec<SignalType> = inputs.iter()
+                .filter(|p| p.signal_type != SignalType::Midi)
+                .map(|p| p.signal_type)
+                .collect();
 
             // Clear input buffers
             // - Audio inputs: fill with 0.0 (silence) when unconnected
@@ -545,11 +552,18 @@ impl AudioGraph {
 
                     match source_port_type {
                         SignalType::Audio | SignalType::CV => {
+                            // Map from global port index to audio/CV-only port index
+                            // (input_buffers only contains audio/CV entries, not MIDI)
+                            let audio_cv_port_idx = inputs.iter()
+                                .take(to_port + 1)
+                                .filter(|p| p.signal_type != SignalType::Midi)
+                                .count().saturating_sub(1);
+
                             // Copy audio/CV data
-                            if to_port < num_audio_cv_inputs && from_port < source_node.output_buffers.len() {
+                            if audio_cv_port_idx < num_audio_cv_inputs && from_port < source_node.output_buffers.len() {
                                 let source_buffer = &source_node.output_buffers[from_port];
-                                if to_port < self.input_buffers.len() {
-                                    for (dst, src) in self.input_buffers[to_port].iter_mut().zip(source_buffer.iter()) {
+                                if audio_cv_port_idx < self.input_buffers.len() {
+                                    for (dst, src) in self.input_buffers[audio_cv_port_idx].iter_mut().zip(source_buffer.iter()) {
                                         // If dst is NaN (unconnected), replace it; otherwise add (for mixing)
                                         if dst.is_nan() {
                                             *dst = *src;
@@ -583,11 +597,15 @@ impl AudioGraph {
                 }
             }
 
-            // Prepare audio/CV input slices
+            // Prepare audio/CV input slices (Audio=stereo process_size, CV=mono frame_count)
             let input_slices: Vec<&[f32]> = (0..num_audio_cv_inputs)
                 .map(|i| {
                     if i < self.input_buffers.len() {
-                        &self.input_buffers[i][..process_size.min(self.input_buffers[i].len())]
+                        let slice_size = match audio_cv_input_types.get(i) {
+                            Some(&SignalType::Audio) => process_size,
+                            _ => frame_count,
+                        };
+                        &self.input_buffers[i][..slice_size.min(self.input_buffers[i].len())]
                     } else {
                         &[][..]
                     }
@@ -608,19 +626,22 @@ impl AudioGraph {
             // Get mutable access to output buffers
             let node = &mut self.graph[node_idx];
             let outputs = node.node.outputs();
-            let num_audio_cv_outputs = outputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
             let num_midi_outputs = outputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
+            // Collect output signal types for correct buffer sizing
+            let output_signal_types: Vec<SignalType> = outputs.iter().map(|p| p.signal_type).collect();
 
-            // Create mutable slices for audio/CV outputs
-            // Each buffer is independent, so this is safe
-            let mut output_slices: Vec<&mut [f32]> = node.output_buffers
-                .iter_mut()
-                .take(num_audio_cv_outputs)
-                .map(|buf| {
-                    let len = buf.len();
-                    &mut buf[..process_size.min(len)]
-                })
-                .collect();
+            // Create mutable slices for audio/CV outputs (Audio=stereo, CV=mono)
+            let mut output_slices: Vec<&mut [f32]> = Vec::new();
+            for (i, buf) in node.output_buffers.iter_mut().enumerate() {
+                let signal_type = output_signal_types.get(i).copied().unwrap_or(SignalType::CV);
+                if signal_type == SignalType::Midi { continue; }
+                let slice_size = match signal_type {
+                    SignalType::Audio => process_size,
+                    _ => frame_count,
+                };
+                let len = buf.len();
+                output_slices.push(&mut buf[..slice_size.min(len)]);
+            }
 
             // Create mutable references for MIDI outputs
             let mut midi_output_refs: Vec<&mut Vec<MidiEvent>> = node.midi_output_buffers
@@ -969,6 +990,7 @@ impl AudioGraph {
                 "Compressor" => Box::new(CompressorNode::new("Compressor")),
                 "Constant" => Box::new(ConstantNode::new("Constant")),
                 "Beat" => Box::new(BeatNode::new("Beat")),
+                "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator")),
                 "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
                 "Limiter" => Box::new(LimiterNode::new("Limiter")),
                 "Math" => Box::new(MathNode::new("Math")),
