@@ -431,7 +431,7 @@ mod tests {
         let mut settings = AudioExportSettings::default();
         settings.sample_rate = 0; // Invalid
 
-        let project = Project::new();
+        let project = Project::new(44100);
         let pool = AudioPool::new();
         let midi_pool = MidiClipPool::new();
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn test_export_audio_cancellation() {
         let settings = AudioExportSettings::default();
-        let mut project = Project::new();
+        let mut project = Project::new(44100);
         let pool = AudioPool::new();
         let midi_pool = MidiClipPool::new();
         let cancel_flag = Arc::new(AtomicBool::new(true)); // Pre-cancelled

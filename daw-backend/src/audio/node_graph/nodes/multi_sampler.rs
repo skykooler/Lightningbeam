@@ -458,6 +458,16 @@ impl MultiSamplerNode {
         Ok(())
     }
 
+    /// Remove all layers
+    pub fn clear_layers(&mut self) {
+        self.layers.clear();
+        self.layer_infos.clear();
+        // Stop all active voices
+        for voice in &mut self.voices {
+            voice.is_active = false;
+        }
+    }
+
     /// Find the best matching layer for a given note and velocity
     fn find_layer(&self, note: u8, velocity: u8) -> Option<usize> {
         self.layers

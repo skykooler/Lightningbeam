@@ -194,6 +194,8 @@ pub enum Command {
     MultiSamplerUpdateLayer(TrackId, u32, usize, u8, u8, u8, u8, u8, Option<usize>, Option<usize>, LoopMode),
     /// Remove a layer from a MultiSampler node (track_id, node_id, layer_index)
     MultiSamplerRemoveLayer(TrackId, u32, usize),
+    /// Clear all layers from a MultiSampler node (track_id, node_id)
+    MultiSamplerClearLayers(TrackId, u32),
 
     // Automation Input Node commands
     /// Add or update a keyframe on an AutomationInput node (track_id, node_id, time, value, interpolation, ease_out, ease_in)

@@ -793,6 +793,23 @@ impl NodeGraphPane {
                     }
                 }
             }
+            graph_data::PendingSamplerLoad::MultiFromFolderFilesystem { node_id, backend_node_id } => {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    match crate::sample_import::scan_folder(&path) {
+                        Ok(samples) => {
+                            let scan_result = crate::sample_import::build_import_layers(samples, &path);
+                            let track_id = backend_track_id;
+                            let dialog = crate::sample_import_dialog::SampleImportDialog::new(
+                                path, scan_result, track_id, backend_node_id, node_id,
+                            );
+                            self.user_state.sample_import_dialog = Some(dialog);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to scan folder '{}': {}", path.display(), e);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2582,6 +2599,54 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             // Handle pending sampler load requests from bottom_ui()
             if let Some(load) = self.user_state.pending_sampler_load.take() {
                 self.handle_pending_sampler_load(load, shared);
+            }
+
+            // Render sample import dialog if active
+            if let Some(dialog) = &mut self.user_state.sample_import_dialog {
+                let still_open = dialog.show(ui.ctx());
+                if !still_open {
+                    // Dialog closed — check if confirmed
+                    let dialog = self.user_state.sample_import_dialog.take().unwrap();
+                    if dialog.confirmed {
+                        let backend_track_id = dialog.track_id;
+                        let backend_node_id = dialog.backend_node_id;
+                        let node_id = dialog.node_id;
+                        let loop_mode = dialog.loop_mode;
+                        let enabled_layers: Vec<_> = dialog.scan_result.layers.iter()
+                            .filter(|l| l.enabled)
+                            .collect();
+                        let layer_count = enabled_layers.len();
+                        let folder_name = dialog.folder_path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Folder".to_string());
+
+                        if let Some(controller_arc) = &shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            // Clear existing layers before importing new ones
+                            controller.multi_sampler_clear_layers(backend_track_id, backend_node_id);
+                            for layer in &enabled_layers {
+                                controller.multi_sampler_add_layer(
+                                    backend_track_id,
+                                    backend_node_id,
+                                    layer.path.to_string_lossy().to_string(),
+                                    layer.key_min,
+                                    layer.key_max,
+                                    layer.root_key,
+                                    layer.velocity_min,
+                                    layer.velocity_max,
+                                    None, None, // loop points auto-detected by backend
+                                    loop_mode,
+                                );
+                            }
+                        }
+
+                        if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                            node.user_data.sample_display_name = Some(
+                                format!("{} ({} layers)", folder_name, layer_count)
+                            );
+                        }
+                    }
+                }
             }
 
             // Handle pending script sample load requests from bottom_ui()

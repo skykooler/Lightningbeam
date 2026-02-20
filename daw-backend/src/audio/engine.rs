@@ -1840,6 +1840,21 @@ impl Engine {
                 }
             }
 
+            Command::MultiSamplerClearLayers(track_id, node_id) => {
+                use crate::audio::node_graph::nodes::MultiSamplerNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                    let graph = &mut track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
+                            multi_sampler_node.clear_layers();
+                        }
+                    }
+                }
+            }
+
             Command::AutomationAddKeyframe(track_id, node_id, time, value, interpolation_str, ease_out, ease_in) => {
                 use crate::audio::node_graph::nodes::{AutomationInputNode, AutomationKeyframe, InterpolationType};
 
@@ -3327,6 +3342,11 @@ impl EngineController {
     /// Remove a layer from a MultiSampler node
     pub fn multi_sampler_remove_layer(&mut self, track_id: TrackId, node_id: u32, layer_index: usize) {
         let _ = self.command_tx.push(Command::MultiSamplerRemoveLayer(track_id, node_id, layer_index));
+    }
+
+    /// Clear all layers from a MultiSampler node
+    pub fn multi_sampler_clear_layers(&mut self, track_id: TrackId, node_id: u32) {
+        let _ = self.command_tx.push(Command::MultiSamplerClearLayers(track_id, node_id));
     }
 
     /// Send a synchronous query and wait for the response

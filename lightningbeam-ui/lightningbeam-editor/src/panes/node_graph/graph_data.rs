@@ -224,6 +224,8 @@ pub enum PendingSamplerLoad {
     MultiFromFolder { node_id: NodeId, folder_id: uuid::Uuid },
     /// Open a file/folder dialog to load into a MultiSampler
     MultiFromFilesystem { node_id: NodeId, backend_node_id: u32 },
+    /// Open a folder dialog for batch import with heuristic mapping
+    MultiFromFolderFilesystem { node_id: NodeId, backend_node_id: u32 },
 }
 
 /// Custom graph state - can track selected nodes, etc.
@@ -261,6 +263,8 @@ pub struct GraphState {
     pub draw_vms: HashMap<NodeId, beamdsp::DrawVM>,
     /// Pending param changes from draw block (node_id, param_index, new_value)
     pub pending_draw_param_changes: Vec<(NodeId, u32, f32)>,
+    /// Active sample import dialog (folder import with heuristic mapping)
+    pub sample_import_dialog: Option<crate::sample_import_dialog::SampleImportDialog>,
 }
 
 impl Default for GraphState {
@@ -283,6 +287,7 @@ impl Default for GraphState {
             pending_script_sample_load: None,
             draw_vms: HashMap::new(),
             pending_draw_param_changes: Vec::new(),
+            sample_import_dialog: None,
         }
     }
 }
@@ -661,6 +666,14 @@ impl NodeTemplateTrait for NodeTemplate {
             }
             NodeTemplate::MultiSampler => {
                 graph.add_input_param(node_id, "MIDI In".into(), DataType::Midi, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Gain".into(), DataType::CV,
+                    ValueType::float_param(1.0, 0.0, 2.0, "", 0, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Attack".into(), DataType::CV,
+                    ValueType::float_param(0.01, 0.001, 1.0, " s", 1, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Release".into(), DataType::CV,
+                    ValueType::float_param(0.1, 0.01, 5.0, " s", 2, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Transpose".into(), DataType::CV,
+                    ValueType::float_param(0.0, -24.0, 24.0, " st", 3, None), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::Reverb => {
@@ -1122,6 +1135,15 @@ impl NodeDataTrait for NodeData {
                         });
                     }
                     close_popup = true;
+                }
+                if is_multi {
+                    if ui.button("Import Folder...").clicked() {
+                        user_state.pending_sampler_load = Some(PendingSamplerLoad::MultiFromFolderFilesystem {
+                            node_id,
+                            backend_node_id,
+                        });
+                        close_popup = true;
+                    }
                 }
             });
 

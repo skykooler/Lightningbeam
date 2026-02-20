@@ -40,6 +40,9 @@ use effect_thumbnails::EffectThumbnailGenerator;
 
 mod debug_overlay;
 
+mod sample_import;
+mod sample_import_dialog;
+
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
 #[command(name = "Lightningbeam Editor")]
