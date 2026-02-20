@@ -17,6 +17,7 @@ const LAYER_HEADER_WIDTH: f32 = 200.0;
 const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
+const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
 
 /// Type of clip drag operation
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +25,7 @@ enum ClipDragType {
     Move,
     TrimLeft,
     TrimRight,
+    LoopExtend,
 }
 
 pub struct TimelinePane {
@@ -347,10 +349,19 @@ impl TimelinePane {
                 let mouse_x = pointer_pos.x - content_rect.min.x;
 
                 // Determine drag type based on edge proximity (check both sides of edge)
+                let is_audio_layer = matches!(layer, lightningbeam_core::layer::AnyLayer::Audio(_));
+                let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
+                let mouse_in_top_corner = pointer_pos.y < layer_top + LOOP_CORNER_SIZE;
+
                 let drag_type = if (mouse_x - start_x).abs() <= EDGE_DETECTION_PIXELS {
                     ClipDragType::TrimLeft
                 } else if (end_x - mouse_x).abs() <= EDGE_DETECTION_PIXELS {
-                    ClipDragType::TrimRight
+                    // Top-right corner of audio clips = loop extend
+                    if is_audio_layer && mouse_in_top_corner {
+                        ClipDragType::LoopExtend
+                    } else {
+                        ClipDragType::TrimRight
+                    }
                 } else {
                     ClipDragType::Move
                 };
@@ -545,6 +556,7 @@ impl TimelinePane {
         pixels_per_second: f32,
         theme: &crate::theme::Theme,
         ctx: &egui::Context,
+        faded: bool,
     ) {
         let clip_height = clip_rect.height();
         let note_height = clip_height / 12.0; // 12 semitones per octave
@@ -634,8 +646,13 @@ impl TimelinePane {
         }
 
         // Second pass: render all note rectangles
+        let render_color = if faded {
+            egui::Color32::from_rgba_unmultiplied(note_color.r(), note_color.g(), note_color.b(), note_color.a() / 2)
+        } else {
+            note_color
+        };
         for (note_rect, _note_number) in note_rectangles {
-            painter.rect_filled(note_rect, 1.0, note_color);
+            painter.rect_filled(note_rect, 1.0, render_color);
         }
     }
 
@@ -1149,6 +1166,23 @@ impl TimelinePane {
                                     // (the waveform system uses clip_duration to determine visible range)
                                     preview_clip_duration = new_trim_end - preview_trim_start;
                                 }
+                                ClipDragType::LoopExtend => {
+                                    // Loop extend: extend clip beyond content window
+                                    // Use trimmed content window, NOT effective_duration (which includes loop extension)
+                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                    let content_window = (trim_end - clip_instance.trim_start).max(0.0);
+                                    let desired_total = (content_window + self.drag_offset).max(content_window * 0.25);
+
+                                    // Check for adjacent clips
+                                    let max_extend = document.find_max_trim_extend_right(
+                                        &layer.id(),
+                                        &clip_instance.id,
+                                        clip_instance.timeline_start,
+                                        content_window,
+                                    );
+                                    let extend_amount = (desired_total - content_window).min(max_extend).max(0.0);
+                                    instance_duration = content_window + extend_amount;
+                                }
                             }
                         }
                     }
@@ -1196,33 +1230,82 @@ impl TimelinePane {
                             egui::pos2(rect.min.x + visible_end_x, y + LAYER_HEIGHT - 10.0),
                         );
 
-                        // Draw the clip instance
-                        painter.rect_filled(
-                            clip_rect,
-                            3.0, // Rounded corners
-                            clip_color,
-                        );
+                        // Draw the clip instance background(s)
+                        // For looping clips, draw each iteration as a separate rounded rect
+                        let trim_end_for_bg = clip_instance.trim_end.unwrap_or(clip_duration);
+                        let content_window_for_bg = (trim_end_for_bg - clip_instance.trim_start).max(0.0);
+                        let is_looping_bg = instance_duration > content_window_for_bg + 0.001 && content_window_for_bg > 0.0;
+
+                        if is_looping_bg {
+                            let num_bg_iters = ((instance_duration / content_window_for_bg).ceil() as usize).max(1);
+                            let faded_color = egui::Color32::from_rgba_unmultiplied(
+                                clip_color.r(), clip_color.g(), clip_color.b(),
+                                (clip_color.a() as f32 * 0.55) as u8,
+                            );
+                            for i in 0..num_bg_iters {
+                                let iter_time_start = instance_start + i as f64 * content_window_for_bg;
+                                let iter_time_end = (iter_time_start + content_window_for_bg).min(instance_start + instance_duration);
+                                let ix0 = (rect.min.x + ((iter_time_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32).max(clip_rect.min.x);
+                                let ix1 = (rect.min.x + ((iter_time_end - self.viewport_start_time) * self.pixels_per_second as f64) as f32).min(clip_rect.max.x);
+                                if ix1 > ix0 {
+                                    let iter_rect = egui::Rect::from_min_max(
+                                        egui::pos2(ix0, clip_rect.min.y),
+                                        egui::pos2(ix1, clip_rect.max.y),
+                                    );
+                                    let color = if i == 0 { clip_color } else { faded_color };
+                                    painter.rect_filled(iter_rect, 3.0, color);
+                                }
+                            }
+                        } else {
+                            painter.rect_filled(
+                                clip_rect,
+                                3.0,
+                                clip_color,
+                            );
+                        }
 
                         // AUDIO VISUALIZATION: Draw piano roll or waveform overlay
                         if let lightningbeam_core::layer::AnyLayer::Audio(_) = layer {
                             if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
                                 match &clip.clip_type {
-                                    // MIDI: Draw piano roll
+                                    // MIDI: Draw piano roll (with loop iterations)
                                     lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } => {
                                         if let Some(events) = midi_event_cache.get(midi_clip_id) {
-                                            Self::render_midi_piano_roll(
-                                                painter,
-                                                clip_rect,
-                                                rect.min.x, // Pass timeline panel left edge for proper positioning
-                                                events,
-                                                clip_instance.trim_start,
-                                                instance_duration,
-                                                instance_start,
-                                                self.viewport_start_time,
-                                                self.pixels_per_second,
-                                                theme,
-                                                ui.ctx(),
-                                            );
+                                            // Calculate content window for loop detection
+                                            let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                            let content_window = (preview_trim_end - preview_trim_start).max(0.0);
+                                            let is_looping = instance_duration > content_window + 0.001;
+                                            let num_iterations = if is_looping && content_window > 0.0 {
+                                                ((instance_duration / content_window).ceil() as usize).max(1)
+                                            } else {
+                                                1
+                                            };
+
+                                            for iteration in 0..num_iterations {
+                                                let iter_offset = iteration as f64 * content_window;
+                                                let iter_start = instance_start + iter_offset;
+                                                let iter_end = (iter_start + content_window).min(instance_start + instance_duration);
+                                                let iter_duration = iter_end - iter_start;
+
+                                                if iter_duration <= 0.0 {
+                                                    break;
+                                                }
+
+                                                Self::render_midi_piano_roll(
+                                                    painter,
+                                                    clip_rect,
+                                                    rect.min.x,
+                                                    events,
+                                                    clip_instance.trim_start,
+                                                    iter_duration,
+                                                    iter_start,
+                                                    self.viewport_start_time,
+                                                    self.pixels_per_second,
+                                                    theme,
+                                                    ui.ctx(),
+                                                    iteration > 0, // fade subsequent iterations
+                                                );
+                                            }
                                         }
                                     }
                                     // Sampled Audio: Draw waveform via GPU
@@ -1250,45 +1333,71 @@ impl TimelinePane {
                                                 bright_color.a() as f32 / 255.0,
                                             ];
 
-                                            let clip_screen_start = rect.min.x + ((instance_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32;
-                                            let clip_screen_end = clip_screen_start + (preview_clip_duration * self.pixels_per_second as f64) as f32;
-                                            let waveform_rect = egui::Rect::from_min_max(
-                                                egui::pos2(clip_screen_start.max(clip_rect.min.x), clip_rect.min.y),
-                                                egui::pos2(clip_screen_end.min(clip_rect.max.x), clip_rect.max.y),
-                                            );
+                                            // Calculate content window for loop detection
+                                            // Use trimmed content window (preview_trim_start accounts for TrimLeft drag)
+                                            let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                            let content_window = (preview_trim_end - preview_trim_start).max(0.0);
+                                            let is_looping = instance_duration > content_window + 0.001;
+                                            let num_iterations = if is_looping && content_window > 0.0 {
+                                                ((instance_duration / content_window).ceil() as usize).max(1)
+                                            } else {
+                                                1
+                                            };
 
-                                            if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
-                                                // Use clip instance UUID's lower 64 bits as stable instance ID
-                                                let instance_id = clip_instance.id.as_u128() as u64;
-                                                let callback = crate::waveform_gpu::WaveformCallback {
-                                                    pool_index: *audio_pool_index,
-                                                    segment_index: 0,
-                                                    params: crate::waveform_gpu::WaveformParams {
-                                                        clip_rect: [waveform_rect.min.x, waveform_rect.min.y, waveform_rect.max.x, waveform_rect.max.y],
-                                                        viewport_start_time: self.viewport_start_time as f32,
-                                                        pixels_per_second: self.pixels_per_second as f32,
-                                                        audio_duration: audio_file_duration as f32,
-                                                        sample_rate: *sr as f32,
-                                                        clip_start_time: clip_screen_start,
-                                                        trim_start: preview_trim_start as f32,
-                                                        tex_width: crate::waveform_gpu::tex_width() as f32,
-                                                        total_frames: total_frames as f32,
-                                                        segment_start_frame: 0.0,
-                                                        display_mode: if waveform_stereo { 1.0 } else { 0.0 },
-                                                        _pad1: [0.0, 0.0],
-                                                        tint_color: tint,
-                                                        screen_size: [screen_size.x, screen_size.y],
-                                                        _pad: [0.0, 0.0],
-                                                    },
-                                                    target_format,
-                                                    pending_upload,
-                                                    instance_id,
-                                                };
+                                            for iteration in 0..num_iterations {
+                                                let iter_offset = iteration as f64 * content_window;
+                                                let iter_start = instance_start + iter_offset;
+                                                let iter_end = (iter_start + content_window).min(instance_start + instance_duration);
+                                                let iter_duration = iter_end - iter_start;
 
-                                                ui.painter().add(egui_wgpu::Callback::new_paint_callback(
-                                                    waveform_rect,
-                                                    callback,
-                                                ));
+                                                if iter_duration <= 0.0 {
+                                                    break;
+                                                }
+
+                                                let iter_screen_start = rect.min.x + ((iter_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32;
+                                                let iter_screen_end = iter_screen_start + (iter_duration * self.pixels_per_second as f64) as f32;
+                                                let waveform_rect = egui::Rect::from_min_max(
+                                                    egui::pos2(iter_screen_start.max(clip_rect.min.x), clip_rect.min.y),
+                                                    egui::pos2(iter_screen_end.min(clip_rect.max.x), clip_rect.max.y),
+                                                );
+
+                                                if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
+                                                    let instance_id = clip_instance.id.as_u128() as u64 + iteration as u64;
+                                                    let callback = crate::waveform_gpu::WaveformCallback {
+                                                        pool_index: *audio_pool_index,
+                                                        segment_index: 0,
+                                                        params: crate::waveform_gpu::WaveformParams {
+                                                            clip_rect: [waveform_rect.min.x, waveform_rect.min.y, waveform_rect.max.x, waveform_rect.max.y],
+                                                            viewport_start_time: self.viewport_start_time as f32,
+                                                            pixels_per_second: self.pixels_per_second as f32,
+                                                            audio_duration: audio_file_duration as f32,
+                                                            sample_rate: *sr as f32,
+                                                            clip_start_time: iter_screen_start,
+                                                            trim_start: preview_trim_start as f32,
+                                                            tex_width: crate::waveform_gpu::tex_width() as f32,
+                                                            total_frames: total_frames as f32,
+                                                            segment_start_frame: 0.0,
+                                                            display_mode: if waveform_stereo { 1.0 } else { 0.0 },
+                                                            _pad1: [0.0, 0.0],
+                                                            tint_color: if iteration > 0 {
+                                                                [tint[0], tint[1], tint[2], tint[3] * 0.5]
+                                                            } else {
+                                                                tint
+                                                            },
+                                                            screen_size: [screen_size.x, screen_size.y],
+                                                            _pad: [0.0, 0.0],
+                                                        },
+                                                        target_format,
+                                                        pending_upload: if iteration == 0 { pending_upload.clone() } else { None },
+                                                        instance_id,
+                                                    };
+
+                                                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                                                        waveform_rect,
+                                                        callback,
+                                                    ));
+                                                }
+
                                             }
                                         }
                                     }
@@ -1370,28 +1479,38 @@ impl TimelinePane {
                             video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, instance_start));
                         }
 
-                        // Draw border on all clips for visual separation
-                        if selection.contains_clip_instance(&clip_instance.id) {
-                            // Selected: bright colored border
-                            painter.rect_stroke(
-                                clip_rect,
-                                3.0,
-                                egui::Stroke::new(3.0, bright_color),
-                                egui::StrokeKind::Middle,
-                            );
-                        } else {
-                            // Unselected: thin dark border using darker version of clip color
-                            let dark_border = egui::Color32::from_rgb(
-                                clip_color.r() / 2,
-                                clip_color.g() / 2,
-                                clip_color.b() / 2,
-                            );
-                            painter.rect_stroke(
-                                clip_rect,
-                                3.0,
-                                egui::Stroke::new(1.0, dark_border),
-                                egui::StrokeKind::Middle,
-                            );
+                        // Draw border per segment (per loop iteration for looping clips)
+                        {
+                            let is_selected = selection.contains_clip_instance(&clip_instance.id);
+                            let border_stroke = if is_selected {
+                                egui::Stroke::new(3.0, bright_color)
+                            } else {
+                                let dark_border = egui::Color32::from_rgb(
+                                    clip_color.r() / 2,
+                                    clip_color.g() / 2,
+                                    clip_color.b() / 2,
+                                );
+                                egui::Stroke::new(1.0, dark_border)
+                            };
+
+                            if is_looping_bg {
+                                let num_border_iters = ((instance_duration / content_window_for_bg).ceil() as usize).max(1);
+                                for i in 0..num_border_iters {
+                                    let iter_time_start = instance_start + i as f64 * content_window_for_bg;
+                                    let iter_time_end = (iter_time_start + content_window_for_bg).min(instance_start + instance_duration);
+                                    let ix0 = (rect.min.x + ((iter_time_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32).max(clip_rect.min.x);
+                                    let ix1 = (rect.min.x + ((iter_time_end - self.viewport_start_time) * self.pixels_per_second as f64) as f32).min(clip_rect.max.x);
+                                    if ix1 > ix0 {
+                                        let iter_rect = egui::Rect::from_min_max(
+                                            egui::pos2(ix0, clip_rect.min.y),
+                                            egui::pos2(ix1, clip_rect.max.y),
+                                        );
+                                        painter.rect_stroke(iter_rect, 3.0, border_stroke, egui::StrokeKind::Middle);
+                                    }
+                                }
+                            } else {
+                                painter.rect_stroke(clip_rect, 3.0, border_stroke, egui::StrokeKind::Middle);
+                            }
                         }
 
                         // Draw clip name if there's space
@@ -1826,6 +1945,69 @@ impl TimelinePane {
                                 pending_actions.push(action);
                             }
                         }
+                        ClipDragType::LoopExtend => {
+                            let mut layer_loops: HashMap<uuid::Uuid, Vec<(uuid::Uuid, Option<f64>, Option<f64>)>> = HashMap::new();
+
+                            for layer in &document.root.children {
+                                let layer_id = layer.id();
+                                let clip_instances = match layer {
+                                    lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+                                };
+
+                                for clip_instance in clip_instances {
+                                    if selection.contains_clip_instance(&clip_instance.id) {
+                                        let clip_duration = match layer {
+                                            lightningbeam_core::layer::AnyLayer::Audio(_) => {
+                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration)
+                                            }
+                                            _ => continue,
+                                        };
+
+                                        if let Some(clip_duration) = clip_duration {
+                                            // Use trimmed content window, NOT effective_duration (which includes loop extension)
+                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                            let content_window = (trim_end - clip_instance.trim_start).max(0.0);
+                                            let desired_total = content_window + self.drag_offset;
+
+                                            // Check for adjacent clips
+                                            let max_extend = document.find_max_trim_extend_right(
+                                                &layer_id,
+                                                &clip_instance.id,
+                                                clip_instance.timeline_start,
+                                                content_window,
+                                            );
+                                            let extend_amount = (desired_total - content_window).min(max_extend).max(0.0);
+                                            let new_total = content_window + extend_amount;
+
+                                            let old_timeline_duration = clip_instance.timeline_duration;
+                                            // Only set timeline_duration if extending beyond content
+                                            let new_timeline_duration = if new_total > content_window + 0.001 {
+                                                Some(new_total)
+                                            } else {
+                                                None
+                                            };
+
+                                            if old_timeline_duration != new_timeline_duration {
+                                                layer_loops
+                                                    .entry(layer_id)
+                                                    .or_insert_with(Vec::new)
+                                                    .push((clip_instance.id, old_timeline_duration, new_timeline_duration));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !layer_loops.is_empty() {
+                                let action = Box::new(
+                                    lightningbeam_core::actions::LoopClipInstancesAction::new(layer_loops),
+                                );
+                                pending_actions.push(action);
+                            }
+                        }
                     }
 
                     // Reset drag state
@@ -1973,10 +2155,16 @@ impl TimelinePane {
 
         // Update cursor based on hover position (only if not scrubbing or panning)
         if !self.is_scrubbing && !self.is_panning {
-            // If dragging a clip with trim, keep the resize cursor
+            // If dragging a clip with trim/loop, keep the appropriate cursor
             if let Some(drag_type) = self.clip_drag_state {
-                if drag_type != ClipDragType::Move {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                match drag_type {
+                    ClipDragType::TrimLeft | ClipDragType::TrimRight => {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    ClipDragType::LoopExtend => {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+                    }
+                    ClipDragType::Move => {}
                 }
             } else if let Some(hover_pos) = response.hover_pos() {
                 // Not dragging - detect hover for cursor feedback
@@ -1986,9 +2174,14 @@ impl TimelinePane {
                     content_rect,
                     header_rect,
                 ) {
-                    // Set cursor for trim operations
-                    if drag_type != ClipDragType::Move {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    match drag_type {
+                        ClipDragType::TrimLeft | ClipDragType::TrimRight => {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                        }
+                        ClipDragType::LoopExtend => {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+                        }
+                        ClipDragType::Move => {}
                     }
                 }
             }

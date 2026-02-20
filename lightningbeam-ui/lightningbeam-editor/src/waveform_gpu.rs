@@ -103,6 +103,7 @@ pub struct WaveformCallback {
 
 
 /// Raw audio data waiting to be uploaded to GPU
+#[derive(Clone)]
 pub struct PendingUpload {
     pub samples: std::sync::Arc<Vec<f32>>,
     pub sample_rate: u32,
