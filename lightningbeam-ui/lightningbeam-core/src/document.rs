@@ -604,15 +604,13 @@ impl Document {
                 continue;
             }
 
-            // Calculate instance end time
+            // Calculate instance extent (accounting for loop_before)
             let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) else {
                 continue;
             };
 
-            let instance_start = instance.timeline_start;
-            let trim_start = instance.trim_start;
-            let trim_end = instance.trim_end.unwrap_or(clip_duration);
-            let instance_end = instance_start + (trim_end - trim_start);
+            let instance_start = instance.effective_start();
+            let instance_end = instance.timeline_start + instance.effective_duration(clip_duration);
 
             // Check overlap: start_a < end_b AND start_b < end_a
             if start_time < instance_end && instance_start < end_time {
@@ -667,10 +665,8 @@ impl Document {
             }
 
             if let Some(clip_dur) = self.get_clip_duration(&instance.clip_id) {
-                let inst_start = instance.timeline_start;
-                let trim_start = instance.trim_start;
-                let trim_end = instance.trim_end.unwrap_or(clip_dur);
-                let inst_end = inst_start + (trim_end - trim_start);
+                let inst_start = instance.effective_start();
+                let inst_end = instance.timeline_start + instance.effective_duration(clip_dur);
                 occupied_ranges.push((inst_start, inst_end, instance.id));
             }
         }
@@ -762,8 +758,9 @@ impl Document {
                 continue;
             }
             if let Some(dur) = self.get_clip_duration(&inst.clip_id) {
-                let end = inst.timeline_start + (inst.trim_end.unwrap_or(dur) - inst.trim_start);
-                non_group.push((inst.timeline_start, end));
+                let start = inst.effective_start();
+                let end = inst.timeline_start + inst.effective_duration(dur);
+                non_group.push((start, end));
             }
         }
 
@@ -828,10 +825,9 @@ impl Document {
                 continue;
             }
 
-            // Calculate other clip's end time
+            // Calculate other clip's extent (accounting for loop_before)
             if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
-                let trim_end = other.trim_end.unwrap_or(clip_duration);
-                let other_end = other.timeline_start + (trim_end - other.trim_start);
+                let other_end = other.timeline_start + other.effective_duration(clip_duration);
 
                 // If this clip is to the left and closer than current nearest
                 if other_end <= current_timeline_start && other_end > nearest_end {
@@ -878,9 +874,10 @@ impl Document {
                 continue;
             }
 
-            // If this clip is to the right and closer than current nearest
-            if other.timeline_start >= current_end && other.timeline_start < nearest_start {
-                nearest_start = other.timeline_start;
+            // Use effective_start to account for loop_before on the other clip
+            let other_start = other.effective_start();
+            if other_start >= current_end && other_start < nearest_start {
+                nearest_start = other_start;
             }
         }
 
@@ -889,6 +886,48 @@ impl Document {
         } else {
             (nearest_start - current_end).max(0.0) // Gap between our end and next clip's start
         }
+    }
+    /// Find the maximum amount we can extend loop_before to the left without overlapping.
+    ///
+    /// Returns the max additional loop_before distance (from the current effective start).
+    pub fn find_max_loop_extend_left(
+        &self,
+        layer_id: &Uuid,
+        instance_id: &Uuid,
+        current_effective_start: f64,
+    ) -> f64 {
+        let Some(layer) = self.get_layer(layer_id) else {
+            return current_effective_start;
+        };
+
+        if matches!(layer, AnyLayer::Vector(_)) {
+            return current_effective_start;
+        }
+
+        let instances: &[ClipInstance] = match layer {
+            AnyLayer::Audio(audio) => &audio.clip_instances,
+            AnyLayer::Video(video) => &video.clip_instances,
+            AnyLayer::Effect(effect) => &effect.clip_instances,
+            AnyLayer::Vector(vector) => &vector.clip_instances,
+        };
+
+        let mut nearest_end = 0.0;
+
+        for other in instances {
+            if &other.id == instance_id {
+                continue;
+            }
+
+            if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
+                let other_end = other.timeline_start + other.effective_duration(clip_duration);
+
+                if other_end <= current_effective_start && other_end > nearest_end {
+                    nearest_end = other_end;
+                }
+            }
+        }
+
+        current_effective_start - nearest_end
     }
 }
 

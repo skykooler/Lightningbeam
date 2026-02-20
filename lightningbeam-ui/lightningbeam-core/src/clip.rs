@@ -573,6 +573,12 @@ pub struct ClipInstance {
     /// Compatible with daw-backend's Clip.gain
     /// Default: 1.0
     pub gain: f32,
+
+    /// How far (in seconds) the looped content extends before timeline_start.
+    /// When set, loop iterations are drawn/played before the content start.
+    /// Default: None (no pre-loop)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_before: Option<f64>,
 }
 
 impl ClipInstance {
@@ -590,6 +596,7 @@ impl ClipInstance {
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
+            loop_before: None,
         }
     }
 
@@ -607,6 +614,7 @@ impl ClipInstance {
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
+            loop_before: None,
         }
     }
 
@@ -681,6 +689,17 @@ impl ClipInstance {
         // Otherwise, return the trimmed content duration
         let end = self.trim_end.unwrap_or(clip_duration);
         (end - self.trim_start).max(0.0)
+    }
+
+    /// Get the effective start position on the timeline, accounting for loop_before.
+    /// This is the left edge of the clip's visual extent.
+    pub fn effective_start(&self) -> f64 {
+        self.timeline_start - self.loop_before.unwrap_or(0.0)
+    }
+
+    /// Get the total visual duration including both loop_before and effective_duration.
+    pub fn total_duration(&self, clip_duration: f64) -> f64 {
+        self.loop_before.unwrap_or(0.0) + self.effective_duration(clip_duration)
     }
 
     /// Remap timeline time to clip content time

@@ -38,6 +38,7 @@ mod notifications;
 mod effect_thumbnails;
 use effect_thumbnails::EffectThumbnailGenerator;
 
+mod custom_cursor;
 mod debug_overlay;
 
 mod sample_import;
@@ -732,6 +733,8 @@ struct EditorApp {
     /// GPU-rendered effect thumbnail generator
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 
+    /// Custom cursor cache for SVG cursors
+    cursor_cache: custom_cursor::CursorCache,
     /// Debug overlay (F3) state
     debug_overlay_visible: bool,
     debug_stats_collector: debug_overlay::DebugStatsCollector,
@@ -926,6 +929,7 @@ impl EditorApp {
             effect_thumbnail_generator: None, // Initialized when GPU available
 
             // Debug overlay (F3)
+            cursor_cache: custom_cursor::CursorCache::new(),
             debug_overlay_visible: false,
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
@@ -4695,6 +4699,9 @@ impl eframe::App for EditorApp {
             );
             debug_overlay::render_debug_overlay(ctx, &stats);
         }
+
+        // Render custom cursor overlay (on top of everything including debug overlay)
+        custom_cursor::render_overlay(ctx, &mut self.cursor_cache);
 
         let frame_ms = _frame_start.elapsed().as_secs_f64() * 1000.0;
         if frame_ms > 50.0 {

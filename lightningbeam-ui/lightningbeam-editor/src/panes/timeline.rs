@@ -25,7 +25,8 @@ enum ClipDragType {
     Move,
     TrimLeft,
     TrimRight,
-    LoopExtend,
+    LoopExtendRight,
+    LoopExtendLeft,
 }
 
 pub struct TimelinePane {
@@ -194,7 +195,7 @@ impl TimelinePane {
             match layer_type {
                 AudioLayerType::Midi => {
                     // Create backend MIDI clip and start recording
-                    let clip_id = controller.create_midi_clip(track_id, start_time, 4.0);
+                    let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
                     controller.start_midi_recording(track_id, clip_id, start_time);
                     shared.recording_clips.insert(active_layer_id, clip_id);
                     println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
@@ -204,7 +205,7 @@ impl TimelinePane {
                     drop(controller);
 
                     // Create document clip + clip instance immediately (clip_id is known synchronously)
-                    let doc_clip = AudioClip::new_midi("Recording...", clip_id, 4.0);
+                    let doc_clip = AudioClip::new_midi("Recording...", clip_id, 0.0);
                     let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
 
                     let clip_instance = ClipInstance::new(doc_clip_id)
@@ -339,8 +340,8 @@ impl TimelinePane {
                 }
             }?;
 
-            let instance_duration = clip_instance.effective_duration(clip_duration);
-            let instance_start = clip_instance.timeline_start;
+            let instance_start = clip_instance.effective_start();
+            let instance_duration = clip_instance.total_duration(clip_duration);
             let instance_end = instance_start + instance_duration;
 
             if hover_time >= instance_start && hover_time <= instance_end {
@@ -353,12 +354,20 @@ impl TimelinePane {
                 let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
                 let mouse_in_top_corner = pointer_pos.y < layer_top + LOOP_CORNER_SIZE;
 
+                let is_looping = clip_instance.timeline_duration.is_some() || clip_instance.loop_before.is_some();
                 let drag_type = if (mouse_x - start_x).abs() <= EDGE_DETECTION_PIXELS {
-                    ClipDragType::TrimLeft
+                    // Left edge: loop extend left for audio clips that are looping or top-left corner
+                    let mouse_in_top_left_corner = pointer_pos.y < layer_top + LOOP_CORNER_SIZE;
+                    if is_audio_layer && (is_looping || mouse_in_top_left_corner) {
+                        ClipDragType::LoopExtendLeft
+                    } else {
+                        ClipDragType::TrimLeft
+                    }
                 } else if (end_x - mouse_x).abs() <= EDGE_DETECTION_PIXELS {
-                    // Top-right corner of audio clips = loop extend
-                    if is_audio_layer && mouse_in_top_corner {
-                        ClipDragType::LoopExtend
+                    // If already looping, right edge is always loop extend
+                    // Otherwise, top-right corner of audio clips = loop extend
+                    if is_audio_layer && (is_looping || mouse_in_top_corner) {
+                        ClipDragType::LoopExtendRight
                     } else {
                         ClipDragType::TrimRight
                     }
@@ -1026,7 +1035,7 @@ impl TimelinePane {
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
                     .filter_map(|ci| {
                         let dur = document.get_clip_duration(&ci.clip_id)?;
-                        Some((ci.id, ci.timeline_start, ci.effective_duration(dur)))
+                        Some((ci.id, ci.effective_start(), ci.total_duration(dur)))
                     })
                     .collect();
                 if !group.is_empty() {
@@ -1060,13 +1069,13 @@ impl TimelinePane {
 
                 if let Some(clip_duration) = clip_duration {
                     // Calculate effective duration accounting for trimming
-                    let mut instance_duration = clip_instance.effective_duration(clip_duration);
+                    let mut instance_duration = clip_instance.total_duration(clip_duration);
 
                     // Instance positioned on the layer's timeline using timeline_start
                     // The layer itself has start_time, so the absolute timeline position is:
                     // layer.start_time + instance.timeline_start
                     let _layer_data = layer.layer();
-                    let mut instance_start = clip_instance.timeline_start;
+                    let mut instance_start = clip_instance.effective_start();
 
                     // Apply drag offset preview for selected clips with snapping
                     let is_selected = selection.contains_clip_instance(&clip_instance.id);
@@ -1085,6 +1094,10 @@ impl TimelinePane {
                         false
                     };
 
+                    // Content origin: where the first "real" content iteration starts
+                    // Loop iterations tile outward from this point
+                    let mut content_origin = clip_instance.timeline_start;
+
                     // Track preview trim values for waveform rendering
                     let mut preview_trim_start = clip_instance.trim_start;
                     let mut preview_clip_duration = clip_duration;
@@ -1094,7 +1107,8 @@ impl TimelinePane {
                             match drag_type {
                                 ClipDragType::Move => {
                                     if let Some(offset) = group_move_offset {
-                                        instance_start = (clip_instance.timeline_start + offset).max(0.0);
+                                        instance_start = (clip_instance.effective_start() + offset).max(0.0);
+                                        content_origin = instance_start + clip_instance.loop_before.unwrap_or(0.0);
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
@@ -1108,7 +1122,7 @@ impl TimelinePane {
                                         let max_extend = document.find_max_trim_extend_left(
                                             &layer.id(),
                                             &clip_instance.id,
-                                            clip_instance.timeline_start,
+                                            clip_instance.effective_start(),
                                         );
 
                                         let desired_extend = clip_instance.trim_start - desired_trim_start;
@@ -1124,6 +1138,7 @@ impl TimelinePane {
                                     // Move start and reduce duration by actual clamped offset
                                     instance_start = (clip_instance.timeline_start + actual_offset)
                                         .max(0.0);
+
                                     instance_duration = (clip_duration - new_trim_start).max(0.0);
 
                                     // Adjust for existing trim_end
@@ -1166,22 +1181,62 @@ impl TimelinePane {
                                     // (the waveform system uses clip_duration to determine visible range)
                                     preview_clip_duration = new_trim_end - preview_trim_start;
                                 }
-                                ClipDragType::LoopExtend => {
-                                    // Loop extend: extend clip beyond content window
-                                    // Use trimmed content window, NOT effective_duration (which includes loop extension)
+                                ClipDragType::LoopExtendRight => {
+                                    // Loop extend right: extend clip beyond content window
                                     let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                     let content_window = (trim_end - clip_instance.trim_start).max(0.0);
-                                    let desired_total = (content_window + self.drag_offset).max(content_window * 0.25);
+                                    let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
+                                    let desired_right = (current_right + self.drag_offset).max(content_window);
 
-                                    // Check for adjacent clips
-                                    let max_extend = document.find_max_trim_extend_right(
-                                        &layer.id(),
-                                        &clip_instance.id,
-                                        clip_instance.timeline_start,
-                                        content_window,
-                                    );
-                                    let extend_amount = (desired_total - content_window).min(max_extend).max(0.0);
-                                    instance_duration = content_window + extend_amount;
+                                    let new_right = if desired_right > current_right {
+                                        let max_extend = document.find_max_trim_extend_right(
+                                            &layer.id(),
+                                            &clip_instance.id,
+                                            clip_instance.timeline_start,
+                                            current_right,
+                                        );
+                                        let extend_amount = (desired_right - current_right).min(max_extend);
+                                        current_right + extend_amount
+                                    } else {
+                                        desired_right
+                                    };
+
+                                    // Total duration = loop_before + right duration
+                                    let loop_before = clip_instance.loop_before.unwrap_or(0.0);
+                                    instance_duration = loop_before + new_right;
+                                }
+                                ClipDragType::LoopExtendLeft => {
+                                    // Loop extend left: extend loop_before (pre-loop region)
+                                    // Snap to multiples of content_window so iterations align with backend
+                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                    let content_window = (trim_end - clip_instance.trim_start).max(0.001);
+                                    let current_loop_before = clip_instance.loop_before.unwrap_or(0.0);
+                                    // Invert: dragging left (negative offset) = extend
+                                    let desired_loop_before = (current_loop_before - self.drag_offset).max(0.0);
+                                    // Snap to whole iterations
+                                    let desired_iters = (desired_loop_before / content_window).round();
+                                    let snapped_loop_before = desired_iters * content_window;
+
+                                    let new_loop_before = if snapped_loop_before > current_loop_before {
+                                        // Extending left - check for adjacent clips
+                                        let max_extend = document.find_max_loop_extend_left(
+                                            &layer.id(),
+                                            &clip_instance.id,
+                                            clip_instance.effective_start(),
+                                        );
+                                        let extend_amount = (snapped_loop_before - current_loop_before).min(max_extend);
+                                        // Re-snap after clamping
+                                        let clamped = current_loop_before + extend_amount;
+                                        (clamped / content_window).floor() * content_window
+                                    } else {
+                                        snapped_loop_before
+                                    };
+
+                                    // Recompute instance_start and instance_duration
+                                    let right_duration = clip_instance.effective_duration(clip_duration);
+                                    instance_start = clip_instance.timeline_start - new_loop_before;
+                                    instance_duration = new_loop_before + right_duration;
+                                    content_origin = clip_instance.timeline_start;
                                 }
                             }
                         }
@@ -1237,14 +1292,33 @@ impl TimelinePane {
                         let is_looping_bg = instance_duration > content_window_for_bg + 0.001 && content_window_for_bg > 0.0;
 
                         if is_looping_bg {
-                            let num_bg_iters = ((instance_duration / content_window_for_bg).ceil() as usize).max(1);
+                            // Compute iterations aligned to content_origin
+                            let loop_before_val = content_origin - instance_start;
+                            let pre_iters = if loop_before_val > 0.001 {
+                                (loop_before_val / content_window_for_bg).ceil() as usize
+                            } else {
+                                0
+                            };
+                            let right_duration = instance_duration - loop_before_val;
+                            let post_iters = if right_duration > 0.001 {
+                                (right_duration / content_window_for_bg).ceil() as usize
+                            } else {
+                                1
+                            };
+                            let total_iters = pre_iters + post_iters;
+
                             let faded_color = egui::Color32::from_rgba_unmultiplied(
                                 clip_color.r(), clip_color.g(), clip_color.b(),
                                 (clip_color.a() as f32 * 0.55) as u8,
                             );
-                            for i in 0..num_bg_iters {
-                                let iter_time_start = instance_start + i as f64 * content_window_for_bg;
-                                let iter_time_end = (iter_time_start + content_window_for_bg).min(instance_start + instance_duration);
+                            for i in 0..total_iters {
+                                let signed_i = i as i64 - pre_iters as i64;
+                                let iter_time_start_raw = content_origin + signed_i as f64 * content_window_for_bg;
+                                let iter_time_end_raw = iter_time_start_raw + content_window_for_bg;
+                                let iter_time_start = iter_time_start_raw.max(instance_start);
+                                let iter_time_end = iter_time_end_raw.min(instance_start + instance_duration);
+                                if iter_time_end <= iter_time_start { continue; }
+
                                 let ix0 = (rect.min.x + ((iter_time_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32).max(clip_rect.min.x);
                                 let ix1 = (rect.min.x + ((iter_time_end - self.viewport_start_time) * self.pixels_per_second as f64) as f32).min(clip_rect.max.x);
                                 if ix1 > ix0 {
@@ -1252,7 +1326,7 @@ impl TimelinePane {
                                         egui::pos2(ix0, clip_rect.min.y),
                                         egui::pos2(ix1, clip_rect.max.y),
                                     );
-                                    let color = if i == 0 { clip_color } else { faded_color };
+                                    let color = if signed_i == 0 { clip_color } else { faded_color };
                                     painter.rect_filled(iter_rect, 3.0, color);
                                 }
                             }
@@ -1275,35 +1349,52 @@ impl TimelinePane {
                                             let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                             let content_window = (preview_trim_end - preview_trim_start).max(0.0);
                                             let is_looping = instance_duration > content_window + 0.001;
-                                            let num_iterations = if is_looping && content_window > 0.0 {
-                                                ((instance_duration / content_window).ceil() as usize).max(1)
-                                            } else {
-                                                1
-                                            };
 
-                                            for iteration in 0..num_iterations {
-                                                let iter_offset = iteration as f64 * content_window;
-                                                let iter_start = instance_start + iter_offset;
-                                                let iter_end = (iter_start + content_window).min(instance_start + instance_duration);
-                                                let iter_duration = iter_end - iter_start;
+                                            if is_looping && content_window > 0.0 {
+                                                // Compute iterations aligned to content_origin
+                                                let lb_val = content_origin - instance_start;
+                                                let pre = if lb_val > 0.001 { (lb_val / content_window).ceil() as usize } else { 0 };
+                                                let right_dur = instance_duration - lb_val;
+                                                let post = if right_dur > 0.001 { (right_dur / content_window).ceil() as usize } else { 1 };
 
-                                                if iter_duration <= 0.0 {
-                                                    break;
+                                                for i in 0..(pre + post) {
+                                                    let si = i as i64 - pre as i64;
+                                                    let iter_start_raw = content_origin + si as f64 * content_window;
+                                                    let iter_end_raw = iter_start_raw + content_window;
+                                                    let iter_start = iter_start_raw.max(instance_start);
+                                                    let iter_end = iter_end_raw.min(instance_start + instance_duration);
+                                                    let iter_duration = iter_end - iter_start;
+                                                    if iter_duration <= 0.0 { continue; }
+
+                                                    Self::render_midi_piano_roll(
+                                                        painter,
+                                                        clip_rect,
+                                                        rect.min.x,
+                                                        events,
+                                                        clip_instance.trim_start,
+                                                        iter_duration,
+                                                        iter_start,
+                                                        self.viewport_start_time,
+                                                        self.pixels_per_second,
+                                                        theme,
+                                                        ui.ctx(),
+                                                        si != 0, // fade non-content iterations
+                                                    );
                                                 }
-
+                                            } else {
                                                 Self::render_midi_piano_roll(
                                                     painter,
                                                     clip_rect,
                                                     rect.min.x,
                                                     events,
                                                     clip_instance.trim_start,
-                                                    iter_duration,
-                                                    iter_start,
+                                                    instance_duration,
+                                                    instance_start,
                                                     self.viewport_start_time,
                                                     self.pixels_per_second,
                                                     theme,
                                                     ui.ctx(),
-                                                    iteration > 0, // fade subsequent iterations
+                                                    false,
                                                 );
                                             }
                                         }
@@ -1338,21 +1429,31 @@ impl TimelinePane {
                                             let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                             let content_window = (preview_trim_end - preview_trim_start).max(0.0);
                                             let is_looping = instance_duration > content_window + 0.001;
-                                            let num_iterations = if is_looping && content_window > 0.0 {
-                                                ((instance_duration / content_window).ceil() as usize).max(1)
+
+                                            // Compute iterations aligned to content_origin
+                                            let lb_val = content_origin - instance_start;
+                                            let pre_w = if is_looping && lb_val > 0.001 { (lb_val / content_window).ceil() as usize } else { 0 };
+                                            let right_dur_w = instance_duration - lb_val;
+                                            let post_w = if is_looping && content_window > 0.0 {
+                                                (right_dur_w / content_window).ceil() as usize
                                             } else {
                                                 1
                                             };
+                                            let total_w = pre_w + post_w;
 
-                                            for iteration in 0..num_iterations {
-                                                let iter_offset = iteration as f64 * content_window;
-                                                let iter_start = instance_start + iter_offset;
-                                                let iter_end = (iter_start + content_window).min(instance_start + instance_duration);
-                                                let iter_duration = iter_end - iter_start;
+                                            for wi in 0..total_w {
+                                                let si_w = wi as i64 - pre_w as i64;
+                                                let (iter_start, iter_duration) = if is_looping {
+                                                    let raw_start = content_origin + si_w as f64 * content_window;
+                                                    let raw_end = raw_start + content_window;
+                                                    let s = raw_start.max(instance_start);
+                                                    let e = raw_end.min(instance_start + instance_duration);
+                                                    (s, (e - s).max(0.0))
+                                                } else {
+                                                    (instance_start, instance_duration)
+                                                };
 
-                                                if iter_duration <= 0.0 {
-                                                    break;
-                                                }
+                                                if iter_duration <= 0.0 { continue; }
 
                                                 let iter_screen_start = rect.min.x + ((iter_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32;
                                                 let iter_screen_end = iter_screen_start + (iter_duration * self.pixels_per_second as f64) as f32;
@@ -1362,7 +1463,8 @@ impl TimelinePane {
                                                 );
 
                                                 if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
-                                                    let instance_id = clip_instance.id.as_u128() as u64 + iteration as u64;
+                                                    let instance_id = clip_instance.id.as_u128() as u64 + wi as u64;
+                                                    let is_loop_iter = si_w != 0;
                                                     let callback = crate::waveform_gpu::WaveformCallback {
                                                         pool_index: *audio_pool_index,
                                                         segment_index: 0,
@@ -1379,7 +1481,7 @@ impl TimelinePane {
                                                             segment_start_frame: 0.0,
                                                             display_mode: if waveform_stereo { 1.0 } else { 0.0 },
                                                             _pad1: [0.0, 0.0],
-                                                            tint_color: if iteration > 0 {
+                                                            tint_color: if is_loop_iter {
                                                                 [tint[0], tint[1], tint[2], tint[3] * 0.5]
                                                             } else {
                                                                 tint
@@ -1388,7 +1490,7 @@ impl TimelinePane {
                                                             _pad: [0.0, 0.0],
                                                         },
                                                         target_format,
-                                                        pending_upload: if iteration == 0 { pending_upload.clone() } else { None },
+                                                        pending_upload: if wi == 0 { pending_upload.clone() } else { None },
                                                         instance_id,
                                                     };
 
@@ -1494,10 +1596,18 @@ impl TimelinePane {
                             };
 
                             if is_looping_bg {
-                                let num_border_iters = ((instance_duration / content_window_for_bg).ceil() as usize).max(1);
-                                for i in 0..num_border_iters {
-                                    let iter_time_start = instance_start + i as f64 * content_window_for_bg;
-                                    let iter_time_end = (iter_time_start + content_window_for_bg).min(instance_start + instance_duration);
+                                // Aligned to content_origin (same as bg rendering)
+                                let lb_border = content_origin - instance_start;
+                                let pre_b = if lb_border > 0.001 { (lb_border / content_window_for_bg).ceil() as usize } else { 0 };
+                                let right_b = instance_duration - lb_border;
+                                let post_b = if right_b > 0.001 { (right_b / content_window_for_bg).ceil() as usize } else { 1 };
+                                for i in 0..(pre_b + post_b) {
+                                    let si_b = i as i64 - pre_b as i64;
+                                    let iter_time_start_raw = content_origin + si_b as f64 * content_window_for_bg;
+                                    let iter_time_end_raw = iter_time_start_raw + content_window_for_bg;
+                                    let iter_time_start = iter_time_start_raw.max(instance_start);
+                                    let iter_time_end = iter_time_end_raw.min(instance_start + instance_duration);
+                                    if iter_time_end <= iter_time_start { continue; }
                                     let ix0 = (rect.min.x + ((iter_time_start - self.viewport_start_time) * self.pixels_per_second as f64) as f32).max(clip_rect.min.x);
                                     let ix1 = (rect.min.x + ((iter_time_end - self.viewport_start_time) * self.pixels_per_second as f64) as f32).min(clip_rect.max.x);
                                     if ix1 > ix0 {
@@ -1637,8 +1747,8 @@ impl TimelinePane {
                                 };
 
                                 if let Some(clip_duration) = clip_duration {
-                                    let instance_duration = clip_instance.effective_duration(clip_duration);
-                                    let instance_start = clip_instance.timeline_start;
+                                    let instance_duration = clip_instance.total_duration(clip_duration);
+                                    let instance_start = clip_instance.effective_start();
                                     let instance_end = instance_start + instance_duration;
 
                                     // Check if click is within this clip instance's time range
@@ -1945,8 +2055,8 @@ impl TimelinePane {
                                 pending_actions.push(action);
                             }
                         }
-                        ClipDragType::LoopExtend => {
-                            let mut layer_loops: HashMap<uuid::Uuid, Vec<(uuid::Uuid, Option<f64>, Option<f64>)>> = HashMap::new();
+                        ClipDragType::LoopExtendRight => {
+                            let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
                             for layer in &document.root.children {
                                 let layer_id = layer.id();
@@ -1967,25 +2077,27 @@ impl TimelinePane {
                                         };
 
                                         if let Some(clip_duration) = clip_duration {
-                                            // Use trimmed content window, NOT effective_duration (which includes loop extension)
                                             let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                             let content_window = (trim_end - clip_instance.trim_start).max(0.0);
-                                            let desired_total = content_window + self.drag_offset;
+                                            let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
+                                            let desired_right = current_right + self.drag_offset;
 
-                                            // Check for adjacent clips
-                                            let max_extend = document.find_max_trim_extend_right(
-                                                &layer_id,
-                                                &clip_instance.id,
-                                                clip_instance.timeline_start,
-                                                content_window,
-                                            );
-                                            let extend_amount = (desired_total - content_window).min(max_extend).max(0.0);
-                                            let new_total = content_window + extend_amount;
+                                            let new_right = if desired_right > current_right {
+                                                let max_extend = document.find_max_trim_extend_right(
+                                                    &layer_id,
+                                                    &clip_instance.id,
+                                                    clip_instance.timeline_start,
+                                                    current_right,
+                                                );
+                                                let extend_amount = (desired_right - current_right).min(max_extend);
+                                                current_right + extend_amount
+                                            } else {
+                                                desired_right
+                                            };
 
                                             let old_timeline_duration = clip_instance.timeline_duration;
-                                            // Only set timeline_duration if extending beyond content
-                                            let new_timeline_duration = if new_total > content_window + 0.001 {
-                                                Some(new_total)
+                                            let new_timeline_duration = if new_right > content_window + 0.001 {
+                                                Some(new_right)
                                             } else {
                                                 None
                                             };
@@ -1994,7 +2106,89 @@ impl TimelinePane {
                                                 layer_loops
                                                     .entry(layer_id)
                                                     .or_insert_with(Vec::new)
-                                                    .push((clip_instance.id, old_timeline_duration, new_timeline_duration));
+                                                    .push((
+                                                        clip_instance.id,
+                                                        old_timeline_duration,
+                                                        new_timeline_duration,
+                                                        clip_instance.loop_before,
+                                                        clip_instance.loop_before, // loop_before unchanged
+                                                    ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if !layer_loops.is_empty() {
+                                let action = Box::new(
+                                    lightningbeam_core::actions::LoopClipInstancesAction::new(layer_loops),
+                                );
+                                pending_actions.push(action);
+                            }
+                        }
+                        ClipDragType::LoopExtendLeft => {
+                            // Extend loop_before (pre-loop region)
+                            let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
+
+                            for layer in &document.root.children {
+                                let layer_id = layer.id();
+                                let clip_instances = match layer {
+                                    lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
+                                    lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+                                };
+
+                                for clip_instance in clip_instances {
+                                    if selection.contains_clip_instance(&clip_instance.id) {
+                                        let clip_duration = match layer {
+                                            lightningbeam_core::layer::AnyLayer::Audio(_) => {
+                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration)
+                                            }
+                                            _ => continue,
+                                        };
+
+                                        if let Some(clip_duration) = clip_duration {
+                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
+                                            let content_window = (trim_end - clip_instance.trim_start).max(0.001);
+                                            let current_loop_before = clip_instance.loop_before.unwrap_or(0.0);
+                                            // Invert: dragging left (negative offset) = extend
+                                            let desired_loop_before = (current_loop_before - self.drag_offset).max(0.0);
+                                            // Snap to whole iterations so backend modulo aligns
+                                            let desired_iters = (desired_loop_before / content_window).round();
+                                            let snapped = desired_iters * content_window;
+
+                                            let new_loop_before = if snapped > current_loop_before {
+                                                let max_extend = document.find_max_loop_extend_left(
+                                                    &layer_id,
+                                                    &clip_instance.id,
+                                                    clip_instance.effective_start(),
+                                                );
+                                                let extend_amount = (snapped - current_loop_before).min(max_extend);
+                                                let clamped = current_loop_before + extend_amount;
+                                                (clamped / content_window).floor() * content_window
+                                            } else {
+                                                snapped
+                                            };
+
+                                            let old_loop_before = clip_instance.loop_before;
+                                            let new_lb = if new_loop_before > 0.001 {
+                                                Some(new_loop_before)
+                                            } else {
+                                                None
+                                            };
+
+                                            if old_loop_before != new_lb {
+                                                layer_loops
+                                                    .entry(layer_id)
+                                                    .or_insert_with(Vec::new)
+                                                    .push((
+                                                        clip_instance.id,
+                                                        clip_instance.timeline_duration,
+                                                        clip_instance.timeline_duration, // timeline_duration unchanged
+                                                        old_loop_before,
+                                                        new_lb,
+                                                    ));
                                             }
                                         }
                                     }
@@ -2161,8 +2355,8 @@ impl TimelinePane {
                     ClipDragType::TrimLeft | ClipDragType::TrimRight => {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
-                    ClipDragType::LoopExtend => {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+                    ClipDragType::LoopExtendRight | ClipDragType::LoopExtendLeft => {
+                        crate::custom_cursor::set(ui.ctx(), crate::custom_cursor::CustomCursor::LoopExtend);
                     }
                     ClipDragType::Move => {}
                 }
@@ -2178,8 +2372,8 @@ impl TimelinePane {
                         ClipDragType::TrimLeft | ClipDragType::TrimRight => {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                         }
-                        ClipDragType::LoopExtend => {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+                        ClipDragType::LoopExtendRight | ClipDragType::LoopExtendLeft => {
+                            crate::custom_cursor::set(ui.ctx(), crate::custom_cursor::CustomCursor::LoopExtend);
                         }
                         ClipDragType::Move => {}
                     }

@@ -6314,6 +6314,17 @@ impl PaneRenderer for StagePane {
 
         // Render vector editing overlays (vertices, control points, etc.)
         self.render_vector_editing_overlays(ui, rect, shared);
+
+        // Set custom tool cursor when pointer is over the stage canvas
+        // (system cursors from transform handles take priority via render_overlay check)
+        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+            if rect.contains(pos) {
+                crate::custom_cursor::set(
+                    ui.ctx(),
+                    crate::custom_cursor::CustomCursor::from_tool(*shared.selected_tool),
+                );
+            }
+        }
     }
 
     fn name(&self) -> &str {

@@ -1,7 +1,7 @@
 //! Loop clip instances action
 //!
 //! Handles extending clip instances beyond their content duration to enable looping,
-//! by setting timeline_duration on the ClipInstance.
+//! by setting timeline_duration and/or loop_before on the ClipInstance.
 
 use crate::action::Action;
 use crate::document::Document;
@@ -9,14 +9,17 @@ use crate::layer::AnyLayer;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Per-instance loop change: (instance_id, old_timeline_duration, new_timeline_duration, old_loop_before, new_loop_before)
+pub type LoopEntry = (Uuid, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+
 /// Action that changes the loop duration of clip instances
 pub struct LoopClipInstancesAction {
-    /// Map of layer IDs to vectors of (instance_id, old_timeline_duration, new_timeline_duration)
-    layer_loops: HashMap<Uuid, Vec<(Uuid, Option<f64>, Option<f64>)>>,
+    /// Map of layer IDs to vectors of loop entries
+    layer_loops: HashMap<Uuid, Vec<LoopEntry>>,
 }
 
 impl LoopClipInstancesAction {
-    pub fn new(layer_loops: HashMap<Uuid, Vec<(Uuid, Option<f64>, Option<f64>)>>) -> Self {
+    pub fn new(layer_loops: HashMap<Uuid, Vec<LoopEntry>>) -> Self {
         Self { layer_loops }
     }
 }
@@ -34,9 +37,10 @@ impl Action for LoopClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
             };
 
-            for (instance_id, _old, new) in loops {
+            for (instance_id, _old_dur, new_dur, _old_lb, new_lb) in loops {
                 if let Some(instance) = clip_instances.iter_mut().find(|ci| ci.id == *instance_id) {
-                    instance.timeline_duration = *new;
+                    instance.timeline_duration = *new_dur;
+                    instance.loop_before = *new_lb;
                 }
             }
         }
@@ -55,9 +59,10 @@ impl Action for LoopClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
             };
 
-            for (instance_id, old, _new) in loops {
+            for (instance_id, old_dur, _new_dur, old_lb, _new_lb) in loops {
                 if let Some(instance) = clip_instances.iter_mut().find(|ci| ci.id == *instance_id) {
-                    instance.timeline_duration = *old;
+                    instance.timeline_duration = *old_dur;
+                    instance.loop_before = *old_lb;
                 }
             }
         }
@@ -102,7 +107,7 @@ impl LoopClipInstancesAction {
                 _ => continue,
             };
 
-            for (instance_id, old, new) in loops {
+            for (instance_id, old_dur, new_dur, old_lb, new_lb) in loops {
                 let instance = clip_instances.iter()
                     .find(|ci| ci.id == *instance_id)
                     .ok_or_else(|| format!("Clip instance {} not found", instance_id))?;
@@ -110,32 +115,39 @@ impl LoopClipInstancesAction {
                 let clip = document.get_audio_clip(&instance.clip_id)
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
-                // Determine which duration to send: on rollback use old, otherwise use new (current)
-                let target_duration = if rollback { old } else { new };
+                let (target_duration, target_loop_before) = if rollback {
+                    (old_dur, old_lb)
+                } else {
+                    (new_dur, new_lb)
+                };
 
-                // If timeline_duration is None, the external duration equals the content window
                 let content_window = {
                     let trim_end = instance.trim_end.unwrap_or(clip.duration);
                     (trim_end - instance.trim_start).max(0.0)
                 };
-                let external_duration = target_duration.unwrap_or(content_window);
+                let right_duration = target_duration.unwrap_or(content_window);
+                let left_duration = target_loop_before.unwrap_or(0.0);
+                let external_duration = left_duration + right_duration;
+                let external_start = instance.timeline_start - left_duration;
 
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
-                        controller.extend_clip(*track_id, *midi_clip_id, external_duration);
-                    }
-                    AudioClipType::Sampled { .. } => {
-                        let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
-                            .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
-
-                        match backend_instance_id {
-                            crate::action::BackendClipInstanceId::Audio(audio_id) => {
-                                controller.extend_clip(*track_id, *audio_id, external_duration);
+                let get_backend_clip_id = |inst_id: &Uuid| -> Result<u32, String> {
+                    match &clip.clip_type {
+                        AudioClipType::Midi { midi_clip_id } => Ok(*midi_clip_id),
+                        AudioClipType::Sampled { .. } => {
+                            let backend_id = backend.clip_instance_to_backend_map.get(inst_id)
+                                .ok_or_else(|| format!("Clip instance {} not mapped to backend", inst_id))?;
+                            match backend_id {
+                                crate::action::BackendClipInstanceId::Audio(audio_id) => Ok(*audio_id),
+                                _ => Err("Expected audio instance ID for sampled clip".to_string()),
                             }
-                            _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
+                        AudioClipType::Recording => Err("Cannot sync recording clip".to_string()),
                     }
-                    AudioClipType::Recording => {}
+                };
+
+                if let Ok(backend_clip_id) = get_backend_clip_id(instance_id) {
+                    controller.move_clip(*track_id, backend_clip_id, external_start);
+                    controller.extend_clip(*track_id, backend_clip_id, external_duration);
                 }
             }
         }
