@@ -140,6 +140,34 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+                device_descriptor: std::sync::Arc::new(|adapter| {
+                    let features = adapter.features();
+                    // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
+                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability)
+                    let optional_features = wgpu::Features::SHADER_F16;
+
+                    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                        wgpu::Limits::downlevel_webgl2_defaults()
+                    } else {
+                        wgpu::Limits::default()
+                    };
+
+                    wgpu::DeviceDescriptor {
+                        label: Some("lightningbeam wgpu device"),
+                        required_features: features & optional_features,
+                        required_limits: wgpu::Limits {
+                            max_texture_dimension_2d: 8192,
+                            ..base_limits
+                        },
+                        ..Default::default()
+                    }
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

@@ -2125,6 +2125,7 @@ impl NodeGraphPane {
             "SimpleSampler" => Some(NodeTemplate::SimpleSampler),
             "MultiSampler" => Some(NodeTemplate::MultiSampler),
             "Filter" => Some(NodeTemplate::Filter),
+            "SVF" => Some(NodeTemplate::Svf),
             "Gain" => Some(NodeTemplate::Gain),
             "Echo" | "Delay" => Some(NodeTemplate::Echo),
             "Reverb" => Some(NodeTemplate::Reverb),

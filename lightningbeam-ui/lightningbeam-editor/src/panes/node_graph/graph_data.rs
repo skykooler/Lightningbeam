@@ -35,6 +35,7 @@ pub enum NodeTemplate {
 
     // Effects
     Filter,
+    Svf,
     Gain,
     Echo,
     Reverb,
@@ -100,6 +101,7 @@ impl NodeTemplate {
             NodeTemplate::SimpleSampler => "SimpleSampler",
             NodeTemplate::MultiSampler => "MultiSampler",
             NodeTemplate::Filter => "Filter",
+            NodeTemplate::Svf => "SVF",
             NodeTemplate::Gain => "Gain",
             NodeTemplate::Echo => "Echo",
             NodeTemplate::Reverb => "Reverb",
@@ -400,6 +402,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::MultiSampler => "Multi Sampler".into(),
             // Effects
             NodeTemplate::Filter => "Filter".into(),
+            NodeTemplate::Svf => "SVF".into(),
             NodeTemplate::Gain => "Gain".into(),
             NodeTemplate::Echo => "Echo".into(),
             NodeTemplate::Reverb => "Reverb".into(),
@@ -452,7 +455,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::MidiInput | NodeTemplate::AudioInput | NodeTemplate::AutomationInput | NodeTemplate::Beat => vec!["Inputs"],
             NodeTemplate::Oscillator | NodeTemplate::WavetableOscillator | NodeTemplate::FmSynth
             | NodeTemplate::Noise | NodeTemplate::SimpleSampler | NodeTemplate::MultiSampler => vec!["Generators"],
-            NodeTemplate::Filter | NodeTemplate::Gain | NodeTemplate::Echo | NodeTemplate::Reverb
+            NodeTemplate::Filter | NodeTemplate::Svf | NodeTemplate::Gain | NodeTemplate::Echo | NodeTemplate::Reverb
             | NodeTemplate::Chorus | NodeTemplate::Flanger | NodeTemplate::Phaser | NodeTemplate::Distortion
             | NodeTemplate::BitCrusher | NodeTemplate::Compressor | NodeTemplate::Limiter | NodeTemplate::Eq
             | NodeTemplate::Pan | NodeTemplate::RingModulator | NodeTemplate::Vocoder => vec!["Effects"],
@@ -512,6 +515,20 @@ impl NodeTemplateTrait for NodeTemplate {
                 graph.add_input_param(node_id, "Type".into(), DataType::CV,
                     ValueType::float_param(0.0, 0.0, 3.0, "", 2, Some(&["LPF", "HPF", "BPF", "Notch"])), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Svf => {
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Cutoff CV".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Resonance CV".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                // Parameters
+                graph.add_input_param(node_id, "Cutoff".into(), DataType::CV,
+                    ValueType::float_param(1000.0, 20.0, 20000.0, " Hz", 0, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Resonance".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 1.0, "", 1, None), InputParamKind::ConstantOnly, true);
+                graph.add_output_param(node_id, "Lowpass".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Highpass".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Bandpass".into(), DataType::Audio);
+                graph.add_output_param(node_id, "Notch".into(), DataType::Audio);
             }
             NodeTemplate::Gain => {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
@@ -1676,6 +1693,7 @@ impl NodeTemplateIter for AllNodeTemplates {
             NodeTemplate::MultiSampler,
             // Effects
             NodeTemplate::Filter,
+            NodeTemplate::Svf,
             NodeTemplate::Gain,
             NodeTemplate::Echo,
             NodeTemplate::Reverb,

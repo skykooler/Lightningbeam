@@ -988,6 +988,7 @@ impl AudioGraph {
                 "Gain" => Box::new(GainNode::new("Gain")),
                 "Mixer" => Box::new(MixerNode::new("Mixer")),
                 "Filter" => Box::new(FilterNode::new("Filter")),
+                "SVF" => Box::new(SVFNode::new("SVF")),
                 "ADSR" => Box::new(ADSRNode::new("ADSR")),
                 "LFO" => Box::new(LFONode::new("LFO")),
                 "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise")),
