@@ -20,7 +20,7 @@ egui_code_editor = "0.2"
 # GPU Rendering
 # vello from git uses wgpu 27, matching eframe 0.33
 vello = { git = "https://github.com/linebender/vello", branch = "main" }
-wgpu = { version = "27", features = ["vulkan", "metal"] }
+wgpu = { version = "27", features = ["vulkan", "metal", "gles"] }
 kurbo = { version = "0.12", features = ["serde"] }
 peniko = "0.5"
 
