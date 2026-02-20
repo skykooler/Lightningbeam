@@ -395,6 +395,7 @@ where
                 src_pos,
                 dst_pos,
                 connection_color,
+                false,
             );
         }
 
@@ -406,6 +407,8 @@ where
                     .any_param_type(AnyParameterId::Output(output))
                     .unwrap();
                 let connection_color = port_type.data_type_color(user_state);
+                let highlighted =
+                    self.highlighted_connection == Some((input, output));
                 // outputs can't be wide yet so this is fine.
                 let src_pos = port_locations[&AnyParameterId::Output(output)][0];
                 let dst_pos = conn_locations[&input][hook_n];
@@ -415,6 +418,7 @@ where
                     src_pos,
                     dst_pos,
                     connection_color,
+                    highlighted,
                 );
             }
         }
@@ -586,10 +590,16 @@ fn draw_connection(
     src_pos: Pos2,
     dst_pos: Pos2,
     color: Color32,
+    highlighted: bool,
 ) {
+    let (width, draw_color) = if highlighted {
+        (7.0 * pan_zoom.zoom, Color32::from_rgb(100, 220, 100))
+    } else {
+        (5.0 * pan_zoom.zoom, color)
+    };
     let connection_stroke = egui::Stroke {
-        width: 5.0 * pan_zoom.zoom,
-        color,
+        width,
+        color: draw_color,
     };
 
     let control_scale = ((dst_pos.x - src_pos.x) * pan_zoom.zoom / 2.0).max(30.0 * pan_zoom.zoom);

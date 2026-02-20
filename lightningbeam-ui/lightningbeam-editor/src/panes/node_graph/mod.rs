@@ -1128,36 +1128,6 @@ impl NodeGraphPane {
         best.map(|(input, output, src, dst, _)| (input, output, src, dst))
     }
 
-    /// Draw a highlight over a connection to indicate insertion target.
-    /// src/dst are in graph space — converted to screen space here.
-    fn draw_connection_highlight(
-        ui: &egui::Ui,
-        src_graph: egui::Pos2,
-        dst_graph: egui::Pos2,
-        zoom: f32,
-        pan: egui::Vec2,
-        editor_offset: egui::Vec2,
-    ) {
-        // Convert graph space to screen space
-        let to_screen = |p: egui::Pos2| -> egui::Pos2 {
-            egui::pos2(p.x * zoom + pan.x + editor_offset.x, p.y * zoom + pan.y + editor_offset.y)
-        };
-        let src = to_screen(src_graph);
-        let dst = to_screen(dst_graph);
-
-        let control_scale = ((dst.x - src.x) / 2.0).max(30.0 * zoom);
-        let src_ctrl = egui::pos2(src.x + control_scale, src.y);
-        let dst_ctrl = egui::pos2(dst.x - control_scale, dst.y);
-
-        let bezier = egui::epaint::CubicBezierShape::from_points_stroke(
-            [src, src_ctrl, dst_ctrl, dst],
-            false,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(7.0 * zoom, egui::Color32::from_rgb(100, 220, 100)),
-        );
-        ui.painter().add(bezier);
-    }
-
     /// Execute the insert-node-on-connection action
     fn execute_insert_on_connection(
         &mut self,
@@ -3103,21 +3073,16 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             if let Some(dragged) = self.dragging_node {
                 if primary_down {
                     // Still dragging — check for nearby compatible connection
-                    if let Some((input_id, output_id, src_graph, dst_graph)) = self.find_insert_target(dragged) {
+                    if let Some((input_id, output_id, _src_graph, _dst_graph)) = self.find_insert_target(dragged) {
                         self.insert_target = Some((input_id, output_id));
-                        Self::draw_connection_highlight(
-                            ui,
-                            src_graph,
-                            dst_graph,
-                            self.state.pan_zoom.zoom,
-                            self.state.pan_zoom.pan,
-                            rect.min.to_vec2(),
-                        );
+                        self.state.highlighted_connection = Some((input_id, output_id));
                     } else {
                         self.insert_target = None;
+                        self.state.highlighted_connection = None;
                     }
                 } else {
                     // Drag ended — execute insertion if we have a target
+                    self.state.highlighted_connection = None;
                     if let Some((target_input, target_output)) = self.insert_target.take() {
                         self.execute_insert_on_connection(dragged, target_input, target_output, shared);
                     }

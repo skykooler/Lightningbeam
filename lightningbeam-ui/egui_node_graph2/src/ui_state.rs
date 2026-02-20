@@ -31,6 +31,10 @@ pub struct GraphEditorState<NodeData, DataType, ValueType, NodeTemplate, UserSta
     pub node_finder: Option<NodeFinder<NodeTemplate>>,
     /// The panning of the graph viewport.
     pub pan_zoom: PanZoom,
+    /// A connection to highlight (e.g. as an insertion target during node drag).
+    /// Stored as (InputId, OutputId). Not serialized.
+    #[cfg_attr(feature = "persistence", serde(skip))]
+    pub highlighted_connection: Option<(InputId, OutputId)>,
     pub _user_state: PhantomData<fn() -> UserState>,
 }
 
@@ -57,6 +61,7 @@ impl<NodeData, DataType, ValueType, NodeKind, UserState> Default
             node_positions: Default::default(),
             node_finder: Default::default(),
             pan_zoom: Default::default(),
+            highlighted_connection: Default::default(),
             _user_state: Default::default(),
         }
     }
