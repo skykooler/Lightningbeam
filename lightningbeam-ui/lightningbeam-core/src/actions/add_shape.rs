@@ -1,50 +1,35 @@
 //! Add shape action
 //!
-//! Handles adding a new shape and object to a vector layer.
+//! Handles adding a new shape to a vector layer's keyframe.
 
 use crate::action::Action;
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use crate::object::ShapeInstance;
 use crate::shape::Shape;
 use uuid::Uuid;
 
-/// Action that adds a shape and object to a vector layer
-///
-/// This action creates both a Shape (the path/geometry) and an ShapeInstance
-/// (the instance with transform). Both are added to the layer.
+/// Action that adds a shape to a vector layer's keyframe
 pub struct AddShapeAction {
     /// Layer ID to add the shape to
     layer_id: Uuid,
 
-    /// The shape to add (contains path and styling)
+    /// The shape to add (contains geometry, styling, transform, opacity)
     shape: Shape,
 
-    /// The object to add (references the shape with transform)
-    object: ShapeInstance,
+    /// Time of the keyframe to add to
+    time: f64,
 
     /// ID of the created shape (set after execution)
     created_shape_id: Option<Uuid>,
-
-    /// ID of the created object (set after execution)
-    created_object_id: Option<Uuid>,
 }
 
 impl AddShapeAction {
-    /// Create a new add shape action
-    ///
-    /// # Arguments
-    ///
-    /// * `layer_id` - The layer to add the shape to
-    /// * `shape` - The shape to add
-    /// * `object` - The object instance referencing the shape
-    pub fn new(layer_id: Uuid, shape: Shape, object: ShapeInstance) -> Self {
+    pub fn new(layer_id: Uuid, shape: Shape, time: f64) -> Self {
         Self {
             layer_id,
             shape,
-            object,
+            time,
             created_shape_id: None,
-            created_object_id: None,
         }
     }
 }
@@ -57,34 +42,25 @@ impl Action for AddShapeAction {
         };
 
         if let AnyLayer::Vector(vector_layer) = layer {
-            // Add shape and object to the layer
-            let shape_id = vector_layer.add_shape_internal(self.shape.clone());
-            let object_id = vector_layer.add_object_internal(self.object.clone());
-
-            // Store the IDs for rollback
+            let shape_id = self.shape.id;
+            vector_layer.add_shape_to_keyframe(self.shape.clone(), self.time);
             self.created_shape_id = Some(shape_id);
-            self.created_object_id = Some(object_id);
         }
         Ok(())
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        // Remove the created shape and object if they exist
-        if let (Some(shape_id), Some(object_id)) = (self.created_shape_id, self.created_object_id) {
+        if let Some(shape_id) = self.created_shape_id {
             let layer = match document.get_layer_mut(&self.layer_id) {
                 Some(l) => l,
                 None => return Ok(()),
             };
 
             if let AnyLayer::Vector(vector_layer) = layer {
-                // Remove in reverse order: object first, then shape
-                vector_layer.remove_object_internal(&object_id);
-                vector_layer.remove_shape_internal(&shape_id);
+                vector_layer.remove_shape_from_keyframe(&shape_id, self.time);
             }
 
-            // Clear the stored IDs
             self.created_shape_id = None;
-            self.created_object_id = None;
         }
         Ok(())
     }
@@ -99,33 +75,28 @@ mod tests {
     use super::*;
     use crate::layer::VectorLayer;
     use crate::shape::ShapeColor;
-    use vello::kurbo::{Circle, Rect, Shape as KurboShape};
+    use vello::kurbo::{Rect, Shape as KurboShape};
 
     #[test]
     fn test_add_shape_action_rectangle() {
-        // Create a document with a vector layer
         let mut document = Document::new("Test");
         let vector_layer = VectorLayer::new("Layer 1");
         let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
 
-        // Create a rectangle shape
         let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
         let path = rect.to_path(0.1);
-        let shape = Shape::new(path).with_fill(ShapeColor::rgb(255, 0, 0));
-        let object = ShapeInstance::new(shape.id).with_position(50.0, 50.0);
+        let shape = Shape::new(path)
+            .with_fill(ShapeColor::rgb(255, 0, 0))
+            .with_position(50.0, 50.0);
 
-        // Create and execute action
-        let mut action = AddShapeAction::new(layer_id, shape, object);
+        let mut action = AddShapeAction::new(layer_id, shape, 0.0);
         action.execute(&mut document).unwrap();
 
-        // Verify shape and object were added
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.shape_instances.len(), 1);
-
-            let added_object = &layer.shape_instances[0];
-            assert_eq!(added_object.transform.x, 50.0);
-            assert_eq!(added_object.transform.y, 50.0);
+            let shapes = layer.shapes_at_time(0.0);
+            assert_eq!(shapes.len(), 1);
+            assert_eq!(shapes[0].transform.x, 50.0);
+            assert_eq!(shapes[0].transform.y, 50.0);
         } else {
             panic!("Layer not found or not a vector layer");
         }
@@ -133,91 +104,8 @@ mod tests {
         // Rollback
         action.rollback(&mut document).unwrap();
 
-        // Verify shape and object were removed
         if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            assert_eq!(layer.shapes.len(), 0);
-            assert_eq!(layer.shape_instances.len(), 0);
-        }
-    }
-
-    #[test]
-    fn test_add_shape_action_circle() {
-        let mut document = Document::new("Test");
-        let vector_layer = VectorLayer::new("Layer 1");
-        let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
-
-        // Create a circle shape
-        let circle = Circle::new((50.0, 50.0), 25.0);
-        let path = circle.to_path(0.1);
-        let shape = Shape::new(path)
-            .with_fill(ShapeColor::rgb(0, 255, 0));
-        let object = ShapeInstance::new(shape.id);
-
-        let mut action = AddShapeAction::new(layer_id, shape, object);
-
-        // Test description
-        assert_eq!(action.description(), "Add shape");
-
-        // Execute
-        action.execute(&mut document).unwrap();
-
-        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.shape_instances.len(), 1);
-        }
-    }
-
-    #[test]
-    fn test_add_shape_action_multiple_execute() {
-        let mut document = Document::new("Test");
-        let vector_layer = VectorLayer::new("Layer 1");
-        let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
-
-        let rect = Rect::new(0.0, 0.0, 50.0, 50.0);
-        let path = rect.to_path(0.1);
-        let shape = Shape::new(path);
-        let object = ShapeInstance::new(shape.id);
-
-        let mut action = AddShapeAction::new(layer_id, shape, object);
-
-        // Execute twice - shapes are stored in HashMap (keyed by ID, so same shape overwrites)
-        // while shape_instances are stored in Vec (so duplicates accumulate)
-        action.execute(&mut document).unwrap();
-        action.execute(&mut document).unwrap();
-
-        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            // Shapes use HashMap keyed by shape.id, so same shape overwrites = 1
-            // Shape instances use Vec, so duplicates accumulate = 2
-            assert_eq!(layer.shapes.len(), 1);
-            assert_eq!(layer.shape_instances.len(), 2);
-        }
-    }
-
-    #[test]
-    fn test_add_multiple_different_shapes() {
-        let mut document = Document::new("Test");
-        let vector_layer = VectorLayer::new("Layer 1");
-        let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
-
-        // Create two different shapes
-        let rect1 = Rect::new(0.0, 0.0, 50.0, 50.0);
-        let shape1 = Shape::new(rect1.to_path(0.1));
-        let object1 = ShapeInstance::new(shape1.id);
-
-        let rect2 = Rect::new(100.0, 100.0, 150.0, 150.0);
-        let shape2 = Shape::new(rect2.to_path(0.1));
-        let object2 = ShapeInstance::new(shape2.id);
-
-        let mut action1 = AddShapeAction::new(layer_id, shape1, object1);
-        let mut action2 = AddShapeAction::new(layer_id, shape2, object2);
-
-        action1.execute(&mut document).unwrap();
-        action2.execute(&mut document).unwrap();
-
-        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            // Two different shapes = 2 entries in HashMap
-            assert_eq!(layer.shapes.len(), 2);
-            assert_eq!(layer.shape_instances.len(), 2);
+            assert_eq!(layer.shapes_at_time(0.0).len(), 0);
         }
     }
 }

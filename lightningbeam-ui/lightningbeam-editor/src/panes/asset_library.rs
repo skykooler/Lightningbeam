@@ -440,83 +440,81 @@ fn generate_vector_thumbnail(clip: &VectorClip, bg_color: egui::Color32) -> Vec<
     // Iterate through layers and render shapes
     for layer_node in clip.layers.iter() {
         if let AnyLayer::Vector(vector_layer) = &layer_node.data {
-            // Render each shape instance
-            for shape_instance in &vector_layer.shape_instances {
-                if let Some(shape) = vector_layer.shapes.get(&shape_instance.shape_id) {
-                    // Get the path (frame 0)
-                    let kurbo_path = shape.path();
+            // Render each shape at time 0.0 (frame 0)
+            for shape in vector_layer.shapes_at_time(0.0) {
+                // Get the path (frame 0)
+                let kurbo_path = shape.path();
 
-                    // Convert kurbo BezPath to tiny-skia PathBuilder
-                    let mut path_builder = PathBuilder::new();
-                    for el in kurbo_path.iter() {
-                        match el {
-                            PathEl::MoveTo(p) => {
-                                let x = (p.x * scale + offset_x) as f32;
-                                let y = (p.y * scale + offset_y) as f32;
-                                path_builder.move_to(x, y);
-                            }
-                            PathEl::LineTo(p) => {
-                                let x = (p.x * scale + offset_x) as f32;
-                                let y = (p.y * scale + offset_y) as f32;
-                                path_builder.line_to(x, y);
-                            }
-                            PathEl::QuadTo(p1, p2) => {
-                                let x1 = (p1.x * scale + offset_x) as f32;
-                                let y1 = (p1.y * scale + offset_y) as f32;
-                                let x2 = (p2.x * scale + offset_x) as f32;
-                                let y2 = (p2.y * scale + offset_y) as f32;
-                                path_builder.quad_to(x1, y1, x2, y2);
-                            }
-                            PathEl::CurveTo(p1, p2, p3) => {
-                                let x1 = (p1.x * scale + offset_x) as f32;
-                                let y1 = (p1.y * scale + offset_y) as f32;
-                                let x2 = (p2.x * scale + offset_x) as f32;
-                                let y2 = (p2.y * scale + offset_y) as f32;
-                                let x3 = (p3.x * scale + offset_x) as f32;
-                                let y3 = (p3.y * scale + offset_y) as f32;
-                                path_builder.cubic_to(x1, y1, x2, y2, x3, y3);
-                            }
-                            PathEl::ClosePath => {
-                                path_builder.close();
-                            }
+                // Convert kurbo BezPath to tiny-skia PathBuilder
+                let mut path_builder = PathBuilder::new();
+                for el in kurbo_path.iter() {
+                    match el {
+                        PathEl::MoveTo(p) => {
+                            let x = (p.x * scale + offset_x) as f32;
+                            let y = (p.y * scale + offset_y) as f32;
+                            path_builder.move_to(x, y);
+                        }
+                        PathEl::LineTo(p) => {
+                            let x = (p.x * scale + offset_x) as f32;
+                            let y = (p.y * scale + offset_y) as f32;
+                            path_builder.line_to(x, y);
+                        }
+                        PathEl::QuadTo(p1, p2) => {
+                            let x1 = (p1.x * scale + offset_x) as f32;
+                            let y1 = (p1.y * scale + offset_y) as f32;
+                            let x2 = (p2.x * scale + offset_x) as f32;
+                            let y2 = (p2.y * scale + offset_y) as f32;
+                            path_builder.quad_to(x1, y1, x2, y2);
+                        }
+                        PathEl::CurveTo(p1, p2, p3) => {
+                            let x1 = (p1.x * scale + offset_x) as f32;
+                            let y1 = (p1.y * scale + offset_y) as f32;
+                            let x2 = (p2.x * scale + offset_x) as f32;
+                            let y2 = (p2.y * scale + offset_y) as f32;
+                            let x3 = (p3.x * scale + offset_x) as f32;
+                            let y3 = (p3.y * scale + offset_y) as f32;
+                            path_builder.cubic_to(x1, y1, x2, y2, x3, y3);
+                        }
+                        PathEl::ClosePath => {
+                            path_builder.close();
                         }
                     }
+                }
 
-                    if let Some(ts_path) = path_builder.finish() {
-                        // Draw fill if present
-                        if let Some(fill_color) = &shape.fill_color {
+                if let Some(ts_path) = path_builder.finish() {
+                    // Draw fill if present
+                    if let Some(fill_color) = &shape.fill_color {
+                        let mut paint = Paint::default();
+                        paint.set_color(shape_color_to_tiny_skia(fill_color));
+                        paint.anti_alias = true;
+                        pixmap.fill_path(
+                            &ts_path,
+                            &paint,
+                            tiny_skia::FillRule::Winding,
+                            TsTransform::identity(),
+                            None,
+                        );
+                    }
+
+                    // Draw stroke if present
+                    if let Some(stroke_color) = &shape.stroke_color {
+                        if let Some(stroke_style) = &shape.stroke_style {
                             let mut paint = Paint::default();
-                            paint.set_color(shape_color_to_tiny_skia(fill_color));
+                            paint.set_color(shape_color_to_tiny_skia(stroke_color));
                             paint.anti_alias = true;
-                            pixmap.fill_path(
+
+                            let stroke = tiny_skia::Stroke {
+                                width: (stroke_style.width * scale) as f32,
+                                ..Default::default()
+                            };
+
+                            pixmap.stroke_path(
                                 &ts_path,
                                 &paint,
-                                tiny_skia::FillRule::Winding,
+                                &stroke,
                                 TsTransform::identity(),
                                 None,
                             );
-                        }
-
-                        // Draw stroke if present
-                        if let Some(stroke_color) = &shape.stroke_color {
-                            if let Some(stroke_style) = &shape.stroke_style {
-                                let mut paint = Paint::default();
-                                paint.set_color(shape_color_to_tiny_skia(stroke_color));
-                                paint.anti_alias = true;
-
-                                let stroke = tiny_skia::Stroke {
-                                    width: (stroke_style.width * scale) as f32,
-                                    ..Default::default()
-                                };
-
-                                pixmap.stroke_path(
-                                    &ts_path,
-                                    &paint,
-                                    &stroke,
-                                    TsTransform::identity(),
-                                    None,
-                                );
-                            }
                         }
                     }
                 }

@@ -18,6 +18,50 @@ const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
 const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
+const MIN_CLIP_WIDTH_PX: f32 = 8.0; // Minimum visible width for very short clips (e.g. groups)
+
+/// Calculate vertical bounds for a clip instance within a layer row.
+/// For vector layers with multiple clip instances, stacks them vertically.
+/// Returns (y_min, y_max) relative to the layer top.
+fn clip_instance_y_bounds(
+    layer: &AnyLayer,
+    clip_index: usize,
+    clip_count: usize,
+) -> (f32, f32) {
+    if matches!(layer, AnyLayer::Vector(_)) && clip_count > 1 {
+        let usable_height = LAYER_HEIGHT - 20.0; // 10px padding top/bottom
+        let row_height = (usable_height / clip_count as f32).min(20.0);
+        let top = 10.0 + clip_index as f32 * row_height;
+        (top, top + row_height - 1.0)
+    } else {
+        (10.0, LAYER_HEIGHT - 10.0)
+    }
+}
+
+/// Get the effective clip duration for a clip instance on a given layer.
+/// For groups on vector layers, the duration spans all consecutive keyframes
+/// where the group is present. For regular clips, returns the clip's internal duration.
+fn effective_clip_duration(
+    document: &lightningbeam_core::document::Document,
+    layer: &AnyLayer,
+    clip_instance: &ClipInstance,
+) -> Option<f64> {
+    match layer {
+        AnyLayer::Vector(vl) => {
+            let vc = document.get_vector_clip(&clip_instance.clip_id)?;
+            if vc.is_group {
+                let frame_duration = 1.0 / document.framerate;
+                let end = vl.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration);
+                Some((end - clip_instance.timeline_start).max(0.0))
+            } else {
+                Some(vc.duration)
+            }
+        }
+        AnyLayer::Audio(_) => document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration),
+        AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| c.duration),
+        AnyLayer::Effect(_) => Some(lightningbeam_core::effect::EFFECT_DURATION),
+    }
+}
 
 /// Type of clip drag operation
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -304,7 +348,6 @@ impl TimelinePane {
             return None;
         }
 
-        let hover_time = self.x_to_time(pointer_pos.x - content_rect.min.x);
         let relative_y = pointer_pos.y - header_rect.min.y + self.viewport_scroll_y;
         let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
 
@@ -324,34 +367,29 @@ impl TimelinePane {
         };
 
         // Check each clip instance
-        for clip_instance in clip_instances {
-            let clip_duration = match layer {
-                lightningbeam_core::layer::AnyLayer::Vector(_) => {
-                    document.get_vector_clip(&clip_instance.clip_id).map(|c| c.duration)
-                }
-                lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                    document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration)
-                }
-                lightningbeam_core::layer::AnyLayer::Video(_) => {
-                    document.get_video_clip(&clip_instance.clip_id).map(|c| c.duration)
-                }
-                lightningbeam_core::layer::AnyLayer::Effect(_) => {
-                    Some(lightningbeam_core::effect::EFFECT_DURATION)
-                }
-            }?;
+        let clip_count = clip_instances.len();
+        for (ci_idx, clip_instance) in clip_instances.iter().enumerate() {
+            let clip_duration = effective_clip_duration(document, layer, clip_instance)?;
 
             let instance_start = clip_instance.effective_start();
             let instance_duration = clip_instance.total_duration(clip_duration);
             let instance_end = instance_start + instance_duration;
 
-            if hover_time >= instance_start && hover_time <= instance_end {
-                let start_x = self.time_to_x(instance_start);
-                let end_x = self.time_to_x(instance_end);
-                let mouse_x = pointer_pos.x - content_rect.min.x;
+            let start_x = self.time_to_x(instance_start);
+            let end_x = self.time_to_x(instance_end).max(start_x + MIN_CLIP_WIDTH_PX);
+            let mouse_x = pointer_pos.x - content_rect.min.x;
+
+            if mouse_x >= start_x && mouse_x <= end_x {
+                // Check vertical bounds for stacked vector layer clips
+                let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
+                let (cy_min, cy_max) = clip_instance_y_bounds(layer, ci_idx, clip_count);
+                let mouse_rel_y = pointer_pos.y - layer_top;
+                if mouse_rel_y < cy_min || mouse_rel_y > cy_max {
+                    continue;
+                }
 
                 // Determine drag type based on edge proximity (check both sides of edge)
                 let is_audio_layer = matches!(layer, lightningbeam_core::layer::AnyLayer::Audio(_));
-                let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
                 let mouse_in_top_corner = pointer_pos.y < layer_top + LOOP_CORNER_SIZE;
 
                 let is_looping = clip_instance.timeline_duration.is_some() || clip_instance.loop_before.is_some();
@@ -1047,25 +1085,10 @@ impl TimelinePane {
                 None
             };
 
-            for clip_instance in clip_instances {
+            let clip_instance_count = clip_instances.len();
+            for (clip_instance_index, clip_instance) in clip_instances.iter().enumerate() {
                 // Get the clip to determine duration
-                let clip_duration = match layer {
-                    lightningbeam_core::layer::AnyLayer::Vector(_) => {
-                        document.get_vector_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                        document.get_audio_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Video(_) => {
-                        document.get_video_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
-                        Some(lightningbeam_core::effect::EFFECT_DURATION)
-                    }
-                };
+                let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                 if let Some(clip_duration) = clip_duration {
                     // Calculate effective duration accounting for trimming
@@ -1245,7 +1268,7 @@ impl TimelinePane {
                     let instance_end = instance_start + instance_duration;
 
                     let start_x = self.time_to_x(instance_start);
-                    let end_x = self.time_to_x(instance_end);
+                    let end_x = self.time_to_x(instance_end).max(start_x + MIN_CLIP_WIDTH_PX);
 
                     // Only draw if any part is visible in viewport
                     if end_x >= 0.0 && start_x <= rect.width() {
@@ -1280,9 +1303,11 @@ impl TimelinePane {
                             ),
                         };
 
+                        let (cy_min, cy_max) = clip_instance_y_bounds(layer, clip_instance_index, clip_instance_count);
+
                         let clip_rect = egui::Rect::from_min_max(
-                            egui::pos2(rect.min.x + visible_start_x, y + 10.0),
-                            egui::pos2(rect.min.x + visible_end_x, y + LAYER_HEIGHT - 10.0),
+                            egui::pos2(rect.min.x + visible_start_x, y + cy_min),
+                            egui::pos2(rect.min.x + visible_end_x, y + cy_max),
                         );
 
                         // Draw the clip instance background(s)
@@ -1639,6 +1664,31 @@ impl TimelinePane {
                 }
             }
 
+            // Draw shape keyframe markers for vector layers
+            if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                for kf in &vl.keyframes {
+                    let x = self.time_to_x(kf.time);
+                    if x >= 0.0 && x <= rect.width() {
+                        let cx = rect.min.x + x;
+                        let cy = y + LAYER_HEIGHT - 8.0;
+                        let size = 5.0;
+                        // Draw diamond shape
+                        let diamond = [
+                            egui::pos2(cx, cy - size),
+                            egui::pos2(cx + size, cy),
+                            egui::pos2(cx, cy + size),
+                            egui::pos2(cx - size, cy),
+                        ];
+                        let color = egui::Color32::from_rgb(255, 220, 100);
+                        painter.add(egui::Shape::convex_polygon(
+                            diamond.to_vec(),
+                            color,
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 150, 50)),
+                        ));
+                    }
+                }
+            }
+
             // Separator line at bottom
             painter.line_segment(
                 [
@@ -1709,8 +1759,6 @@ impl TimelinePane {
                 if pos.y >= header_rect.min.y && pos.x >= content_rect.min.x {
                     let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
                     let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-                    let click_time = self.x_to_time(pos.x - content_rect.min.x);
-
                     // Get the layer at this index (accounting for reversed display order)
                     if clicked_layer_index < layer_count {
                         let layers: Vec<_> = document.root.children.iter().rev().collect();
@@ -1726,33 +1774,25 @@ impl TimelinePane {
                             };
 
                             // Check if click is within any clip instance
-                            for clip_instance in clip_instances {
-                                // Get the clip to determine duration
-                                let clip_duration = match layer {
-                                    lightningbeam_core::layer::AnyLayer::Vector(_) => {
-                                        document.get_vector_clip(&clip_instance.clip_id)
-                                            .map(|c| c.duration)
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                                        document.get_audio_clip(&clip_instance.clip_id)
-                                            .map(|c| c.duration)
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Video(_) => {
-                                        document.get_video_clip(&clip_instance.clip_id)
-                                            .map(|c| c.duration)
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
-                                        Some(lightningbeam_core::effect::EFFECT_DURATION)
-                                    }
-                                };
+                            let click_clip_count = clip_instances.len();
+                            let click_layer_top = pos.y - (relative_y % LAYER_HEIGHT);
+                            for (ci_idx, clip_instance) in clip_instances.iter().enumerate() {
+                                let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                                 if let Some(clip_duration) = clip_duration {
                                     let instance_duration = clip_instance.total_duration(clip_duration);
                                     let instance_start = clip_instance.effective_start();
                                     let instance_end = instance_start + instance_duration;
 
-                                    // Check if click is within this clip instance's time range
-                                    if click_time >= instance_start && click_time <= instance_end {
+                                    // Check if click is within this clip instance's pixel range and vertical bounds
+                                    let ci_start_x = self.time_to_x(instance_start);
+                                    let ci_end_x = self.time_to_x(instance_end).max(ci_start_x + MIN_CLIP_WIDTH_PX);
+                                    let click_x = pos.x - content_rect.min.x;
+                                    let (cy_min, cy_max) = clip_instance_y_bounds(layer, ci_idx, click_clip_count);
+                                    let click_rel_y = pos.y - click_layer_top;
+                                    if click_x >= ci_start_x && click_x <= ci_end_x
+                                        && click_rel_y >= cy_min && click_rel_y <= cy_max
+                                    {
                                         // Found a clicked clip instance!
                                         if shift_held {
                                             // Shift+click: add to selection
@@ -1919,27 +1959,7 @@ impl TimelinePane {
                                 // Find selected clip instances in this layer
                                 for clip_instance in clip_instances {
                                     if selection.contains_clip_instance(&clip_instance.id) {
-                                        // Get clip duration to validate trim bounds
-                                        let clip_duration = match layer {
-                                            lightningbeam_core::layer::AnyLayer::Vector(_) => {
-                                                document
-                                                    .get_vector_clip(&clip_instance.clip_id)
-                                                    .map(|c| c.duration)
-                                            }
-                                            lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                                                document
-                                                    .get_audio_clip(&clip_instance.clip_id)
-                                                    .map(|c| c.duration)
-                                            }
-                                            lightningbeam_core::layer::AnyLayer::Video(_) => {
-                                                document
-                                                    .get_video_clip(&clip_instance.clip_id)
-                                                    .map(|c| c.duration)
-                                            }
-                                            lightningbeam_core::layer::AnyLayer::Effect(_) => {
-                                                Some(lightningbeam_core::effect::EFFECT_DURATION)
-                                            }
-                                        };
+                                        let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                                         if let Some(clip_duration) = clip_duration {
                                             match drag_type {
@@ -2528,24 +2548,7 @@ impl PaneRenderer for TimelinePane {
             };
 
             for clip_instance in clip_instances {
-                // Get clip duration
-                let clip_duration = match layer {
-                    lightningbeam_core::layer::AnyLayer::Vector(_) => {
-                        document.get_vector_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                        document.get_audio_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Video(_) => {
-                        document.get_video_clip(&clip_instance.clip_id)
-                            .map(|c| c.duration)
-                    }
-                    lightningbeam_core::layer::AnyLayer::Effect(_) => {
-                        Some(lightningbeam_core::effect::EFFECT_DURATION)
-                    }
-                };
+                let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                 if let Some(clip_duration) = clip_duration {
                     let instance_duration = clip_instance.effective_duration(clip_duration);

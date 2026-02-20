@@ -28,6 +28,8 @@ pub mod update_midi_notes;
 pub mod loop_clip_instances;
 pub mod remove_clip_instances;
 pub mod remove_shapes;
+pub mod set_keyframe;
+pub mod group_shapes;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -54,3 +56,5 @@ pub use update_midi_notes::UpdateMidiNotesAction;
 pub use loop_clip_instances::LoopClipInstancesAction;
 pub use remove_clip_instances::RemoveClipInstancesAction;
 pub use remove_shapes::RemoveShapesAction;
+pub use set_keyframe::SetKeyframeAction;
+pub use group_shapes::GroupAction;

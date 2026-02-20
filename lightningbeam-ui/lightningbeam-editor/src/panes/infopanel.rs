@@ -117,81 +117,77 @@ impl InfopanelPane {
                     let mut first = true;
 
                     for instance_id in &info.instance_ids {
-                        if let Some(instance) = vector_layer.get_object(instance_id) {
-                            info.shape_ids.push(instance.shape_id);
+                        if let Some(shape) = vector_layer.get_shape_in_keyframe(instance_id, *shared.playback_time) {
+                            info.shape_ids.push(*instance_id);
 
                             if first {
-                                // First instance - set initial values
-                                info.x = Some(instance.transform.x);
-                                info.y = Some(instance.transform.y);
-                                info.rotation = Some(instance.transform.rotation);
-                                info.scale_x = Some(instance.transform.scale_x);
-                                info.scale_y = Some(instance.transform.scale_y);
-                                info.skew_x = Some(instance.transform.skew_x);
-                                info.skew_y = Some(instance.transform.skew_y);
-                                info.opacity = Some(instance.opacity);
+                                // First shape - set initial values
+                                info.x = Some(shape.transform.x);
+                                info.y = Some(shape.transform.y);
+                                info.rotation = Some(shape.transform.rotation);
+                                info.scale_x = Some(shape.transform.scale_x);
+                                info.scale_y = Some(shape.transform.scale_y);
+                                info.skew_x = Some(shape.transform.skew_x);
+                                info.skew_y = Some(shape.transform.skew_y);
+                                info.opacity = Some(shape.opacity);
 
                                 // Get shape properties
-                                if let Some(shape) = vector_layer.shapes.get(&instance.shape_id) {
-                                    info.fill_color = Some(shape.fill_color);
-                                    info.stroke_color = Some(shape.stroke_color);
-                                    info.stroke_width = shape
-                                        .stroke_style
-                                        .as_ref()
-                                        .map(|s| Some(s.width))
-                                        .unwrap_or(Some(1.0));
-                                }
+                                info.fill_color = Some(shape.fill_color);
+                                info.stroke_color = Some(shape.stroke_color);
+                                info.stroke_width = shape
+                                    .stroke_style
+                                    .as_ref()
+                                    .map(|s| Some(s.width))
+                                    .unwrap_or(Some(1.0));
 
                                 first = false;
                             } else {
                                 // Check if values differ (set to None if mixed)
-                                if info.x != Some(instance.transform.x) {
+                                if info.x != Some(shape.transform.x) {
                                     info.x = None;
                                 }
-                                if info.y != Some(instance.transform.y) {
+                                if info.y != Some(shape.transform.y) {
                                     info.y = None;
                                 }
-                                if info.rotation != Some(instance.transform.rotation) {
+                                if info.rotation != Some(shape.transform.rotation) {
                                     info.rotation = None;
                                 }
-                                if info.scale_x != Some(instance.transform.scale_x) {
+                                if info.scale_x != Some(shape.transform.scale_x) {
                                     info.scale_x = None;
                                 }
-                                if info.scale_y != Some(instance.transform.scale_y) {
+                                if info.scale_y != Some(shape.transform.scale_y) {
                                     info.scale_y = None;
                                 }
-                                if info.skew_x != Some(instance.transform.skew_x) {
+                                if info.skew_x != Some(shape.transform.skew_x) {
                                     info.skew_x = None;
                                 }
-                                if info.skew_y != Some(instance.transform.skew_y) {
+                                if info.skew_y != Some(shape.transform.skew_y) {
                                     info.skew_y = None;
                                 }
-                                if info.opacity != Some(instance.opacity) {
+                                if info.opacity != Some(shape.opacity) {
                                     info.opacity = None;
                                 }
 
                                 // Check shape properties
-                                if let Some(shape) = vector_layer.shapes.get(&instance.shape_id) {
-                                    // Compare fill colors - set to None if mixed
-                                    if let Some(current_fill) = &info.fill_color {
-                                        if *current_fill != shape.fill_color {
-                                            info.fill_color = None;
-                                        }
+                                // Compare fill colors - set to None if mixed
+                                if let Some(current_fill) = &info.fill_color {
+                                    if *current_fill != shape.fill_color {
+                                        info.fill_color = None;
                                     }
-                                    // Compare stroke colors - set to None if mixed
-                                    if let Some(current_stroke) = &info.stroke_color {
-                                        if *current_stroke != shape.stroke_color {
-                                            info.stroke_color = None;
-                                        }
+                                }
+                                // Compare stroke colors - set to None if mixed
+                                if let Some(current_stroke) = &info.stroke_color {
+                                    if *current_stroke != shape.stroke_color {
+                                        info.stroke_color = None;
                                     }
-                                    let stroke_w = shape
-                                        .stroke_style
-                                        .as_ref()
-                                        .map(|s| s.width)
-                                        .unwrap_or(1.0);
-                                    if info.stroke_width != Some(stroke_w) {
-                                        info.stroke_width = None;
-                                    }
+                                }
+                                let stroke_w = shape
+                                    .stroke_style
+                                    .as_ref()
+                                    .map(|s| s.width)
+                                    .unwrap_or(1.0);
+                                if info.stroke_width != Some(stroke_w) {
+                                    info.stroke_width = None;
                                 }
                             }
                         }
@@ -488,6 +484,7 @@ impl InfopanelPane {
                         for instance_id in instance_ids {
                             let action = SetInstancePropertiesAction::new(
                                 layer_id,
+                                *shared.playback_time,
                                 *instance_id,
                                 make_change(v),
                             );
@@ -507,6 +504,7 @@ impl InfopanelPane {
                         for instance_id in instance_ids {
                             let action = SetInstancePropertiesAction::new(
                                 layer_id,
+                                *shared.playback_time,
                                 *instance_id,
                                 make_change(v),
                             );
@@ -564,6 +562,7 @@ impl InfopanelPane {
                                     let action = SetShapePropertiesAction::set_fill_color(
                                         layer_id,
                                         *shape_id,
+                                        *shared.playback_time,
                                         new_color,
                                     );
                                     shared.pending_actions.push(Box::new(action));
@@ -578,6 +577,7 @@ impl InfopanelPane {
                                     let action = SetShapePropertiesAction::set_fill_color(
                                         layer_id,
                                         *shape_id,
+                                        *shared.playback_time,
                                         default_fill,
                                     );
                                     shared.pending_actions.push(Box::new(action));
@@ -612,6 +612,7 @@ impl InfopanelPane {
                                     let action = SetShapePropertiesAction::set_stroke_color(
                                         layer_id,
                                         *shape_id,
+                                        *shared.playback_time,
                                         new_color,
                                     );
                                     shared.pending_actions.push(Box::new(action));
@@ -626,6 +627,7 @@ impl InfopanelPane {
                                     let action = SetShapePropertiesAction::set_stroke_color(
                                         layer_id,
                                         *shape_id,
+                                        *shared.playback_time,
                                         default_stroke,
                                     );
                                     shared.pending_actions.push(Box::new(action));
@@ -654,6 +656,7 @@ impl InfopanelPane {
                                     let action = SetShapePropertiesAction::set_stroke_width(
                                         layer_id,
                                         *shape_id,
+                                        *shared.playback_time,
                                         width,
                                     );
                                     shared.pending_actions.push(Box::new(action));

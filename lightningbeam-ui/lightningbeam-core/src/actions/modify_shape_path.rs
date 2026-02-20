@@ -20,6 +20,9 @@ pub struct ModifyShapePathAction {
     /// Shape to modify
     shape_id: Uuid,
 
+    /// Time of the keyframe containing the shape
+    time: f64,
+
     /// The version index being modified (for shapes with multiple versions)
     version_index: usize,
 
@@ -32,17 +35,11 @@ pub struct ModifyShapePathAction {
 
 impl ModifyShapePathAction {
     /// Create a new action to modify a shape's path
-    ///
-    /// # Arguments
-    ///
-    /// * `layer_id` - The layer containing the shape
-    /// * `shape_id` - The shape to modify
-    /// * `version_index` - The version index to modify (usually 0)
-    /// * `new_path` - The new path to set
-    pub fn new(layer_id: Uuid, shape_id: Uuid, version_index: usize, new_path: BezPath) -> Self {
+    pub fn new(layer_id: Uuid, shape_id: Uuid, time: f64, version_index: usize, new_path: BezPath) -> Self {
         Self {
             layer_id,
             shape_id,
+            time,
             version_index,
             new_path,
             old_path: None,
@@ -53,6 +50,7 @@ impl ModifyShapePathAction {
     pub fn with_old_path(
         layer_id: Uuid,
         shape_id: Uuid,
+        time: f64,
         version_index: usize,
         old_path: BezPath,
         new_path: BezPath,
@@ -60,6 +58,7 @@ impl ModifyShapePathAction {
         Self {
             layer_id,
             shape_id,
+            time,
             version_index,
             new_path,
             old_path: Some(old_path),
@@ -71,8 +70,7 @@ impl Action for ModifyShapePathAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {
-                if let Some(shape) = vector_layer.shapes.get_mut(&self.shape_id) {
-                    // Check if version exists
+                if let Some(shape) = vector_layer.get_shape_in_keyframe_mut(&self.shape_id, self.time) {
                     if self.version_index >= shape.versions.len() {
                         return Err(format!(
                             "Version index {} out of bounds (shape has {} versions)",
@@ -104,7 +102,7 @@ impl Action for ModifyShapePathAction {
         if let Some(old_path) = &self.old_path {
             if let Some(layer) = document.get_layer_mut(&self.layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
-                    if let Some(shape) = vector_layer.shapes.get_mut(&self.shape_id) {
+                    if let Some(shape) = vector_layer.get_shape_in_keyframe_mut(&self.shape_id, self.time) {
                         if self.version_index < shape.versions.len() {
                             shape.versions[self.version_index].path = old_path.clone();
                             return Ok(());
@@ -130,6 +128,7 @@ mod tests {
     use super::*;
     use crate::layer::VectorLayer;
     use crate::shape::Shape;
+    use vello::kurbo::Shape as KurboShape;
 
     fn create_test_path() -> BezPath {
         let mut path = BezPath::new();
@@ -144,9 +143,9 @@ mod tests {
     fn create_modified_path() -> BezPath {
         let mut path = BezPath::new();
         path.move_to((0.0, 0.0));
-        path.line_to((150.0, 0.0)); // Modified
-        path.line_to((150.0, 150.0)); // Modified
-        path.line_to((0.0, 150.0)); // Modified
+        path.line_to((150.0, 0.0));
+        path.line_to((150.0, 150.0));
+        path.line_to((0.0, 150.0));
         path.close_path();
         path
     }
@@ -158,13 +157,13 @@ mod tests {
 
         let shape = Shape::new(create_test_path());
         let shape_id = shape.id;
-        layer.shapes.insert(shape_id, shape);
+        layer.add_shape_to_keyframe(shape, 0.0);
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
         // Verify initial path
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             let bbox = shape.versions[0].path.bounding_box();
             assert_eq!(bbox.width(), 100.0);
             assert_eq!(bbox.height(), 100.0);
@@ -172,12 +171,12 @@ mod tests {
 
         // Create and execute action
         let new_path = create_modified_path();
-        let mut action = ModifyShapePathAction::new(layer_id, shape_id, 0, new_path);
+        let mut action = ModifyShapePathAction::new(layer_id, shape_id, 0.0, 0, new_path);
         action.execute(&mut document).unwrap();
 
         // Verify path changed
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             let bbox = shape.versions[0].path.bounding_box();
             assert_eq!(bbox.width(), 150.0);
             assert_eq!(bbox.height(), 150.0);
@@ -187,8 +186,8 @@ mod tests {
         action.rollback(&mut document).unwrap();
 
         // Verify restored
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             let bbox = shape.versions[0].path.bounding_box();
             assert_eq!(bbox.width(), 100.0);
             assert_eq!(bbox.height(), 100.0);
@@ -202,13 +201,12 @@ mod tests {
 
         let shape = Shape::new(create_test_path());
         let shape_id = shape.id;
-        layer.shapes.insert(shape_id, shape);
+        layer.add_shape_to_keyframe(shape, 0.0);
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Try to modify non-existent version
         let new_path = create_modified_path();
-        let mut action = ModifyShapePathAction::new(layer_id, shape_id, 5, new_path);
+        let mut action = ModifyShapePathAction::new(layer_id, shape_id, 0.0, 5, new_path);
         let result = action.execute(&mut document);
 
         assert!(result.is_err());
@@ -219,7 +217,7 @@ mod tests {
     fn test_description() {
         let layer_id = Uuid::new_v4();
         let shape_id = Uuid::new_v4();
-        let action = ModifyShapePathAction::new(layer_id, shape_id, 0, create_test_path());
+        let action = ModifyShapePathAction::new(layer_id, shape_id, 0.0, 0, create_test_path());
         assert_eq!(action.description(), "Modify shape path");
     }
 }

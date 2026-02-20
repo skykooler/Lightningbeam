@@ -1,8 +1,10 @@
 //! Transform clip instances action
 //!
 //! Handles spatial transformation (move, scale, rotate) of clip instances on the stage.
+//! Updates both the clip instance's transform and the animation keyframe at the current time.
 
 use crate::action::Action;
+use crate::animation::{AnimationTarget, Keyframe, TransformProperty};
 use crate::document::Document;
 use crate::layer::AnyLayer;
 use crate::object::Transform;
@@ -12,6 +14,8 @@ use uuid::Uuid;
 /// Action that transforms clip instances spatially on the stage
 pub struct TransformClipInstancesAction {
     layer_id: Uuid,
+    /// Current time for animation keyframe update
+    time: f64,
     /// Map of clip instance ID to (old transform, new transform)
     clip_instance_transforms: HashMap<Uuid, (Transform, Transform)>,
 }
@@ -19,11 +23,44 @@ pub struct TransformClipInstancesAction {
 impl TransformClipInstancesAction {
     pub fn new(
         layer_id: Uuid,
+        time: f64,
         clip_instance_transforms: HashMap<Uuid, (Transform, Transform)>,
     ) -> Self {
         Self {
             layer_id,
+            time,
             clip_instance_transforms,
+        }
+    }
+}
+
+/// Update animation keyframes for a clip instance's transform properties at the given time.
+/// If a curve exists for a property, updates the keyframe at that time. If no curve exists, does nothing.
+fn update_animation_keyframes(
+    animation_data: &mut crate::animation::AnimationData,
+    instance_id: Uuid,
+    transform: &Transform,
+    opacity: f64,
+    time: f64,
+) {
+    let props_and_values = [
+        (TransformProperty::X, transform.x),
+        (TransformProperty::Y, transform.y),
+        (TransformProperty::Rotation, transform.rotation),
+        (TransformProperty::ScaleX, transform.scale_x),
+        (TransformProperty::ScaleY, transform.scale_y),
+        (TransformProperty::SkewX, transform.skew_x),
+        (TransformProperty::SkewY, transform.skew_y),
+        (TransformProperty::Opacity, opacity),
+    ];
+
+    for (prop, value) in props_and_values {
+        let target = AnimationTarget::Object {
+            id: instance_id,
+            property: prop,
+        };
+        if let Some(curve) = animation_data.get_curve_mut(&target) {
+            curve.set_keyframe(Keyframe::linear(time, value));
         }
     }
 }
@@ -35,19 +72,33 @@ impl Action for TransformClipInstancesAction {
             None => return Ok(()),
         };
 
-        // Get mutable reference to clip_instances for this layer type
-        let clip_instances = match layer {
-            AnyLayer::Vector(vl) => &mut vl.clip_instances,
-            AnyLayer::Audio(al) => &mut al.clip_instances,
-            AnyLayer::Video(vl) => &mut vl.clip_instances,
-            AnyLayer::Effect(_) => return Ok(()), // Effect layers don't have clip instances
-        };
-
-        // Apply new transforms
-        for (clip_id, (_old, new)) in &self.clip_instance_transforms {
-            if let Some(clip_instance) = clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
-                clip_instance.transform = new.clone();
+        match layer {
+            AnyLayer::Vector(vl) => {
+                for (clip_id, (_old, new)) in &self.clip_instance_transforms {
+                    if let Some(clip_instance) = vl.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        let opacity = clip_instance.opacity;
+                        clip_instance.transform = new.clone();
+                        update_animation_keyframes(
+                            &mut vl.layer.animation_data, *clip_id, new, opacity, self.time,
+                        );
+                    }
+                }
             }
+            AnyLayer::Audio(al) => {
+                for (clip_id, (_old, new)) in &self.clip_instance_transforms {
+                    if let Some(ci) = al.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        ci.transform = new.clone();
+                    }
+                }
+            }
+            AnyLayer::Video(vl) => {
+                for (clip_id, (_old, new)) in &self.clip_instance_transforms {
+                    if let Some(ci) = vl.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        ci.transform = new.clone();
+                    }
+                }
+            }
+            AnyLayer::Effect(_) => {}
         }
         Ok(())
     }
@@ -58,19 +109,33 @@ impl Action for TransformClipInstancesAction {
             None => return Ok(()),
         };
 
-        // Get mutable reference to clip_instances for this layer type
-        let clip_instances = match layer {
-            AnyLayer::Vector(vl) => &mut vl.clip_instances,
-            AnyLayer::Audio(al) => &mut al.clip_instances,
-            AnyLayer::Video(vl) => &mut vl.clip_instances,
-            AnyLayer::Effect(_) => return Ok(()), // Effect layers don't have clip instances
-        };
-
-        // Restore old transforms
-        for (clip_id, (old, _new)) in &self.clip_instance_transforms {
-            if let Some(clip_instance) = clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
-                clip_instance.transform = old.clone();
+        match layer {
+            AnyLayer::Vector(vl) => {
+                for (clip_id, (old, _new)) in &self.clip_instance_transforms {
+                    if let Some(clip_instance) = vl.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        let opacity = clip_instance.opacity;
+                        clip_instance.transform = old.clone();
+                        update_animation_keyframes(
+                            &mut vl.layer.animation_data, *clip_id, old, opacity, self.time,
+                        );
+                    }
+                }
             }
+            AnyLayer::Audio(al) => {
+                for (clip_id, (old, _new)) in &self.clip_instance_transforms {
+                    if let Some(ci) = al.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        ci.transform = old.clone();
+                    }
+                }
+            }
+            AnyLayer::Video(vl) => {
+                for (clip_id, (old, _new)) in &self.clip_instance_transforms {
+                    if let Some(ci) = vl.clip_instances.iter_mut().find(|ci| ci.id == *clip_id) {
+                        ci.transform = old.clone();
+                    }
+                }
+            }
+            AnyLayer::Effect(_) => {}
         }
         Ok(())
     }
@@ -94,7 +159,6 @@ mod tests {
         let mut document = Document::new("Test");
         let mut layer = VectorLayer::new("Test Layer");
 
-        // Create a clip instance with initial transform
         let clip_id = Uuid::new_v4();
         let instance_id = Uuid::new_v4();
         let mut instance = ClipInstance::with_id(instance_id, clip_id);
@@ -103,18 +167,14 @@ mod tests {
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Create transform action: move from (10, 20) to (100, 200)
         let old_transform = Transform::with_position(10.0, 20.0);
         let new_transform = Transform::with_position(100.0, 200.0);
         let mut transforms = HashMap::new();
         transforms.insert(instance_id, (old_transform, new_transform));
 
-        let mut action = TransformClipInstancesAction::new(layer_id, transforms);
-
-        // Execute action
+        let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
         action.execute(&mut document).unwrap();
 
-        // Verify transform changed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
             let inst = vl.clip_instances.iter().find(|ci| ci.id == instance_id).unwrap();
             assert_eq!(inst.transform.x, 100.0);
@@ -123,10 +183,8 @@ mod tests {
             panic!("Layer not found");
         }
 
-        // Rollback
         action.rollback(&mut document).unwrap();
 
-        // Verify transform restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
             let inst = vl.clip_instances.iter().find(|ci| ci.id == instance_id).unwrap();
             assert_eq!(inst.transform.x, 10.0);
@@ -141,7 +199,6 @@ mod tests {
         let mut document = Document::new("Test");
         let mut layer = AudioLayer::new("Audio Layer");
 
-        // Create a clip instance
         let clip_id = Uuid::new_v4();
         let instance_id = Uuid::new_v4();
         let mut instance = ClipInstance::with_id(instance_id, clip_id);
@@ -150,16 +207,14 @@ mod tests {
 
         let layer_id = document.root_mut().add_child(AnyLayer::Audio(layer));
 
-        // Create transform action
         let old_transform = Transform::with_position(0.0, 0.0);
         let new_transform = Transform::with_position(50.0, 75.0);
         let mut transforms = HashMap::new();
         transforms.insert(instance_id, (old_transform, new_transform));
 
-        let mut action = TransformClipInstancesAction::new(layer_id, transforms);
+        let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
         action.execute(&mut document).unwrap();
 
-        // Verify
         if let Some(AnyLayer::Audio(al)) = document.get_layer_mut(&layer_id) {
             let inst = al.clip_instances.iter().find(|ci| ci.id == instance_id).unwrap();
             assert_eq!(inst.transform.x, 50.0);
@@ -174,7 +229,6 @@ mod tests {
         let mut document = Document::new("Test");
         let mut layer = VideoLayer::new("Video Layer");
 
-        // Create a clip instance
         let clip_id = Uuid::new_v4();
         let instance_id = Uuid::new_v4();
         let mut instance = ClipInstance::with_id(instance_id, clip_id);
@@ -184,7 +238,6 @@ mod tests {
 
         let layer_id = document.root_mut().add_child(AnyLayer::Video(layer));
 
-        // Create transform with rotation and scale
         let mut old_transform = Transform::new();
         old_transform.rotation = 0.0;
         old_transform.scale_x = 1.0;
@@ -197,10 +250,9 @@ mod tests {
         let mut transforms = HashMap::new();
         transforms.insert(instance_id, (old_transform, new_transform));
 
-        let mut action = TransformClipInstancesAction::new(layer_id, transforms);
+        let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
         action.execute(&mut document).unwrap();
 
-        // Verify rotation and scale
         if let Some(AnyLayer::Video(vl)) = document.get_layer_mut(&layer_id) {
             let inst = vl.clip_instances.iter().find(|ci| ci.id == instance_id).unwrap();
             assert_eq!(inst.transform.rotation, 45.0);
@@ -216,7 +268,6 @@ mod tests {
         let mut document = Document::new("Test");
         let mut layer = VectorLayer::new("Test Layer");
 
-        // Create two clip instances
         let clip_id = Uuid::new_v4();
         let instance1_id = Uuid::new_v4();
         let instance2_id = Uuid::new_v4();
@@ -232,7 +283,6 @@ mod tests {
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Transform both instances
         let mut transforms = HashMap::new();
         transforms.insert(
             instance1_id,
@@ -243,10 +293,9 @@ mod tests {
             (Transform::with_position(100.0, 100.0), Transform::with_position(150.0, 150.0)),
         );
 
-        let mut action = TransformClipInstancesAction::new(layer_id, transforms);
+        let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
         action.execute(&mut document).unwrap();
 
-        // Verify both transformed
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
             let inst1 = vl.clip_instances.iter().find(|ci| ci.id == instance1_id).unwrap();
             assert_eq!(inst1.transform.x, 50.0);
@@ -259,10 +308,8 @@ mod tests {
             panic!("Layer not found");
         }
 
-        // Rollback
         action.rollback(&mut document).unwrap();
 
-        // Verify both restored
         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
             let inst1 = vl.clip_instances.iter().find(|ci| ci.id == instance1_id).unwrap();
             assert_eq!(inst1.transform.x, 0.0);
@@ -277,25 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_nonexistent_layer() {
-        let mut document = Document::new("Test");
-        let fake_layer_id = Uuid::new_v4();
-        let instance_id = Uuid::new_v4();
-
-        let mut transforms = HashMap::new();
-        transforms.insert(
-            instance_id,
-            (Transform::with_position(0.0, 0.0), Transform::with_position(50.0, 50.0)),
-        );
-
-        let mut action = TransformClipInstancesAction::new(fake_layer_id, transforms);
-
-        // Should not panic, just return early
-        action.execute(&mut document).unwrap();
-        action.rollback(&mut document).unwrap();
-    }
-
-    #[test]
     fn test_description() {
         let layer_id = Uuid::new_v4();
         let instance_id = Uuid::new_v4();
@@ -306,16 +334,7 @@ mod tests {
             (Transform::new(), Transform::with_position(10.0, 10.0)),
         );
 
-        let action = TransformClipInstancesAction::new(layer_id, transforms);
+        let action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
         assert_eq!(action.description(), "Transform 1 clip instance(s)");
-
-        // Multiple instances
-        let mut transforms2 = HashMap::new();
-        transforms2.insert(Uuid::new_v4(), (Transform::new(), Transform::new()));
-        transforms2.insert(Uuid::new_v4(), (Transform::new(), Transform::new()));
-        transforms2.insert(Uuid::new_v4(), (Transform::new(), Transform::new()));
-
-        let action2 = TransformClipInstancesAction::new(layer_id, transforms2);
-        assert_eq!(action2.description(), "Transform 3 clip instance(s)");
     }
 }

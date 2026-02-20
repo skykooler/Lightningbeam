@@ -523,4 +523,25 @@ impl AnimationData {
             .map(|curve| curve.eval(time))
             .unwrap_or(default)
     }
+
+    /// Evaluate the effective transform for a clip instance at a given time.
+    /// Uses animation curves if they exist, falling back to the clip instance's base transform.
+    pub fn eval_clip_instance_transform(
+        &self,
+        instance_id: uuid::Uuid,
+        time: f64,
+        base: &crate::object::Transform,
+        base_opacity: f64,
+    ) -> (crate::object::Transform, f64) {
+        let mut t = base.clone();
+        t.x = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::X }, time, base.x);
+        t.y = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::Y }, time, base.y);
+        t.rotation = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::Rotation }, time, base.rotation);
+        t.scale_x = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::ScaleX }, time, base.scale_x);
+        t.scale_y = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::ScaleY }, time, base.scale_y);
+        t.skew_x = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::SkewX }, time, base.skew_x);
+        t.skew_y = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::SkewY }, time, base.skew_y);
+        let opacity = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::Opacity }, time, base_opacity);
+        (t, opacity)
+    }
 }

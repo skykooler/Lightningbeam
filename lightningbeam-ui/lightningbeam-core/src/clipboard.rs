@@ -5,7 +5,6 @@
 
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VectorClip, VideoClip};
 use crate::layer::{AudioLayerType, AnyLayer};
-use crate::object::ShapeInstance;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -71,12 +70,10 @@ pub enum ClipboardContent {
         /// Referenced image assets
         image_assets: Vec<(Uuid, ImageAsset)>,
     },
-    /// Shapes and shape instances from a vector layer
+    /// Shapes from a vector layer's keyframe
     Shapes {
-        /// Shape definitions (id -> shape)
-        shapes: Vec<(Uuid, Shape)>,
-        /// Shape instances referencing the shapes above
-        instances: Vec<ShapeInstance>,
+        /// Shapes (with embedded transforms)
+        shapes: Vec<Shape>,
     },
 }
 
@@ -168,39 +165,22 @@ impl ClipboardContent {
                     id_map,
                 )
             }
-            ClipboardContent::Shapes { shapes, instances } => {
-                // Regenerate shape definition IDs
-                let new_shapes: Vec<(Uuid, Shape)> = shapes
+            ClipboardContent::Shapes { shapes } => {
+                // Regenerate shape IDs
+                let new_shapes: Vec<Shape> = shapes
                     .iter()
-                    .map(|(old_id, shape)| {
+                    .map(|shape| {
                         let new_id = Uuid::new_v4();
-                        id_map.insert(*old_id, new_id);
+                        id_map.insert(shape.id, new_id);
                         let mut new_shape = shape.clone();
                         new_shape.id = new_id;
-                        (new_id, new_shape)
-                    })
-                    .collect();
-
-                // Regenerate instance IDs and remap shape_id references
-                let new_instances: Vec<ShapeInstance> = instances
-                    .iter()
-                    .map(|inst| {
-                        let new_instance_id = Uuid::new_v4();
-                        id_map.insert(inst.id, new_instance_id);
-                        let mut new_inst = inst.clone();
-                        new_inst.id = new_instance_id;
-                        // Remap shape_id to new definition ID
-                        if let Some(new_shape_id) = id_map.get(&inst.shape_id) {
-                            new_inst.shape_id = *new_shape_id;
-                        }
-                        new_inst
+                        new_shape
                     })
                     .collect();
 
                 (
                     ClipboardContent::Shapes {
                         shapes: new_shapes,
-                        instances: new_instances,
                     },
                     id_map,
                 )

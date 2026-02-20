@@ -136,6 +136,59 @@ impl Layer {
     }
 }
 
+/// Tween type between keyframes
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TweenType {
+    /// Hold shapes until next keyframe (no interpolation)
+    None,
+    /// Shape tween — morph geometry between keyframes
+    Shape,
+}
+
+impl Default for TweenType {
+    fn default() -> Self {
+        TweenType::None
+    }
+}
+
+/// A keyframe containing all shapes at a point in time
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShapeKeyframe {
+    /// Time in seconds
+    pub time: f64,
+    /// All shapes at this keyframe
+    pub shapes: Vec<Shape>,
+    /// What happens between this keyframe and the next
+    #[serde(default)]
+    pub tween_after: TweenType,
+    /// Clip instance IDs visible in this keyframe region.
+    /// Groups are only rendered in regions where they appear in the left keyframe.
+    #[serde(default)]
+    pub clip_instance_ids: Vec<Uuid>,
+}
+
+impl ShapeKeyframe {
+    /// Create a new empty keyframe at a given time
+    pub fn new(time: f64) -> Self {
+        Self {
+            time,
+            shapes: Vec::new(),
+            tween_after: TweenType::None,
+            clip_instance_ids: Vec::new(),
+        }
+    }
+
+    /// Create a keyframe with shapes
+    pub fn with_shapes(time: f64, shapes: Vec<Shape>) -> Self {
+        Self {
+            time,
+            shapes,
+            tween_after: TweenType::None,
+            clip_instance_ids: Vec::new(),
+        }
+    }
+}
+
 /// Vector layer containing shapes and objects
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VectorLayer {
@@ -147,6 +200,10 @@ pub struct VectorLayer {
 
     /// Shape instances (references to shapes with transforms)
     pub shape_instances: Vec<ShapeInstance>,
+
+    /// Shape keyframes (sorted by time) — replaces shapes/shape_instances
+    #[serde(default)]
+    pub keyframes: Vec<ShapeKeyframe>,
 
     /// Clip instances (references to vector clips with transforms)
     /// VectorLayer can contain instances of VectorClips for nested compositions
@@ -230,6 +287,7 @@ impl VectorLayer {
             layer: Layer::new(LayerType::Vector, name),
             shapes: HashMap::new(),
             shape_instances: Vec::new(),
+            keyframes: Vec::new(),
             clip_instances: Vec::new(),
         }
     }
@@ -323,6 +381,176 @@ impl VectorLayer {
     {
         if let Some(object) = self.get_object_mut(id) {
             f(object);
+        }
+    }
+
+    // === KEYFRAME METHODS ===
+
+    /// Find the keyframe at-or-before the given time
+    pub fn keyframe_at(&self, time: f64) -> Option<&ShapeKeyframe> {
+        // keyframes are sorted by time; find the last one <= time
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        if idx > 0 {
+            Some(&self.keyframes[idx - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Find the mutable keyframe at-or-before the given time
+    pub fn keyframe_at_mut(&mut self, time: f64) -> Option<&mut ShapeKeyframe> {
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        if idx > 0 {
+            Some(&mut self.keyframes[idx - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Find the index of a keyframe at the exact time (within tolerance)
+    pub fn keyframe_index_at_exact(&self, time: f64, tolerance: f64) -> Option<usize> {
+        self.keyframes.iter().position(|kf| (kf.time - time).abs() < tolerance)
+    }
+
+    /// Get shapes visible at a given time (from the keyframe at-or-before time)
+    pub fn shapes_at_time(&self, time: f64) -> &[Shape] {
+        match self.keyframe_at(time) {
+            Some(kf) => &kf.shapes,
+            None => &[],
+        }
+    }
+
+    /// Get the duration of the keyframe span starting at-or-before `time`.
+    /// Returns the time from `time` to the next keyframe, or to `fallback_end` if there is no next keyframe.
+    pub fn keyframe_span_duration(&self, time: f64, fallback_end: f64) -> f64 {
+        // Find the next keyframe after `time`
+        let next_idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        let end = if next_idx < self.keyframes.len() {
+            self.keyframes[next_idx].time
+        } else {
+            fallback_end
+        };
+        (end - time).max(0.0)
+    }
+
+    /// Check if a clip instance (group) is visible at the given time.
+    /// Returns true if the keyframe at-or-before `time` contains `clip_instance_id`.
+    pub fn is_clip_instance_visible_at(&self, clip_instance_id: &Uuid, time: f64) -> bool {
+        self.keyframe_at(time)
+            .map_or(false, |kf| kf.clip_instance_ids.contains(clip_instance_id))
+    }
+
+    /// Get the visibility end time for a group clip instance starting from `time`.
+    /// A group is visible in regions bounded on the left by a keyframe that contains it
+    /// and on the right by any keyframe. Walks forward through keyframe regions,
+    /// extending as long as consecutive left-keyframes contain the clip instance.
+    /// If the last containing keyframe has no next keyframe (no right border),
+    /// the region is just one frame long.
+    pub fn group_visibility_end(&self, clip_instance_id: &Uuid, time: f64, frame_duration: f64) -> f64 {
+        let start_idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        // start_idx is the index of the first keyframe AFTER time
+        // Walk forward: each keyframe that contains the group extends visibility to the NEXT keyframe
+        for idx in start_idx..self.keyframes.len() {
+            if !self.keyframes[idx].clip_instance_ids.contains(clip_instance_id) {
+                // This keyframe doesn't contain the group — it's the right border of the last region
+                return self.keyframes[idx].time;
+            }
+            // This keyframe contains the group — check if there's a next one to form a right border
+        }
+        // No more keyframes after the last containing one — last region is one frame
+        if let Some(last_kf) = self.keyframes.last() {
+            if last_kf.clip_instance_ids.contains(clip_instance_id) {
+                return last_kf.time + frame_duration;
+            }
+        }
+        time + frame_duration
+    }
+
+    /// Get mutable shapes at a given time
+    pub fn shapes_at_time_mut(&mut self, time: f64) -> Option<&mut Vec<Shape>> {
+        self.keyframe_at_mut(time).map(|kf| &mut kf.shapes)
+    }
+
+    /// Find a shape by ID within the keyframe active at the given time
+    pub fn get_shape_in_keyframe(&self, shape_id: &Uuid, time: f64) -> Option<&Shape> {
+        self.keyframe_at(time)
+            .and_then(|kf| kf.shapes.iter().find(|s| &s.id == shape_id))
+    }
+
+    /// Find a mutable shape by ID within the keyframe active at the given time
+    pub fn get_shape_in_keyframe_mut(&mut self, shape_id: &Uuid, time: f64) -> Option<&mut Shape> {
+        self.keyframe_at_mut(time)
+            .and_then(|kf| kf.shapes.iter_mut().find(|s| &s.id == shape_id))
+    }
+
+    /// Ensure a keyframe exists at the exact time, creating an empty one if needed.
+    /// Returns a mutable reference to the keyframe.
+    pub fn ensure_keyframe_at(&mut self, time: f64) -> &mut ShapeKeyframe {
+        let tolerance = 0.001;
+        if let Some(idx) = self.keyframe_index_at_exact(time, tolerance) {
+            return &mut self.keyframes[idx];
+        }
+        // Insert in sorted position
+        let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
+        self.keyframes.insert(insert_idx, ShapeKeyframe::new(time));
+        &mut self.keyframes[insert_idx]
+    }
+
+    /// Insert a new keyframe at time by copying shapes from the active keyframe.
+    /// Shape UUIDs are regenerated (no cross-keyframe identity).
+    /// If a keyframe already exists at the exact time, does nothing and returns it.
+    pub fn insert_keyframe_from_current(&mut self, time: f64) -> &mut ShapeKeyframe {
+        let tolerance = 0.001;
+        if let Some(idx) = self.keyframe_index_at_exact(time, tolerance) {
+            return &mut self.keyframes[idx];
+        }
+
+        // Clone shapes and clip instance IDs from the active keyframe
+        let (cloned_shapes, cloned_clip_ids) = self
+            .keyframe_at(time)
+            .map(|kf| {
+                let shapes: Vec<Shape> = kf.shapes
+                    .iter()
+                    .map(|s| {
+                        let mut new_shape = s.clone();
+                        new_shape.id = Uuid::new_v4();
+                        new_shape
+                    })
+                    .collect();
+                let clip_ids = kf.clip_instance_ids.clone();
+                (shapes, clip_ids)
+            })
+            .unwrap_or_default();
+
+        let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
+        let mut kf = ShapeKeyframe::with_shapes(time, cloned_shapes);
+        kf.clip_instance_ids = cloned_clip_ids;
+        self.keyframes.insert(insert_idx, kf);
+        &mut self.keyframes[insert_idx]
+    }
+
+    /// Add a shape to the keyframe at the given time.
+    /// Creates a keyframe if none exists at that time.
+    pub(crate) fn add_shape_to_keyframe(&mut self, shape: Shape, time: f64) {
+        let kf = self.ensure_keyframe_at(time);
+        kf.shapes.push(shape);
+    }
+
+    /// Remove a shape from the keyframe at the given time.
+    /// Returns the removed shape if found.
+    pub(crate) fn remove_shape_from_keyframe(&mut self, shape_id: &Uuid, time: f64) -> Option<Shape> {
+        let kf = self.keyframe_at_mut(time)?;
+        let idx = kf.shapes.iter().position(|s| &s.id == shape_id)?;
+        Some(kf.shapes.remove(idx))
+    }
+
+    /// Remove a keyframe at the exact time (within tolerance).
+    /// Returns the removed keyframe if found.
+    pub(crate) fn remove_keyframe_at(&mut self, time: f64, tolerance: f64) -> Option<ShapeKeyframe> {
+        if let Some(idx) = self.keyframe_index_at_exact(time, tolerance) {
+            Some(self.keyframes.remove(idx))
+        } else {
+            None
         }
     }
 }

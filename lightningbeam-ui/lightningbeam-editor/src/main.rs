@@ -1566,31 +1566,17 @@ impl EditorApp {
                 _ => return,
             };
 
-            // Gather selected shape instances and their shape definitions
-            let selected_instances: Vec<_> = vector_layer
-                .shape_instances
-                .iter()
-                .filter(|si| self.selection.contains_shape_instance(&si.id))
-                .cloned()
+            // Gather selected shapes (they now contain their own transforms)
+            let selected_shapes: Vec<_> = self.selection.shapes().iter()
+                .filter_map(|id| vector_layer.shapes.get(id).cloned())
                 .collect();
 
-            if selected_instances.is_empty() {
+            if selected_shapes.is_empty() {
                 return;
             }
 
-            let mut shapes = Vec::new();
-            let mut seen_shape_ids = std::collections::HashSet::new();
-            for inst in &selected_instances {
-                if seen_shape_ids.insert(inst.shape_id) {
-                    if let Some(shape) = vector_layer.shapes.get(&inst.shape_id) {
-                        shapes.push((inst.shape_id, shape.clone()));
-                    }
-                }
-            }
-
             let content = ClipboardContent::Shapes {
-                shapes,
-                instances: selected_instances,
+                shapes: selected_shapes,
             };
 
             self.clipboard_manager.copy(content);
@@ -1641,47 +1627,18 @@ impl EditorApp {
             }
 
             self.selection.clear_clip_instances();
-        } else if !self.selection.shape_instances().is_empty() {
+        } else if !self.selection.shapes().is_empty() {
             let active_layer_id = match self.active_layer_id {
                 Some(id) => id,
                 None => return,
             };
 
-            let document = self.action_executor.document();
-            let layer = match document.get_layer(&active_layer_id) {
-                Some(l) => l,
-                None => return,
-            };
-
-            let vector_layer = match layer {
-                AnyLayer::Vector(vl) => vl,
-                _ => return,
-            };
-
-            // Collect shape instance IDs and their shape IDs
-            let instance_ids: Vec<Uuid> = self.selection.shape_instances().to_vec();
-            let mut shape_ids: Vec<Uuid> = Vec::new();
-            let mut shape_id_set = std::collections::HashSet::new();
-
-            for inst in &vector_layer.shape_instances {
-                if instance_ids.contains(&inst.id) {
-                    if shape_id_set.insert(inst.shape_id) {
-                        // Only remove shape definition if no other instances reference it
-                        let other_refs = vector_layer
-                            .shape_instances
-                            .iter()
-                            .any(|si| si.shape_id == inst.shape_id && !instance_ids.contains(&si.id));
-                        if !other_refs {
-                            shape_ids.push(inst.shape_id);
-                        }
-                    }
-                }
-            }
+            let shape_ids: Vec<Uuid> = self.selection.shapes().to_vec();
 
             let action = lightningbeam_core::actions::RemoveShapesAction::new(
                 active_layer_id,
                 shape_ids,
-                instance_ids,
+                self.playback_time,
             );
 
             if let Err(e) = self.action_executor.execute(Box::new(action)) {
@@ -1797,16 +1754,13 @@ impl EditorApp {
                     self.selection.add_clip_instance(id);
                 }
             }
-            ClipboardContent::Shapes {
-                shapes,
-                instances,
-            } => {
+            ClipboardContent::Shapes { shapes } => {
                 let active_layer_id = match self.active_layer_id {
                     Some(id) => id,
                     None => return,
                 };
 
-                // Add shapes and instances to the active vector layer
+                // Add shapes to the active vector layer's keyframe
                 let document = self.action_executor.document_mut();
                 let layer = match document.get_layer_mut(&active_layer_id) {
                     Some(l) => l,
@@ -1821,19 +1775,17 @@ impl EditorApp {
                     }
                 };
 
-                let new_instance_ids: Vec<Uuid> = instances.iter().map(|i| i.id).collect();
+                let new_shape_ids: Vec<Uuid> = shapes.iter().map(|s| s.id).collect();
 
-                for (id, shape) in shapes {
-                    vector_layer.shapes.insert(id, shape);
-                }
-                for inst in instances {
-                    vector_layer.shape_instances.push(inst);
+                let kf = vector_layer.ensure_keyframe_at(self.playback_time);
+                for shape in shapes {
+                    kf.shapes.push(shape);
                 }
 
                 // Select pasted shapes
-                self.selection.clear_shape_instances();
-                for id in new_instance_ids {
-                    self.selection.add_shape_instance(id);
+                self.selection.clear_shapes();
+                for id in new_shape_ids {
+                    self.selection.add_shape(id);
                 }
             }
         }
@@ -2268,8 +2220,26 @@ impl EditorApp {
 
             // Modify menu
             MenuAction::Group => {
-                println!("Menu: Group");
-                // TODO: Implement group
+                if let Some(layer_id) = self.active_layer_id {
+                    let shape_ids: Vec<uuid::Uuid> = self.selection.shape_instances().to_vec();
+                    let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
+                    if shape_ids.len() + clip_ids.len() >= 2 {
+                        let instance_id = uuid::Uuid::new_v4();
+                        let action = lightningbeam_core::actions::GroupAction::new(
+                            layer_id,
+                            self.playback_time,
+                            shape_ids,
+                            clip_ids,
+                            instance_id,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to group: {}", e);
+                        } else {
+                            self.selection.clear();
+                            self.selection.add_clip_instance(instance_id);
+                        }
+                    }
+                }
             }
             MenuAction::SendToBack => {
                 println!("Menu: Send to Back");
@@ -2397,7 +2367,6 @@ impl EditorApp {
                 use lightningbeam_core::clip::VectorClip;
                 use lightningbeam_core::layer::{VectorLayer, AnyLayer};
                 use lightningbeam_core::shape::{Shape, ShapeColor};
-                use lightningbeam_core::object::ShapeInstance;
                 use kurbo::{Circle, Rect, Shape as KurboShape};
 
                 // Generate unique name based on existing clip count
@@ -2413,19 +2382,16 @@ impl EditorApp {
                 let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
                 let mut circle_shape = Shape::new(circle_path);
                 circle_shape.fill_color = Some(ShapeColor::rgb(255, 0, 0));
-                let circle_id = circle_shape.id;
-                layer.add_shape(circle_shape);
 
                 // Create a blue rectangle shape
                 let rect_path = Rect::new(200.0, 50.0, 350.0, 150.0).to_path(0.1);
                 let mut rect_shape = Shape::new(rect_path);
                 rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
-                let rect_id = rect_shape.id;
-                layer.add_shape(rect_shape);
 
-                // Add shape instances
-                layer.shape_instances.push(ShapeInstance::new(circle_id));
-                layer.shape_instances.push(ShapeInstance::new(rect_id));
+                // Add shapes to keyframe at time 0.0
+                let kf = layer.ensure_keyframe_at(0.0);
+                kf.shapes.push(circle_shape);
+                kf.shapes.push(rect_shape);
 
                 // Add the layer to the clip
                 test_clip.layers.add_root(AnyLayer::Vector(layer));
@@ -2444,9 +2410,36 @@ impl EditorApp {
             }
 
             // Timeline menu
-            MenuAction::NewKeyframe => {
-                println!("Menu: New Keyframe");
-                // TODO: Implement new keyframe
+            MenuAction::NewKeyframe | MenuAction::AddKeyframeAtPlayhead => {
+                if let Some(layer_id) = self.active_layer_id {
+                    let document = self.action_executor.document();
+                    // Determine which selected objects are shape instances vs clip instances
+                    let mut shape_ids = Vec::new();
+                    let mut clip_ids = Vec::new();
+                    if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                        for &id in self.selection.shape_instances() {
+                            if vl.get_shape_in_keyframe(&id, self.playback_time).is_some() {
+                                shape_ids.push(id);
+                            }
+                        }
+                        for &id in self.selection.clip_instances() {
+                            if vl.clip_instances.iter().any(|ci| ci.id == id) {
+                                clip_ids.push(id);
+                            }
+                        }
+                    }
+                    // For vector layers, always create a shape keyframe (even without clip selection)
+                    if document.get_layer(&layer_id).map_or(false, |l| matches!(l, AnyLayer::Vector(_))) || !clip_ids.is_empty() {
+                        let action = lightningbeam_core::actions::SetKeyframeAction::new(
+                            layer_id,
+                            self.playback_time,
+                            clip_ids,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to set keyframe: {}", e);
+                        }
+                    }
+                }
             }
             MenuAction::NewBlankKeyframe => {
                 println!("Menu: New Blank Keyframe");
@@ -2460,10 +2453,7 @@ impl EditorApp {
                 println!("Menu: Duplicate Keyframe");
                 // TODO: Implement duplicate keyframe
             }
-            MenuAction::AddKeyframeAtPlayhead => {
-                println!("Menu: Add Keyframe at Playhead");
-                // TODO: Implement add keyframe at playhead
-            }
+            // AddKeyframeAtPlayhead handled above together with NewKeyframe
             MenuAction::AddMotionTween => {
                 println!("Menu: Add Motion Tween");
                 // TODO: Implement add motion tween
@@ -3312,16 +3302,14 @@ impl EditorApp {
                 use lightningbeam_core::shape::Shape;
                 let shape = Shape::new(path).with_image_fill(asset_info.clip_id);
 
-                // Create shape instance at document center
-                use lightningbeam_core::object::ShapeInstance;
-                let shape_instance = ShapeInstance::new(shape.id)
-                    .with_position(center_x, center_y);
+                // Set position on shape directly
+                let shape = shape.with_position(center_x, center_y);
 
                 // Create and execute action
                 let action = lightningbeam_core::actions::AddShapeAction::new(
                     layer_id,
                     shape,
-                    shape_instance,
+                    self.playback_time,
                 );
                 let _ = self.action_executor.execute(Box::new(action));
             } else {
@@ -4445,6 +4433,25 @@ impl eframe::App for EditorApp {
             let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
             // Empty cache fallback if generator not initialized
             let empty_thumbnail_cache: HashMap<Uuid, Vec<u8>> = HashMap::new();
+
+            // Sync clip instance transforms from animation data at current playback time.
+            // This ensures selection boxes, hit testing, and interactive editing see the
+            // animated transform values, not just the base values on the ClipInstance struct.
+            {
+                let time = self.playback_time;
+                let document = self.action_executor.document_mut();
+                for layer in document.root.children.iter_mut() {
+                    if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                        for ci in &mut vl.clip_instances {
+                            let (t, opacity) = vl.layer.animation_data.eval_clip_instance_transform(
+                                ci.id, time, &ci.transform, ci.opacity,
+                            );
+                            ci.transform = t;
+                            ci.opacity = opacity;
+                        }
+                    }
+                }
+            }
 
             // Create render context
             let mut ctx = RenderContext {

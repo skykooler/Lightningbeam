@@ -1,37 +1,32 @@
 //! Remove shapes action
 //!
-//! Handles removing shapes and shape instances from a vector layer (for cut/delete).
+//! Handles removing shapes from a vector layer's keyframe (for cut/delete).
 
 use crate::action::Action;
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use crate::object::ShapeInstance;
 use crate::shape::Shape;
 use uuid::Uuid;
 
-/// Action that removes shapes and their instances from a vector layer
+/// Action that removes shapes from a vector layer's keyframe
 pub struct RemoveShapesAction {
     /// Layer ID containing the shapes
     layer_id: Uuid,
     /// Shape IDs to remove
     shape_ids: Vec<Uuid>,
-    /// Shape instance IDs to remove
-    instance_ids: Vec<Uuid>,
+    /// Time of the keyframe
+    time: f64,
     /// Saved shapes for rollback
-    saved_shapes: Vec<(Uuid, Shape)>,
-    /// Saved instances for rollback
-    saved_instances: Vec<ShapeInstance>,
+    saved_shapes: Vec<Shape>,
 }
 
 impl RemoveShapesAction {
-    /// Create a new remove shapes action
-    pub fn new(layer_id: Uuid, shape_ids: Vec<Uuid>, instance_ids: Vec<Uuid>) -> Self {
+    pub fn new(layer_id: Uuid, shape_ids: Vec<Uuid>, time: f64) -> Self {
         Self {
             layer_id,
             shape_ids,
-            instance_ids,
+            time,
             saved_shapes: Vec::new(),
-            saved_instances: Vec::new(),
         }
     }
 }
@@ -39,7 +34,6 @@ impl RemoveShapesAction {
 impl Action for RemoveShapesAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         self.saved_shapes.clear();
-        self.saved_instances.clear();
 
         let layer = document
             .get_layer_mut(&self.layer_id)
@@ -50,21 +44,9 @@ impl Action for RemoveShapesAction {
             _ => return Err("Not a vector layer".to_string()),
         };
 
-        // Remove and save shape instances
-        let mut remaining_instances = Vec::new();
-        for inst in vector_layer.shape_instances.drain(..) {
-            if self.instance_ids.contains(&inst.id) {
-                self.saved_instances.push(inst);
-            } else {
-                remaining_instances.push(inst);
-            }
-        }
-        vector_layer.shape_instances = remaining_instances;
-
-        // Remove and save shape definitions
         for shape_id in &self.shape_ids {
-            if let Some(shape) = vector_layer.shapes.remove(shape_id) {
-                self.saved_shapes.push((*shape_id, shape));
+            if let Some(shape) = vector_layer.remove_shape_from_keyframe(shape_id, self.time) {
+                self.saved_shapes.push(shape);
             }
         }
 
@@ -81,21 +63,15 @@ impl Action for RemoveShapesAction {
             _ => return Err("Not a vector layer".to_string()),
         };
 
-        // Restore shapes
-        for (id, shape) in self.saved_shapes.drain(..) {
-            vector_layer.shapes.insert(id, shape);
-        }
-
-        // Restore instances
-        for inst in self.saved_instances.drain(..) {
-            vector_layer.shape_instances.push(inst);
+        for shape in self.saved_shapes.drain(..) {
+            vector_layer.add_shape_to_keyframe(shape, self.time);
         }
 
         Ok(())
     }
 
     fn description(&self) -> String {
-        let count = self.instance_ids.len();
+        let count = self.shape_ids.len();
         if count == 1 {
             "Delete shape".to_string()
         } else {
@@ -108,45 +84,35 @@ impl Action for RemoveShapesAction {
 mod tests {
     use super::*;
     use crate::layer::VectorLayer;
-    use crate::object::ShapeInstance;
     use crate::shape::Shape;
     use vello::kurbo::BezPath;
 
     #[test]
     fn test_remove_shapes() {
         let mut document = Document::new("Test");
-
         let mut vector_layer = VectorLayer::new("Layer 1");
 
-        // Add a shape and instance
         let mut path = BezPath::new();
         path.move_to((0.0, 0.0));
         path.line_to((100.0, 100.0));
         let shape = Shape::new(path);
         let shape_id = shape.id;
-        let instance = ShapeInstance::new(shape_id);
-        let instance_id = instance.id;
 
-        vector_layer.shapes.insert(shape_id, shape);
-        vector_layer.shape_instances.push(instance);
+        vector_layer.add_shape_to_keyframe(shape, 0.0);
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(vector_layer));
 
-        // Remove
-        let mut action = RemoveShapesAction::new(layer_id, vec![shape_id], vec![instance_id]);
+        let mut action = RemoveShapesAction::new(layer_id, vec![shape_id], 0.0);
         action.execute(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-            assert!(vl.shapes.is_empty());
-            assert!(vl.shape_instances.is_empty());
+            assert!(vl.shapes_at_time(0.0).is_empty());
         }
 
-        // Rollback
         action.rollback(&mut document).unwrap();
 
         if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-            assert_eq!(vl.shapes.len(), 1);
-            assert_eq!(vl.shape_instances.len(), 1);
+            assert_eq!(vl.shapes_at_time(0.0).len(), 1);
         }
     }
 }

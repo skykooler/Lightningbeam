@@ -3,6 +3,7 @@
 //! Provides bezier-based vector shapes with morphing support.
 //! All shapes are composed of cubic bezier curves using kurbo::BezPath.
 
+use crate::object::Transform;
 use crate::path_interpolation::interpolate_paths;
 use kurbo::{BezPath, Cap as KurboCap, Join as KurboJoin, Stroke as KurboStroke};
 use vello::peniko::{Brush, Color, Fill};
@@ -235,6 +236,22 @@ pub struct Shape {
 
     /// Stroke style
     pub stroke_style: Option<StrokeStyle>,
+
+    /// Transform (position, rotation, scale, skew)
+    #[serde(default)]
+    pub transform: Transform,
+
+    /// Opacity (0.0 to 1.0)
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+
+    /// Display name
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn default_opacity() -> f64 {
+    1.0
 }
 
 impl Shape {
@@ -248,6 +265,9 @@ impl Shape {
             fill_rule: FillRule::NonZero,
             stroke_color: None,
             stroke_style: None,
+            transform: Transform::default(),
+            opacity: 1.0,
+            name: None,
         }
     }
 
@@ -261,6 +281,9 @@ impl Shape {
             fill_rule: FillRule::NonZero,
             stroke_color: None,
             stroke_style: None,
+            transform: Transform::default(),
+            opacity: 1.0,
+            name: None,
         }
     }
 
@@ -323,6 +346,31 @@ impl Shape {
     /// Set fill rule
     pub fn with_fill_rule(mut self, rule: FillRule) -> Self {
         self.fill_rule = rule;
+        self
+    }
+
+    /// Set position
+    pub fn with_position(mut self, x: f64, y: f64) -> Self {
+        self.transform.x = x;
+        self.transform.y = y;
+        self
+    }
+
+    /// Set transform
+    pub fn with_transform(mut self, transform: Transform) -> Self {
+        self.transform = transform;
+        self
+    }
+
+    /// Set opacity
+    pub fn with_opacity(mut self, opacity: f64) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    /// Set display name
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 

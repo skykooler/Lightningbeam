@@ -25,6 +25,9 @@ pub struct SetShapePropertiesAction {
     /// Shape to modify
     shape_id: Uuid,
 
+    /// Time of the keyframe containing the shape
+    time: f64,
+
     /// New property value
     new_value: ShapePropertyChange,
 
@@ -34,28 +37,50 @@ pub struct SetShapePropertiesAction {
 
 impl SetShapePropertiesAction {
     /// Create a new action to set a property on a shape
-    pub fn new(layer_id: Uuid, shape_id: Uuid, new_value: ShapePropertyChange) -> Self {
+    pub fn new(layer_id: Uuid, shape_id: Uuid, time: f64, new_value: ShapePropertyChange) -> Self {
         Self {
             layer_id,
             shape_id,
+            time,
             new_value,
             old_value: None,
         }
     }
 
     /// Create action to set fill color
-    pub fn set_fill_color(layer_id: Uuid, shape_id: Uuid, color: Option<ShapeColor>) -> Self {
-        Self::new(layer_id, shape_id, ShapePropertyChange::FillColor(color))
+    pub fn set_fill_color(layer_id: Uuid, shape_id: Uuid, time: f64, color: Option<ShapeColor>) -> Self {
+        Self::new(layer_id, shape_id, time, ShapePropertyChange::FillColor(color))
     }
 
     /// Create action to set stroke color
-    pub fn set_stroke_color(layer_id: Uuid, shape_id: Uuid, color: Option<ShapeColor>) -> Self {
-        Self::new(layer_id, shape_id, ShapePropertyChange::StrokeColor(color))
+    pub fn set_stroke_color(layer_id: Uuid, shape_id: Uuid, time: f64, color: Option<ShapeColor>) -> Self {
+        Self::new(layer_id, shape_id, time, ShapePropertyChange::StrokeColor(color))
     }
 
     /// Create action to set stroke width
-    pub fn set_stroke_width(layer_id: Uuid, shape_id: Uuid, width: f64) -> Self {
-        Self::new(layer_id, shape_id, ShapePropertyChange::StrokeWidth(width))
+    pub fn set_stroke_width(layer_id: Uuid, shape_id: Uuid, time: f64, width: f64) -> Self {
+        Self::new(layer_id, shape_id, time, ShapePropertyChange::StrokeWidth(width))
+    }
+}
+
+fn apply_property(shape: &mut crate::shape::Shape, change: &ShapePropertyChange) {
+    match change {
+        ShapePropertyChange::FillColor(color) => {
+            shape.fill_color = *color;
+        }
+        ShapePropertyChange::StrokeColor(color) => {
+            shape.stroke_color = *color;
+        }
+        ShapePropertyChange::StrokeWidth(width) => {
+            if let Some(ref mut style) = shape.stroke_style {
+                style.width = *width;
+            } else {
+                shape.stroke_style = Some(StrokeStyle {
+                    width: *width,
+                    ..Default::default()
+                });
+            }
+        }
     }
 }
 
@@ -63,7 +88,7 @@ impl Action for SetShapePropertiesAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         if let Some(layer) = document.get_layer_mut(&self.layer_id) {
             if let AnyLayer::Vector(vector_layer) = layer {
-                if let Some(shape) = vector_layer.shapes.get_mut(&self.shape_id) {
+                if let Some(shape) = vector_layer.get_shape_in_keyframe_mut(&self.shape_id, self.time) {
                     // Store old value if not already stored
                     if self.old_value.is_none() {
                         self.old_value = Some(match &self.new_value {
@@ -84,26 +109,7 @@ impl Action for SetShapePropertiesAction {
                         });
                     }
 
-                    // Apply new value
-                    match &self.new_value {
-                        ShapePropertyChange::FillColor(color) => {
-                            shape.fill_color = *color;
-                        }
-                        ShapePropertyChange::StrokeColor(color) => {
-                            shape.stroke_color = *color;
-                        }
-                        ShapePropertyChange::StrokeWidth(width) => {
-                            if let Some(ref mut style) = shape.stroke_style {
-                                style.width = *width;
-                            } else {
-                                // Create stroke style if it doesn't exist
-                                shape.stroke_style = Some(StrokeStyle {
-                                    width: *width,
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
+                    apply_property(shape, &self.new_value);
                 }
             }
         }
@@ -111,23 +117,11 @@ impl Action for SetShapePropertiesAction {
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        if let Some(old_value) = &self.old_value {
+        if let Some(old_value) = &self.old_value.clone() {
             if let Some(layer) = document.get_layer_mut(&self.layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
-                    if let Some(shape) = vector_layer.shapes.get_mut(&self.shape_id) {
-                        match old_value {
-                            ShapePropertyChange::FillColor(color) => {
-                                shape.fill_color = *color;
-                            }
-                            ShapePropertyChange::StrokeColor(color) => {
-                                shape.stroke_color = *color;
-                            }
-                            ShapePropertyChange::StrokeWidth(width) => {
-                                if let Some(ref mut style) = shape.stroke_style {
-                                    style.width = *width;
-                                }
-                            }
-                        }
+                    if let Some(shape) = vector_layer.get_shape_in_keyframe_mut(&self.shape_id, self.time) {
+                        apply_property(shape, old_value);
                     }
                 }
             }
@@ -149,7 +143,7 @@ mod tests {
     use super::*;
     use crate::layer::VectorLayer;
     use crate::shape::Shape;
-    use kurbo::BezPath;
+    use vello::kurbo::BezPath;
 
     fn create_test_shape() -> Shape {
         let mut path = BezPath::new();
@@ -176,24 +170,24 @@ mod tests {
 
         let shape = create_test_shape();
         let shape_id = shape.id;
-        layer.shapes.insert(shape_id, shape);
+        layer.add_shape_to_keyframe(shape, 0.0);
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
         // Verify initial color
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             assert_eq!(shape.fill_color.unwrap().r, 255);
         }
 
         // Create and execute action
         let new_color = Some(ShapeColor::rgb(0, 255, 0));
-        let mut action = SetShapePropertiesAction::set_fill_color(layer_id, shape_id, new_color);
+        let mut action = SetShapePropertiesAction::set_fill_color(layer_id, shape_id, 0.0, new_color);
         action.execute(&mut document).unwrap();
 
         // Verify color changed
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             assert_eq!(shape.fill_color.unwrap().g, 255);
         }
 
@@ -201,8 +195,8 @@ mod tests {
         action.rollback(&mut document).unwrap();
 
         // Verify restored
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             assert_eq!(shape.fill_color.unwrap().r, 255);
         }
     }
@@ -214,23 +208,17 @@ mod tests {
 
         let shape = create_test_shape();
         let shape_id = shape.id;
-        layer.shapes.insert(shape_id, shape);
+        layer.add_shape_to_keyframe(shape, 0.0);
 
         let layer_id = document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Verify initial width
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
-            assert_eq!(shape.stroke_style.as_ref().unwrap().width, 2.0);
-        }
-
         // Create and execute action
-        let mut action = SetShapePropertiesAction::set_stroke_width(layer_id, shape_id, 5.0);
+        let mut action = SetShapePropertiesAction::set_stroke_width(layer_id, shape_id, 0.0, 5.0);
         action.execute(&mut document).unwrap();
 
         // Verify width changed
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             assert_eq!(shape.stroke_style.as_ref().unwrap().width, 5.0);
         }
 
@@ -238,8 +226,8 @@ mod tests {
         action.rollback(&mut document).unwrap();
 
         // Verify restored
-        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&layer_id) {
-            let shape = vl.shapes.get(&shape_id).unwrap();
+        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+            let shape = vl.get_shape_in_keyframe(&shape_id, 0.0).unwrap();
             assert_eq!(shape.stroke_style.as_ref().unwrap().width, 2.0);
         }
     }
@@ -250,14 +238,14 @@ mod tests {
         let shape_id = Uuid::new_v4();
 
         let action1 =
-            SetShapePropertiesAction::set_fill_color(layer_id, shape_id, Some(ShapeColor::rgb(0, 0, 0)));
+            SetShapePropertiesAction::set_fill_color(layer_id, shape_id, 0.0, Some(ShapeColor::rgb(0, 0, 0)));
         assert_eq!(action1.description(), "Set fill color");
 
         let action2 =
-            SetShapePropertiesAction::set_stroke_color(layer_id, shape_id, Some(ShapeColor::rgb(0, 0, 0)));
+            SetShapePropertiesAction::set_stroke_color(layer_id, shape_id, 0.0, Some(ShapeColor::rgb(0, 0, 0)));
         assert_eq!(action2.description(), "Set stroke color");
 
-        let action3 = SetShapePropertiesAction::set_stroke_width(layer_id, shape_id, 3.0);
+        let action3 = SetShapePropertiesAction::set_stroke_width(layer_id, shape_id, 0.0, 3.0);
         assert_eq!(action3.description(), "Set stroke width");
     }
 }

@@ -44,6 +44,12 @@ pub struct VectorClip {
     /// Nested layer hierarchy
     pub layers: LayerTree<AnyLayer>,
 
+    /// Whether this clip is a group (static collection) rather than an animated clip.
+    /// Groups have their timeline extent determined by keyframe spans on the containing layer,
+    /// not by their internal duration.
+    #[serde(default)]
+    pub is_group: bool,
+
     /// Folder this clip belongs to (None = root of category)
     #[serde(default)]
     pub folder_id: Option<Uuid>,
@@ -59,6 +65,7 @@ impl VectorClip {
             height,
             duration,
             layers: LayerTree::new(),
+            is_group: false,
             folder_id: None,
         }
     }
@@ -78,6 +85,7 @@ impl VectorClip {
             height,
             duration,
             layers: LayerTree::new(),
+            is_group: false,
             folder_id: None,
         }
     }
@@ -100,23 +108,20 @@ impl VectorClip {
         for layer_node in self.layers.iter() {
             // Only process vector layers (skip other layer types)
             if let AnyLayer::Vector(vector_layer) = &layer_node.data {
-                // Calculate bounds for all shape instances in this layer
-                for shape_instance in &vector_layer.shape_instances {
-                    // Get the shape for this instance
-                    if let Some(shape) = vector_layer.shapes.get(&shape_instance.shape_id) {
-                        // Get the local bounding box of the shape's path
-                        let local_bbox = shape.path().bounding_box();
+                // Calculate bounds for all shapes in the active keyframe
+                for shape in vector_layer.shapes_at_time(clip_time) {
+                    // Get the local bounding box of the shape's path
+                    let local_bbox = shape.path().bounding_box();
 
-                        // Apply the shape instance's transform (TODO: evaluate animations at clip_time)
-                        let instance_transform = shape_instance.to_affine();
-                        let transformed_bbox = instance_transform.transform_rect_bbox(local_bbox);
+                    // Apply the shape's transform
+                    let shape_transform = shape.transform.to_affine();
+                    let transformed_bbox = shape_transform.transform_rect_bbox(local_bbox);
 
-                        // Union with combined bounds
-                        combined_bounds = Some(match combined_bounds {
-                            None => transformed_bbox,
-                            Some(existing) => existing.union(transformed_bbox),
-                        });
-                    }
+                    // Union with combined bounds
+                    combined_bounds = Some(match combined_bounds {
+                        None => transformed_bbox,
+                        Some(existing) => existing.union(transformed_bbox),
+                    });
                 }
 
                 // Handle nested clip instances recursively
