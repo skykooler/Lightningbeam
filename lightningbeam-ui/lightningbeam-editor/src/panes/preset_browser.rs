@@ -191,8 +191,9 @@ impl PresetBrowserPane {
             let mut controller = audio_controller.lock().unwrap();
             controller.graph_load_preset(track_id, preset.path.to_string_lossy().to_string());
         }
-
-        *shared.project_generation += 1;
+        // Note: project_generation is incremented by the GraphPresetLoaded event handler
+        // in main.rs, which fires after the audio thread has actually processed the load.
+        // This avoids a race where the node graph queries stale backend state.
     }
 
     /// Render the save preset dialog
@@ -509,6 +510,9 @@ impl PaneRenderer for PresetBrowserPane {
         // Deferred actions after ScrollArea borrow is released
         if let Some(idx) = load_index {
             self.load_preset(idx, shared);
+            // Signal that we're expecting a GraphPresetLoaded event so the
+            // repaint loop stays alive until the audio thread responds.
+            shared.pending_graph_loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(path) = delete_path {
             if let Err(e) = std::fs::remove_file(&path) {

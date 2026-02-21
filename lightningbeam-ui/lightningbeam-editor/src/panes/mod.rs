@@ -237,6 +237,10 @@ pub struct SharedPaneState<'a> {
     pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
     /// Region select mode (Rectangle or Lasso)
     pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
+    /// Counter for in-flight graph preset loads — increment when sending a
+    /// GraphLoadPreset command so the repaint loop stays alive until the
+    /// audio thread sends GraphPresetLoaded back
+    pub pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Trait for pane rendering

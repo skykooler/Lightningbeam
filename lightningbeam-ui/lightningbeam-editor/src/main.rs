@@ -698,6 +698,9 @@ struct EditorApp {
     audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>,
     audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Count of in-flight graph preset loads — keeps the repaint loop alive
+    /// until the audio thread sends GraphPresetLoaded events for all of them
+    pending_graph_loads: std::sync::Arc<std::sync::atomic::AtomicU32>,
     #[allow(dead_code)] // Stored for future export/recording configuration
     audio_sample_rate: u32,
     #[allow(dead_code)]
@@ -937,6 +940,7 @@ impl EditorApp {
             audio_controller,
             audio_event_rx,
             audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_graph_loads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             audio_sample_rate,
             audio_channels,
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
@@ -3976,6 +3980,10 @@ impl eframe::App for EditorApp {
         if self.audio_events_pending.load(std::sync::atomic::Ordering::Relaxed) {
             ctx.request_repaint();
         }
+        // Keep repainting while waiting for graph preset loads to complete
+        if self.pending_graph_loads.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            ctx.request_repaint();
+        }
 
         // Drain recording mirror buffer for live waveform display
         if self.is_recording {
@@ -4352,6 +4360,19 @@ impl eframe::App for EditorApp {
                                 self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sample_rate, channels));
                             }
                             self.waveform_gpu_dirty.insert(pool_index);
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::GraphPresetLoaded(_track_id) => {
+                            // Preset was loaded on the audio thread — bump generation
+                            // so the node graph pane reloads from backend
+                            self.project_generation += 1;
+                            // Decrement pending counter (saturating to avoid underflow from
+                            // loads not initiated by the preset browser, e.g. default instruments)
+                            let _ = self.pending_graph_loads.fetch_update(
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                                |v| if v > 0 { Some(v - 1) } else { Some(0) },
+                            );
                             ctx.request_repaint();
                         }
                         _ => {} // Ignore other events for now
@@ -4731,6 +4752,7 @@ impl eframe::App for EditorApp {
                 script_saved: &mut self.script_saved,
                 region_selection: &mut self.region_selection,
                 region_select_mode: &mut self.region_select_mode,
+                pending_graph_loads: &self.pending_graph_loads,
             };
 
             render_layout_node(
@@ -5065,6 +5087,8 @@ struct RenderContext<'a> {
     region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
     /// Region select mode (Rectangle or Lasso)
     region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
+    /// Counter for in-flight graph preset loads (keeps repaint loop alive)
+    pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Recursively render a layout node with drag support
@@ -5551,6 +5575,7 @@ fn render_pane(
                 script_saved: ctx.script_saved,
                 region_selection: ctx.region_selection,
                 region_select_mode: ctx.region_select_mode,
+                pending_graph_loads: ctx.pending_graph_loads,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
@@ -5631,6 +5656,7 @@ fn render_pane(
                 script_saved: ctx.script_saved,
                 region_selection: ctx.region_selection,
                 region_select_mode: ctx.region_select_mode,
+                pending_graph_loads: ctx.pending_graph_loads,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
