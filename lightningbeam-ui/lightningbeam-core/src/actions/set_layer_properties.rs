@@ -76,8 +76,8 @@ impl SetLayerPropertiesAction {
 impl Action for SetLayerPropertiesAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         for (i, &layer_id) in self.layer_ids.iter().enumerate() {
-            // Find the layer in the document
-            if let Some(layer) = document.root_mut().get_child_mut(&layer_id) {
+            // Find the layer in the document (searches root + inside movie clips)
+            if let Some(layer) = document.get_layer_mut(&layer_id) {
                 // Store old value if not already stored
                 if self.old_values[i].is_none() {
                     self.old_values[i] = Some(match &self.property {
@@ -106,8 +106,8 @@ impl Action for SetLayerPropertiesAction {
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         for (i, &layer_id) in self.layer_ids.iter().enumerate() {
-            // Find the layer in the document
-            if let Some(layer) = document.root_mut().get_child_mut(&layer_id) {
+            // Find the layer in the document (searches root + inside movie clips)
+            if let Some(layer) = document.get_layer_mut(&layer_id) {
                 // Restore old value if we have one
                 if let Some(old_value) = &self.old_values[i] {
                     match old_value {

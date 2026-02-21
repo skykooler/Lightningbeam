@@ -462,6 +462,15 @@ impl Document {
         self.context_layers_mut(clip_id).into_iter().find(|l| &l.id() == layer_id)
     }
 
+    /// Get all layers across the entire document (root + inside all vector clips).
+    pub fn all_layers(&self) -> Vec<&AnyLayer> {
+        let mut layers: Vec<&AnyLayer> = self.root.children.iter().collect();
+        for clip in self.vector_clips.values() {
+            layers.extend(clip.layers.root_data());
+        }
+        layers
+    }
+
     // === CLIP LIBRARY METHODS ===
 
     /// Add a vector clip to the library
@@ -645,7 +654,21 @@ impl Document {
             if clip.is_group {
                 Some(clip.duration)
             } else {
-                Some(clip.content_duration(self.framerate))
+                Some(clip.content_duration_with(self.framerate, |id| {
+                    // Resolve nested clip durations (audio, video, other vector clips)
+                    if let Some(vc) = self.vector_clips.get(id) {
+                        // Avoid deep recursion — use stored duration for nested vector clips
+                        Some(vc.content_duration(self.framerate))
+                    } else if let Some(ac) = self.audio_clips.get(id) {
+                        Some(ac.duration)
+                    } else if let Some(vc) = self.video_clips.get(id) {
+                        Some(vc.duration)
+                    } else if self.effect_definitions.contains_key(id) {
+                        Some(crate::effect::EFFECT_DURATION)
+                    } else {
+                        None
+                    }
+                }))
             }
         } else if let Some(clip) = self.video_clips.get(clip_id) {
             Some(clip.duration)

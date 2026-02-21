@@ -110,8 +110,8 @@ fn effective_clip_duration(
                 let end = vl.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration);
                 Some((end - clip_instance.timeline_start).max(0.0))
             } else {
-                // Movie clips: duration based on internal keyframe content
-                Some(vc.content_duration(document.framerate))
+                // Movie clips: duration based on all internal content (keyframes + clip instances)
+                document.get_clip_duration(&clip_instance.clip_id)
             }
         }
         AnyLayer::Audio(_) => document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration),
@@ -315,9 +315,7 @@ impl TimelinePane {
                     let clip_instance = ClipInstance::new(doc_clip_id)
                         .with_timeline_start(start_time);
 
-                    if let Some(layer) = shared.action_executor.document_mut().root.children.iter_mut()
-                        .find(|l| l.id() == active_layer_id)
-                    {
+                    if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&active_layer_id) {
                         if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                             audio_layer.clip_instances.push(clip_instance);
                         }
@@ -3313,8 +3311,15 @@ impl PaneRenderer for TimelinePane {
                             let new_layer = super::create_layer_for_clip_type(dragging.clip_type, &layer_name);
                             let new_layer_id = new_layer.id();
 
-                            // Add the layer
-                            shared.action_executor.document_mut().root.add_child(new_layer);
+                            // Add the layer to the current editing context
+                            if let Some(clip_id) = shared.editing_clip_id {
+                                if let Some(clip) = shared.action_executor.document_mut().vector_clips.get_mut(&clip_id) {
+                                    clip.layers.add_root(new_layer);
+                                }
+                                shared.action_executor.document_mut().layer_to_clip_map.insert(new_layer_id, clip_id);
+                            } else {
+                                shared.action_executor.document_mut().root.add_child(new_layer);
+                            }
 
                             // Now add the clip to the new layer
                             if dragging.clip_type == DragClipType::Effect {

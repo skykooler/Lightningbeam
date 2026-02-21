@@ -190,6 +190,21 @@ impl Action for MoveClipInstancesAction {
             let layer = document.get_layer(layer_id)
                 .ok_or_else(|| format!("Layer {} not found", layer_id))?;
 
+            // Handle vector layers: update metatrack offset for movie clips with audio
+            if let AnyLayer::Vector(vl) = layer {
+                for (instance_id, _old_start, new_start) in moves {
+                    if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
+                        // Check if this clip has a metatrack
+                        if let Some(&metatrack_id) = backend.clip_to_metatrack_map.get(&instance.clip_id) {
+                            controller.set_offset(metatrack_id, *new_start);
+                            controller.set_trim_start(metatrack_id, instance.trim_start);
+                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                        }
+                    }
+                }
+                continue;
+            }
+
             // Only process audio layers
             if !matches!(layer, AnyLayer::Audio(_)) {
                 continue;
@@ -259,6 +274,20 @@ impl Action for MoveClipInstancesAction {
             // Get the layer to determine its type
             let layer = document.get_layer(layer_id)
                 .ok_or_else(|| format!("Layer {} not found", layer_id))?;
+
+            // Handle vector layers: restore metatrack offset for movie clips with audio
+            if let AnyLayer::Vector(vl) = layer {
+                for (instance_id, old_start, _new_start) in moves {
+                    if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
+                        if let Some(&metatrack_id) = backend.clip_to_metatrack_map.get(&instance.clip_id) {
+                            controller.set_offset(metatrack_id, *old_start);
+                            controller.set_trim_start(metatrack_id, instance.trim_start);
+                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                        }
+                    }
+                }
+                continue;
+            }
 
             // Only process audio layers
             if !matches!(layer, AnyLayer::Audio(_)) {

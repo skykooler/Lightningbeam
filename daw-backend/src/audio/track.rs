@@ -153,7 +153,7 @@ impl TrackNode {
 }
 
 /// Metatrack that contains other tracks with time transformation capabilities
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Metatrack {
     pub id: TrackId,
     pub name: String,
@@ -167,14 +167,50 @@ pub struct Metatrack {
     pub pitch_shift: f32,
     /// Time offset in seconds (shift content forward/backward in time)
     pub offset: f64,
+    /// Trim start: offset into the metatrack's internal content (seconds)
+    /// Children will see time starting from this point
+    pub trim_start: f64,
+    /// Trim end: offset into the metatrack's internal content (seconds)
+    /// None means no end trim (play until content ends)
+    pub trim_end: Option<f64>,
     /// Automation lanes for this metatrack
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
+    /// Audio node graph for effects processing (input → output)
+    #[serde(skip, default = "default_audio_graph")]
+    pub audio_graph: AudioGraph,
+    /// Saved graph preset for serialization
+    audio_graph_preset: Option<GraphPreset>,
+}
+
+impl Clone for Metatrack {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            name: self.name.clone(),
+            children: self.children.clone(),
+            volume: self.volume,
+            muted: self.muted,
+            solo: self.solo,
+            time_stretch: self.time_stretch,
+            pitch_shift: self.pitch_shift,
+            offset: self.offset,
+            trim_start: self.trim_start,
+            trim_end: self.trim_end,
+            automation_lanes: self.automation_lanes.clone(),
+            next_automation_id: self.next_automation_id,
+            audio_graph: default_audio_graph(), // Create fresh graph, not cloned
+            audio_graph_preset: self.audio_graph_preset.clone(),
+        }
+    }
 }
 
 impl Metatrack {
-    /// Create a new metatrack
-    pub fn new(id: TrackId, name: String) -> Self {
+    /// Create a new metatrack with an audio graph (input → output)
+    pub fn new(id: TrackId, name: String, sample_rate: u32) -> Self {
+        let default_buffer_size = 8192;
+        let audio_graph = Self::create_default_graph(sample_rate, default_buffer_size);
+
         Self {
             id,
             name,
@@ -185,9 +221,50 @@ impl Metatrack {
             time_stretch: 1.0,
             pitch_shift: 0.0,
             offset: 0.0,
+            trim_start: 0.0,
+            trim_end: None,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
+            audio_graph,
+            audio_graph_preset: None,
         }
+    }
+
+    /// Create a default audio graph with AudioInput -> AudioOutput
+    fn create_default_graph(sample_rate: u32, buffer_size: usize) -> AudioGraph {
+        let mut graph = AudioGraph::new(sample_rate, buffer_size);
+
+        let input_node = Box::new(AudioInputNode::new("Audio Input"));
+        let input_id = graph.add_node(input_node);
+        graph.set_node_position(input_id, 100.0, 150.0);
+
+        let output_node = Box::new(AudioOutputNode::new("Audio Output"));
+        let output_id = graph.add_node(output_node);
+        graph.set_node_position(output_id, 500.0, 150.0);
+
+        let _ = graph.connect(input_id, 0, output_id, 0);
+        graph.set_output_node(Some(output_id));
+
+        graph
+    }
+
+    /// Prepare for serialization by saving the audio graph as a preset
+    pub fn prepare_for_save(&mut self) {
+        self.audio_graph_preset = Some(self.audio_graph.to_preset("Metatrack Graph"));
+    }
+
+    /// Rebuild the audio graph from preset after deserialization
+    pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
+        if let Some(preset) = &self.audio_graph_preset {
+            if !preset.nodes.is_empty() && preset.output_node.is_some() {
+                self.audio_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+            } else {
+                self.audio_graph = Self::create_default_graph(sample_rate, buffer_size);
+            }
+        } else {
+            self.audio_graph = Self::create_default_graph(sample_rate, buffer_size);
+        }
+        Ok(())
     }
 
     /// Add an automation lane to this metatrack
@@ -282,11 +359,27 @@ impl Metatrack {
         !self.muted && (!any_solo || self.solo)
     }
 
+    /// Check whether this metatrack should produce audio at the given parent time.
+    /// Returns false if the playhead is outside the trim window.
+    pub fn is_active_at_time(&self, parent_playhead: f64) -> bool {
+        let local_time = (parent_playhead - self.offset) * self.time_stretch as f64;
+        if local_time < self.trim_start {
+            return false;
+        }
+        if let Some(end) = self.trim_end {
+            if local_time >= end {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Transform a render context for this metatrack's children
     ///
-    /// Applies time stretching and offset transformations.
+    /// Applies time stretching, offset, and trim transformations.
     /// Time stretch affects how fast content plays: 0.5 = half speed, 2.0 = double speed
     /// Offset shifts content forward/backward in time
+    /// Trim start offsets into the internal content
     pub fn transform_context(&self, ctx: RenderContext) -> RenderContext {
         let mut transformed = ctx;
 
@@ -300,7 +393,11 @@ impl Metatrack {
         //    With stretch=0.5, when parent time is 2.0s, child reads from 1.0s (plays slower, pitches down)
         //    With stretch=2.0, when parent time is 2.0s, child reads from 4.0s (plays faster, pitches up)
         //    Note: This creates pitch shift as well - true time stretching would require resampling
-        transformed.playhead_seconds = adjusted_playhead * self.time_stretch as f64;
+        let stretched = adjusted_playhead * self.time_stretch as f64;
+
+        // 3. Add trim_start so children see time starting from the trim point
+        //    If trim_start=2.0, children start seeing time 2.0 when parent reaches offset
+        transformed.playhead_seconds = stretched + self.trim_start;
 
         // Accumulate time stretch for nested metatracks
         transformed.time_stretch *= self.time_stretch;

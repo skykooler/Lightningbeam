@@ -658,8 +658,8 @@ impl Engine {
                     _ => {}
                 }
             }
-            Command::CreateMetatrack(name) => {
-                let track_id = self.project.add_group_track(name.clone(), None);
+            Command::CreateMetatrack(name, parent_id) => {
+                let track_id = self.project.add_group_track(name.clone(), parent_id);
                 // Notify UI about the new metatrack
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, true, name));
             }
@@ -686,8 +686,18 @@ impl Engine {
                     metatrack.pitch_shift = semitones;
                 }
             }
-            Command::CreateAudioTrack(name) => {
-                let track_id = self.project.add_audio_track(name.clone(), None);
+            Command::SetTrimStart(track_id, trim_start) => {
+                if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.trim_start = trim_start.max(0.0);
+                }
+            }
+            Command::SetTrimEnd(track_id, trim_end) => {
+                if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.trim_end = trim_end.map(|t| t.max(0.0));
+                }
+            }
+            Command::CreateAudioTrack(name, parent_id) => {
+                let track_id = self.project.add_audio_track(name.clone(), parent_id);
                 // Notify UI about the new audio track
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
@@ -793,8 +803,8 @@ impl Engine {
                     eprintln!("[Engine] ERROR: Track {} not found or is not an audio track", track_id);
                 }
             }
-            Command::CreateMidiTrack(name) => {
-                let track_id = self.project.add_midi_track(name.clone(), None);
+            Command::CreateMidiTrack(name, parent_id) => {
+                let track_id = self.project.add_midi_track(name.clone(), parent_id);
                 // Notify UI about the new MIDI track
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
             }
@@ -2348,18 +2358,22 @@ impl Engine {
 
                 QueryResponse::TrackGraphLoaded(result)
             }
-            Query::CreateAudioTrackSync(name) => {
-                let track_id = self.project.add_audio_track(name.clone(), None);
-                eprintln!("[Engine] Created audio track '{}' with ID {}", name, track_id);
-                // Notify UI about the new audio track
+            Query::CreateAudioTrackSync(name, parent_id) => {
+                let track_id = self.project.add_audio_track(name.clone(), parent_id);
+                eprintln!("[Engine] Created audio track '{}' with ID {} (parent: {:?})", name, track_id, parent_id);
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
                 QueryResponse::TrackCreated(Ok(track_id))
             }
-            Query::CreateMidiTrackSync(name) => {
-                let track_id = self.project.add_midi_track(name.clone(), None);
-                eprintln!("[Engine] Created MIDI track '{}' with ID {}", name, track_id);
-                // Notify UI about the new MIDI track
+            Query::CreateMidiTrackSync(name, parent_id) => {
+                let track_id = self.project.add_midi_track(name.clone(), parent_id);
+                eprintln!("[Engine] Created MIDI track '{}' with ID {} (parent: {:?})", name, track_id, parent_id);
                 let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, false, name));
+                QueryResponse::TrackCreated(Ok(track_id))
+            }
+            Query::CreateMetatrackSync(name, parent_id) => {
+                let track_id = self.project.add_group_track(name.clone(), parent_id);
+                eprintln!("[Engine] Created metatrack '{}' with ID {} (parent: {:?})", name, track_id, parent_id);
+                let _ = self.event_tx.push(AudioEvent::TrackCreated(track_id, true, name));
                 QueryResponse::TrackCreated(Ok(track_id))
             }
             Query::GetPoolWaveform(pool_index, target_peaks) => {
@@ -2930,7 +2944,7 @@ impl EngineController {
 
     /// Create a new metatrack
     pub fn create_metatrack(&mut self, name: String) {
-        let _ = self.command_tx.push(Command::CreateMetatrack(name));
+        let _ = self.command_tx.push(Command::CreateMetatrack(name, None));
     }
 
     /// Add a track to a metatrack
@@ -2960,9 +2974,19 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetPitchShift(track_id, semitones));
     }
 
+    /// Set metatrack trim start in seconds
+    pub fn set_trim_start(&mut self, track_id: TrackId, trim_start: f64) {
+        let _ = self.command_tx.push(Command::SetTrimStart(track_id, trim_start));
+    }
+
+    /// Set metatrack trim end in seconds (None = no end trim)
+    pub fn set_trim_end(&mut self, track_id: TrackId, trim_end: Option<f64>) {
+        let _ = self.command_tx.push(Command::SetTrimEnd(track_id, trim_end));
+    }
+
     /// Create a new audio track
     pub fn create_audio_track(&mut self, name: String) {
-        let _ = self.command_tx.push(Command::CreateAudioTrack(name));
+        let _ = self.command_tx.push(Command::CreateAudioTrack(name, None));
     }
 
     /// Add an audio file to the pool (must be called from non-audio thread with pre-loaded data)
@@ -3012,7 +3036,7 @@ impl EngineController {
 
     /// Create a new MIDI track
     pub fn create_midi_track(&mut self, name: String) {
-        let _ = self.command_tx.push(Command::CreateMidiTrack(name));
+        let _ = self.command_tx.push(Command::CreateMidiTrack(name, None));
     }
 
     /// Add a MIDI clip to the pool without placing it on any track
@@ -3022,8 +3046,8 @@ impl EngineController {
     }
 
     /// Create a new audio track synchronously (waits for creation to complete)
-    pub fn create_audio_track_sync(&mut self, name: String) -> Result<TrackId, String> {
-        if let Err(_) = self.query_tx.push(Query::CreateAudioTrackSync(name)) {
+    pub fn create_audio_track_sync(&mut self, name: String, parent: Option<TrackId>) -> Result<TrackId, String> {
+        if let Err(_) = self.query_tx.push(Query::CreateAudioTrackSync(name, parent)) {
             return Err("Failed to send track creation query".to_string());
         }
 
@@ -3042,8 +3066,8 @@ impl EngineController {
     }
 
     /// Create a new MIDI track synchronously (waits for creation to complete)
-    pub fn create_midi_track_sync(&mut self, name: String) -> Result<TrackId, String> {
-        if let Err(_) = self.query_tx.push(Query::CreateMidiTrackSync(name)) {
+    pub fn create_midi_track_sync(&mut self, name: String, parent: Option<TrackId>) -> Result<TrackId, String> {
+        if let Err(_) = self.query_tx.push(Query::CreateMidiTrackSync(name, parent)) {
             return Err("Failed to send track creation query".to_string());
         }
 
@@ -3059,6 +3083,25 @@ impl EngineController {
         }
 
         Err("Track creation timeout".to_string())
+    }
+
+    /// Create a new metatrack/group synchronously (waits for creation to complete)
+    pub fn create_group_track_sync(&mut self, name: String, parent: Option<TrackId>) -> Result<TrackId, String> {
+        if let Err(_) = self.query_tx.push(Query::CreateMetatrackSync(name, parent)) {
+            return Err("Failed to send metatrack creation query".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::TrackCreated(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        Err("Metatrack creation timeout".to_string())
     }
 
     /// Create a new MIDI clip on a track

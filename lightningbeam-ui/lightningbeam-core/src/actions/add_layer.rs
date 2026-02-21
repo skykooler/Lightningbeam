@@ -12,6 +12,9 @@ pub struct AddLayerAction {
     /// The layer to add
     layer: AnyLayer,
 
+    /// If Some, add to this VectorClip's layers instead of root
+    target_clip_id: Option<Uuid>,
+
     /// ID of the created layer (set after execution)
     created_layer_id: Option<Uuid>,
 }
@@ -26,6 +29,7 @@ impl AddLayerAction {
         let layer = VectorLayer::new(name);
         Self {
             layer: AnyLayer::Vector(layer),
+            target_clip_id: None,
             created_layer_id: None,
         }
     }
@@ -38,8 +42,15 @@ impl AddLayerAction {
     pub fn new(layer: AnyLayer) -> Self {
         Self {
             layer,
+            target_clip_id: None,
             created_layer_id: None,
         }
+    }
+
+    /// Set the target clip for this action (add layer inside a movie clip)
+    pub fn with_target_clip(mut self, clip_id: Option<Uuid>) -> Self {
+        self.target_clip_id = clip_id;
+        self
     }
 
     /// Get the ID of the created layer (after execution)
@@ -50,8 +61,19 @@ impl AddLayerAction {
 
 impl Action for AddLayerAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        // Add layer to the document's root
-        let layer_id = document.root_mut().add_child(self.layer.clone());
+        let layer_id = if let Some(clip_id) = self.target_clip_id {
+            // Add layer inside a vector clip (movie clip)
+            let clip = document.vector_clips.get_mut(&clip_id)
+                .ok_or_else(|| format!("Target clip {} not found", clip_id))?;
+            let id = self.layer.id();
+            clip.layers.add_root(self.layer.clone());
+            // Register in layer_to_clip_map for O(1) lookup
+            document.layer_to_clip_map.insert(id, clip_id);
+            id
+        } else {
+            // Add layer to the document's root
+            document.root_mut().add_child(self.layer.clone())
+        };
 
         // Store the ID for rollback
         self.created_layer_id = Some(layer_id);
@@ -62,7 +84,15 @@ impl Action for AddLayerAction {
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         // Remove the created layer if it exists
         if let Some(layer_id) = self.created_layer_id {
-            document.root_mut().remove_child(&layer_id);
+            if let Some(clip_id) = self.target_clip_id {
+                // Remove from vector clip
+                if let Some(clip) = document.vector_clips.get_mut(&clip_id) {
+                    clip.layers.roots.retain(|node| node.data.id() != layer_id);
+                }
+                document.layer_to_clip_map.remove(&layer_id);
+            } else {
+                document.root_mut().remove_child(&layer_id);
+            }
 
             // Clear the stored ID
             self.created_layer_id = None;

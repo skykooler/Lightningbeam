@@ -1310,8 +1310,8 @@ impl AssetLibraryPane {
 
     /// Check if an asset is currently in use (has clip instances on layers)
     fn is_asset_in_use(document: &Document, asset_id: Uuid, category: AssetCategory) -> bool {
-        // Check all layers for clip instances referencing this asset
-        for layer in &document.root.children {
+        // Check all layers (root + inside movie clips) for clip instances referencing this asset
+        for layer in document.all_layers() {
             match layer {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => {
                     if category == AssetCategory::Vector {

@@ -43,6 +43,9 @@ pub struct BackendContext<'a> {
     /// Mapping from document clip instance UUIDs to backend clip instance IDs
     pub clip_instance_to_backend_map: &'a mut HashMap<Uuid, BackendClipInstanceId>,
 
+    /// Mapping from movie clip UUIDs to backend metatrack (group track) TrackIds
+    pub clip_to_metatrack_map: &'a HashMap<Uuid, daw_backend::TrackId>,
+
     // Future: pub video_controller: Option<&'a mut VideoController>,
 }
 

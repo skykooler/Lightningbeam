@@ -38,8 +38,8 @@ pub enum Command {
     ExtendClip(TrackId, ClipId, f64),
 
     // Metatrack management commands
-    /// Create a new metatrack with a name
-    CreateMetatrack(String),
+    /// Create a new metatrack with a name and optional parent group
+    CreateMetatrack(String, Option<TrackId>),
     /// Add a track to a metatrack (track_id, metatrack_id)
     AddToMetatrack(TrackId, TrackId),
     /// Remove a track from its parent metatrack
@@ -54,10 +54,16 @@ pub enum Command {
     SetOffset(TrackId, f64),
     /// Set metatrack pitch shift in semitones (track_id, semitones) - for future use
     SetPitchShift(TrackId, f32),
+    /// Set metatrack trim start in seconds (track_id, trim_start)
+    /// Children won't hear content before this point
+    SetTrimStart(TrackId, f64),
+    /// Set metatrack trim end in seconds (track_id, trim_end)
+    /// None means no end trim
+    SetTrimEnd(TrackId, Option<f64>),
 
     // Audio track commands
-    /// Create a new audio track with a name
-    CreateAudioTrack(String),
+    /// Create a new audio track with a name and optional parent group
+    CreateAudioTrack(String, Option<TrackId>),
     /// Add an audio file to the pool (path, data, channels, sample_rate)
     /// Returns the pool index via an AudioEvent
     AddAudioFile(String, Vec<f32>, u32, u32),
@@ -65,8 +71,8 @@ pub enum Command {
     AddAudioClip(TrackId, usize, f64, f64, f64),
 
     // MIDI commands
-    /// Create a new MIDI track with a name
-    CreateMidiTrack(String),
+    /// Create a new MIDI track with a name and optional parent group
+    CreateMidiTrack(String, Option<TrackId>),
     /// Add a MIDI clip to the pool without placing it on a track
     AddMidiClipToPool(MidiClip),
     /// Create a new MIDI clip on a track (track_id, start_time, duration)
@@ -361,10 +367,12 @@ pub enum Query {
     SerializeTrackGraph(TrackId, std::path::PathBuf),
     /// Load a track's effects/instrument graph (track_id, preset_json, project_path)
     LoadTrackGraph(TrackId, String, std::path::PathBuf),
-    /// Create a new audio track (name) - returns track ID synchronously
-    CreateAudioTrackSync(String),
-    /// Create a new MIDI track (name) - returns track ID synchronously
-    CreateMidiTrackSync(String),
+    /// Create a new audio track (name, parent) - returns track ID synchronously
+    CreateAudioTrackSync(String, Option<TrackId>),
+    /// Create a new MIDI track (name, parent) - returns track ID synchronously
+    CreateMidiTrackSync(String, Option<TrackId>),
+    /// Create a new metatrack/group (name, parent) - returns track ID synchronously
+    CreateMetatrackSync(String, Option<TrackId>),
     /// Get waveform data from audio pool (pool_index, target_peaks)
     GetPoolWaveform(usize, usize),
     /// Get file info from audio pool (pool_index) - returns (duration, sample_rate, channels)

@@ -384,6 +384,7 @@ enum FileCommand {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
+        clip_to_metatrack_map: std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -458,8 +459,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, layer_to_track_map, progress_tx } => {
-                    self.handle_save(path, document, &layer_to_track_map, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, clip_to_metatrack_map, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, &clip_to_metatrack_map, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -474,6 +475,7 @@ impl FileOperationsWorker {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
+        clip_to_metatrack_map: &std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
@@ -516,7 +518,7 @@ impl FileOperationsWorker {
         let step3_start = std::time::Instant::now();
 
         let settings = SaveSettings::default();
-        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, clip_to_metatrack_map, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
@@ -704,6 +706,8 @@ struct EditorApp {
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
+    // Movie clip ID -> backend metatrack (group track) mapping
+    clip_to_metatrack_map: HashMap<Uuid, daw_backend::TrackId>,
     /// Generation counter - incremented on project load to force UI components to reload
     project_generation: u64,
     // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
@@ -936,6 +940,7 @@ impl EditorApp {
             )),
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
+            clip_to_metatrack_map: HashMap::new(),
             project_generation: 0,
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
@@ -1309,69 +1314,115 @@ impl EditorApp {
     fn sync_audio_layers_to_backend(&mut self) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
 
-        // Iterate through all layers in the document
+        // Collect audio layers from root and inside vector clips
+        // Each entry: (layer_id, layer_name, audio_type, parent_clip_id)
+        let mut audio_layers_to_sync: Vec<(uuid::Uuid, String, AudioLayerType, Option<uuid::Uuid>)> = Vec::new();
+
+        // Root layers
         for layer in &self.action_executor.document().root.children {
-            // Only process Audio layers
             if let AnyLayer::Audio(audio_layer) = layer {
                 let layer_id = audio_layer.layer.id;
-                let layer_name = &audio_layer.layer.name;
-
-                // Skip if already mapped (shouldn't happen, but be defensive)
-                if self.layer_to_track_map.contains_key(&layer_id) {
-                    continue;
+                if !self.layer_to_track_map.contains_key(&layer_id) {
+                    audio_layers_to_sync.push((
+                        layer_id,
+                        audio_layer.layer.name.clone(),
+                        audio_layer.audio_layer_type,
+                        None,
+                    ));
                 }
+            }
+        }
 
-                // Handle both MIDI and Sampled audio tracks
-                match audio_layer.audio_layer_type {
-                    AudioLayerType::Midi => {
-                        // Create daw-backend MIDI track
-                        if let Some(ref controller_arc) = self.audio_controller {
-                            let mut controller = controller_arc.lock().unwrap();
-                            match controller.create_midi_track_sync(layer_name.clone()) {
-                                Ok(track_id) => {
-                                    // Store bidirectional mapping
-                                    self.layer_to_track_map.insert(layer_id, track_id);
-                                    self.track_to_layer_map.insert(track_id, layer_id);
+        // Layers inside vector clips
+        for (&clip_id, clip) in &self.action_executor.document().vector_clips {
+            for layer in clip.layers.root_data() {
+                if let AnyLayer::Audio(audio_layer) = layer {
+                    let layer_id = audio_layer.layer.id;
+                    if !self.layer_to_track_map.contains_key(&layer_id) {
+                        audio_layers_to_sync.push((
+                            layer_id,
+                            audio_layer.layer.name.clone(),
+                            audio_layer.audio_layer_type,
+                            Some(clip_id),
+                        ));
+                    }
+                }
+            }
+        }
 
-                                    // Load default instrument
-                                    if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
-                                        eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
-                                    } else {
-                                        println!("✅ Synced MIDI layer '{}' to backend (TrackId: {})", layer_name, track_id);
-                                    }
+        // Now create backend tracks for each
+        for (layer_id, layer_name, audio_type, parent_clip_id) in audio_layers_to_sync {
+            // If inside a clip, ensure a metatrack exists
+            let parent_track = parent_clip_id.and_then(|cid| self.ensure_metatrack_for_clip(cid));
 
-                                    // TODO: Sync any existing clips on this layer to the backend
-                                    // This will be implemented when we add clip synchronization
+            match audio_type {
+                AudioLayerType::Midi => {
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        match controller.create_midi_track_sync(layer_name.clone(), parent_track) {
+                            Ok(track_id) => {
+                                self.layer_to_track_map.insert(layer_id, track_id);
+                                self.track_to_layer_map.insert(track_id, layer_id);
+
+                                if let Err(e) = default_instrument::load_default_instrument(&mut *controller, track_id) {
+                                    eprintln!("⚠️  Failed to load default instrument for {}: {}", layer_name, e);
+                                } else {
+                                    println!("✅ Synced MIDI layer '{}' to backend (TrackId: {}, parent: {:?})", layer_name, track_id, parent_track);
                                 }
-                                Err(e) => {
-                                    eprintln!("⚠️  Failed to create daw-backend track for MIDI layer '{}': {}", layer_name, e);
-                                }
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️  Failed to create daw-backend track for MIDI layer '{}': {}", layer_name, e);
                             }
                         }
                     }
-                    AudioLayerType::Sampled => {
-                        // Create daw-backend Audio track
-                        if let Some(ref controller_arc) = self.audio_controller {
-                            let mut controller = controller_arc.lock().unwrap();
-                            match controller.create_audio_track_sync(layer_name.clone()) {
-                                Ok(track_id) => {
-                                    // Store bidirectional mapping
-                                    self.layer_to_track_map.insert(layer_id, track_id);
-                                    self.track_to_layer_map.insert(track_id, layer_id);
-                                    println!("✅ Synced Audio layer '{}' to backend (TrackId: {})", layer_name, track_id);
-
-                                    // TODO: Sync any existing clips on this layer to the backend
-                                    // This will be implemented when we add clip synchronization
-                                }
-                                Err(e) => {
-                                    eprintln!("⚠️  Failed to create daw-backend audio track for '{}': {}", layer_name, e);
-                                }
+                }
+                AudioLayerType::Sampled => {
+                    if let Some(ref controller_arc) = self.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        match controller.create_audio_track_sync(layer_name.clone(), parent_track) {
+                            Ok(track_id) => {
+                                self.layer_to_track_map.insert(layer_id, track_id);
+                                self.track_to_layer_map.insert(track_id, layer_id);
+                                println!("✅ Synced Audio layer '{}' to backend (TrackId: {}, parent: {:?})", layer_name, track_id, parent_track);
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️  Failed to create daw-backend audio track for '{}': {}", layer_name, e);
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Ensure a backend metatrack (group track) exists for a movie clip.
+    /// Returns the metatrack's TrackId, creating one if needed.
+    fn ensure_metatrack_for_clip(&mut self, clip_id: Uuid) -> Option<daw_backend::TrackId> {
+        // Return existing metatrack if already mapped
+        if let Some(&track_id) = self.clip_to_metatrack_map.get(&clip_id) {
+            return Some(track_id);
+        }
+
+        // Create a new metatrack in the backend
+        let clip_name = self.action_executor.document().vector_clips
+            .get(&clip_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("Clip {}", clip_id));
+
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            match controller.create_group_track_sync(format!("[{}]", clip_name), None) {
+                Ok(track_id) => {
+                    self.clip_to_metatrack_map.insert(clip_id, track_id);
+                    println!("✅ Created metatrack for clip '{}' (TrackId: {})", clip_name, track_id);
+                    return Some(track_id);
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to create metatrack for clip '{}': {}", clip_name, e);
+                }
+            }
+        }
+        None
     }
 
     /// Split clip instances at the current playhead position
@@ -1487,6 +1538,7 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
 
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
@@ -1659,6 +1711,7 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
                 if let Err(e) = self
                     .action_executor
@@ -1780,6 +1833,7 @@ impl EditorApp {
                             audio_controller: Some(&mut *controller),
                             layer_to_track_map: &self.layer_to_track_map,
                             clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                            clip_to_metatrack_map: &self.clip_to_metatrack_map,
                         };
                         if let Err(e) = self
                             .action_executor
@@ -1894,6 +1948,7 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
                     eprintln!("Duplicate clip failed: {}", e);
@@ -1973,6 +2028,7 @@ impl EditorApp {
                 // TODO: Add ResetProject command to EngineController
                 self.layer_to_track_map.clear();
                 self.track_to_layer_map.clear();
+                self.clip_to_metatrack_map.clear();
 
                 // Clear file path
                 self.current_file_path = None;
@@ -2176,6 +2232,7 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
                     match self.action_executor.undo_with_backend(&mut backend_context) {
                         Ok(true) => {
@@ -2211,6 +2268,7 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
                     match self.action_executor.redo_with_backend(&mut backend_context) {
                         Ok(true) => {
@@ -2327,58 +2385,71 @@ impl EditorApp {
             // Layer menu
             MenuAction::AddLayer => {
                 // Create a new vector layer with a default name
-                let layer_count = self.action_executor.document().root.children.len();
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                let layer_count = context_layers.len();
                 let layer_name = format!("Layer {}", layer_count + 1);
 
-                let action = lightningbeam_core::actions::AddLayerAction::new_vector(layer_name);
+                let action = lightningbeam_core::actions::AddLayerAction::new_vector(layer_name)
+                    .with_target_clip(editing_clip_id);
                 let _ = self.action_executor.execute(Box::new(action));
 
-                // Select the newly created layer (last child in the document)
-                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                // Select the newly created layer (last in context)
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                if let Some(last_layer) = context_layers.last() {
                     self.active_layer_id = Some(last_layer.id());
                 }
             }
             MenuAction::AddVideoLayer => {
-                println!("Menu: Add Video Layer");
-                // Create a new video layer with a default name
-                let layer_number = self.action_executor.document().root.children.len() + 1;
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                let layer_number = context_layers.len() + 1;
                 let layer_name = format!("Video {}", layer_number);
                 let new_layer = lightningbeam_core::layer::AnyLayer::Video(
                     lightningbeam_core::layer::VideoLayer::new(&layer_name)
                 );
 
-                // Add the layer to the document
-                self.action_executor.document_mut().root.add_child(new_layer.clone());
+                let action = lightningbeam_core::actions::AddLayerAction::new(new_layer)
+                    .with_target_clip(editing_clip_id);
+                let _ = self.action_executor.execute(Box::new(action));
 
                 // Set it as the active layer
-                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                if let Some(last_layer) = context_layers.last() {
                     self.active_layer_id = Some(last_layer.id());
                 }
             }
             MenuAction::AddAudioTrack => {
                 // Create a new sampled audio layer with a default name
-                let layer_count = self.action_executor.document().root.children.len();
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                let layer_count = context_layers.len();
                 let layer_name = format!("Audio Track {}", layer_count + 1);
 
                 // Create audio layer in document
                 let audio_layer = AudioLayer::new_sampled(layer_name.clone());
-                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(audio_layer));
+                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(audio_layer))
+                    .with_target_clip(editing_clip_id);
                 let _ = self.action_executor.execute(Box::new(action));
 
                 // Get the newly created layer ID
-                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                if let Some(last_layer) = context_layers.last() {
                     let layer_id = last_layer.id();
                     self.active_layer_id = Some(layer_id);
+
+                    // If inside a clip, ensure a metatrack exists for it
+                    let parent_track = editing_clip_id.and_then(|cid| self.ensure_metatrack_for_clip(cid));
 
                     // Create corresponding daw-backend audio track
                     if let Some(ref controller_arc) = self.audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        match controller.create_audio_track_sync(layer_name.clone()) {
+                        match controller.create_audio_track_sync(layer_name.clone(), parent_track) {
                             Ok(track_id) => {
                                 // Store bidirectional mapping
                                 self.layer_to_track_map.insert(layer_id, track_id);
                                 self.track_to_layer_map.insert(track_id, layer_id);
-                                println!("✅ Created {} (backend TrackId: {})", layer_name, track_id);
+                                println!("✅ Created {} (backend TrackId: {}, parent: {:?})", layer_name, track_id, parent_track);
                             }
                             Err(e) => {
                                 eprintln!("⚠️  Failed to create daw-backend audio track for {}: {}", layer_name, e);
@@ -2390,23 +2461,30 @@ impl EditorApp {
             }
             MenuAction::AddMidiTrack => {
                 // Create a new MIDI audio layer with a default name
-                let layer_count = self.action_executor.document().root.children.len();
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                let layer_count = context_layers.len();
                 let layer_name = format!("MIDI Track {}", layer_count + 1);
 
                 // Create MIDI layer in document
                 let midi_layer = AudioLayer::new_midi(layer_name.clone());
-                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(midi_layer));
+                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Audio(midi_layer))
+                    .with_target_clip(editing_clip_id);
                 let _ = self.action_executor.execute(Box::new(action));
 
                 // Get the newly created layer ID
-                if let Some(last_layer) = self.action_executor.document().root.children.last() {
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                if let Some(last_layer) = context_layers.last() {
                     let layer_id = last_layer.id();
                     self.active_layer_id = Some(layer_id);
+
+                    // If inside a clip, ensure a metatrack exists for it
+                    let parent_track = editing_clip_id.and_then(|cid| self.ensure_metatrack_for_clip(cid));
 
                     // Create corresponding daw-backend MIDI track
                     if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
-                        match controller.create_midi_track_sync(layer_name.clone()) {
+                        match controller.create_midi_track_sync(layer_name.clone(), parent_track) {
                             Ok(track_id) => {
                                 // Store bidirectional mapping
                                 self.layer_to_track_map.insert(layer_id, track_id);
@@ -2627,6 +2705,7 @@ impl EditorApp {
             path: path.clone(),
             document,
             layer_to_track_map: self.layer_to_track_map.clone(),
+            clip_to_metatrack_map: self.clip_to_metatrack_map.clone(),
             progress_tx,
         };
 
@@ -2774,6 +2853,15 @@ impl EditorApp {
                 loaded_project.layer_to_track_map.len(), step5_start.elapsed().as_secs_f64() * 1000.0);
         } else {
             eprintln!("📊 [APPLY] Step 5: No saved track mappings (old file format)");
+        }
+
+        // Restore clip-to-metatrack mappings
+        if !loaded_project.clip_to_metatrack_map.is_empty() {
+            for (&clip_id, &track_id) in &loaded_project.clip_to_metatrack_map {
+                self.clip_to_metatrack_map.insert(clip_id, track_id);
+            }
+            eprintln!("📊 [APPLY] Step 5b: Restored {} clip-to-metatrack mappings",
+                loaded_project.clip_to_metatrack_map.len());
         }
 
         // Sync any audio layers that don't have a mapping yet (new layers, or old file format)
@@ -3317,12 +3405,16 @@ impl EditorApp {
                 // Update active layer to the new layer
                 self.active_layer_id = target_layer_id;
 
+                // If inside a clip, ensure a metatrack exists for it
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let parent_track = editing_clip_id.and_then(|cid| self.ensure_metatrack_for_clip(cid));
+
                 // Create a backend audio/MIDI track and add the mapping
                 if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     match asset_info.clip_type {
                         panes::DragClipType::AudioSampled => {
-                            match controller.create_audio_track_sync(layer_name.clone()) {
+                            match controller.create_audio_track_sync(layer_name.clone(), parent_track) {
                                 Ok(track_id) => {
                                     self.layer_to_track_map.insert(layer_id, track_id);
                                     self.track_to_layer_map.insert(track_id, layer_id);
@@ -3331,7 +3423,7 @@ impl EditorApp {
                             }
                         }
                         panes::DragClipType::AudioMidi => {
-                            match controller.create_midi_track_sync(layer_name.clone()) {
+                            match controller.create_midi_track_sync(layer_name.clone(), parent_track) {
                                 Ok(track_id) => {
                                     self.layer_to_track_map.insert(layer_id, track_id);
                                     self.track_to_layer_map.insert(track_id, layer_id);
@@ -3432,6 +3524,7 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
 
                     if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
@@ -3477,6 +3570,7 @@ impl EditorApp {
                             audio_controller: Some(&mut *controller),
                             layer_to_track_map: &self.layer_to_track_map,
                             clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                            clip_to_metatrack_map: &self.clip_to_metatrack_map,
                         };
 
                         if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
@@ -3505,8 +3599,9 @@ impl EditorApp {
         let document = self.action_executor.document();
         let mut video_instance_info: Option<(uuid::Uuid, uuid::Uuid, f64)> = None; // (layer_id, instance_id, timeline_start)
 
-        // Search all layers for a video clip instance with matching clip_id
-        for layer in &document.root.children {
+        // Search all layers (root + inside movie clips) for a video clip instance with matching clip_id
+        let all_layers = document.all_layers();
+        for layer in &all_layers {
             if let AnyLayer::Video(video_layer) = layer {
                 for instance in &video_layer.clip_instances {
                     if instance.clip_id == video_clip_id {
@@ -3559,6 +3654,7 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
 
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
@@ -3923,10 +4019,8 @@ impl eframe::App for EditorApp {
                                 let clip_instance = ClipInstance::new(doc_clip_id)
                                     .with_timeline_start(self.recording_start_time);
 
-                                // Add instance to layer
-                                if let Some(layer) = self.action_executor.document_mut().root.children.iter_mut()
-                                    .find(|l| l.id() == layer_id)
-                                {
+                                // Add instance to layer (works for root and inside movie clips)
+                                if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
                                     if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                                         audio_layer.clip_instances.push(clip_instance);
                                         println!("✅ Created recording clip instance on layer {}", layer_id);
@@ -3948,8 +4042,7 @@ impl eframe::App for EditorApp {
                                 // First, find the clip_id from the layer (read-only borrow)
                                 let clip_id = {
                                     let document = self.action_executor.document();
-                                    document.root.children.iter()
-                                        .find(|l| l.id() == layer_id)
+                                    document.get_layer(&layer_id)
                                         .and_then(|layer| {
                                             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                                                 audio_layer.clip_instances.last().map(|i| i.clip_id)
@@ -4014,8 +4107,7 @@ impl eframe::App for EditorApp {
                                 // First, find the clip instance and clip id
                                 let (clip_id, instance_id, timeline_start, trim_start) = {
                                     let document = self.action_executor.document();
-                                    document.root.children.iter()
-                                        .find(|l| l.id() == layer_id)
+                                    document.get_layer(&layer_id)
                                         .and_then(|layer| {
                                             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                                                 audio_layer.clip_instances.last().map(|instance| {
@@ -4093,8 +4185,7 @@ impl eframe::App for EditorApp {
                             if let Some(layer_id) = self.recording_layer_id {
                                 let doc_clip_id = {
                                     let document = self.action_executor.document();
-                                    document.root.children.iter()
-                                        .find(|l| l.id() == layer_id)
+                                    document.get_layer(&layer_id)
                                         .and_then(|layer| {
                                             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                                                 audio_layer.clip_instances.last().map(|i| i.clip_id)
@@ -4153,8 +4244,7 @@ impl eframe::App for EditorApp {
                                         if let Some(layer_id) = self.recording_layer_id {
                                             let doc_clip_id = {
                                                 let document = self.action_executor.document();
-                                                document.root.children.iter()
-                                                    .find(|l| l.id() == layer_id)
+                                                document.get_layer(&layer_id)
                                                     .and_then(|layer| {
                                                         if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
                                                             audio_layer.clip_instances.last().map(|i| i.clip_id)
@@ -4512,6 +4602,7 @@ impl eframe::App for EditorApp {
             {
                 let time = self.playback_time;
                 let document = self.action_executor.document_mut();
+                // Bake animation transforms for root layers
                 for layer in document.root.children.iter_mut() {
                     if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
                         for ci in &mut vl.clip_instances {
@@ -4520,6 +4611,20 @@ impl eframe::App for EditorApp {
                             );
                             ci.transform = t;
                             ci.opacity = opacity;
+                        }
+                    }
+                }
+                // Bake animation transforms for layers inside movie clips
+                for clip in document.vector_clips.values_mut() {
+                    for layer_node in clip.layers.roots.iter_mut() {
+                        if let lightningbeam_core::layer::AnyLayer::Vector(vl) = &mut layer_node.data {
+                            for ci in &mut vl.clip_instances {
+                                let (t, opacity) = vl.layer.animation_data.eval_clip_instance_transform(
+                                    ci.id, time, &ci.transform, ci.opacity,
+                                );
+                                ci.transform = t;
+                                ci.opacity = opacity;
+                            }
                         }
                     }
                 }
@@ -4636,6 +4741,7 @@ impl eframe::App for EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
 
                     // Execute action with backend synchronization

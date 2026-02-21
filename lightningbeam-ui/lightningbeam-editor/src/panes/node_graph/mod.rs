@@ -636,10 +636,12 @@ impl NodeGraphPane {
                 let mut controller = audio_controller.lock().unwrap();
                 // Node graph actions don't use clip instances, so we use an empty map
                 let mut empty_clip_map = std::collections::HashMap::new();
+                let empty_metatrack_map = std::collections::HashMap::new();
                 let mut backend_context = lightningbeam_core::action::BackendContext {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: shared.layer_to_track_map,
                     clip_instance_to_backend_map: &mut empty_clip_map,
+                    clip_to_metatrack_map: &empty_metatrack_map,
                 };
 
                 if let Err(e) = shared.action_executor.execute_with_backend(action, &mut backend_context) {

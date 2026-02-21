@@ -498,7 +498,7 @@ fn render_clip_instance(
         }
         0.0
     } else {
-        let clip_dur = vector_clip.content_duration(document.framerate);
+        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
         let Some(t) = clip_instance.remap_time(time, clip_dur) else {
             return; // Clip instance not active at this time
         };

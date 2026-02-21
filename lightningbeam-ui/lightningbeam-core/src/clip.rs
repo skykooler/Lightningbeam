@@ -90,14 +90,49 @@ impl VectorClip {
         }
     }
 
-    /// Calculate the duration of this clip based on its internal keyframe content.
-    /// Returns the time of the last keyframe across all layers, plus one frame.
-    /// Falls back to the stored `duration` field if no keyframes exist.
+    /// Calculate the duration of this clip based on its internal content.
+    ///
+    /// Considers:
+    /// - Vector layer keyframes (last keyframe time + one frame)
+    /// - Audio/video/effect layer clip instances (timeline_start + effective duration)
+    ///
+    /// The `clip_duration_fn` resolves referenced clip durations for non-vector layers.
+    /// Falls back to the stored `duration` field if no content exists.
     pub fn content_duration(&self, framerate: f64) -> f64 {
+        self.content_duration_with(framerate, |_| None)
+    }
+
+    /// Like `content_duration`, but with a closure that resolves clip durations
+    /// for audio/video/effect clip instances inside this movie clip.
+    pub fn content_duration_with(&self, framerate: f64, clip_duration_fn: impl Fn(&Uuid) -> Option<f64>) -> f64 {
         let frame_duration = 1.0 / framerate;
         let mut last_time: Option<f64> = None;
 
         for layer_node in self.layers.iter() {
+            // Check clip instances on ALL layer types (vector, audio, video, effect)
+            let clip_instances: &[ClipInstance] = match &layer_node.data {
+                AnyLayer::Vector(vl) => &vl.clip_instances,
+                AnyLayer::Audio(al) => &al.clip_instances,
+                AnyLayer::Video(vl) => &vl.clip_instances,
+                AnyLayer::Effect(el) => &el.clip_instances,
+            };
+            for ci in clip_instances {
+                let end = if let Some(td) = ci.timeline_duration {
+                    ci.timeline_start + td
+                } else if let Some(te) = ci.trim_end {
+                    ci.timeline_start + (te - ci.trim_start).max(0.0)
+                } else if let Some(clip_dur) = clip_duration_fn(&ci.clip_id) {
+                    ci.timeline_start + (clip_dur - ci.trim_start).max(0.0)
+                } else {
+                    continue;
+                };
+                last_time = Some(match last_time {
+                    Some(t) => t.max(end),
+                    None => end,
+                });
+            }
+
+            // Also check vector layer keyframes
             if let AnyLayer::Vector(vector_layer) = &layer_node.data {
                 if let Some(last_kf) = vector_layer.keyframes.last() {
                     last_time = Some(match last_time {

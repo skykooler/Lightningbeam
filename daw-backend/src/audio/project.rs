@@ -82,7 +82,7 @@ impl Project {
     /// The new group's ID
     pub fn add_group_track(&mut self, name: String, parent_id: Option<TrackId>) -> TrackId {
         let id = self.next_id();
-        let group = Metatrack::new(id, name);
+        let group = Metatrack::new(id, name, self.sample_rate);
         self.tracks.insert(id, TrackNode::Group(group));
 
         if let Some(parent) = parent_id {
@@ -450,6 +450,11 @@ impl Project {
                 track.render(output, &self.midi_clip_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
             }
             Some(TrackNode::Group(group)) => {
+                // Skip rendering if playhead is outside the metatrack's trim window
+                if !group.is_active_at_time(ctx.playhead_seconds) {
+                    return;
+                }
+
                 // Read group properties and transform context (index-based child iteration to avoid clone)
                 let num_children = group.children.len();
                 let this_group_is_soloed = group.solo;
@@ -479,14 +484,37 @@ impl Project {
                     );
                 }
 
-                // Apply group volume and mix into output
+                // Route children's mix through metatrack's audio graph
                 if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
-                    for (out_sample, group_sample) in output.iter_mut().zip(group_buffer.iter()) {
-                        *out_sample += group_sample * group.volume;
+                    // Inject children's mix into audio graph's input node
+                    let node_indices: Vec<_> = group.audio_graph.node_indices().collect();
+                    for node_idx in node_indices {
+                        if let Some(graph_node) = group.audio_graph.get_graph_node_mut(node_idx) {
+                            if graph_node.node.node_type() == "AudioInput" {
+                                if let Some(input_node) = graph_node.node.as_any_mut()
+                                    .downcast_mut::<super::node_graph::nodes::AudioInputNode>()
+                                {
+                                    input_node.inject_audio(&group_buffer);
+                                    break;
+                                }
+                            }
+                        }
                     }
+
+                    // Process through the audio graph into a fresh buffer
+                    let mut graph_output = buffer_pool.acquire();
+                    graph_output.resize(output.len(), 0.0);
+                    graph_output.fill(0.0);
+                    group.audio_graph.process(&mut graph_output, &[], ctx.playhead_seconds);
+
+                    // Apply group volume and mix into output
+                    for (out_sample, graph_sample) in output.iter_mut().zip(graph_output.iter()) {
+                        *out_sample += graph_sample * group.volume;
+                    }
+                    buffer_pool.release(graph_output);
                 }
 
-                // Release buffer back to pool
+                // Release children mix buffer back to pool
                 buffer_pool.release(group_buffer);
             }
             None => {}
@@ -581,8 +609,8 @@ impl Project {
                 TrackNode::Midi(midi_track) => {
                     midi_track.prepare_for_save();
                 }
-                TrackNode::Group(_) => {
-                    // Groups don't have audio graphs
+                TrackNode::Group(group) => {
+                    group.prepare_for_save();
                 }
             }
         }
@@ -604,8 +632,8 @@ impl Project {
                 TrackNode::Midi(midi_track) => {
                     midi_track.rebuild_audio_graph(self.sample_rate, buffer_size)?;
                 }
-                TrackNode::Group(_) => {
-                    // Groups don't have audio graphs
+                TrackNode::Group(group) => {
+                    group.rebuild_audio_graph(self.sample_rate, buffer_size)?;
                 }
             }
         }
