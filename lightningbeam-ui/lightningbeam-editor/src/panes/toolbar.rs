@@ -4,7 +4,7 @@
 /// Users can click to select tools, which updates the global selected_tool state.
 
 use eframe::egui;
-use lightningbeam_core::tool::Tool;
+use lightningbeam_core::tool::{Tool, RegionSelectMode};
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
 /// Toolbar pane state
@@ -83,6 +83,24 @@ impl PaneRenderer for ToolbarPane {
                 );
             }
 
+            // Draw sub-tool arrow indicator for tools with modes
+            let has_sub_tools = matches!(tool, Tool::RegionSelect);
+            if has_sub_tools {
+                let arrow_size = 6.0;
+                let margin = 4.0;
+                let corner = button_rect.right_bottom() - egui::vec2(margin, margin);
+                let tri = [
+                    corner,
+                    corner - egui::vec2(arrow_size, 0.0),
+                    corner - egui::vec2(0.0, arrow_size),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(
+                    tri.to_vec(),
+                    egui::Color32::from_gray(200),
+                    egui::Stroke::NONE,
+                ));
+            }
+
             // Make button interactive (include path to ensure unique IDs across panes)
             let button_id = ui.id().with(("tool_button", path, *tool as usize));
             let response = ui.interact(button_rect, button_id, egui::Sense::click());
@@ -90,6 +108,34 @@ impl PaneRenderer for ToolbarPane {
             // Check for click first
             if response.clicked() {
                 *shared.selected_tool = *tool;
+            }
+
+            // Right-click context menu for tools with sub-options
+            if has_sub_tools {
+                response.context_menu(|ui| {
+                    match tool {
+                        Tool::RegionSelect => {
+                            ui.set_min_width(120.0);
+                            if ui.selectable_label(
+                                *shared.region_select_mode == RegionSelectMode::Rectangle,
+                                "Rectangle",
+                            ).clicked() {
+                                *shared.region_select_mode = RegionSelectMode::Rectangle;
+                                *shared.selected_tool = Tool::RegionSelect;
+                                ui.close();
+                            }
+                            if ui.selectable_label(
+                                *shared.region_select_mode == RegionSelectMode::Lasso,
+                                "Lasso",
+                            ).clicked() {
+                                *shared.region_select_mode = RegionSelectMode::Lasso;
+                                *shared.selected_tool = Tool::RegionSelect;
+                                ui.close();
+                            }
+                        }
+                        _ => {}
+                    }
+                });
             }
 
             if response.hovered() {
@@ -102,7 +148,16 @@ impl PaneRenderer for ToolbarPane {
             }
 
             // Show tooltip with tool name and shortcut (consumes response)
-            response.on_hover_text(format!("{} ({})", tool.display_name(), tool.shortcut_hint()));
+            let tooltip = if *tool == Tool::RegionSelect {
+                let mode = match *shared.region_select_mode {
+                    RegionSelectMode::Rectangle => "Rectangle",
+                    RegionSelectMode::Lasso => "Lasso",
+                };
+                format!("{} - {} ({})\nRight-click for options", tool.display_name(), mode, tool.shortcut_hint())
+            } else {
+                format!("{} ({})", tool.display_name(), tool.shortcut_hint())
+            };
+            response.on_hover_text(tooltip);
 
             // Draw selection border
             if is_selected {

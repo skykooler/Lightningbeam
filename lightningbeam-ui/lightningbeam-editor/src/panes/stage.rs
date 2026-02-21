@@ -386,6 +386,8 @@ struct VelloRenderContext {
     editing_instance_id: Option<uuid::Uuid>,
     /// The parent layer ID containing the clip instance being edited
     editing_parent_layer_id: Option<uuid::Uuid>,
+    /// Active region selection state (for rendering boundary overlay)
+    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
 }
 
 /// Callback for Vello rendering within egui
@@ -1104,6 +1106,81 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             selection_color,
                             None,
                             &marquee_rect,
+                        );
+                    }
+
+                    // 2b. Draw region selection overlay (rect or lasso)
+                    match &self.ctx.tool_state {
+                        lightningbeam_core::tool::ToolState::RegionSelectingRect { start, current } => {
+                            let region_rect = KurboRect::new(
+                                start.x.min(current.x),
+                                start.y.min(current.y),
+                                start.x.max(current.x),
+                                start.y.max(current.y),
+                            );
+                            // Semi-transparent orange fill
+                            let region_fill = Color::from_rgba8(255, 150, 0, 60);
+                            scene.fill(
+                                Fill::NonZero,
+                                overlay_transform,
+                                region_fill,
+                                None,
+                                &region_rect,
+                            );
+                            // Dashed-like border (solid for now)
+                            let region_stroke_color = Color::from_rgba8(255, 150, 0, 200);
+                            scene.stroke(
+                                &Stroke::new(1.5),
+                                overlay_transform,
+                                region_stroke_color,
+                                None,
+                                &region_rect,
+                            );
+                        }
+                        lightningbeam_core::tool::ToolState::RegionSelectingLasso { points } => {
+                            if points.len() >= 2 {
+                                // Build polyline path
+                                let mut lasso_path = vello::kurbo::BezPath::new();
+                                lasso_path.move_to(points[0]);
+                                for &p in &points[1..] {
+                                    lasso_path.line_to(p);
+                                }
+                                // Close back to start
+                                lasso_path.close_path();
+
+                                // Semi-transparent orange fill
+                                let region_fill = Color::from_rgba8(255, 150, 0, 60);
+                                scene.fill(
+                                    Fill::NonZero,
+                                    overlay_transform,
+                                    region_fill,
+                                    None,
+                                    &lasso_path,
+                                );
+                                // Border
+                                let region_stroke_color = Color::from_rgba8(255, 150, 0, 200);
+                                scene.stroke(
+                                    &Stroke::new(1.5),
+                                    overlay_transform,
+                                    region_stroke_color,
+                                    None,
+                                    &lasso_path,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // 2c. Draw active region selection boundary
+                    if let Some(ref region_sel) = self.ctx.region_selection {
+                        // Draw the region boundary as a dashed outline
+                        let boundary_color = Color::from_rgba8(255, 150, 0, 150);
+                        scene.stroke(
+                            &Stroke::new(1.0).with_dashes(0.0, &[6.0, 4.0]),
+                            overlay_transform,
+                            boundary_color,
+                            None,
+                            &region_sel.region_path,
                         );
                     }
 
@@ -3681,6 +3758,261 @@ impl StagePane {
         }
     }
 
+    fn handle_region_select_tool(
+        &mut self,
+        _ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::{ToolState, RegionSelectMode};
+        use lightningbeam_core::region_select;
+        use vello::kurbo::{Point, Rect as KurboRect};
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Mouse down: start region selection
+        if response.drag_started() {
+            // Revert any existing uncommitted region selection
+            Self::revert_region_selection_static(shared);
+
+            match *shared.region_select_mode {
+                RegionSelectMode::Rectangle => {
+                    *shared.tool_state = ToolState::RegionSelectingRect {
+                        start: point,
+                        current: point,
+                    };
+                }
+                RegionSelectMode::Lasso => {
+                    *shared.tool_state = ToolState::RegionSelectingLasso {
+                        points: vec![point],
+                    };
+                }
+            }
+        }
+
+        // Mouse drag: update region
+        if response.dragged() {
+            match shared.tool_state {
+                ToolState::RegionSelectingRect { ref start, .. } => {
+                    let start = *start;
+                    *shared.tool_state = ToolState::RegionSelectingRect {
+                        start,
+                        current: point,
+                    };
+                }
+                ToolState::RegionSelectingLasso { ref mut points } => {
+                    if let Some(last) = points.last() {
+                        if (point.x - last.x).hypot(point.y - last.y) > 3.0 {
+                            points.push(point);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Mouse up: execute region selection
+        if response.drag_stopped() {
+            let region_path = match &*shared.tool_state {
+                ToolState::RegionSelectingRect { start, current } => {
+                    let min_x = start.x.min(current.x);
+                    let min_y = start.y.min(current.y);
+                    let max_x = start.x.max(current.x);
+                    let max_y = start.y.max(current.y);
+                    // Ignore tiny drags
+                    if (max_x - min_x) < 2.0 || (max_y - min_y) < 2.0 {
+                        *shared.tool_state = ToolState::Idle;
+                        return;
+                    }
+                    Some(region_select::rect_to_path(KurboRect::new(min_x, min_y, max_x, max_y)))
+                }
+                ToolState::RegionSelectingLasso { points } => {
+                    if points.len() >= 3 {
+                        Some(region_select::lasso_to_path(points))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            *shared.tool_state = ToolState::Idle;
+
+            if let Some(region_path) = region_path {
+                Self::execute_region_select(shared, region_path, active_layer_id);
+            }
+        }
+    }
+
+    /// Execute region selection: classify shapes, clip intersecting ones, create temporary split
+    fn execute_region_select(
+        shared: &mut SharedPaneState,
+        region_path: vello::kurbo::BezPath,
+        layer_id: uuid::Uuid,
+    ) {
+        use lightningbeam_core::hit_test;
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::region_select;
+        use lightningbeam_core::selection::ShapeSplit;
+        use vello::kurbo::Affine;
+
+        let time = *shared.playback_time;
+
+        // Classify shapes
+        let classification = {
+            let document = shared.action_executor.document();
+            let layer = match document.get_layer(&layer_id) {
+                Some(l) => l,
+                None => return,
+            };
+            let vector_layer = match layer {
+                AnyLayer::Vector(vl) => vl,
+                _ => return,
+            };
+            hit_test::classify_shapes_by_region(vector_layer, time, &region_path, Affine::IDENTITY)
+        };
+
+        // If nothing is inside or intersecting, do nothing
+        if classification.fully_inside.is_empty() && classification.intersecting.is_empty() {
+            return;
+        }
+
+        shared.selection.clear();
+
+        // Select fully-inside shapes directly
+        for &id in &classification.fully_inside {
+            shared.selection.add_shape_instance(id);
+        }
+
+        // For intersecting shapes: compute clip and create temporary splits
+        let mut splits = Vec::new();
+
+        // Collect shape data we need before mutating the document
+        let shape_data: Vec<_> = {
+            let document = shared.action_executor.document();
+            let layer = document.get_layer(&layer_id).unwrap();
+            let vector_layer = match layer {
+                AnyLayer::Vector(vl) => vl,
+                _ => return,
+            };
+            classification.intersecting.iter().filter_map(|id| {
+                vector_layer.get_shape_in_keyframe(id, time)
+                    .map(|shape| {
+                        // Transform path to world space for clipping
+                        let mut world_path = shape.path().clone();
+                        world_path.apply_affine(shape.transform.to_affine());
+                        (shape.clone(), world_path)
+                    })
+            }).collect()
+        };
+
+        for (shape, world_path) in &shape_data {
+            let clip_result = region_select::clip_path_to_region(world_path, &region_path);
+
+            if clip_result.inside.elements().is_empty() {
+                continue;
+            }
+
+            let inside_id = uuid::Uuid::new_v4();
+            let outside_id = uuid::Uuid::new_v4();
+
+            // Transform clipped paths back to local space
+            let inv_transform = shape.transform.to_affine().inverse();
+            let mut inside_path = clip_result.inside;
+            inside_path.apply_affine(inv_transform);
+            let mut outside_path = clip_result.outside;
+            outside_path.apply_affine(inv_transform);
+
+            splits.push(ShapeSplit {
+                original_shape: shape.clone(),
+                inside_shape_id: inside_id,
+                inside_path: inside_path.clone(),
+                outside_shape_id: outside_id,
+                outside_path: outside_path.clone(),
+            });
+
+            shared.selection.add_shape_instance(inside_id);
+        }
+
+        // Apply temporary split to document
+        if !splits.is_empty() {
+            let doc = shared.action_executor.document_mut();
+            let layer = doc.get_layer_mut(&layer_id).unwrap();
+            let vector_layer = match layer {
+                AnyLayer::Vector(vl) => vl,
+                _ => return,
+            };
+
+            for split in &splits {
+                // Remove original shape
+                vector_layer.remove_shape_from_keyframe(&split.original_shape.id, time);
+
+                // Add inside shape
+                let mut inside_shape = split.original_shape.clone();
+                inside_shape.id = split.inside_shape_id;
+                inside_shape.versions[0].path = split.inside_path.clone();
+                vector_layer.add_shape_to_keyframe(inside_shape, time);
+
+                // Add outside shape
+                let mut outside_shape = split.original_shape.clone();
+                outside_shape.id = split.outside_shape_id;
+                outside_shape.versions[0].path = split.outside_path.clone();
+                vector_layer.add_shape_to_keyframe(outside_shape, time);
+            }
+        }
+
+        // Store region selection state
+        *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
+            region_path,
+            layer_id,
+            time,
+            splits,
+            fully_inside_ids: classification.fully_inside,
+            committed: false,
+        });
+    }
+
+    /// Revert an uncommitted region selection, restoring original shapes
+    fn revert_region_selection_static(shared: &mut SharedPaneState) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        let region_sel = match shared.region_selection.take() {
+            Some(rs) => rs,
+            None => return,
+        };
+
+        if region_sel.committed {
+            // Already committed via action system, nothing to revert
+            return;
+        }
+
+        let doc = shared.action_executor.document_mut();
+        let layer = match doc.get_layer_mut(&region_sel.layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+        let vector_layer = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        for split in &region_sel.splits {
+            // Remove temporary inside/outside shapes
+            vector_layer.remove_shape_from_keyframe(&split.inside_shape_id, region_sel.time);
+            vector_layer.remove_shape_from_keyframe(&split.outside_shape_id, region_sel.time);
+            // Restore original
+            vector_layer.add_shape_to_keyframe(split.original_shape.clone(), region_sel.time);
+        }
+
+        shared.selection.clear();
+    }
+
     /// Create a rectangle path centered at origin (easier for curve editing later)
     fn create_rectangle_path(width: f64, height: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
@@ -5815,6 +6147,9 @@ impl StagePane {
                 Tool::Eyedropper => {
                     self.handle_eyedropper_tool(ui, &response, mouse_pos, shared);
                 }
+                Tool::RegionSelect => {
+                    self.handle_region_select_tool(ui, &response, world_pos, shared);
+                }
                 _ => {
                     // Other tools not implemented yet
                 }
@@ -6532,6 +6867,7 @@ impl PaneRenderer for StagePane {
             editing_clip_id: shared.editing_clip_id,
             editing_instance_id: shared.editing_instance_id,
             editing_parent_layer_id: shared.editing_parent_layer_id,
+            region_selection: shared.region_selection.clone(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(

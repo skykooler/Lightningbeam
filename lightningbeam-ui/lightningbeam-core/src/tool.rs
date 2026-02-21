@@ -33,6 +33,23 @@ pub enum Tool {
     BezierEdit,
     /// Text tool - add and edit text
     Text,
+    /// Region select tool - select sub-regions of shapes by clipping
+    RegionSelect,
+}
+
+/// Region select mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RegionSelectMode {
+    /// Rectangular region selection
+    Rectangle,
+    /// Freehand lasso region selection
+    Lasso,
+}
+
+impl Default for RegionSelectMode {
+    fn default() -> Self {
+        Self::Rectangle
+    }
 }
 
 /// Tool state tracking for interactive operations
@@ -117,6 +134,17 @@ pub enum ToolState {
         parameter_t: f64,          // Parameter where the drag started (0.0-1.0)
     },
 
+    /// Drawing a region selection rectangle
+    RegionSelectingRect {
+        start: Point,
+        current: Point,
+    },
+
+    /// Drawing a freehand lasso region selection
+    RegionSelectingLasso {
+        points: Vec<Point>,
+    },
+
     /// Editing a control point (BezierEdit tool only)
     EditingControlPoint {
         shape_id: Uuid,            // Which shape is being edited
@@ -179,6 +207,7 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::BezierEdit => "Bezier Edit",
             Tool::Text => "Text",
+            Tool::RegionSelect => "Region Select",
         }
     }
 
@@ -196,6 +225,7 @@ impl Tool {
             Tool::Polygon => "polygon.svg",
             Tool::BezierEdit => "bezier_edit.svg",
             Tool::Text => "text.svg",
+            Tool::RegionSelect => "region_select.svg",
         }
     }
 
@@ -213,6 +243,7 @@ impl Tool {
             Tool::Polygon,
             Tool::BezierEdit,
             Tool::Text,
+            Tool::RegionSelect,
         ]
     }
 
@@ -230,6 +261,7 @@ impl Tool {
             Tool::Polygon => "G",
             Tool::BezierEdit => "A",
             Tool::Text => "T",
+            Tool::RegionSelect => "S",
         }
     }
 }

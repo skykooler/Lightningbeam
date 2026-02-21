@@ -5,10 +5,11 @@
 
 use crate::clip::ClipInstance;
 use crate::layer::VectorLayer;
+use crate::region_select;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vello::kurbo::{Affine, Point, Rect, Shape as KurboShape};
+use vello::kurbo::{Affine, BezPath, Point, Rect, Shape as KurboShape};
 
 /// Result of a hit test operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +118,66 @@ pub fn hit_test_objects_in_rect(
     }
 
     hits
+}
+
+/// Classification of shapes relative to a clipping region
+#[derive(Debug, Clone)]
+pub struct ShapeRegionClassification {
+    /// Shapes entirely inside the region
+    pub fully_inside: Vec<Uuid>,
+    /// Shapes whose paths cross the region boundary
+    pub intersecting: Vec<Uuid>,
+    /// Shapes with no overlap with the region
+    pub fully_outside: Vec<Uuid>,
+}
+
+/// Classify shapes in a layer relative to a clipping region.
+///
+/// Uses bounding box fast-rejection, then checks path-region intersection
+/// and containment for accurate classification.
+pub fn classify_shapes_by_region(
+    layer: &VectorLayer,
+    time: f64,
+    region: &BezPath,
+    parent_transform: Affine,
+) -> ShapeRegionClassification {
+    let mut result = ShapeRegionClassification {
+        fully_inside: Vec::new(),
+        intersecting: Vec::new(),
+        fully_outside: Vec::new(),
+    };
+
+    let region_bbox = region.bounding_box();
+
+    for shape in layer.shapes_at_time(time) {
+        let combined_transform = parent_transform * shape.transform.to_affine();
+        let bbox = shape.path().bounding_box();
+        let transformed_bbox = combined_transform.transform_rect_bbox(bbox);
+
+        // Fast rejection: if bounding boxes don't overlap, fully outside
+        if region_bbox.intersect(transformed_bbox).area() <= 0.0 {
+            result.fully_outside.push(shape.id);
+            continue;
+        }
+
+        // Transform the shape path to world space for accurate testing
+        let world_path = {
+            let mut p = shape.path().clone();
+            p.apply_affine(combined_transform);
+            p
+        };
+
+        // Check if the path crosses the region boundary
+        if region_select::path_intersects_region(&world_path, region) {
+            result.intersecting.push(shape.id);
+        } else if region_select::path_fully_inside_region(&world_path, region) {
+            result.fully_inside.push(shape.id);
+        } else {
+            result.fully_outside.push(shape.id);
+        }
+    }
+
+    result
 }
 
 /// Get the bounding box of a shape in screen space

@@ -489,14 +489,14 @@ impl VectorLayer {
 
     /// Add a shape to the keyframe at the given time.
     /// Creates a keyframe if none exists at that time.
-    pub(crate) fn add_shape_to_keyframe(&mut self, shape: Shape, time: f64) {
+    pub fn add_shape_to_keyframe(&mut self, shape: Shape, time: f64) {
         let kf = self.ensure_keyframe_at(time);
         kf.shapes.push(shape);
     }
 
     /// Remove a shape from the keyframe at the given time.
     /// Returns the removed shape if found.
-    pub(crate) fn remove_shape_from_keyframe(&mut self, shape_id: &Uuid, time: f64) -> Option<Shape> {
+    pub fn remove_shape_from_keyframe(&mut self, shape_id: &Uuid, time: f64) -> Option<Shape> {
         let kf = self.keyframe_at_mut(time)?;
         let idx = kf.shapes.iter().position(|s| &s.id == shape_id)?;
         Some(kf.shapes.remove(idx))

@@ -2,8 +2,10 @@
 //!
 //! Tracks selected shape instances, clip instances, and shapes for editing operations.
 
+use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vello::kurbo::BezPath;
 
 /// Selection state for the editor
 ///
@@ -210,6 +212,43 @@ impl Selection {
             self.add_clip_instance(id);
         }
     }
+}
+
+/// Represents a temporary region-based split of shapes.
+///
+/// When a region select is active, shapes that cross the region boundary
+/// are temporarily split into "inside" and "outside" parts. The inside
+/// parts are selected. If the user performs an operation, the split is
+/// committed; if they deselect, the original shapes are restored.
+#[derive(Clone, Debug)]
+pub struct RegionSelection {
+    /// The clipping region as a closed BezPath (polygon or rect)
+    pub region_path: BezPath,
+    /// Layer containing the affected shapes
+    pub layer_id: Uuid,
+    /// Keyframe time
+    pub time: f64,
+    /// Per-shape split results
+    pub splits: Vec<ShapeSplit>,
+    /// Shape IDs that were fully inside the region (not split, just selected)
+    pub fully_inside_ids: Vec<Uuid>,
+    /// Whether the split has been committed (via an operation on the selection)
+    pub committed: bool,
+}
+
+/// One shape's split result from a region selection
+#[derive(Clone, Debug)]
+pub struct ShapeSplit {
+    /// The original shape (stored for reverting)
+    pub original_shape: Shape,
+    /// UUID for the "inside" portion shape
+    pub inside_shape_id: Uuid,
+    /// The clipped path inside the region
+    pub inside_path: BezPath,
+    /// UUID for the "outside" portion shape
+    pub outside_shape_id: Uuid,
+    /// The clipped path outside the region
+    pub outside_path: BezPath,
 }
 
 #[cfg(test)]

@@ -333,6 +333,7 @@ impl ToolIconCache {
                 Tool::Polygon => tool_icons::POLYGON,
                 Tool::BezierEdit => tool_icons::BEZIER_EDIT,
                 Tool::Text => tool_icons::TEXT,
+                Tool::RegionSelect => tool_icons::SELECT, // Reuse select icon for now
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -741,6 +742,9 @@ struct EditorApp {
     fill_enabled: bool,              // Whether to fill shapes (default: true)
     paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
     polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
+    // Region select state
+    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
+    region_select_mode: lightningbeam_core::tool::RegionSelectMode,
 
     /// Cache for MIDI event data (keyed by backend midi_clip_id)
     /// Prevents repeated backend queries for the same MIDI clip
@@ -962,6 +966,8 @@ impl EditorApp {
             fill_enabled: true,              // Default to filling shapes
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
+            region_selection: None,
+            region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
             audio_duration_cache: HashMap::new(), // Initialize empty audio duration cache
             audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
@@ -2001,6 +2007,42 @@ impl EditorApp {
                 };
             }
         }
+    }
+
+    /// Revert an uncommitted region selection, restoring original shapes
+    fn revert_region_selection(
+        region_selection: &mut Option<lightningbeam_core::selection::RegionSelection>,
+        action_executor: &mut lightningbeam_core::action::ActionExecutor,
+        selection: &mut lightningbeam_core::selection::Selection,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        let region_sel = match region_selection.take() {
+            Some(rs) => rs,
+            None => return,
+        };
+
+        if region_sel.committed {
+            return;
+        }
+
+        let doc = action_executor.document_mut();
+        let layer = match doc.get_layer_mut(&region_sel.layer_id) {
+            Some(l) => l,
+            None => return,
+        };
+        let vector_layer = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return,
+        };
+
+        for split in &region_sel.splits {
+            vector_layer.remove_shape_from_keyframe(&split.inside_shape_id, region_sel.time);
+            vector_layer.remove_shape_from_keyframe(&split.outside_shape_id, region_sel.time);
+            vector_layer.add_shape_to_keyframe(split.original_shape.clone(), region_sel.time);
+        }
+
+        selection.clear();
     }
 
     fn handle_menu_action(&mut self, action: MenuAction) {
@@ -4687,6 +4729,8 @@ impl eframe::App for EditorApp {
                 project_generation: &mut self.project_generation,
                 script_to_edit: &mut self.script_to_edit,
                 script_saved: &mut self.script_saved,
+                region_selection: &mut self.region_selection,
+                region_select_mode: &mut self.region_select_mode,
             };
 
             render_layout_node(
@@ -4892,9 +4936,22 @@ impl eframe::App for EditorApp {
                     self.selected_tool = Tool::BezierEdit;
                 } else if i.key_pressed(egui::Key::T) {
                     self.selected_tool = Tool::Text;
+                } else if i.key_pressed(egui::Key::S) {
+                    self.selected_tool = Tool::RegionSelect;
                 }
             }
         });
+
+        // Escape key: revert uncommitted region selection
+        if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.region_selection.is_some() {
+                Self::revert_region_selection(
+                    &mut self.region_selection,
+                    &mut self.action_executor,
+                    &mut self.selection,
+                );
+            }
+        }
 
         // F3 debug overlay toggle (works even when text input is active)
         if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
@@ -5004,6 +5061,10 @@ struct RenderContext<'a> {
     script_to_edit: &'a mut Option<Uuid>,
     /// Script ID just saved (triggers auto-recompile of nodes using it)
     script_saved: &'a mut Option<Uuid>,
+    /// Active region selection (temporary split state)
+    region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
+    /// Region select mode (Rectangle or Lasso)
+    region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
 }
 
 /// Recursively render a layout node with drag support
@@ -5488,6 +5549,8 @@ fn render_pane(
                 project_generation: ctx.project_generation,
                 script_to_edit: ctx.script_to_edit,
                 script_saved: ctx.script_saved,
+                region_selection: ctx.region_selection,
+                region_select_mode: ctx.region_select_mode,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
@@ -5566,6 +5629,8 @@ fn render_pane(
                 project_generation: ctx.project_generation,
                 script_to_edit: ctx.script_to_edit,
                 script_saved: ctx.script_saved,
+                region_selection: ctx.region_selection,
+                region_select_mode: ctx.region_select_mode,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,

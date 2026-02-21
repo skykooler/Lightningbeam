@@ -43,6 +43,7 @@ impl CustomCursor {
             Tool::Polygon => CustomCursor::Polygon,
             Tool::BezierEdit => CustomCursor::BezierEdit,
             Tool::Text => CustomCursor::Text,
+            Tool::RegionSelect => CustomCursor::Select, // Reuse select cursor for now
         }
     }
 

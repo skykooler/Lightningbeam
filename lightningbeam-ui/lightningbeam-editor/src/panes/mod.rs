@@ -233,6 +233,10 @@ pub struct SharedPaneState<'a> {
     pub script_to_edit: &'a mut Option<Uuid>,
     /// Script ID that was just saved (triggers auto-recompile of nodes using it)
     pub script_saved: &'a mut Option<Uuid>,
+    /// Active region selection (temporary split state)
+    pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
+    /// Region select mode (Rectangle or Lasso)
+    pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
 }
 
 /// Trait for pane rendering

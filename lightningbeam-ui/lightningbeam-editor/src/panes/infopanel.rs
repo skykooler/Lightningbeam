@@ -206,7 +206,7 @@ impl InfopanelPane {
         // Only show tool options for tools that have options
         let has_options = matches!(
             tool,
-            Tool::Draw | Tool::Rectangle | Tool::Ellipse | Tool::PaintBucket | Tool::Polygon | Tool::Line
+            Tool::Draw | Tool::Rectangle | Tool::Ellipse | Tool::PaintBucket | Tool::Polygon | Tool::Line | Tool::RegionSelect
         );
 
         if !has_options {
@@ -308,6 +308,25 @@ impl InfopanelPane {
                         ui.horizontal(|ui| {
                             ui.label("Stroke Width:");
                             ui.add(DragValue::new(shared.stroke_width).speed(0.1).range(0.1..=100.0));
+                        });
+                    }
+
+                    Tool::RegionSelect => {
+                        use lightningbeam_core::tool::RegionSelectMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            if ui.selectable_label(
+                                *shared.region_select_mode == RegionSelectMode::Rectangle,
+                                "Rectangle",
+                            ).clicked() {
+                                *shared.region_select_mode = RegionSelectMode::Rectangle;
+                            }
+                            if ui.selectable_label(
+                                *shared.region_select_mode == RegionSelectMode::Lasso,
+                                "Lasso",
+                            ).clicked() {
+                                *shared.region_select_mode = RegionSelectMode::Lasso;
+                            }
                         });
                     }
 
