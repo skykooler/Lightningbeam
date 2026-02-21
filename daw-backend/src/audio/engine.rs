@@ -1158,62 +1158,16 @@ impl Engine {
 
                 if let Some(graph) = graph {
                     // Create the node based on type
-                    let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
-                            "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
-                            "Gain" => Box::new(GainNode::new("Gain".to_string())),
-                            "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
-                            "Filter" => Box::new(FilterNode::new("Filter".to_string())),
-                            "SVF" => Box::new(SVFNode::new("SVF".to_string())),
-                            "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
-                            "LFO" => Box::new(LFONode::new("LFO".to_string())),
-                            "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
-                            "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
-                            "Pan" => Box::new(PanNode::new("Pan".to_string())),
-                            "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
-                            "Echo" | "Delay" => Box::new(EchoNode::new("Echo".to_string())),
-                            "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
-                            "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
-                            "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
-                            "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
-                            "Constant" => Box::new(ConstantNode::new("Constant".to_string())),
-                            "BpmDetector" => Box::new(BpmDetectorNode::new("BPM Detector".to_string())),
-                            "Beat" => Box::new(BeatNode::new("Beat".to_string())),
-                            "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator".to_string())),
-                            "Sequencer" => Box::new(SequencerNode::new("Sequencer".to_string())),
-                            "Script" => Box::new(ScriptNode::new("Script".to_string())),
-                            "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
-                            "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
-                            "Math" => Box::new(MathNode::new("Math".to_string())),
-                            "EQ" => Box::new(EQNode::new("EQ".to_string())),
-                            "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
-                            "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
-                            "Phaser" => Box::new(PhaserNode::new("Phaser".to_string())),
-                            "BitCrusher" => Box::new(BitCrusherNode::new("Bit Crusher".to_string())),
-                            "Vocoder" => Box::new(VocoderNode::new("Vocoder".to_string())),
-                            "RingModulator" => Box::new(RingModulatorNode::new("Ring Modulator".to_string())),
-                            "SampleHold" => Box::new(SampleHoldNode::new("Sample & Hold".to_string())),
-                            "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
-                            "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
-                            "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter".to_string())),
-                            "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
-                            "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
-                            "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
-                            "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
-                            "AudioInput" => Box::new(AudioInputNode::new("Audio Input".to_string())),
-                            "AutomationInput" => Box::new(AutomationInputNode::new("Automation".to_string())),
-                            "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
-                            "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
-                            "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
-                            "VoiceAllocator" => Box::new(VoiceAllocatorNode::new("VoiceAllocator".to_string(), self.sample_rate, 8192)),
-                            "AudioOutput" => Box::new(AudioOutputNode::new("Output".to_string())),
-                            _ => {
-                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
-                                    track_id,
-                                    format!("Unknown node type: {}", node_type)
-                                ));
-                                return;
-                            }
-                        };
+                    let node = match crate::audio::node_graph::nodes::create_node(&node_type, self.sample_rate, 8192) {
+                        Some(n) => n,
+                        None => {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("Unknown node type: {}", node_type)
+                            ));
+                            return;
+                        }
+                    };
 
                     // Add node to graph
                     let node_idx = graph.add_node(node);
@@ -1250,53 +1204,9 @@ impl Engine {
                         let va_idx = NodeIndex::new(voice_allocator_id as usize);
 
                         // Create the node
-                        let node: Box<dyn crate::audio::node_graph::AudioNode> = match node_type.as_str() {
-                            "Oscillator" => Box::new(OscillatorNode::new("Oscillator".to_string())),
-                            "Gain" => Box::new(GainNode::new("Gain".to_string())),
-                            "Mixer" => Box::new(MixerNode::new("Mixer".to_string())),
-                            "Filter" => Box::new(FilterNode::new("Filter".to_string())),
-                            "SVF" => Box::new(SVFNode::new("SVF".to_string())),
-                            "ADSR" => Box::new(ADSRNode::new("ADSR".to_string())),
-                            "LFO" => Box::new(LFONode::new("LFO".to_string())),
-                            "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise".to_string())),
-                            "Splitter" => Box::new(SplitterNode::new("Splitter".to_string())),
-                            "Pan" => Box::new(PanNode::new("Pan".to_string())),
-                            "Quantizer" => Box::new(QuantizerNode::new("Quantizer".to_string())),
-                            "Echo" | "Delay" => Box::new(EchoNode::new("Echo".to_string())),
-                            "Distortion" => Box::new(DistortionNode::new("Distortion".to_string())),
-                            "Reverb" => Box::new(ReverbNode::new("Reverb".to_string())),
-                            "Chorus" => Box::new(ChorusNode::new("Chorus".to_string())),
-                            "Compressor" => Box::new(CompressorNode::new("Compressor".to_string())),
-                            "Constant" => Box::new(ConstantNode::new("Constant".to_string())),
-                            "BpmDetector" => Box::new(BpmDetectorNode::new("BPM Detector".to_string())),
-                            "Beat" => Box::new(BeatNode::new("Beat".to_string())),
-                            "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator".to_string())),
-                            "Sequencer" => Box::new(SequencerNode::new("Sequencer".to_string())),
-                            "Script" => Box::new(ScriptNode::new("Script".to_string())),
-                            "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower".to_string())),
-                            "Limiter" => Box::new(LimiterNode::new("Limiter".to_string())),
-                            "Math" => Box::new(MathNode::new("Math".to_string())),
-                            "EQ" => Box::new(EQNode::new("EQ".to_string())),
-                            "Flanger" => Box::new(FlangerNode::new("Flanger".to_string())),
-                            "FMSynth" => Box::new(FMSynthNode::new("FM Synth".to_string())),
-                            "Phaser" => Box::new(PhaserNode::new("Phaser".to_string())),
-                            "BitCrusher" => Box::new(BitCrusherNode::new("Bit Crusher".to_string())),
-                            "Vocoder" => Box::new(VocoderNode::new("Vocoder".to_string())),
-                            "RingModulator" => Box::new(RingModulatorNode::new("Ring Modulator".to_string())),
-                            "SampleHold" => Box::new(SampleHoldNode::new("Sample & Hold".to_string())),
-                            "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable".to_string())),
-                            "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler".to_string())),
-                            "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter".to_string())),
-                            "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler".to_string())),
-                            "MidiInput" => Box::new(MidiInputNode::new("MIDI Input".to_string())),
-                            "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV".to_string())),
-                            "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV".to_string())),
-                            "AutomationInput" => Box::new(AutomationInputNode::new("Automation".to_string())),
-                            "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope".to_string())),
-                            "TemplateInput" => Box::new(TemplateInputNode::new("Template Input".to_string())),
-                            "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output".to_string())),
-                            "AudioOutput" => Box::new(AudioOutputNode::new("Output".to_string())),
-                            _ => {
+                        let node = match crate::audio::node_graph::nodes::create_node(&node_type, self.sample_rate, 8192) {
+                            Some(n) => n,
+                            None => {
                                 let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
                                     track_id,
                                     format!("Unknown node type: {}", node_type)
@@ -1718,6 +1628,26 @@ impl Engine {
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
                         if let Some(script_node) = graph_node.node.as_any_mut().downcast_mut::<ScriptNode>() {
                             script_node.set_sample(slot_index, data, sample_rate, name);
+                        }
+                    }
+                }
+            }
+
+            Command::AmpSimLoadModel(track_id, node_id, model_path) => {
+                use crate::audio::node_graph::nodes::AmpSimNode;
+
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let node_idx = NodeIndex::new(node_id as usize);
+                    if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
+                        if let Some(amp_sim) = graph_node.node.as_any_mut().downcast_mut::<AmpSimNode>() {
+                            if let Err(e) = amp_sim.load_model(&model_path) {
+                                eprintln!("Failed to load NAM model: {}", e);
+                            }
                         }
                     }
                 }
@@ -3350,6 +3280,11 @@ impl EngineController {
     /// Save a VoiceAllocator's template graph as a preset
     pub fn graph_save_template_preset(&mut self, track_id: TrackId, voice_allocator_id: u32, preset_path: String, preset_name: String) {
         let _ = self.command_tx.push(Command::GraphSaveTemplatePreset(track_id, voice_allocator_id, preset_path, preset_name));
+    }
+
+    /// Load a NAM model into an AmpSim node
+    pub fn amp_sim_load_model(&mut self, track_id: TrackId, node_id: u32, model_path: String) {
+        let _ = self.command_tx.push(Command::AmpSimLoadModel(track_id, node_id, model_path));
     }
 
     /// Load a sample into a SimpleSampler node

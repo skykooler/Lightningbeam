@@ -1385,7 +1385,7 @@ impl NodeGraphPane {
         // Create nodes in frontend
         self.pending_script_resolutions.clear();
         for node in &graph_state.nodes {
-            let node_template = match Self::backend_type_to_template(&node.node_type) {
+            let node_template = match NodeTemplate::from_backend_name(&node.node_type) {
                 Some(t) => t,
                 None => {
                     eprintln!("Unknown node type: {}", node.node_type);
@@ -1836,7 +1836,7 @@ impl NodeGraphPane {
                 continue;
             }
 
-            let node_template = match Self::backend_type_to_template(&node.node_type) {
+            let node_template = match NodeTemplate::from_backend_name(&node.node_type) {
                 Some(t) => t,
                 None => {
                     eprintln!("Unknown node type: {}", node.node_type);
@@ -2098,62 +2098,6 @@ impl NodeGraphPane {
                     }
                 }
             }
-        }
-    }
-
-    /// Helper: map backend node type string to frontend NodeTemplate
-    fn backend_type_to_template(node_type: &str) -> Option<NodeTemplate> {
-        match node_type {
-            "MidiInput" => Some(NodeTemplate::MidiInput),
-            "AudioInput" => Some(NodeTemplate::AudioInput),
-            "AutomationInput" => Some(NodeTemplate::AutomationInput),
-            "Oscillator" => Some(NodeTemplate::Oscillator),
-            "WavetableOscillator" => Some(NodeTemplate::WavetableOscillator),
-            "FMSynth" => Some(NodeTemplate::FmSynth),
-            "NoiseGenerator" => Some(NodeTemplate::Noise),
-            "SimpleSampler" => Some(NodeTemplate::SimpleSampler),
-            "MultiSampler" => Some(NodeTemplate::MultiSampler),
-            "Filter" => Some(NodeTemplate::Filter),
-            "SVF" => Some(NodeTemplate::Svf),
-            "Gain" => Some(NodeTemplate::Gain),
-            "Echo" | "Delay" => Some(NodeTemplate::Echo),
-            "Reverb" => Some(NodeTemplate::Reverb),
-            "Chorus" => Some(NodeTemplate::Chorus),
-            "Flanger" => Some(NodeTemplate::Flanger),
-            "Phaser" => Some(NodeTemplate::Phaser),
-            "Distortion" => Some(NodeTemplate::Distortion),
-            "BitCrusher" => Some(NodeTemplate::BitCrusher),
-            "Compressor" => Some(NodeTemplate::Compressor),
-            "Limiter" => Some(NodeTemplate::Limiter),
-            "EQ" => Some(NodeTemplate::Eq),
-            "Pan" => Some(NodeTemplate::Pan),
-            "RingModulator" => Some(NodeTemplate::RingModulator),
-            "Vocoder" => Some(NodeTemplate::Vocoder),
-            "ADSR" => Some(NodeTemplate::Adsr),
-            "LFO" => Some(NodeTemplate::Lfo),
-            "Mixer" => Some(NodeTemplate::Mixer),
-            "Splitter" => Some(NodeTemplate::Splitter),
-            "Constant" => Some(NodeTemplate::Constant),
-            "MidiToCV" => Some(NodeTemplate::MidiToCv),
-            "AudioToCV" => Some(NodeTemplate::AudioToCv),
-            "Math" => Some(NodeTemplate::Math),
-            "SampleHold" => Some(NodeTemplate::SampleHold),
-            "SlewLimiter" => Some(NodeTemplate::SlewLimiter),
-            "Quantizer" => Some(NodeTemplate::Quantizer),
-            "EnvelopeFollower" => Some(NodeTemplate::EnvelopeFollower),
-            "BPMDetector" => Some(NodeTemplate::BpmDetector),
-            "Mod" => Some(NodeTemplate::Mod),
-            "Oscilloscope" => Some(NodeTemplate::Oscilloscope),
-            "Arpeggiator" => Some(NodeTemplate::Arpeggiator),
-            "Sequencer" => Some(NodeTemplate::Sequencer),
-            "Script" => Some(NodeTemplate::Script),
-            "Beat" => Some(NodeTemplate::Beat),
-            "VoiceAllocator" => Some(NodeTemplate::VoiceAllocator),
-            "Group" => Some(NodeTemplate::Group),
-            "TemplateInput" => Some(NodeTemplate::TemplateInput),
-            "TemplateOutput" => Some(NodeTemplate::TemplateOutput),
-            "AudioOutput" => Some(NodeTemplate::AudioOutput),
-            _ => None,
         }
     }
 
@@ -2571,6 +2515,31 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             // Handle pending sampler load requests from bottom_ui()
             if let Some(load) = self.user_state.pending_sampler_load.take() {
                 self.handle_pending_sampler_load(load, shared);
+            }
+
+            // Handle pending AmpSim model load from bottom_ui()
+            if let Some((node_id, backend_node_id)) = self.user_state.pending_amp_sim_load.take() {
+                if let Some(backend_track_id) = self.backend_track_id {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("NAM Model", &["nam"])
+                        .pick_file()
+                    {
+                        let model_name = path.file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Model".to_string());
+                        if let Some(controller_arc) = &shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            controller.amp_sim_load_model(
+                                backend_track_id,
+                                backend_node_id,
+                                path.to_string_lossy().to_string(),
+                            );
+                        }
+                        if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                            node.user_data.nam_model_name = Some(model_name);
+                        }
+                    }
+                }
             }
 
             // Render sample import dialog if active

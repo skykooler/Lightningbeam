@@ -917,6 +917,14 @@ impl AudioGraph {
                     }
                 }
 
+                // For AmpSim nodes, serialize the model path
+                if node.node_type() == "AmpSim" {
+                    use crate::audio::node_graph::nodes::AmpSimNode;
+                    if let Some(amp_sim) = node.as_any().downcast_ref::<AmpSimNode>() {
+                        serialized.nam_model_path = amp_sim.model_path().map(|s| s.to_string());
+                    }
+                }
+
                 // Save position if available
                 if let Some(pos) = self.get_node_position(node_idx) {
                     serialized.set_position(pos.0, pos.1);
@@ -983,66 +991,19 @@ impl AudioGraph {
         // Create all nodes
         for serialized_node in &preset.nodes {
             // Create the node based on type
-            let node: Box<dyn crate::audio::node_graph::AudioNode> = match serialized_node.node_type.as_str() {
-                "Oscillator" => Box::new(OscillatorNode::new("Oscillator")),
-                "Gain" => Box::new(GainNode::new("Gain")),
-                "Mixer" => Box::new(MixerNode::new("Mixer")),
-                "Filter" => Box::new(FilterNode::new("Filter")),
-                "SVF" => Box::new(SVFNode::new("SVF")),
-                "ADSR" => Box::new(ADSRNode::new("ADSR")),
-                "LFO" => Box::new(LFONode::new("LFO")),
-                "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise")),
-                "Splitter" => Box::new(SplitterNode::new("Splitter")),
-                "Pan" => Box::new(PanNode::new("Pan")),
-                "Quantizer" => Box::new(QuantizerNode::new("Quantizer")),
-                "Echo" | "Delay" => Box::new(EchoNode::new("Echo")),
-                "Distortion" => Box::new(DistortionNode::new("Distortion")),
-                "Reverb" => Box::new(ReverbNode::new("Reverb")),
-                "Chorus" => Box::new(ChorusNode::new("Chorus")),
-                "Compressor" => Box::new(CompressorNode::new("Compressor")),
-                "Constant" => Box::new(ConstantNode::new("Constant")),
-                "Beat" => Box::new(BeatNode::new("Beat")),
-                "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator")),
-                "Sequencer" => Box::new(SequencerNode::new("Sequencer")),
-                "Script" => Box::new(ScriptNode::new("Script")),
-                "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
-                "Limiter" => Box::new(LimiterNode::new("Limiter")),
-                "Math" => Box::new(MathNode::new("Math")),
-                "EQ" => Box::new(EQNode::new("EQ")),
-                "Flanger" => Box::new(FlangerNode::new("Flanger")),
-                "FMSynth" => Box::new(FMSynthNode::new("FM Synth")),
-                "Phaser" => Box::new(PhaserNode::new("Phaser")),
-                "BitCrusher" => Box::new(BitCrusherNode::new("Bit Crusher")),
-                "Vocoder" => Box::new(VocoderNode::new("Vocoder")),
-                "RingModulator" => Box::new(RingModulatorNode::new("Ring Modulator")),
-                "SampleHold" => Box::new(SampleHoldNode::new("Sample & Hold")),
-                "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable")),
-                "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler")),
-                "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter")),
-                "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler")),
-                "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
-                "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
-                "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
-                "AudioInput" => Box::new(AudioInputNode::new("Audio Input")),
-                "AutomationInput" => Box::new(AutomationInputNode::new("Automation")),
-                "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
-                "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
-                "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),
-                "VoiceAllocator" => {
-                    let mut va = VoiceAllocatorNode::new("VoiceAllocator", sample_rate, buffer_size);
+            let mut node = crate::audio::node_graph::nodes::create_node(&serialized_node.node_type, sample_rate, buffer_size)
+                .ok_or_else(|| format!("Unknown node type: {}", serialized_node.node_type))?;
 
-                    // If there's a template graph, deserialize and set it
-                    if let Some(ref template_preset) = serialized_node.template_graph {
+            // VoiceAllocator needs its template graph deserialized and set
+            if serialized_node.node_type == "VoiceAllocator" {
+                if let Some(ref template_preset) = serialized_node.template_graph {
+                    if let Some(va) = node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
                         let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path)?;
                         *va.template_graph_mut() = template_graph;
                         va.rebuild_voices();
                     }
-
-                    Box::new(va)
                 }
-                "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
-                _ => return Err(format!("Unknown node type: {}", serialized_node.node_type)),
-            };
+            }
 
             let node_idx = graph.add_node(node);
             index_map.insert(serialized_node.id, node_idx);
@@ -1155,6 +1116,21 @@ impl AudioGraph {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Restore NAM model for AmpSim nodes
+            if let Some(ref model_path) = serialized_node.nam_model_path {
+                if serialized_node.node_type == "AmpSim" {
+                    use crate::audio::node_graph::nodes::AmpSimNode;
+                    let resolved_path = resolve_sample_path(model_path);
+                    if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                        if let Some(amp_sim) = graph_node.node.as_any_mut().downcast_mut::<AmpSimNode>() {
+                            if let Err(e) = amp_sim.load_model(&resolved_path) {
+                                eprintln!("Warning: failed to load NAM model {}: {}", resolved_path, e);
                             }
                         }
                     }

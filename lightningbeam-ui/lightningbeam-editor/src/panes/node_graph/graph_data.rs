@@ -16,132 +16,140 @@ pub enum DataType {
     CV,
 }
 
-/// Node templates - types of nodes that can be created
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NodeTemplate {
-    // Inputs
-    MidiInput,
-    AudioInput,
-    AutomationInput,
-    Beat,
+/// Macro that defines `NodeTemplate` enum and generates metadata methods from a single table.
+///
+/// Each row: `variant, backend_name, display_label, category, in_finder;`
+///
+/// Generated methods:
+/// - `backend_type_name() -> &'static str`
+/// - `display_label() -> &'static str` (used by `node_finder_label`)
+/// - `category() -> &'static str` (used by `node_finder_categories`)
+/// - `in_finder() -> bool`
+/// - `from_backend_name(s: &str) -> Option<NodeTemplate>`
+/// - `all_finder_kinds() -> Vec<NodeTemplate>` (only variants with `in_finder = true`)
+macro_rules! node_templates {
+    (
+        $( $variant:ident, $backend:literal, $label:literal, $category:literal, $in_finder:literal );+
+        $(;)?
+    ) => {
+        /// Node templates - types of nodes that can be created
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum NodeTemplate {
+            $($variant),+
+        }
 
-    // Generators
-    Oscillator,
-    WavetableOscillator,
-    FmSynth,
-    Noise,
-    SimpleSampler,
-    MultiSampler,
+        impl NodeTemplate {
+            /// Returns the backend-compatible type name string (matches daw-backend match arms)
+            pub fn backend_type_name(&self) -> &'static str {
+                match self {
+                    $(NodeTemplate::$variant => $backend),+
+                }
+            }
 
-    // Effects
-    Filter,
-    Svf,
-    Gain,
-    Echo,
-    Reverb,
-    Chorus,
-    Flanger,
-    Phaser,
-    Distortion,
-    BitCrusher,
-    Compressor,
-    Limiter,
-    Eq,
-    Pan,
-    RingModulator,
-    Vocoder,
+            /// Display label for the node finder
+            fn display_label(&self) -> &'static str {
+                match self {
+                    $(NodeTemplate::$variant => $label),+
+                }
+            }
 
-    // Utilities
-    Adsr,
-    Lfo,
-    Mixer,
-    Splitter,
-    Constant,
-    MidiToCv,
-    AudioToCv,
-    Arpeggiator,
-    Sequencer,
-    Math,
-    SampleHold,
-    SlewLimiter,
-    Quantizer,
-    EnvelopeFollower,
-    BpmDetector,
-    Mod,
+            /// Category for the node finder
+            fn category(&self) -> &'static str {
+                match self {
+                    $(NodeTemplate::$variant => $category),+
+                }
+            }
 
-    // Scripting
-    Script,
+            /// Whether this node appears in the node finder
+            #[allow(dead_code)]
+            fn in_finder(&self) -> bool {
+                match self {
+                    $(NodeTemplate::$variant => $in_finder),+
+                }
+            }
 
-    // Analysis
-    Oscilloscope,
+            /// Map a backend type name string to a NodeTemplate variant.
+            ///
+            /// Handles canonical names from the table plus legacy aliases.
+            pub fn from_backend_name(s: &str) -> Option<NodeTemplate> {
+                match s {
+                    $($backend => Some(NodeTemplate::$variant),)+
+                    // Legacy / alternate aliases
+                    "Delay" => Some(NodeTemplate::Echo),
+                    "BPMDetector" => Some(NodeTemplate::BpmDetector),
+                    _ => None,
+                }
+            }
 
-    // Advanced
-    VoiceAllocator,
-    Group,
-
-    // Subgraph I/O (only visible when editing inside a container node)
-    TemplateInput,
-    TemplateOutput,
-
-    // Outputs
-    AudioOutput,
+            /// All node templates that should appear in the default node finder
+            pub fn all_finder_kinds() -> Vec<NodeTemplate> {
+                let mut v = Vec::new();
+                $(if $in_finder { v.push(NodeTemplate::$variant); })+
+                v
+            }
+        }
+    };
 }
 
-impl NodeTemplate {
-    /// Returns the backend-compatible type name string (matches daw-backend match arms)
-    pub fn backend_type_name(&self) -> &'static str {
-        match self {
-            NodeTemplate::MidiInput => "MidiInput",
-            NodeTemplate::AudioInput => "AudioInput",
-            NodeTemplate::AutomationInput => "AutomationInput",
-            NodeTemplate::Oscillator => "Oscillator",
-            NodeTemplate::WavetableOscillator => "WavetableOscillator",
-            NodeTemplate::FmSynth => "FMSynth",
-            NodeTemplate::Noise => "NoiseGenerator",
-            NodeTemplate::SimpleSampler => "SimpleSampler",
-            NodeTemplate::MultiSampler => "MultiSampler",
-            NodeTemplate::Filter => "Filter",
-            NodeTemplate::Svf => "SVF",
-            NodeTemplate::Gain => "Gain",
-            NodeTemplate::Echo => "Echo",
-            NodeTemplate::Reverb => "Reverb",
-            NodeTemplate::Chorus => "Chorus",
-            NodeTemplate::Flanger => "Flanger",
-            NodeTemplate::Phaser => "Phaser",
-            NodeTemplate::Distortion => "Distortion",
-            NodeTemplate::BitCrusher => "BitCrusher",
-            NodeTemplate::Compressor => "Compressor",
-            NodeTemplate::Limiter => "Limiter",
-            NodeTemplate::Eq => "EQ",
-            NodeTemplate::Pan => "Pan",
-            NodeTemplate::RingModulator => "RingModulator",
-            NodeTemplate::Vocoder => "Vocoder",
-            NodeTemplate::Adsr => "ADSR",
-            NodeTemplate::Lfo => "LFO",
-            NodeTemplate::Mixer => "Mixer",
-            NodeTemplate::Splitter => "Splitter",
-            NodeTemplate::Constant => "Constant",
-            NodeTemplate::MidiToCv => "MidiToCV",
-            NodeTemplate::AudioToCv => "AudioToCV",
-            NodeTemplate::Arpeggiator => "Arpeggiator",
-            NodeTemplate::Sequencer => "Sequencer",
-            NodeTemplate::Math => "Math",
-            NodeTemplate::SampleHold => "SampleHold",
-            NodeTemplate::SlewLimiter => "SlewLimiter",
-            NodeTemplate::Quantizer => "Quantizer",
-            NodeTemplate::EnvelopeFollower => "EnvelopeFollower",
-            NodeTemplate::BpmDetector => "BpmDetector",
-            NodeTemplate::Beat => "Beat",
-            NodeTemplate::Script => "Script",
-            NodeTemplate::Mod => "Mod",
-            NodeTemplate::Oscilloscope => "Oscilloscope",
-            NodeTemplate::VoiceAllocator => "VoiceAllocator",
-            NodeTemplate::Group => "Group",
-            NodeTemplate::TemplateInput => "TemplateInput",
-            NodeTemplate::TemplateOutput => "TemplateOutput",
-            NodeTemplate::AudioOutput => "AudioOutput",
-        }
-    }
+node_templates! {
+    // Inputs
+    MidiInput,          "MidiInput",          "MIDI Input",          "Inputs",       true;
+    AudioInput,         "AudioInput",         "Audio Input",         "Inputs",       true;
+    AutomationInput,    "AutomationInput",    "Automation Input",    "Inputs",       true;
+    Beat,               "Beat",               "Beat",                "Inputs",       true;
+    // Generators
+    Oscillator,         "Oscillator",         "Oscillator",          "Generators",   true;
+    WavetableOscillator,"WavetableOscillator","Wavetable Oscillator","Generators",   true;
+    FmSynth,            "FMSynth",            "FM Synth",            "Generators",   true;
+    Noise,              "NoiseGenerator",     "Noise Generator",     "Generators",   true;
+    SimpleSampler,      "SimpleSampler",      "Simple Sampler",      "Generators",   true;
+    MultiSampler,       "MultiSampler",       "Multi Sampler",       "Generators",   true;
+    // Effects
+    Filter,             "Filter",             "Filter",              "Effects",      true;
+    Svf,                "SVF",                "SVF",                 "Effects",      true;
+    Gain,               "Gain",               "Gain",                "Effects",      true;
+    Echo,               "Echo",               "Echo",                "Effects",      true;
+    Reverb,             "Reverb",             "Reverb",              "Effects",      true;
+    Chorus,             "Chorus",             "Chorus",              "Effects",      true;
+    Flanger,            "Flanger",            "Flanger",             "Effects",      true;
+    Phaser,             "Phaser",             "Phaser",              "Effects",      true;
+    Distortion,         "Distortion",         "Distortion",          "Effects",      true;
+    AmpSim,             "AmpSim",             "Amp Sim",             "Effects",      true;
+    BitCrusher,         "BitCrusher",         "Bit Crusher",         "Effects",      true;
+    Compressor,         "Compressor",         "Compressor",          "Effects",      true;
+    Limiter,            "Limiter",            "Limiter",             "Effects",      true;
+    Eq,                 "EQ",                 "EQ",                  "Effects",      true;
+    Pan,                "Pan",                "Pan",                 "Effects",      true;
+    RingModulator,      "RingModulator",      "Ring Modulator",      "Effects",      true;
+    Vocoder,            "Vocoder",            "Vocoder",             "Effects",      true;
+    // Utilities
+    Adsr,               "ADSR",               "ADSR Envelope",       "Utilities",    true;
+    Lfo,                "LFO",                "LFO",                 "Utilities",    true;
+    Mixer,              "Mixer",              "Mixer",               "Utilities",    true;
+    Splitter,           "Splitter",           "Splitter",            "Utilities",    true;
+    Constant,           "Constant",           "Constant",            "Utilities",    true;
+    MidiToCv,           "MidiToCV",           "MIDI to CV",          "Utilities",    true;
+    AudioToCv,          "AudioToCV",          "Audio to CV",         "Utilities",    true;
+    Arpeggiator,        "Arpeggiator",        "Arpeggiator",         "Utilities",    true;
+    Sequencer,          "Sequencer",          "Step Sequencer",      "Utilities",    true;
+    Math,               "Math",               "Math",                "Utilities",    true;
+    SampleHold,         "SampleHold",         "Sample & Hold",       "Utilities",    true;
+    SlewLimiter,        "SlewLimiter",        "Slew Limiter",        "Utilities",    true;
+    Quantizer,          "Quantizer",          "Quantizer",           "Utilities",    true;
+    EnvelopeFollower,   "EnvelopeFollower",   "Envelope Follower",   "Utilities",    true;
+    BpmDetector,        "BpmDetector",        "BPM Detector",        "Utilities",    true;
+    Mod,                "Mod",                "Modulator",           "Utilities",    true;
+    // Analysis
+    Oscilloscope,       "Oscilloscope",       "Oscilloscope",        "Analysis",     true;
+    // Advanced
+    VoiceAllocator,     "VoiceAllocator",     "Voice Allocator",     "Advanced",     true;
+    Script,             "Script",             "Script",              "Advanced",     true;
+    Group,              "Group",              "Group",               "Advanced",     false;
+    // Subgraph I/O
+    TemplateInput,      "TemplateInput",      "Template Input",      "Subgraph I/O", false;
+    TemplateOutput,     "TemplateOutput",     "Template Output",     "Subgraph I/O", false;
+    // Outputs
+    AudioOutput,        "AudioOutput",        "Audio Output",        "Outputs",      true;
 }
 
 /// Custom node data
@@ -166,6 +174,9 @@ pub struct NodeData {
     /// Display names of loaded samples per slot (slot_index → display name)
     #[serde(skip)]
     pub script_sample_names: HashMap<usize, String>,
+    /// Display name of loaded NAM model (for AmpSim nodes)
+    #[serde(default)]
+    pub nam_model_name: Option<String>,
 }
 
 fn default_root_note() -> u8 { 69 }
@@ -180,6 +191,7 @@ impl NodeData {
             ui_declaration: None,
             sample_slot_names: Vec::new(),
             script_sample_names: HashMap::new(),
+            nam_model_name: None,
         }
     }
 }
@@ -265,6 +277,8 @@ pub struct GraphState {
     pub pending_draw_param_changes: Vec<(NodeId, u32, f32)>,
     /// Active sample import dialog (folder import with heuristic mapping)
     pub sample_import_dialog: Option<crate::sample_import_dialog::SampleImportDialog>,
+    /// Pending AmpSim model load (node_id, backend_node_id) — triggers file dialog for .nam
+    pub pending_amp_sim_load: Option<(NodeId, u32)>,
 }
 
 impl Default for GraphState {
@@ -288,6 +302,7 @@ impl Default for GraphState {
             draw_vms: HashMap::new(),
             pending_draw_param_changes: Vec::new(),
             sample_import_dialog: None,
+            pending_amp_sim_load: None,
         }
     }
 }
@@ -393,87 +408,11 @@ impl NodeTemplateTrait for NodeTemplate {
     type CategoryType = &'static str;
 
     fn node_finder_label(&self, _user_state: &mut Self::UserState) -> std::borrow::Cow<'_, str> {
-        match self {
-            // Inputs
-            NodeTemplate::MidiInput => "MIDI Input".into(),
-            NodeTemplate::AudioInput => "Audio Input".into(),
-            NodeTemplate::AutomationInput => "Automation Input".into(),
-            // Generators
-            NodeTemplate::Oscillator => "Oscillator".into(),
-            NodeTemplate::WavetableOscillator => "Wavetable Oscillator".into(),
-            NodeTemplate::FmSynth => "FM Synth".into(),
-            NodeTemplate::Noise => "Noise Generator".into(),
-            NodeTemplate::SimpleSampler => "Simple Sampler".into(),
-            NodeTemplate::MultiSampler => "Multi Sampler".into(),
-            // Effects
-            NodeTemplate::Filter => "Filter".into(),
-            NodeTemplate::Svf => "SVF".into(),
-            NodeTemplate::Gain => "Gain".into(),
-            NodeTemplate::Echo => "Echo".into(),
-            NodeTemplate::Reverb => "Reverb".into(),
-            NodeTemplate::Chorus => "Chorus".into(),
-            NodeTemplate::Flanger => "Flanger".into(),
-            NodeTemplate::Phaser => "Phaser".into(),
-            NodeTemplate::Distortion => "Distortion".into(),
-            NodeTemplate::BitCrusher => "Bit Crusher".into(),
-            NodeTemplate::Compressor => "Compressor".into(),
-            NodeTemplate::Limiter => "Limiter".into(),
-            NodeTemplate::Eq => "EQ".into(),
-            NodeTemplate::Pan => "Pan".into(),
-            NodeTemplate::RingModulator => "Ring Modulator".into(),
-            NodeTemplate::Vocoder => "Vocoder".into(),
-            // Utilities
-            NodeTemplate::Adsr => "ADSR Envelope".into(),
-            NodeTemplate::Lfo => "LFO".into(),
-            NodeTemplate::Mixer => "Mixer".into(),
-            NodeTemplate::Splitter => "Splitter".into(),
-            NodeTemplate::Constant => "Constant".into(),
-            NodeTemplate::MidiToCv => "MIDI to CV".into(),
-            NodeTemplate::AudioToCv => "Audio to CV".into(),
-            NodeTemplate::Arpeggiator => "Arpeggiator".into(),
-            NodeTemplate::Sequencer => "Step Sequencer".into(),
-            NodeTemplate::Math => "Math".into(),
-            NodeTemplate::SampleHold => "Sample & Hold".into(),
-            NodeTemplate::SlewLimiter => "Slew Limiter".into(),
-            NodeTemplate::Quantizer => "Quantizer".into(),
-            NodeTemplate::EnvelopeFollower => "Envelope Follower".into(),
-            NodeTemplate::BpmDetector => "BPM Detector".into(),
-            NodeTemplate::Beat => "Beat".into(),
-            NodeTemplate::Mod => "Modulator".into(),
-            // Scripting
-            NodeTemplate::Script => "Script".into(),
-            // Analysis
-            NodeTemplate::Oscilloscope => "Oscilloscope".into(),
-            // Advanced
-            NodeTemplate::VoiceAllocator => "Voice Allocator".into(),
-            NodeTemplate::Group => "Group".into(),
-            // Subgraph I/O
-            NodeTemplate::TemplateInput => "Template Input".into(),
-            NodeTemplate::TemplateOutput => "Template Output".into(),
-            // Outputs
-            NodeTemplate::AudioOutput => "Audio Output".into(),
-        }
+        self.display_label().into()
     }
 
     fn node_finder_categories(&self, _user_state: &mut Self::UserState) -> Vec<&'static str> {
-        match self {
-            NodeTemplate::MidiInput | NodeTemplate::AudioInput | NodeTemplate::AutomationInput | NodeTemplate::Beat => vec!["Inputs"],
-            NodeTemplate::Oscillator | NodeTemplate::WavetableOscillator | NodeTemplate::FmSynth
-            | NodeTemplate::Noise | NodeTemplate::SimpleSampler | NodeTemplate::MultiSampler => vec!["Generators"],
-            NodeTemplate::Filter | NodeTemplate::Svf | NodeTemplate::Gain | NodeTemplate::Echo | NodeTemplate::Reverb
-            | NodeTemplate::Chorus | NodeTemplate::Flanger | NodeTemplate::Phaser | NodeTemplate::Distortion
-            | NodeTemplate::BitCrusher | NodeTemplate::Compressor | NodeTemplate::Limiter | NodeTemplate::Eq
-            | NodeTemplate::Pan | NodeTemplate::RingModulator | NodeTemplate::Vocoder => vec!["Effects"],
-            NodeTemplate::Adsr | NodeTemplate::Lfo | NodeTemplate::Mixer | NodeTemplate::Splitter
-            | NodeTemplate::Constant | NodeTemplate::MidiToCv | NodeTemplate::AudioToCv | NodeTemplate::Arpeggiator | NodeTemplate::Sequencer | NodeTemplate::Math
-            | NodeTemplate::SampleHold | NodeTemplate::SlewLimiter | NodeTemplate::Quantizer
-            | NodeTemplate::EnvelopeFollower | NodeTemplate::BpmDetector | NodeTemplate::Mod => vec!["Utilities"],
-            NodeTemplate::Script => vec!["Advanced"],
-            NodeTemplate::Oscilloscope => vec!["Analysis"],
-            NodeTemplate::VoiceAllocator | NodeTemplate::Group => vec!["Advanced"],
-            NodeTemplate::TemplateInput | NodeTemplate::TemplateOutput => vec!["Subgraph I/O"],
-            NodeTemplate::AudioOutput => vec!["Outputs"],
-        }
+        vec![self.category()]
     }
 
     fn node_graph_label(&self, user_state: &mut Self::UserState) -> String {
@@ -733,6 +672,16 @@ impl NodeTemplateTrait for NodeTemplate {
                     ValueType::float_param(0.7, 0.0, 1.0, "", 2, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Mix".into(), DataType::CV,
                     ValueType::float_param(1.0, 0.0, 1.0, "", 3, None), InputParamKind::ConstantOnly, true);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::AmpSim => {
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Input Gain".into(), DataType::CV,
+                    ValueType::float_param(1.0, 0.0, 4.0, "", 0, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Output Gain".into(), DataType::CV,
+                    ValueType::float_param(1.0, 0.0, 4.0, "", 1, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Mix".into(), DataType::CV,
+                    ValueType::float_param(1.0, 0.0, 1.0, "", 2, None), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::BitCrusher => {
@@ -1449,6 +1398,12 @@ impl NodeDataTrait for NodeData {
                     &mut user_state.pending_draw_param_changes,
                 );
             }
+        } else if self.template == NodeTemplate::AmpSim {
+            let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
+            let button_text = self.nam_model_name.as_deref().unwrap_or("Load Model...");
+            if ui.button(button_text).clicked() {
+                user_state.pending_amp_sim_load = Some((node_id, backend_node_id));
+            }
         } else {
             ui.label("");
         }
@@ -1677,7 +1632,7 @@ impl NodeTemplateIter for VoiceAllocatorNodeTemplates {
     type Item = NodeTemplate;
 
     fn all_kinds(&self) -> Vec<Self::Item> {
-        let mut templates = AllNodeTemplates.all_kinds();
+        let mut templates = NodeTemplate::all_finder_kinds();
         // VA nodes can't be nested — signals inside a VA are monophonic
         templates.retain(|t| *t != NodeTemplate::VoiceAllocator);
         templates.push(NodeTemplate::TemplateInput);
@@ -1690,7 +1645,7 @@ impl NodeTemplateIter for SubgraphNodeTemplates {
     type Item = NodeTemplate;
 
     fn all_kinds(&self) -> Vec<Self::Item> {
-        let mut templates = AllNodeTemplates.all_kinds();
+        let mut templates = NodeTemplate::all_finder_kinds();
         templates.push(NodeTemplate::TemplateInput);
         templates.push(NodeTemplate::TemplateOutput);
         templates
@@ -1701,63 +1656,6 @@ impl NodeTemplateIter for AllNodeTemplates {
     type Item = NodeTemplate;
 
     fn all_kinds(&self) -> Vec<Self::Item> {
-        vec![
-            // Inputs
-            NodeTemplate::MidiInput,
-            NodeTemplate::AudioInput,
-            NodeTemplate::AutomationInput,
-            // Generators
-            NodeTemplate::Oscillator,
-            NodeTemplate::WavetableOscillator,
-            NodeTemplate::FmSynth,
-            NodeTemplate::Noise,
-            NodeTemplate::SimpleSampler,
-            NodeTemplate::MultiSampler,
-            // Effects
-            NodeTemplate::Filter,
-            NodeTemplate::Svf,
-            NodeTemplate::Gain,
-            NodeTemplate::Echo,
-            NodeTemplate::Reverb,
-            NodeTemplate::Chorus,
-            NodeTemplate::Flanger,
-            NodeTemplate::Phaser,
-            NodeTemplate::Distortion,
-            NodeTemplate::BitCrusher,
-            NodeTemplate::Compressor,
-            NodeTemplate::Limiter,
-            NodeTemplate::Eq,
-            NodeTemplate::Pan,
-            NodeTemplate::RingModulator,
-            NodeTemplate::Vocoder,
-            // Utilities
-            NodeTemplate::Adsr,
-            NodeTemplate::Lfo,
-            NodeTemplate::Mixer,
-            NodeTemplate::Splitter,
-            NodeTemplate::Constant,
-            NodeTemplate::MidiToCv,
-            NodeTemplate::AudioToCv,
-            NodeTemplate::Arpeggiator,
-            NodeTemplate::Sequencer,
-            NodeTemplate::Math,
-            NodeTemplate::SampleHold,
-            NodeTemplate::SlewLimiter,
-            NodeTemplate::Quantizer,
-            NodeTemplate::EnvelopeFollower,
-            NodeTemplate::BpmDetector,
-            NodeTemplate::Beat,
-            NodeTemplate::Mod,
-            // Analysis
-            NodeTemplate::Oscilloscope,
-            // Advanced
-            NodeTemplate::VoiceAllocator,
-            NodeTemplate::Script,
-            // Note: Group is not in the node finder — groups are created via Ctrl+G selection.
-            // Note: TemplateInput/TemplateOutput are excluded from the default finder.
-            // They are added dynamically when editing inside a subgraph.
-            // Outputs
-            NodeTemplate::AudioOutput,
-        ]
+        NodeTemplate::all_finder_kinds()
     }
 }

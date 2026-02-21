@@ -1,3 +1,4 @@
+mod amp_sim;
 mod adsr;
 mod arpeggiator;
 mod audio_input;
@@ -45,6 +46,7 @@ mod vocoder;
 mod voice_allocator;
 mod wavetable_oscillator;
 
+pub use amp_sim::AmpSimNode;
 pub use adsr::ADSRNode;
 pub use arpeggiator::ArpeggiatorNode;
 pub use audio_input::AudioInputNode;
@@ -91,3 +93,61 @@ pub use template_io::{TemplateInputNode, TemplateOutputNode};
 pub use vocoder::VocoderNode;
 pub use voice_allocator::VoiceAllocatorNode;
 pub use wavetable_oscillator::WavetableOscillatorNode;
+
+/// Create a node instance by type name string.
+///
+/// Returns `None` for unknown type names. `sample_rate` and `buffer_size`
+/// are only used by VoiceAllocator; other nodes ignore them.
+pub fn create_node(node_type: &str, sample_rate: u32, buffer_size: usize) -> Option<Box<dyn super::AudioNode>> {
+    Some(match node_type {
+        "Oscillator" => Box::new(OscillatorNode::new("Oscillator")),
+        "Gain" => Box::new(GainNode::new("Gain")),
+        "Mixer" => Box::new(MixerNode::new("Mixer")),
+        "Filter" => Box::new(FilterNode::new("Filter")),
+        "SVF" => Box::new(SVFNode::new("SVF")),
+        "ADSR" => Box::new(ADSRNode::new("ADSR")),
+        "LFO" => Box::new(LFONode::new("LFO")),
+        "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise")),
+        "Splitter" => Box::new(SplitterNode::new("Splitter")),
+        "Pan" => Box::new(PanNode::new("Pan")),
+        "Quantizer" => Box::new(QuantizerNode::new("Quantizer")),
+        "Echo" | "Delay" => Box::new(EchoNode::new("Echo")),
+        "Distortion" => Box::new(DistortionNode::new("Distortion")),
+        "Reverb" => Box::new(ReverbNode::new("Reverb")),
+        "Chorus" => Box::new(ChorusNode::new("Chorus")),
+        "Compressor" => Box::new(CompressorNode::new("Compressor")),
+        "Constant" => Box::new(ConstantNode::new("Constant")),
+        "BpmDetector" => Box::new(BpmDetectorNode::new("BPM Detector")),
+        "Beat" => Box::new(BeatNode::new("Beat")),
+        "Arpeggiator" => Box::new(ArpeggiatorNode::new("Arpeggiator")),
+        "Sequencer" => Box::new(SequencerNode::new("Sequencer")),
+        "Script" => Box::new(ScriptNode::new("Script")),
+        "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
+        "Limiter" => Box::new(LimiterNode::new("Limiter")),
+        "Math" => Box::new(MathNode::new("Math")),
+        "EQ" => Box::new(EQNode::new("EQ")),
+        "Flanger" => Box::new(FlangerNode::new("Flanger")),
+        "FMSynth" => Box::new(FMSynthNode::new("FM Synth")),
+        "Phaser" => Box::new(PhaserNode::new("Phaser")),
+        "BitCrusher" => Box::new(BitCrusherNode::new("Bit Crusher")),
+        "Vocoder" => Box::new(VocoderNode::new("Vocoder")),
+        "RingModulator" => Box::new(RingModulatorNode::new("Ring Modulator")),
+        "SampleHold" => Box::new(SampleHoldNode::new("Sample & Hold")),
+        "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable")),
+        "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler")),
+        "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter")),
+        "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler")),
+        "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
+        "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
+        "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
+        "AudioInput" => Box::new(AudioInputNode::new("Audio Input")),
+        "AutomationInput" => Box::new(AutomationInputNode::new("Automation")),
+        "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
+        "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
+        "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),
+        "VoiceAllocator" => Box::new(VoiceAllocatorNode::new("VoiceAllocator", sample_rate, buffer_size)),
+        "AmpSim" => Box::new(AmpSimNode::new("Amp Sim")),
+        "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
+        _ => return None,
+    })
+}
