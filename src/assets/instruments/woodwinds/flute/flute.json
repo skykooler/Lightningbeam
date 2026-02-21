@@ -1,0 +1,164 @@
+{
+  "metadata": {
+    "name": "Flute",
+    "description": "Orchestral flute section",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "woodwinds",
+      "flute",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Flute Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.03,
+        "2": 0.3,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/Db4.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 0,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/F4.mp3",
+            "root_key": 65,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 64,
+            "key_max": 66
+          },
+          {
+            "file_path": "samples/Ab4.mp3",
+            "root_key": 68,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 67,
+            "key_max": 69
+          },
+          {
+            "file_path": "samples/B4.mp3",
+            "root_key": 71,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 70,
+            "key_max": 72
+          },
+          {
+            "file_path": "samples/D5.mp3",
+            "root_key": 74,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 73,
+            "key_max": 75
+          },
+          {
+            "file_path": "samples/F5.mp3",
+            "root_key": 77,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 76,
+            "key_max": 78
+          },
+          {
+            "file_path": "samples/Ab5.mp3",
+            "root_key": 80,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 79,
+            "key_max": 82
+          },
+          {
+            "file_path": "samples/C6.mp3",
+            "root_key": 84,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 83,
+            "key_max": 85
+          },
+          {
+            "file_path": "samples/Eb6.mp3",
+            "root_key": 87,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 86,
+            "key_max": 89
+          },
+          {
+            "file_path": "samples/Ab6.mp3",
+            "root_key": 92,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 90,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

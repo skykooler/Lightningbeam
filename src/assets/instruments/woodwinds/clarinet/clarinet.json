@@ -1,0 +1,173 @@
+{
+  "metadata": {
+    "name": "Clarinet",
+    "description": "Orchestral clarinet section",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "woodwinds",
+      "clarinet",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Clarinet Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.02,
+        "2": 0.25,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/D3.mp3",
+            "root_key": 50,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 0,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/Gb3.mp3",
+            "root_key": 54,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 53,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/Bb3.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 57,
+            "key_max": 60
+          },
+          {
+            "file_path": "samples/D4.mp3",
+            "root_key": 62,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 61,
+            "key_max": 64
+          },
+          {
+            "file_path": "samples/Gb4.mp3",
+            "root_key": 66,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 65,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/Bb4.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 69,
+            "key_max": 72
+          },
+          {
+            "file_path": "samples/D5.mp3",
+            "root_key": 74,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 73,
+            "key_max": 76
+          },
+          {
+            "file_path": "samples/Gb5.mp3",
+            "root_key": 78,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 77,
+            "key_max": 80
+          },
+          {
+            "file_path": "samples/Bb5.mp3",
+            "root_key": 82,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 81,
+            "key_max": 84
+          },
+          {
+            "file_path": "samples/D6.mp3",
+            "root_key": 86,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 85,
+            "key_max": 88
+          },
+          {
+            "file_path": "samples/Gb6.mp3",
+            "root_key": 90,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 89,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

@@ -1,0 +1,309 @@
+{
+  "metadata": {
+    "name": "Horn Section",
+    "description": "French horn section with forte and mezzo-piano dynamics",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "brass",
+      "horn",
+      "french horn",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Horn Section Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.04,
+        "2": 0.4,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/E2_ff.mp3",
+            "root_key": 40,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 0,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/G2_ff.mp3",
+            "root_key": 43,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 42,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/A#2_ff.mp3",
+            "root_key": 46,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 45,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/C#3_ff.mp3",
+            "root_key": 49,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 48,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/E3_ff.mp3",
+            "root_key": 52,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 51,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/G3_ff.mp3",
+            "root_key": 55,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 54,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/A#3_ff.mp3",
+            "root_key": 58,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 57,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/C#4_ff.mp3",
+            "root_key": 61,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 60,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/E4_ff.mp3",
+            "root_key": 64,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 63,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/G4_ff.mp3",
+            "root_key": 67,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 66,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/A#4_ff.mp3",
+            "root_key": 70,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 69,
+            "key_max": 71
+          },
+          {
+            "file_path": "samples/C#5_ff.mp3",
+            "root_key": 73,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 72,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/E5_ff.mp3",
+            "root_key": 76,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 75,
+            "key_max": 127
+          },
+          {
+            "file_path": "samples/E2_mp.mp3",
+            "root_key": 40,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 0,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/G2_mp.mp3",
+            "root_key": 43,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 42,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/A#2_mp.mp3",
+            "root_key": 46,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 45,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/C#3_mp.mp3",
+            "root_key": 49,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 48,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/E3_mp.mp3",
+            "root_key": 52,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 51,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/G3_mp.mp3",
+            "root_key": 55,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 54,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/A#3_mp.mp3",
+            "root_key": 58,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 57,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/C#4_mp.mp3",
+            "root_key": 61,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 60,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/E4_mp.mp3",
+            "root_key": 64,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 63,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/G4_mp.mp3",
+            "root_key": 67,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 66,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/A#4_mp.mp3",
+            "root_key": 70,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 69,
+            "key_max": 71
+          },
+          {
+            "file_path": "samples/C#5_mp.mp3",
+            "root_key": 73,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 72,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/E5_mp.mp3",
+            "root_key": 76,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 75,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

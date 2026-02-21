@@ -231,7 +231,7 @@ impl Voice {
             envelope_phase: EnvelopePhase::Attack,
             envelope_value: 0.0,
             crossfade_buffer: Vec::new(),
-            crossfade_length: 1000,  // ~20ms at 48kHz (longer for smoother loops)
+            crossfade_length: 4800,  // ~100ms at 48kHz — hides loop seams in sustained instruments
         }
     }
 }

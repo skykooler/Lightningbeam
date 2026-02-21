@@ -79,6 +79,8 @@ assets = [
     ["assets/icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png", "644"],
     ["assets/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png", "644"],
     ["assets/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png", "644"],
+    # Factory instrument presets and samples — copied to share dir, preserving directory tree
+    ["target/release/presets/**/*", "usr/share/lightningbeam-editor/presets/", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -121,3 +123,10 @@ mode = "644"
 source = "assets/icons/256x256.png"
 dest = "/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
 mode = "644"
+
+# Factory instrument presets and samples (built by build.rs into target dir)
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/presets/"
+dest = "/usr/share/lightningbeam-editor/presets/"
+mode = "644"
+doc = false

@@ -1,0 +1,461 @@
+{
+  "metadata": {
+    "name": "Woodwinds",
+    "description": "Full woodwind section \u2014 auto-selects bassoon, clarinet, oboe, or flute by pitch range",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "woodwinds",
+      "section",
+      "orchestral",
+      "combined"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Woodwinds Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.03,
+        "2": 0.3,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "../bassoon/samples/A#1.mp3",
+            "root_key": 34,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 0,
+            "key_max": 35
+          },
+          {
+            "file_path": "../bassoon/samples/C#2.mp3",
+            "root_key": 37,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 36,
+            "key_max": 38
+          },
+          {
+            "file_path": "../bassoon/samples/E2.mp3",
+            "root_key": 40,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 39,
+            "key_max": 41
+          },
+          {
+            "file_path": "../bassoon/samples/G2.mp3",
+            "root_key": 43,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 42,
+            "key_max": 44
+          },
+          {
+            "file_path": "../bassoon/samples/A#2.mp3",
+            "root_key": 46,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 45,
+            "key_max": 47
+          },
+          {
+            "file_path": "../bassoon/samples/C#3.mp3",
+            "root_key": 49,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 48,
+            "key_max": 49
+          },
+          {
+            "file_path": "../clarinet/samples/D3.mp3",
+            "root_key": 50,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 50,
+            "key_max": 51
+          },
+          {
+            "file_path": "../bassoon/samples/E3.mp3",
+            "root_key": 52,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 52,
+            "key_max": 53
+          },
+          {
+            "file_path": "../clarinet/samples/Gb3.mp3",
+            "root_key": 54,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 54,
+            "key_max": 54
+          },
+          {
+            "file_path": "../bassoon/samples/G3.mp3",
+            "root_key": 55,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 55,
+            "key_max": 56
+          },
+          {
+            "file_path": "../bassoon/samples/A#3.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 57,
+            "key_max": 58
+          },
+          {
+            "file_path": "../clarinet/samples/Bb3.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 59,
+            "key_max": 58
+          },
+          {
+            "file_path": "../oboe/samples/A#3.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 59,
+            "key_max": 59
+          },
+          {
+            "file_path": "../bassoon/samples/C#4.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 60,
+            "key_max": 61
+          },
+          {
+            "file_path": "../oboe/samples/C#4.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 62,
+            "key_max": 61
+          },
+          {
+            "file_path": "../flute/samples/Db4.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 62,
+            "key_max": 61
+          },
+          {
+            "file_path": "../clarinet/samples/D4.mp3",
+            "root_key": 62,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 62,
+            "key_max": 63
+          },
+          {
+            "file_path": "../bassoon/samples/E4.mp3",
+            "root_key": 64,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 64,
+            "key_max": 64
+          },
+          {
+            "file_path": "../oboe/samples/E4.mp3",
+            "root_key": 64,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 65,
+            "key_max": 64
+          },
+          {
+            "file_path": "../flute/samples/F4.mp3",
+            "root_key": 65,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 65,
+            "key_max": 65
+          },
+          {
+            "file_path": "../clarinet/samples/Gb4.mp3",
+            "root_key": 66,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 66,
+            "key_max": 66
+          },
+          {
+            "file_path": "../bassoon/samples/G4.mp3",
+            "root_key": 67,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 67,
+            "key_max": 67
+          },
+          {
+            "file_path": "../oboe/samples/G4.mp3",
+            "root_key": 67,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 68,
+            "key_max": 67
+          },
+          {
+            "file_path": "../flute/samples/Ab4.mp3",
+            "root_key": 68,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 68,
+            "key_max": 69
+          },
+          {
+            "file_path": "../bassoon/samples/A#4.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 70,
+            "key_max": 70
+          },
+          {
+            "file_path": "../clarinet/samples/Bb4.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 71,
+            "key_max": 70
+          },
+          {
+            "file_path": "../oboe/samples/A#4.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 71,
+            "key_max": 70
+          },
+          {
+            "file_path": "../flute/samples/B4.mp3",
+            "root_key": 71,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 71,
+            "key_max": 72
+          },
+          {
+            "file_path": "../oboe/samples/C#5.mp3",
+            "root_key": 73,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 73,
+            "key_max": 73
+          },
+          {
+            "file_path": "../clarinet/samples/D5.mp3",
+            "root_key": 74,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 74,
+            "key_max": 74
+          },
+          {
+            "file_path": "../flute/samples/D5.mp3",
+            "root_key": 74,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 75,
+            "key_max": 75
+          },
+          {
+            "file_path": "../flute/samples/F5.mp3",
+            "root_key": 77,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 76,
+            "key_max": 77
+          },
+          {
+            "file_path": "../clarinet/samples/Gb5.mp3",
+            "root_key": 78,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 78,
+            "key_max": 78
+          },
+          {
+            "file_path": "../oboe/samples/G5.mp3",
+            "root_key": 79,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 79,
+            "key_max": 79
+          },
+          {
+            "file_path": "../flute/samples/Ab5.mp3",
+            "root_key": 80,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 80,
+            "key_max": 81
+          },
+          {
+            "file_path": "../clarinet/samples/Bb5.mp3",
+            "root_key": 82,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 82,
+            "key_max": 82
+          },
+          {
+            "file_path": "../oboe/samples/A#5.mp3",
+            "root_key": 82,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 83,
+            "key_max": 83
+          },
+          {
+            "file_path": "../oboe/samples/C6.mp3",
+            "root_key": 84,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 84,
+            "key_max": 84
+          },
+          {
+            "file_path": "../flute/samples/C6.mp3",
+            "root_key": 84,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 85,
+            "key_max": 85
+          },
+          {
+            "file_path": "../clarinet/samples/D6.mp3",
+            "root_key": 86,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 86,
+            "key_max": 86
+          },
+          {
+            "file_path": "../flute/samples/Eb6.mp3",
+            "root_key": 87,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 87,
+            "key_max": 88
+          },
+          {
+            "file_path": "../clarinet/samples/Gb6.mp3",
+            "root_key": 90,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 89,
+            "key_max": 91
+          },
+          {
+            "file_path": "../flute/samples/Ab6.mp3",
+            "root_key": 92,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 92,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+{
+  "metadata": {
+    "name": "Cello Section",
+    "description": "Orchestral cello section with sustained bowing",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "strings",
+      "cello",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Cello Section Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.05,
+        "2": 0.4,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/Db2.mp3",
+            "root_key": 37,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 0,
+            "key_max": 38
+          },
+          {
+            "file_path": "samples/E2.mp3",
+            "root_key": 40,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 39,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/G2.mp3",
+            "root_key": 43,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 42,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/Bb2.mp3",
+            "root_key": 46,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 45,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/Db3.mp3",
+            "root_key": 49,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 48,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/E3.mp3",
+            "root_key": 52,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 51,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/Bb3.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 56,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/Db4.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 60,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/E4.mp3",
+            "root_key": 64,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 63,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/G4.mp3",
+            "root_key": 67,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 66,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/Bb4.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 69,
+            "key_max": 73
+          },
+          {
+            "file_path": "samples/E5.mp3",
+            "root_key": 76,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 74,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

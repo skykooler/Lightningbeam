@@ -1,0 +1,236 @@
+{
+  "metadata": {
+    "name": "Trombone Section",
+    "description": "Orchestral trombone section with piano and forte dynamics",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "brass",
+      "trombone",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Trombone Section Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.03,
+        "2": 0.35,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/F2.mp3",
+            "root_key": 41,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 0,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/A2.mp3",
+            "root_key": 45,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 44,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/C3.mp3",
+            "root_key": 48,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 47,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/Eb3.mp3",
+            "root_key": 51,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 50,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/Gb3.mp3",
+            "root_key": 54,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 53,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/A3.mp3",
+            "root_key": 57,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 56,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/C4.mp3",
+            "root_key": 60,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 59,
+            "key_max": 61
+          },
+          {
+            "file_path": "samples/Eb4.mp3",
+            "root_key": 63,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 62,
+            "key_max": 64
+          },
+          {
+            "file_path": "samples/Gb4.mp3",
+            "root_key": 66,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 65,
+            "key_max": 67
+          },
+          {
+            "file_path": "samples/A4.mp3",
+            "root_key": 69,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 68,
+            "key_max": 70
+          },
+          {
+            "file_path": "samples/C5.mp3",
+            "root_key": 72,
+            "loop_mode": "continuous",
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 71,
+            "key_max": 127
+          },
+          {
+            "file_path": "samples/F2_p.mp3",
+            "root_key": 41,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 0,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/Bb2_p.mp3",
+            "root_key": 46,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 44,
+            "key_max": 48
+          },
+          {
+            "file_path": "samples/Eb3_p.mp3",
+            "root_key": 51,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 49,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/Ab3_p.mp3",
+            "root_key": 56,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 54,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/Db4_p.mp3",
+            "root_key": 61,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 59,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/Gb4_p.mp3",
+            "root_key": 66,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 64,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/B4_p.mp3",
+            "root_key": 71,
+            "loop_mode": "continuous",
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 69,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

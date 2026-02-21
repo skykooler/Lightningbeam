@@ -5,6 +5,9 @@ use std::path::PathBuf;
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
+    // Copy factory instrument presets next to the binary (works on all platforms)
+    bundle_factory_presets();
+
     if target_os == "windows" {
         bundle_windows_dlls();
     }
@@ -126,6 +129,56 @@ fn bundle_windows_dlls() {
     }
 
     println!("cargo:warning=Bundled FFmpeg DLLs to {}", target_dir.display());
+}
+
+/// Copy factory instrument presets into target dir so they're next to the binary.
+/// This makes them available for:
+/// - Portable/AppImage builds (preset browser checks <exe>/presets/)
+/// - Windows builds (same)
+/// - cargo-deb/rpm packaging (assets reference target/release/presets/)
+fn bundle_factory_presets() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let instruments_src = manifest_dir.join("../../src/assets/instruments");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let target_dir = PathBuf::from(&out_dir)
+        .parent().unwrap()
+        .parent().unwrap()
+        .parent().unwrap()
+        .to_path_buf();
+    let presets_dst = target_dir.join("presets");
+
+    if !instruments_src.exists() {
+        println!("cargo:warning=Factory instruments not found at {:?}, skipping", instruments_src);
+        return;
+    }
+
+    // Re-run if instruments change
+    println!("cargo:rerun-if-changed={}", instruments_src.display());
+
+    if let Err(e) = copy_dir_recursive(&instruments_src, &presets_dst) {
+        println!("cargo:warning=Failed to copy factory presets: {}", e);
+    }
+}
+
+/// Recursively copy a directory tree, preserving structure.
+/// Only copies .json and .mp3 files (skips README.md, etc.)
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if let Some(ext) = src_path.extension() {
+            let ext = ext.to_string_lossy().to_lowercase();
+            if ext == "json" || ext == "mp3" {
+                fs::copy(&src_path, &dst_path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn copy_library(lib_name: &str, search_paths: &[&str], lib_dir: &PathBuf) {
