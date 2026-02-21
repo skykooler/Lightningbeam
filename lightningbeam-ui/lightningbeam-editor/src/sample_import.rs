@@ -51,17 +51,6 @@ fn parse_note_letter(s: &str) -> Option<(u8, usize)> {
     }
 }
 
-/// Convert a note name like "C4", "A#3", "Bb2" to a MIDI note number.
-pub fn note_name_to_midi(note: &str, octave: i8) -> Option<u8> {
-    let (semitone, _) = parse_note_letter(note)?;
-    let midi = (octave as i32 + 1) * 12 + semitone as i32;
-    if (0..=127).contains(&midi) {
-        Some(midi as u8)
-    } else {
-        None
-    }
-}
-
 /// Format a MIDI note number as a note name (e.g., 60 → "C4").
 pub fn midi_to_note_name(midi: u8) -> String {
     const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -214,8 +203,7 @@ fn tokenize(stem: &str) -> Vec<&str> {
 }
 
 /// Parse a sample filename to extract note, velocity, round-robin, and loop hint info.
-/// `folder_path` is used for loop/articulation context from parent directory names.
-pub fn parse_sample_filename(path: &Path, folder_path: &Path) -> ParsedSample {
+pub fn parse_sample_filename(path: &Path) -> ParsedSample {
     let filename = path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -390,7 +378,7 @@ pub fn scan_folder(folder_path: &Path) -> std::io::Result<Vec<ParsedSample>> {
     collect_audio_files(folder_path, &mut files)?;
 
     let mut samples: Vec<ParsedSample> = files.iter()
-        .map(|path| parse_sample_filename(path, folder_path))
+        .map(|path| parse_sample_filename(path))
         .collect();
 
     // Percussion pass: for samples with no detected note, try GM drum mapping
@@ -467,7 +455,6 @@ pub struct FolderScanResult {
     pub loop_mode: LoopMode,
     pub velocity_markers: Vec<String>,
     pub velocity_ranges: Vec<(String, u8, u8)>,
-    pub detected_articulation: Option<String>,
 }
 
 /// Compute auto key ranges for a sorted list of unique MIDI notes.
@@ -533,28 +520,9 @@ fn detect_global_loop_mode(samples: &[ParsedSample]) -> LoopMode {
     }
 }
 
-/// Detect articulation from folder path.
-fn detect_articulation(folder_path: &Path) -> Option<String> {
-    for component in folder_path.components().rev() {
-        if let std::path::Component::Normal(name) = component {
-            let lower = name.to_string_lossy().to_lowercase();
-            match lower.as_str() {
-                "sustain" | "vibrato" | "tremolo" | "pizzicato" | "staccato" |
-                "legato" | "marcato" | "spiccato" | "arco" => {
-                    return Some(name.to_string_lossy().to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-    None
-}
-
 /// Build import layers from parsed samples with auto key ranges and velocity mapping.
-pub fn build_import_layers(samples: Vec<ParsedSample>, folder_path: &Path) -> FolderScanResult {
+pub fn build_import_layers(samples: Vec<ParsedSample>) -> FolderScanResult {
     let loop_mode = detect_global_loop_mode(&samples);
-    let detected_articulation = detect_articulation(folder_path);
-
     // Separate mapped vs unmapped
     let mut mapped: Vec<ParsedSample> = Vec::new();
     let mut unmapped: Vec<ParsedSample> = Vec::new();
@@ -623,7 +591,6 @@ pub fn build_import_layers(samples: Vec<ParsedSample>, folder_path: &Path) -> Fo
         loop_mode,
         velocity_markers,
         velocity_ranges,
-        detected_articulation,
     }
 }
 
@@ -662,13 +629,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_note_name_to_midi() {
-        assert_eq!(note_name_to_midi("C", 4), Some(60));
-        assert_eq!(note_name_to_midi("A", 4), Some(69));
-        assert_eq!(note_name_to_midi("A#", 3), Some(58));
-        assert_eq!(note_name_to_midi("Bb", 2), Some(46));
-        assert_eq!(note_name_to_midi("C", -1), Some(0));
-        assert_eq!(note_name_to_midi("G", 9), Some(127));
+    fn test_try_note_octave() {
+        assert_eq!(try_note_octave("C4"), Some(60));
+        assert_eq!(try_note_octave("A4"), Some(69));
+        assert_eq!(try_note_octave("A#3"), Some(58));
+        assert_eq!(try_note_octave("Bb2"), Some(46));
+        assert_eq!(try_note_octave("C-1"), Some(0));
+        assert_eq!(try_note_octave("G9"), Some(127));
     }
 
     #[test]
@@ -676,7 +643,6 @@ mod tests {
         // Horns: horns-sus-ff-a#2-PB-loop.wav
         let p = parse_sample_filename(
             Path::new("/samples/horns-sus-ff-a#2-PB-loop.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(46)); // A#2
         assert_eq!(p.velocity_marker, Some("ff".to_string()));
@@ -685,7 +651,6 @@ mod tests {
         // Philharmonia: viola_A#3-staccato-rr1-PB.wav
         let p = parse_sample_filename(
             Path::new("/samples/viola_A#3-staccato-rr1-PB.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(58)); // A#3
         assert_eq!(p.rr_index, Some(1));
@@ -694,7 +659,6 @@ mod tests {
         // Bare note: A1.mp3
         let p = parse_sample_filename(
             Path::new("/samples/A1.mp3"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(33)); // A1
     }
@@ -704,21 +668,18 @@ mod tests {
         // NoBudgetOrch: 2_A-PB.wav
         let p = parse_sample_filename(
             Path::new("/samples/2_A-PB.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(45)); // A2
 
         // 3_Gb-PB.wav
         let p = parse_sample_filename(
             Path::new("/samples/3_Gb-PB.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(54)); // Gb3
 
         // 1_Bb.wav
         let p = parse_sample_filename(
             Path::new("/samples/1_Bb.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(34)); // Bb1
     }
@@ -728,7 +689,6 @@ mod tests {
         // NoBudgetOrch TubularBells: 3_A_f.wav
         let p = parse_sample_filename(
             Path::new("/samples/3_A_f.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(57)); // A3
         assert_eq!(p.velocity_marker, Some("f".to_string()));
@@ -736,7 +696,6 @@ mod tests {
         // 3_C_p.wav
         let p = parse_sample_filename(
             Path::new("/samples/3_C_p.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(48)); // C3
         assert_eq!(p.velocity_marker, Some("p".to_string()));
@@ -747,7 +706,6 @@ mod tests {
         // NoBudgetOrch: 5_C_2-PB.wav → C5, rr2
         let p = parse_sample_filename(
             Path::new("/samples/5_C_2-PB.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.detected_note, Some(72)); // C5
         assert_eq!(p.rr_index, Some(2));
@@ -755,7 +713,6 @@ mod tests {
         // rr marker: viola_A#3-staccato-rr1-PB.wav
         let p = parse_sample_filename(
             Path::new("/samples/viola_A#3-staccato-rr1-PB.wav"),
-            Path::new("/samples"),
         );
         assert_eq!(p.rr_index, Some(1));
     }
@@ -764,13 +721,11 @@ mod tests {
     fn test_loop_hints_from_folder() {
         let p = parse_sample_filename(
             Path::new("/libs/Cello/Sustain/2_A.wav"),
-            Path::new("/libs/Cello/Sustain"),
         );
         assert_eq!(p.loop_hint, LoopHint::Loop);
 
         let p = parse_sample_filename(
             Path::new("/libs/Cello/Pizzicato/2_A-PB.wav"),
-            Path::new("/libs/Cello/Pizzicato"),
         );
         assert_eq!(p.loop_hint, LoopHint::OneShot);
     }

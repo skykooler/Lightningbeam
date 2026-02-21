@@ -110,6 +110,18 @@ impl<T> LayerTree<T> {
     }
 }
 
+impl<T> LayerTree<T> {
+    /// Get flat list of references to all root layer data
+    pub fn root_data(&self) -> Vec<&T> {
+        self.roots.iter().map(|n| &n.data).collect()
+    }
+
+    /// Get flat list of mutable references to all root layer data
+    pub fn root_data_mut(&mut self) -> Vec<&mut T> {
+        self.roots.iter_mut().map(|n| &mut n.data).collect()
+    }
+}
+
 impl<T> Default for LayerTree<T> {
     fn default() -> Self {
         Self::new()

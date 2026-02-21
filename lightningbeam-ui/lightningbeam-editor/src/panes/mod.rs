@@ -154,6 +154,16 @@ pub struct SharedPaneState<'a> {
     pub action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
     /// Current selection state (mutable for tools to modify)
     pub selection: &'a mut lightningbeam_core::selection::Selection,
+    /// Which VectorClip is being edited (None = document root)
+    pub editing_clip_id: Option<uuid::Uuid>,
+    /// The clip instance ID being edited
+    pub editing_instance_id: Option<uuid::Uuid>,
+    /// The parent layer ID containing the clip instance being edited
+    pub editing_parent_layer_id: Option<uuid::Uuid>,
+    /// Request to enter a movie clip for editing: (clip_id, instance_id, parent_layer_id)
+    pub pending_enter_clip: &'a mut Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
+    /// Request to exit the current movie clip
+    pub pending_exit_clip: &'a mut bool,
     /// Currently active layer ID
     pub active_layer_id: &'a mut Option<uuid::Uuid>,
     /// Current tool interaction state (mutable for tools to modify)

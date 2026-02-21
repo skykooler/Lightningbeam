@@ -328,48 +328,6 @@ impl VectorLayer {
 
     // === MUTATION METHODS (pub(crate) - only accessible to action module) ===
 
-    /// Add a shape to this layer (internal, for actions only)
-    ///
-    /// This method is intentionally `pub(crate)` to ensure mutations
-    /// only happen through the action system.
-    pub(crate) fn add_shape_internal(&mut self, shape: Shape) -> Uuid {
-        let id = shape.id;
-        self.shapes.insert(id, shape);
-        id
-    }
-
-    /// Add an object to this layer (internal, for actions only)
-    ///
-    /// This method is intentionally `pub(crate)` to ensure mutations
-    /// only happen through the action system.
-    pub(crate) fn add_object_internal(&mut self, object: ShapeInstance) -> Uuid {
-        let id = object.id;
-        self.shape_instances.push(object);
-        id
-    }
-
-    /// Remove a shape from this layer (internal, for actions only)
-    ///
-    /// Returns the removed shape if found.
-    /// This method is intentionally `pub(crate)` to ensure mutations
-    /// only happen through the action system.
-    pub(crate) fn remove_shape_internal(&mut self, id: &Uuid) -> Option<Shape> {
-        self.shapes.remove(id)
-    }
-
-    /// Remove an object from this layer (internal, for actions only)
-    ///
-    /// Returns the removed object if found.
-    /// This method is intentionally `pub(crate)` to ensure mutations
-    /// only happen through the action system.
-    pub(crate) fn remove_object_internal(&mut self, id: &Uuid) -> Option<ShapeInstance> {
-        if let Some(index) = self.shape_instances.iter().position(|o| &o.id == id) {
-            Some(self.shape_instances.remove(index))
-        } else {
-            None
-        }
-    }
-
     /// Modify an object in place (internal, for actions only)
     ///
     /// Applies the given function to the object if found.

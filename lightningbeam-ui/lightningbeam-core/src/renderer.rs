@@ -373,7 +373,19 @@ pub fn render_document_with_transform(
 
     // 2. Recursively render the root graphics object at current time
     let time = document.current_time;
-    render_graphics_object(document, time, scene, base_transform, image_cache, video_manager, skip_instance_id);
+
+    // Check if any layers are soloed
+    let any_soloed = document.visible_layers().any(|layer| layer.soloed());
+
+    for layer in document.visible_layers() {
+        if any_soloed {
+            if layer.soloed() {
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
+            }
+        } else {
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
+        }
+    }
 }
 
 /// Draw the document background
@@ -392,35 +404,6 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
     );
 }
 
-/// Recursively render the root graphics object and its children
-fn render_graphics_object(
-    document: &Document,
-    time: f64,
-    scene: &mut Scene,
-    base_transform: Affine,
-    image_cache: &mut ImageCache,
-    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
-) {
-    // Check if any layers are soloed
-    let any_soloed = document.visible_layers().any(|layer| layer.soloed());
-
-    // Render layers based on solo state
-    // If any layer is soloed, only render soloed layers
-    // Otherwise, render all visible layers
-    // Start with full opacity (1.0)
-    for layer in document.visible_layers() {
-        if any_soloed {
-            // Only render soloed layers when solo is active
-            if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
-            }
-        } else {
-            // Render all visible layers when no solo is active
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
-        }
-    }
-}
 
 /// Render a single layer
 fn render_layer(
@@ -451,6 +434,42 @@ fn render_layer(
     }
 }
 
+/// Render a single clip instance by ID to a scene.
+/// Used for re-rendering the "focused" clip on top of a dimmed scene when editing inside a clip.
+pub fn render_single_clip_instance(
+    document: &Document,
+    scene: &mut Scene,
+    base_transform: Affine,
+    layer_id: &uuid::Uuid,
+    instance_id: &uuid::Uuid,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+) {
+    let time = document.current_time;
+
+    // Find the layer containing this instance
+    let Some(layer) = document.get_layer(layer_id) else { return };
+    let AnyLayer::Vector(vector_layer) = layer else { return };
+
+    let layer_opacity = vector_layer.layer.opacity;
+
+    // Find the specific clip instance
+    let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| &ci.id == instance_id) else { return };
+
+    // Compute group_end_time if needed
+    let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
+        .filter(|vc| vc.is_group)
+        .map(|_| {
+            let frame_duration = 1.0 / document.framerate;
+            vector_layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
+        });
+
+    render_clip_instance(
+        document, time, clip_instance, layer_opacity, scene, base_transform,
+        &vector_layer.layer.animation_data, image_cache, video_manager, group_end_time,
+    );
+}
+
 /// Render a clip instance (recursive rendering for nested compositions)
 fn render_clip_instance(
     document: &Document,
@@ -479,7 +498,8 @@ fn render_clip_instance(
         }
         0.0
     } else {
-        let Some(t) = clip_instance.remap_time(time, vector_clip.duration) else {
+        let clip_dur = vector_clip.content_duration(document.framerate);
+        let Some(t) = clip_instance.remap_time(time, clip_dur) else {
             return; // Clip instance not active at this time
         };
         t

@@ -133,7 +133,9 @@ pub struct ActionExecutor {
 
 impl ActionExecutor {
     /// Create a new action executor with the given document
-    pub fn new(document: Document) -> Self {
+    pub fn new(mut document: Document) -> Self {
+        // Rebuild transient lookup maps (not serialized)
+        document.rebuild_layer_to_clip_map();
         Self {
             document: Arc::new(document),
             undo_stack: Vec::new(),

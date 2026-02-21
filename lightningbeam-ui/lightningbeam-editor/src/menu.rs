@@ -163,6 +163,7 @@ pub enum MenuAction {
 
     // Modify menu
     Group,
+    ConvertToMovieClip,
     SendToBack,
     BringToFront,
     SplitClip,
@@ -259,6 +260,7 @@ impl MenuItemDef {
 
     // Modify menu items
     const GROUP: Self = Self { label: "Group", action: MenuAction::Group, shortcut: Some(Shortcut::new(ShortcutKey::G, CTRL, NO_SHIFT, NO_ALT)) };
+    const CONVERT_TO_MOVIE_CLIP: Self = Self { label: "Convert to Movie Clip", action: MenuAction::ConvertToMovieClip, shortcut: None };
     const SEND_TO_BACK: Self = Self { label: "Send to back", action: MenuAction::SendToBack, shortcut: None };
     const BRING_TO_FRONT: Self = Self { label: "Bring to front", action: MenuAction::BringToFront, shortcut: None };
     const SPLIT_CLIP: Self = Self { label: "Split Clip", action: MenuAction::SplitClip, shortcut: Some(Shortcut::new(ShortcutKey::K, CTRL, NO_SHIFT, NO_ALT)) };
@@ -369,6 +371,7 @@ impl MenuItemDef {
                 label: "Modify",
                 children: &[
                     MenuDef::Item(&Self::GROUP),
+                    MenuDef::Item(&Self::CONVERT_TO_MOVIE_CLIP),
                     MenuDef::Separator,
                     MenuDef::Item(&Self::SEND_TO_BACK),
                     MenuDef::Item(&Self::BRING_TO_FRONT),

@@ -380,6 +380,12 @@ struct VelloRenderContext {
     shape_editing_cache: Option<ShapeEditingCache>,
     /// Surface format for blit pipelines
     target_format: wgpu::TextureFormat,
+    /// Which VectorClip is being edited (None = document root)
+    editing_clip_id: Option<uuid::Uuid>,
+    /// The clip instance ID being edited (for skip + re-render)
+    editing_instance_id: Option<uuid::Uuid>,
+    /// The parent layer ID containing the clip instance being edited
+    editing_parent_layer_id: Option<uuid::Uuid>,
 }
 
 /// Callback for Vello rendering within egui
@@ -436,6 +442,23 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         let camera_transform = Affine::translate((self.ctx.pan_offset.x as f64, self.ctx.pan_offset.y as f64))
             * Affine::scale(self.ctx.zoom as f64);
 
+        // Overlay transform: camera + clip instance transform (for rendering overlays in clip-local space)
+        let overlay_transform = if let (Some(parent_layer_id), Some(instance_id)) = (self.ctx.editing_parent_layer_id, self.ctx.editing_instance_id) {
+            let clip_affine = self.ctx.document.get_layer(&parent_layer_id)
+                .and_then(|layer| {
+                    if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                        vl.clip_instances.iter().find(|ci| ci.id == instance_id)
+                    } else {
+                        None
+                    }
+                })
+                .map(|ci| ci.transform.to_affine())
+                .unwrap_or(Affine::IDENTITY);
+            camera_transform * clip_affine
+        } else {
+            camera_transform
+        };
+
         // Choose rendering path based on HDR compositing flag
         let mut scene = if USE_HDR_COMPOSITING {
             // HDR Compositing Pipeline: render each layer separately for proper opacity
@@ -448,12 +471,19 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Skip rendering the shape instance being edited (for vector editing preview)
             let skip_instance_id = self.ctx.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
 
+            // When editing inside a clip, skip the clip instance in the main pass
+            // (it will be re-rendered on top after the dim overlay)
+            let editing_skip_id = self.ctx.editing_clip_id.as_ref().and_then(|_| {
+                self.ctx.editing_instance_id
+            });
+            let effective_skip = skip_instance_id.or(editing_skip_id);
+
             let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
                 &self.ctx.document,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
-                skip_instance_id,
+                effective_skip,
             );
             drop(image_cache);
 
@@ -677,6 +707,89 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             drop(effect_processor);
 
+            // When editing inside a clip: dim overlay + re-render the clip at full opacity
+            if let (Some(parent_layer_id), Some(instance_id)) = (self.ctx.editing_parent_layer_id, self.ctx.editing_instance_id) {
+                // 1. Render dim overlay scene
+                let mut dim_scene = vello::Scene::new();
+                let doc_rect = vello::kurbo::Rect::new(0.0, 0.0, self.ctx.document.width, self.ctx.document.height);
+                dim_scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    camera_transform,
+                    vello::peniko::Color::new([0.0, 0.0, 0.0, 0.5]),
+                    None,
+                    &doc_rect,
+                );
+
+                // Composite dim overlay onto HDR texture
+                let dim_srgb_handle = buffer_pool.acquire(device, lightningbeam_core::gpu::BufferSpec::new(width, height, lightningbeam_core::gpu::BufferFormat::Rgba8Srgb));
+                let dim_hdr_handle = buffer_pool.acquire(device, lightningbeam_core::gpu::BufferSpec::new(width, height, BufferFormat::Rgba16Float));
+                if let (Some(dim_srgb_view), Some(dim_hdr_view), Some(hdr_view)) = (
+                    buffer_pool.get_view(dim_srgb_handle),
+                    buffer_pool.get_view(dim_hdr_handle),
+                    &instance_resources.hdr_texture_view,
+                ) {
+                    let dim_params = vello::RenderParams {
+                        base_color: vello::peniko::Color::TRANSPARENT,
+                        width, height,
+                        antialiasing_method: vello::AaConfig::Msaa16,
+                    };
+                    if let Ok(mut renderer) = shared.renderer.lock() {
+                        renderer.render_to_texture(device, queue, &dim_scene, dim_srgb_view, &dim_params).ok();
+                    }
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("dim_srgb_to_linear") });
+                    shared.srgb_to_linear.convert(device, &mut enc, dim_srgb_view, dim_hdr_view);
+                    queue.submit(Some(enc.finish()));
+
+                    let dim_layer = lightningbeam_core::gpu::CompositorLayer::normal(dim_hdr_handle, 1.0);
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("dim_composite") });
+                    shared.compositor.composite(device, queue, &mut enc, &[dim_layer], &buffer_pool, hdr_view, None);
+                    queue.submit(Some(enc.finish()));
+                }
+                buffer_pool.release(dim_srgb_handle);
+                buffer_pool.release(dim_hdr_handle);
+
+                // 2. Re-render the clip instance at full opacity
+                let mut clip_scene = vello::Scene::new();
+                let mut image_cache = shared.image_cache.lock().unwrap();
+                lightningbeam_core::renderer::render_single_clip_instance(
+                    &self.ctx.document,
+                    &mut clip_scene,
+                    camera_transform,
+                    &parent_layer_id,
+                    &instance_id,
+                    &mut image_cache,
+                    &shared.video_manager,
+                );
+                drop(image_cache);
+
+                let clip_srgb_handle = buffer_pool.acquire(device, lightningbeam_core::gpu::BufferSpec::new(width, height, lightningbeam_core::gpu::BufferFormat::Rgba8Srgb));
+                let clip_hdr_handle = buffer_pool.acquire(device, lightningbeam_core::gpu::BufferSpec::new(width, height, BufferFormat::Rgba16Float));
+                if let (Some(clip_srgb_view), Some(clip_hdr_view), Some(hdr_view)) = (
+                    buffer_pool.get_view(clip_srgb_handle),
+                    buffer_pool.get_view(clip_hdr_handle),
+                    &instance_resources.hdr_texture_view,
+                ) {
+                    let clip_params = vello::RenderParams {
+                        base_color: vello::peniko::Color::TRANSPARENT,
+                        width, height,
+                        antialiasing_method: vello::AaConfig::Msaa16,
+                    };
+                    if let Ok(mut renderer) = shared.renderer.lock() {
+                        renderer.render_to_texture(device, queue, &clip_scene, clip_srgb_view, &clip_params).ok();
+                    }
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clip_srgb_to_linear") });
+                    shared.srgb_to_linear.convert(device, &mut enc, clip_srgb_view, clip_hdr_view);
+                    queue.submit(Some(enc.finish()));
+
+                    let clip_layer = lightningbeam_core::gpu::CompositorLayer::normal(clip_hdr_handle, 1.0);
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clip_composite") });
+                    shared.compositor.composite(device, queue, &mut enc, &[clip_layer], &buffer_pool, hdr_view, None);
+                    queue.submit(Some(enc.finish()));
+                }
+                buffer_pool.release(clip_srgb_handle);
+                buffer_pool.release(clip_hdr_handle);
+            }
+
             // Advance frame counter for buffer cleanup
             buffer_pool.next_frame();
             drop(buffer_pool);
@@ -692,14 +805,43 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Skip rendering the shape instance being edited (for vector editing preview)
             let skip_instance_id = self.ctx.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
 
+            let editing_skip_id = self.ctx.editing_clip_id.as_ref().and_then(|_| {
+                self.ctx.editing_instance_id
+            });
+            let effective_skip = skip_instance_id.or(editing_skip_id);
+
             lightningbeam_core::renderer::render_document_with_transform(
                 &self.ctx.document,
                 &mut scene,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
-                skip_instance_id,
+                effective_skip,
             );
+
+            // When editing inside a clip: dim overlay + re-render the clip at full opacity
+            if let (Some(parent_layer_id), Some(instance_id)) = (self.ctx.editing_parent_layer_id, self.ctx.editing_instance_id) {
+                // Semi-transparent dim overlay
+                let doc_rect = vello::kurbo::Rect::new(0.0, 0.0, self.ctx.document.width, self.ctx.document.height);
+                scene.fill(
+                    vello::peniko::Fill::NonZero,
+                    camera_transform,
+                    vello::peniko::Color::new([0.0, 0.0, 0.0, 0.5]),
+                    None,
+                    &doc_rect,
+                );
+                // Re-render the clip instance on top
+                lightningbeam_core::renderer::render_single_clip_instance(
+                    &self.ctx.document,
+                    &mut scene,
+                    camera_transform,
+                    &parent_layer_id,
+                    &instance_id,
+                    &mut image_cache,
+                    &shared.video_manager,
+                );
+            }
+
             drop(image_cache);
             scene
         };
@@ -751,7 +893,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         * Affine::rotate(shape.transform.rotation.to_radians())
                                         * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y)
                                         * skew_transform;
-                                    let combined_transform = camera_transform * object_transform;
+                                    let combined_transform = overlay_transform * object_transform;
 
                                     // Render shape with semi-transparent fill (light blue, 40% opacity)
                                     let alpha_color = Color::from_rgba8(100, 150, 255, 100);
@@ -772,7 +914,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                 use vello::kurbo::Stroke;
                                 let clip_transform = Affine::translate((new_x, new_y));
-                                let combined_transform = camera_transform * clip_transform;
+                                let combined_transform = overlay_transform * clip_transform;
 
                                 // Calculate clip bounds for preview
                                 let clip_time = ((self.ctx.playback_time - clip_inst.timeline_start) * clip_inst.playback_speed) + clip_inst.trim_start;
@@ -822,7 +964,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                     // Apply object transform and camera transform
                                     let object_transform = Affine::translate((shape.transform.x, shape.transform.y));
-                                    let combined_transform = camera_transform * object_transform;
+                                    let combined_transform = overlay_transform * object_transform;
 
                                     // Create selection rectangle
                                     let selection_rect = KurboRect::new(bbox.x0, bbox.y0, bbox.x1, bbox.y1);
@@ -868,9 +1010,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
 
                         // Also draw selection outlines for clip instances
-                        let _clip_instance_count = self.ctx.selection.clip_instances().len();
                         for &clip_id in self.ctx.selection.clip_instances() {
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
+                                // Skip clip instances not active at current time
+                                let clip_dur = self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(0.0);
+                                let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_dur);
+                                if self.ctx.playback_time < clip_instance.timeline_start || self.ctx.playback_time >= instance_end {
+                                    continue;
+                                }
+
                                 // Calculate clip-local time
                                 let clip_time = ((self.ctx.playback_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
 
@@ -886,7 +1034,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                 // Apply clip instance transform and camera transform
                                 let clip_transform = clip_instance.transform.to_affine();
-                                let combined_transform = camera_transform * clip_transform;
+                                let combined_transform = overlay_transform * clip_transform;
 
                                 // Draw selection outline with different color for clip instances
                                 let clip_selection_color = Color::from_rgb8(255, 120, 0); // Orange
@@ -943,7 +1091,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         let marquee_fill = Color::from_rgba8(0, 120, 255, 100);
                         scene.fill(
                             Fill::NonZero,
-                            camera_transform,
+                            overlay_transform,
                             marquee_fill,
                             None,
                             &marquee_rect,
@@ -952,7 +1100,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // Border stroke
                         scene.stroke(
                             &Stroke::new(1.0),
-                            camera_transform,
+                            overlay_transform,
                             selection_color,
                             None,
                             &marquee_rect,
@@ -1006,7 +1154,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                         if width > 0.0 && height > 0.0 {
                             let rect = KurboRect::new(0.0, 0.0, width, height);
-                            let preview_transform = camera_transform * Affine::translate((position.x, position.y));
+                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
 
                             if self.ctx.fill_enabled {
                                 let fill_color = Color::from_rgba8(
@@ -1079,7 +1227,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         };
 
                         if rx > 0.0 && ry > 0.0 {
-                            let preview_transform = camera_transform * Affine::translate((position.x, position.y));
+                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
 
                             let fill_color = Color::from_rgba8(
                                 self.ctx.fill_color.r(),
@@ -1132,7 +1280,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let line = Line::new(*start_point, *current_point);
                             scene.stroke(
                                 &Stroke::new(2.0),
-                                camera_transform,
+                                overlay_transform,
                                 stroke_color,
                                 None,
                                 &line,
@@ -1151,7 +1299,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         let radius = (dx * dx + dy * dy).sqrt();
 
                         if radius > 5.0 && num_sides >= 3 {
-                            let preview_transform = camera_transform * Affine::translate((center.x, center.y));
+                            let preview_transform = overlay_transform * Affine::translate((center.x, center.y));
 
                             // Use actual fill color (same as final shape)
                             let fill_color = Color::from_rgba8(
@@ -1229,7 +1377,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 );
                                 scene.fill(
                                     Fill::NonZero,
-                                    camera_transform,
+                                    overlay_transform,
                                     fill_color,
                                     None,
                                     &preview_path,
@@ -1245,7 +1393,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             scene.stroke(
                                 &Stroke::new(self.ctx.stroke_width),
-                                camera_transform,
+                                overlay_transform,
                                 stroke_color,
                                 None,
                                 &preview_path,
@@ -1261,10 +1409,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         let preview_path = rebuild_bezpath(&cache.editable_data);
 
                         // Get the layer first, then the shape from the layer
-                        if let Some(layer) = (*self.ctx.document).root.get_child(&cache.layer_id) {
+                        if let Some(layer) = (*self.ctx.document).get_layer(&cache.layer_id) {
                             if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
                                 if let Some(shape) = vector_layer.get_shape_in_keyframe(&cache.shape_id, self.ctx.playback_time) {
-                                    let transform = camera_transform * cache.local_to_world;
+                                    let transform = overlay_transform * cache.local_to_world;
 
                                     // Render fill with FULL OPACITY (same as original)
                                     if let Some(fill_color) = &shape.fill_color {
@@ -1389,7 +1537,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                     scene.stroke(
                                         &Stroke::new(stroke_width),
-                                        camera_transform,
+                                        overlay_transform,
                                         handle_color,
                                         None,
                                         &bbox_path,
@@ -1407,7 +1555,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         // Fill
                                         scene.fill(
                                             Fill::NonZero,
-                                            camera_transform,
+                                            overlay_transform,
                                             handle_color,
                                             None,
                                             &handle_rect,
@@ -1416,7 +1564,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         // White outline
                                         scene.stroke(
                                             &Stroke::new(1.0),
-                                            camera_transform,
+                                            overlay_transform,
                                             Color::from_rgb8(255, 255, 255),
                                             None,
                                             &handle_rect,
@@ -1437,7 +1585,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         // Fill
                                         scene.fill(
                                             Fill::NonZero,
-                                            camera_transform,
+                                            overlay_transform,
                                             handle_color,
                                             None,
                                             &edge_circle,
@@ -1446,7 +1594,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         // White outline
                                         scene.stroke(
                                             &Stroke::new(1.0),
-                                            camera_transform,
+                                            overlay_transform,
                                             Color::from_rgb8(255, 255, 255),
                                             None,
                                             &edge_circle,
@@ -1471,7 +1619,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     // Fill with different color (green)
                                     scene.fill(
                                         Fill::NonZero,
-                                        camera_transform,
+                                        overlay_transform,
                                         Color::from_rgb8(50, 200, 50),
                                         None,
                                         &rotation_circle,
@@ -1480,7 +1628,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     // White outline
                                     scene.stroke(
                                         &Stroke::new(1.0),
-                                        camera_transform,
+                                        overlay_transform,
                                         Color::from_rgb8(255, 255, 255),
                                         None,
                                         &rotation_circle,
@@ -1496,7 +1644,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                     scene.stroke(
                                         &Stroke::new(1.0),
-                                        camera_transform,
+                                        overlay_transform,
                                         Color::from_rgb8(50, 200, 50),
                                         None,
                                         &line_path,
@@ -1526,7 +1674,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 let handle_color = Color::from_rgb8(0, 120, 255);
                                 let rotation_handle_offset = 20.0 / self.ctx.zoom.max(0.5) as f64;
 
-                                scene.stroke(&Stroke::new(stroke_width), camera_transform, handle_color, None, &bbox);
+                                scene.stroke(&Stroke::new(stroke_width), overlay_transform, handle_color, None, &bbox);
 
                                 let corners = [
                                     vello::kurbo::Point::new(bbox.x0, bbox.y0),
@@ -1540,8 +1688,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         corner.x - handle_size / 2.0, corner.y - handle_size / 2.0,
                                         corner.x + handle_size / 2.0, corner.y + handle_size / 2.0,
                                     );
-                                    scene.fill(Fill::NonZero, camera_transform, handle_color, None, &handle_rect);
-                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &handle_rect);
+                                    scene.fill(Fill::NonZero, overlay_transform, handle_color, None, &handle_rect);
+                                    scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &handle_rect);
                                 }
 
                                 let edges = [
@@ -1553,14 +1701,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                 for edge in &edges {
                                     let edge_circle = Circle::new(*edge, handle_size / 2.0);
-                                    scene.fill(Fill::NonZero, camera_transform, handle_color, None, &edge_circle);
-                                    scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &edge_circle);
+                                    scene.fill(Fill::NonZero, overlay_transform, handle_color, None, &edge_circle);
+                                    scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &edge_circle);
                                 }
 
                                 let rotation_handle_pos = vello::kurbo::Point::new(bbox.center().x, bbox.y0 - rotation_handle_offset);
                                 let rotation_circle = Circle::new(rotation_handle_pos, handle_size / 2.0);
-                                scene.fill(Fill::NonZero, camera_transform, Color::from_rgb8(50, 200, 50), None, &rotation_circle);
-                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(255, 255, 255), None, &rotation_circle);
+                                scene.fill(Fill::NonZero, overlay_transform, Color::from_rgb8(50, 200, 50), None, &rotation_circle);
+                                scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &rotation_circle);
 
                                 let line_path = {
                                     let mut path = vello::kurbo::BezPath::new();
@@ -1568,7 +1716,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     path.line_to(vello::kurbo::Point::new(bbox.center().x, bbox.y0));
                                     path
                                 };
-                                scene.stroke(&Stroke::new(1.0), camera_transform, Color::from_rgb8(50, 200, 50), None, &line_path);
+                                scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(50, 200, 50), None, &line_path);
                             }
                         }
                     }
@@ -1660,7 +1808,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             scene.stroke(
                                 &Stroke::new(stroke_width),
-                                camera_transform,
+                                overlay_transform,
                                 handle_color,
                                 None,
                                 &bbox_path,
@@ -1678,7 +1826,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 // Fill
                                 scene.fill(
                                     Fill::NonZero,
-                                    camera_transform,
+                                    overlay_transform,
                                     handle_color,
                                     None,
                                     &handle_rect,
@@ -1687,7 +1835,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 // White outline
                                 scene.stroke(
                                     &Stroke::new(1.0),
-                                    camera_transform,
+                                    overlay_transform,
                                     Color::from_rgb8(255, 255, 255),
                                     None,
                                     &handle_rect,
@@ -1708,7 +1856,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 // Fill
                                 scene.fill(
                                     Fill::NonZero,
-                                    camera_transform,
+                                    overlay_transform,
                                     handle_color,
                                     None,
                                     &edge_circle,
@@ -1717,7 +1865,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 // White outline
                                 scene.stroke(
                                     &Stroke::new(1.0),
-                                    camera_transform,
+                                    overlay_transform,
                                     Color::from_rgb8(255, 255, 255),
                                     None,
                                     &edge_circle,
@@ -1740,7 +1888,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // Fill with different color (green)
                             scene.fill(
                                 Fill::NonZero,
-                                camera_transform,
+                                overlay_transform,
                                 Color::from_rgb8(50, 200, 50),
                                 None,
                                 &rotation_circle,
@@ -1749,7 +1897,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // White outline
                             scene.stroke(
                                 &Stroke::new(1.0),
-                                camera_transform,
+                                overlay_transform,
                                 Color::from_rgb8(255, 255, 255),
                                 None,
                                 &rotation_circle,
@@ -1765,7 +1913,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             scene.stroke(
                                 &Stroke::new(1.0),
-                                camera_transform,
+                                overlay_transform,
                                 Color::from_rgb8(50, 200, 50),
                                 None,
                                 &line_path,
@@ -2075,6 +2223,50 @@ impl StagePane {
         }
     }
 
+    /// Convert a document-space position to clip-local coordinates when editing inside a clip.
+    /// Returns the position unchanged when at root level.
+    fn doc_to_clip_local(&self, doc_pos: egui::Vec2, shared: &SharedPaneState) -> egui::Vec2 {
+        if let (Some(parent_layer_id), Some(instance_id)) = (shared.editing_parent_layer_id, shared.editing_instance_id) {
+            let document = shared.action_executor.document();
+            let clip_affine = document.get_layer(&parent_layer_id)
+                .and_then(|layer| {
+                    if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                        vl.clip_instances.iter().find(|ci| ci.id == instance_id)
+                    } else {
+                        None
+                    }
+                })
+                .map(|ci| ci.transform.to_affine())
+                .unwrap_or(vello::kurbo::Affine::IDENTITY);
+            let inv = clip_affine.inverse();
+            let p = inv * vello::kurbo::Point::new(doc_pos.x as f64, doc_pos.y as f64);
+            egui::vec2(p.x as f32, p.y as f32)
+        } else {
+            doc_pos
+        }
+    }
+
+    /// Convert a clip-local position back to document-space coordinates.
+    /// Returns the position unchanged when at root level.
+    fn clip_local_to_doc(&self, local_pos: vello::kurbo::Point, shared: &SharedPaneState) -> vello::kurbo::Point {
+        if let (Some(parent_layer_id), Some(instance_id)) = (shared.editing_parent_layer_id, shared.editing_instance_id) {
+            let document = shared.action_executor.document();
+            let clip_affine = document.get_layer(&parent_layer_id)
+                .and_then(|layer| {
+                    if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                        vl.clip_instances.iter().find(|ci| ci.id == instance_id)
+                    } else {
+                        None
+                    }
+                })
+                .map(|ci| ci.transform.to_affine())
+                .unwrap_or(vello::kurbo::Affine::IDENTITY);
+            clip_affine * local_pos
+        } else {
+            local_pos
+        }
+    }
+
     /// Execute a view action with the given parameters
     /// Called from main.rs after determining this is the best handler
     pub fn execute_view_action(&mut self, action: &crate::menu::MenuAction, zoom_center: egui::Vec2) {
@@ -2184,6 +2376,41 @@ impl StagePane {
         };
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // Double-click: enter/exit movie clip editing
+        if response.double_clicked() {
+            // Hit test clip instances at the click position
+            let document = shared.action_executor.document();
+            let clip_hit = hit_test::hit_test_clip_instances(
+                &vector_layer.clip_instances,
+                document,
+                point,
+                Affine::IDENTITY,
+                *shared.playback_time,
+            );
+
+            if let Some(instance_id) = clip_hit {
+                // Find the clip instance to get its clip_id
+                if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == instance_id) {
+                    // Check if this is a movie clip (not a group)
+                    if let Some(vector_clip) = document.get_vector_clip(&clip_instance.clip_id) {
+                        if !vector_clip.is_group {
+                            // Enter the movie clip
+                            *shared.pending_enter_clip = Some((
+                                clip_instance.clip_id,
+                                instance_id,
+                                active_layer_id,
+                            ));
+                            return;
+                        }
+                    }
+                }
+            } else if shared.editing_clip_id.is_some() {
+                // Double-click on empty space while inside a clip: exit
+                *shared.pending_exit_clip = true;
+                return;
+            }
+        }
 
         // Mouse down: start interaction (check on initial press, not after drag starts)
         // Scope this section to drop vector_layer borrow before drag handling
@@ -5419,7 +5646,8 @@ impl StagePane {
                     // Get last known mouse position (will be at edge if offscreen)
                     if let Some(mouse_pos) = ui.input(|i| i.pointer.latest_pos()) {
                         let mouse_canvas_pos = mouse_pos - rect.min;
-                        let world_pos = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+                        let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+                        let world_pos = self.doc_to_clip_local(world_pos_doc, shared);
                         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
                         let delta = point - start_mouse;
@@ -5548,7 +5776,9 @@ impl StagePane {
         let mouse_canvas_pos = mouse_pos - rect.min;
 
         // Convert screen position to world position (accounting for pan and zoom)
-        let world_pos = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+        // When inside a clip, further transform to clip-local coordinates
+        let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+        let world_pos = self.doc_to_clip_local(world_pos_doc, shared);
 
         // Handle tool input (only if not using Alt modifier for panning)
         if !alt_held {
@@ -5678,18 +5908,22 @@ impl StagePane {
             _ => return,
         };
 
-        // Get mouse position in world coordinates
+        // Get mouse position in world coordinates (clip-local when inside a clip)
         let mouse_screen_pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
         let mouse_canvas_pos = mouse_screen_pos - rect.min;
-        let mouse_world_pos = Point::new(
-            ((mouse_canvas_pos.x - self.pan_offset.x) / self.zoom) as f64,
-            ((mouse_canvas_pos.y - self.pan_offset.y) / self.zoom) as f64,
+        let mouse_doc_pos = egui::vec2(
+            (mouse_canvas_pos.x - self.pan_offset.x) / self.zoom,
+            (mouse_canvas_pos.y - self.pan_offset.y) / self.zoom,
         );
+        let mouse_local = self.doc_to_clip_local(mouse_doc_pos, shared);
+        let mouse_world_pos = Point::new(mouse_local.x as f64, mouse_local.y as f64);
 
-        // Helper to convert world coordinates to screen coordinates
+        // Helper to convert world coordinates (clip-local) to screen coordinates
         let world_to_screen = |world_pos: Point| -> egui::Pos2 {
-            let screen_x = (world_pos.x as f32 * self.zoom) + self.pan_offset.x + rect.min.x;
-            let screen_y = (world_pos.y as f32 * self.zoom) + self.pan_offset.y + rect.min.y;
+            // When inside a clip, first transform from clip-local to document space
+            let doc_pos = self.clip_local_to_doc(world_pos, shared);
+            let screen_x = (doc_pos.x as f32 * self.zoom) + self.pan_offset.x + rect.min.x;
+            let screen_y = (doc_pos.y as f32 * self.zoom) + self.pan_offset.y + rect.min.y;
             egui::pos2(screen_x, screen_y)
         };
 
@@ -6254,12 +6488,13 @@ impl PaneRenderer for StagePane {
             }
         }
 
-        // Calculate drag delta for preview rendering (world space)
+        // Calculate drag delta for preview rendering (clip-local space)
         let drag_delta = if let lightningbeam_core::tool::ToolState::DraggingSelection { ref start_mouse, .. } = shared.tool_state {
-            // Get current mouse position in world coordinates
+            // Get current mouse position in clip-local coordinates (matching start_mouse)
             if let Some(mouse_pos) = ui.input(|i| i.pointer.hover_pos()) {
                 let mouse_canvas_pos = mouse_pos - rect.min;
-                let world_mouse = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+                let world_mouse_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+                let world_mouse = self.doc_to_clip_local(world_mouse_doc, shared);
 
                 let delta_x = world_mouse.x as f64 - start_mouse.x;
                 let delta_y = world_mouse.y as f64 - start_mouse.y;
@@ -6294,6 +6529,9 @@ impl PaneRenderer for StagePane {
             video_manager: shared.video_manager.clone(),
             shape_editing_cache: self.shape_editing_cache.clone(),
             target_format: shared.target_format,
+            editing_clip_id: shared.editing_clip_id,
+            editing_instance_id: shared.editing_instance_id,
+            editing_parent_layer_id: shared.editing_parent_layer_id,
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(
@@ -6312,6 +6550,63 @@ impl PaneRenderer for StagePane {
             egui::FontId::proportional(14.0),
             egui::Color32::from_gray(200),
         );
+
+        // Render breadcrumb navigation when inside a movie clip
+        if shared.editing_clip_id.is_some() {
+            let document = shared.action_executor.document();
+            // Build breadcrumb names from the editing context
+            // We only have the current clip_id, so show "Scene 1 > ClipName"
+            let clip_name = shared.editing_clip_id
+                .and_then(|id| document.get_vector_clip(&id))
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let breadcrumb_y = rect.min.y + 30.0;
+            let breadcrumb_x = rect.min.x + 10.0;
+
+            // Background pill
+            let scene_text = "Scene 1";
+            let separator = " > ";
+            let full_text = format!("{}{}{}", scene_text, separator, clip_name);
+            let font = egui::FontId::proportional(13.0);
+            let galley = ui.painter().layout_no_wrap(full_text.clone(), font.clone(), egui::Color32::WHITE);
+            let text_rect = egui::Rect::from_min_size(
+                egui::pos2(breadcrumb_x, breadcrumb_y),
+                galley.size() + egui::vec2(16.0, 8.0),
+            );
+            ui.painter().rect_filled(
+                text_rect,
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+
+            // "Scene 1" as clickable (exit clip)
+            let scene_galley = ui.painter().layout_no_wrap(
+                scene_text.to_string(), font.clone(), egui::Color32::from_rgb(120, 180, 255),
+            );
+            let scene_rect = egui::Rect::from_min_size(
+                egui::pos2(breadcrumb_x + 8.0, breadcrumb_y + 4.0),
+                scene_galley.size(),
+            );
+            let scene_response = ui.allocate_rect(scene_rect, egui::Sense::click());
+            ui.painter().galley(scene_rect.min, scene_galley, egui::Color32::WHITE);
+            if scene_response.clicked() {
+                *shared.pending_exit_clip = true;
+            }
+            if scene_response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            // Separator + clip name (not clickable, it's the current level)
+            let rest_text = format!("{}{}", separator, clip_name);
+            ui.painter().text(
+                egui::pos2(scene_rect.max.x, breadcrumb_y + 4.0),
+                egui::Align2::LEFT_TOP,
+                rest_text,
+                font,
+                egui::Color32::WHITE,
+            );
+        }
 
         // Render vector editing overlays (vertices, control points, etc.)
         self.render_vector_editing_overlays(ui, rect, shared);

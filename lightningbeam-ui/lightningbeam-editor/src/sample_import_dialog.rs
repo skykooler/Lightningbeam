@@ -8,7 +8,7 @@ use egui_node_graph2::NodeId;
 use std::path::PathBuf;
 
 use crate::sample_import::{
-    FolderScanResult, ImportLayer, midi_to_note_name, recalc_key_ranges,
+    FolderScanResult, midi_to_note_name, recalc_key_ranges,
 };
 use daw_backend::audio::node_graph::nodes::LoopMode;
 
@@ -233,10 +233,5 @@ impl SampleImportDialog {
         }
 
         !self.should_close
-    }
-
-    /// Get the enabled layers for import.
-    pub fn enabled_layers(&self) -> Vec<&ImportLayer> {
-        self.scan_result.layers.iter().filter(|l| l.enabled).collect()
     }
 }

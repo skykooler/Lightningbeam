@@ -616,6 +616,51 @@ enum RecordingArmMode {
     Manual,
 }
 
+/// Entry in the editing context stack — tracks which clip is being edited
+#[derive(Clone)]
+struct EditingContextEntry {
+    /// The VectorClip ID being edited
+    clip_id: Uuid,
+    /// The ClipInstance ID through which we entered
+    instance_id: Uuid,
+    /// The layer ID that contains the instance in the parent context
+    parent_layer_id: Uuid,
+    /// Saved playback time from the parent context (restored on exit)
+    saved_playback_time: f64,
+    /// Saved active layer ID from the parent context
+    saved_active_layer_id: Option<Uuid>,
+}
+
+/// Editing context stack — tracks which clip (or root) is being edited.
+/// Empty stack = editing the document root.
+#[derive(Clone, Default)]
+struct EditingContext {
+    stack: Vec<EditingContextEntry>,
+}
+
+impl EditingContext {
+    fn current_clip_id(&self) -> Option<Uuid> {
+        self.stack.last().map(|e| e.clip_id)
+    }
+
+    fn current_instance_id(&self) -> Option<Uuid> {
+        self.stack.last().map(|e| e.instance_id)
+    }
+
+    fn current_parent_layer_id(&self) -> Option<Uuid> {
+        self.stack.last().map(|e| e.parent_layer_id)
+    }
+
+    fn push(&mut self, entry: EditingContextEntry) {
+        self.stack.push(entry);
+    }
+
+    fn pop(&mut self) -> Option<EditingContextEntry> {
+        self.stack.pop()
+    }
+
+}
+
 struct EditorApp {
     layouts: Vec<LayoutDefinition>,
     current_layout_index: usize,
@@ -638,6 +683,7 @@ struct EditorApp {
     action_executor: lightningbeam_core::action::ActionExecutor, // Action system for undo/redo
     active_layer_id: Option<Uuid>, // Currently active layer for editing
     selection: lightningbeam_core::selection::Selection, // Current selection state
+    editing_context: EditingContext, // Which clip (or root) we're editing
     tool_state: lightningbeam_core::tool::ToolState, // Current tool interaction state
     // Draw tool configuration
     draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
@@ -874,6 +920,7 @@ impl EditorApp {
             action_executor,
             active_layer_id: Some(layer_id),
             selection: lightningbeam_core::selection::Selection::new(),
+            editing_context: EditingContext::default(),
             tool_state: lightningbeam_core::tool::ToolState::default(),
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
@@ -1585,7 +1632,6 @@ impl EditorApp {
 
     /// Delete the current selection (for cut and delete operations)
     fn clipboard_delete_selection(&mut self) {
-        use lightningbeam_core::layer::AnyLayer;
 
         if !self.selection.clip_instances().is_empty() {
             let active_layer_id = match self.active_layer_id {
@@ -2234,6 +2280,28 @@ impl EditorApp {
                         );
                         if let Err(e) = self.action_executor.execute(Box::new(action)) {
                             eprintln!("Failed to group: {}", e);
+                        } else {
+                            self.selection.clear();
+                            self.selection.add_clip_instance(instance_id);
+                        }
+                    }
+                }
+            }
+            MenuAction::ConvertToMovieClip => {
+                if let Some(layer_id) = self.active_layer_id {
+                    let shape_ids: Vec<uuid::Uuid> = self.selection.shape_instances().to_vec();
+                    let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
+                    if shape_ids.len() + clip_ids.len() >= 1 {
+                        let instance_id = uuid::Uuid::new_v4();
+                        let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
+                            layer_id,
+                            self.playback_time,
+                            shape_ids,
+                            clip_ids,
+                            instance_id,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to convert to movie clip: {}", e);
                         } else {
                             self.selection.clear();
                             self.selection.add_clip_instance(instance_id);
@@ -4429,6 +4497,10 @@ impl eframe::App for EditorApp {
             // Menu actions queued by pane context menus
             let mut pending_menu_actions: Vec<MenuAction> = Vec::new();
 
+            // Editing context navigation requests from stage pane
+            let mut pending_enter_clip: Option<(Uuid, Uuid, Uuid)> = None;
+            let mut pending_exit_clip = false;
+
             // Queue for effect thumbnail requests (collected during rendering)
             let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
             // Empty cache fallback if generator not initialized
@@ -4468,6 +4540,11 @@ impl eframe::App for EditorApp {
                 theme: &self.theme,
                 action_executor: &mut self.action_executor,
                 selection: &mut self.selection,
+                editing_clip_id: self.editing_context.current_clip_id(),
+                editing_instance_id: self.editing_context.current_instance_id(),
+                editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
+                pending_enter_clip: &mut pending_enter_clip,
+                pending_exit_clip: &mut pending_exit_clip,
                 active_layer_id: &mut self.active_layer_id,
                 tool_state: &mut self.tool_state,
                 pending_actions: &mut pending_actions,
@@ -4574,6 +4651,34 @@ impl eframe::App for EditorApp {
             // Process menu actions queued by pane context menus
             for action in pending_menu_actions {
                 self.handle_menu_action(action);
+            }
+
+            // Process editing context navigation (enter/exit movie clips)
+            if let Some((clip_id, instance_id, parent_layer_id)) = pending_enter_clip {
+                let entry = EditingContextEntry {
+                    clip_id,
+                    instance_id,
+                    parent_layer_id,
+                    saved_playback_time: self.playback_time,
+                    saved_active_layer_id: self.active_layer_id,
+                };
+                self.editing_context.push(entry);
+                self.selection.clear();
+                // Set active layer to the clip's first layer
+                let first_layer_id = self.action_executor.document()
+                    .get_vector_clip(&clip_id)
+                    .and_then(|clip| clip.layers.roots.first())
+                    .map(|node| node.data.id());
+                self.active_layer_id = first_layer_id;
+                // Reset playback time to 0 when entering a clip
+                self.playback_time = 0.0;
+            }
+            if pending_exit_clip {
+                if let Some(entry) = self.editing_context.pop() {
+                    self.selection.clear();
+                    self.active_layer_id = entry.saved_active_layer_id;
+                    self.playback_time = entry.saved_playback_time;
+                }
             }
 
             // Set cursor based on hover state
@@ -4735,6 +4840,11 @@ struct RenderContext<'a> {
     theme: &'a Theme,
     action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
     selection: &'a mut lightningbeam_core::selection::Selection,
+    editing_clip_id: Option<Uuid>,
+    editing_instance_id: Option<Uuid>,
+    editing_parent_layer_id: Option<Uuid>,
+    pending_enter_clip: &'a mut Option<(Uuid, Uuid, Uuid)>,
+    pending_exit_clip: &'a mut bool,
     active_layer_id: &'a mut Option<Uuid>,
     tool_state: &'a mut lightningbeam_core::tool::ToolState,
     pending_actions: &'a mut Vec<Box<dyn lightningbeam_core::action::Action>>,
@@ -5272,6 +5382,11 @@ fn render_pane(
                 project_generation: ctx.project_generation,
                 script_to_edit: ctx.script_to_edit,
                 script_saved: ctx.script_saved,
+                editing_clip_id: ctx.editing_clip_id,
+                editing_instance_id: ctx.editing_instance_id,
+                editing_parent_layer_id: ctx.editing_parent_layer_id,
+                pending_enter_clip: ctx.pending_enter_clip,
+                pending_exit_clip: ctx.pending_exit_clip,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -5345,6 +5460,11 @@ fn render_pane(
                 project_generation: ctx.project_generation,
                 script_to_edit: ctx.script_to_edit,
                 script_saved: ctx.script_saved,
+                editing_clip_id: ctx.editing_clip_id,
+                editing_instance_id: ctx.editing_instance_id,
+                editing_parent_layer_id: ctx.editing_parent_layer_id,
+                pending_enter_clip: ctx.pending_enter_clip,
+                pending_exit_clip: ctx.pending_exit_clip,
             };
 
             // Render pane content (header was already rendered above)

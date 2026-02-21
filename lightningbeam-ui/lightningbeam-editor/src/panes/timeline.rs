@@ -54,7 +54,8 @@ fn effective_clip_duration(
                 let end = vl.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration);
                 Some((end - clip_instance.timeline_start).max(0.0))
             } else {
-                Some(vc.duration)
+                // Movie clips: duration based on internal keyframe content
+                Some(vc.content_duration(document.framerate))
             }
         }
         AnyLayer::Audio(_) => document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration),
@@ -130,13 +131,15 @@ fn find_sampled_audio_track_for_clip(
     document: &lightningbeam_core::document::Document,
     clip_id: uuid::Uuid,
     timeline_start: f64,
+    editing_clip_id: Option<&uuid::Uuid>,
 ) -> Option<uuid::Uuid> {
     // Get the clip duration
     let clip_duration = document.get_clip_duration(&clip_id)?;
     let clip_end = timeline_start + clip_duration;
 
     // Check each sampled audio layer
-    for layer in &document.root.children {
+    let context_layers = document.context_layers(editing_clip_id);
+    for &layer in &context_layers {
         if let AnyLayer::Audio(audio_layer) = layer {
             if audio_layer.audio_layer_type == AudioLayerType::Sampled {
                 // Check if there's any overlap with existing clips on this layer
@@ -213,7 +216,8 @@ impl TimelinePane {
         // Get layer type (copy it so we can drop the document borrow before mutating)
         let layer_type = {
             let document = shared.action_executor.document();
-            let Some(layer) = document.root.children.iter().find(|l| l.id() == active_layer_id) else {
+            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+            let Some(layer) = context_layers.iter().copied().find(|l| l.id() == active_layer_id) else {
                 println!("⚠️  Active layer not found in document");
                 return;
             };
@@ -295,7 +299,8 @@ impl TimelinePane {
     fn stop_recording(&mut self, shared: &mut SharedPaneState) {
         // Determine if this is MIDI or audio recording by checking the layer type
         let is_midi_recording = if let Some(layer_id) = *shared.recording_layer_id {
-            shared.action_executor.document().root.children.iter()
+            let context_layers = shared.action_executor.document().context_layers(shared.editing_clip_id.as_ref());
+            context_layers.iter().copied()
                 .find(|l| l.id() == layer_id)
                 .map(|layer| {
                     if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
@@ -337,8 +342,10 @@ impl TimelinePane {
         document: &lightningbeam_core::document::Document,
         content_rect: egui::Rect,
         header_rect: egui::Rect,
+        editing_clip_id: Option<&uuid::Uuid>,
     ) -> Option<(ClipDragType, uuid::Uuid)> {
-        let layer_count = document.root.children.len();
+        let context_layers = document.context_layers(editing_clip_id);
+        let layer_count = context_layers.len();
 
         // Check if pointer is in valid area
         if pointer_pos.y < header_rect.min.y {
@@ -355,8 +362,8 @@ impl TimelinePane {
             return None;
         }
 
-        let layers: Vec<_> = document.root.children.iter().rev().collect();
-        let layer = layers.get(hovered_layer_index)?;
+        let rev_layers: Vec<&lightningbeam_core::layer::AnyLayer> = context_layers.iter().rev().copied().collect();
+        let layer = rev_layers.get(hovered_layer_index)?;
         let _layer_data = layer.layer();
 
         let clip_instances = match layer {
@@ -711,7 +718,8 @@ impl TimelinePane {
         theme: &crate::theme::Theme,
         active_layer_id: &Option<uuid::Uuid>,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
-        document: &lightningbeam_core::document::Document,
+        _document: &lightningbeam_core::document::Document,
+        context_layers: &[&lightningbeam_core::layer::AnyLayer],
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -734,7 +742,8 @@ impl TimelinePane {
         let secondary_text_color = egui::Color32::from_gray(150);
 
         // Draw layer headers from document (reversed so newest layers appear on top)
-        for (i, layer) in document.root.children.iter().rev().enumerate() {
+        for (i, layer) in context_layers.iter().rev().enumerate() {
+            let layer = *layer;
             let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
@@ -993,6 +1002,7 @@ impl TimelinePane {
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
         target_format: wgpu::TextureFormat,
         waveform_stereo: bool,
+        context_layers: &[&lightningbeam_core::layer::AnyLayer],
     ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
         let painter = ui.painter();
 
@@ -1014,7 +1024,8 @@ impl TimelinePane {
         }
 
         // Draw layer rows from document (reversed so newest layers appear on top)
-        for (i, layer) in document.root.children.iter().rev().enumerate() {
+        for (i, layer) in context_layers.iter().rev().enumerate() {
+            let layer = *layer;
             let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
@@ -1719,6 +1730,8 @@ impl TimelinePane {
         playback_time: &mut f64,
         _is_playing: &mut bool,
         audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+        context_layers: &[&lightningbeam_core::layer::AnyLayer],
+        editing_clip_id: Option<&uuid::Uuid>,
     ) {
         // Don't allocate the header area for input - let widgets handle it directly
         // Only allocate content area (ruler + layers) with click and drag
@@ -1761,7 +1774,7 @@ impl TimelinePane {
                     let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
                     // Get the layer at this index (accounting for reversed display order)
                     if clicked_layer_index < layer_count {
-                        let layers: Vec<_> = document.root.children.iter().rev().collect();
+                        let layers: Vec<_> = context_layers.iter().rev().copied().collect();
                         if let Some(layer) = layers.get(clicked_layer_index) {
                             let _layer_data = layer.layer();
 
@@ -1828,7 +1841,7 @@ impl TimelinePane {
 
                 // Get the layer at this index (accounting for reversed display order)
                 if clicked_layer_index < layer_count {
-                    let layers: Vec<_> = document.root.children.iter().rev().collect();
+                    let layers: Vec<_> = context_layers.iter().rev().copied().collect();
                     if let Some(layer) = layers.get(clicked_layer_index) {
                         *active_layer_id = Some(layer.id());
                     }
@@ -1853,6 +1866,7 @@ impl TimelinePane {
                         document,
                         content_rect,
                         header_rect,
+                        editing_clip_id,
                     ) {
                         // If this clip is not selected, select it (respecting shift key)
                         if !selection.contains_clip_instance(&clip_id) {
@@ -1886,7 +1900,7 @@ impl TimelinePane {
                     HashMap::new();
 
                 // Iterate through all layers to find selected clip instances
-                for layer in &document.root.children {
+                for &layer in context_layers {
                     let layer_id = layer.id();
 
                     // Get clip instances for this layer
@@ -1937,7 +1951,7 @@ impl TimelinePane {
                             > = HashMap::new();
 
                             // Iterate through all layers to find selected clip instances
-                            for layer in &document.root.children {
+                            for &layer in context_layers {
                                 let layer_id = layer.id();
                                 let _layer_data = layer.layer();
 
@@ -2078,7 +2092,7 @@ impl TimelinePane {
                         ClipDragType::LoopExtendRight => {
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for layer in &document.root.children {
+                            for &layer in context_layers {
                                 let layer_id = layer.id();
                                 let clip_instances = match layer {
                                     lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
@@ -2150,7 +2164,7 @@ impl TimelinePane {
                             // Extend loop_before (pre-loop region)
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for layer in &document.root.children {
+                            for &layer in context_layers {
                                 let layer_id = layer.id();
                                 let clip_instances = match layer {
                                     lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
@@ -2242,7 +2256,7 @@ impl TimelinePane {
 
                     // Get the layer at this index (accounting for reversed display order)
                     if clicked_layer_index < layer_count {
-                        let layers: Vec<_> = document.root.children.iter().rev().collect();
+                        let layers: Vec<_> = context_layers.iter().rev().copied().collect();
                         if let Some(layer) = layers.get(clicked_layer_index) {
                             *active_layer_id = Some(layer.id());
                             // Clear clip instance selection when clicking on empty layer area
@@ -2387,6 +2401,7 @@ impl TimelinePane {
                     document,
                     content_rect,
                     header_rect,
+                    editing_clip_id,
                 ) {
                     match drag_type {
                         ClipDragType::TrimLeft | ClipDragType::TrimRight => {
@@ -2535,11 +2550,13 @@ impl PaneRenderer for TimelinePane {
 
         // Get document from action executor
         let document = shared.action_executor.document();
-        let layer_count = document.root.children.len();
+        let editing_clip_id = shared.editing_clip_id;
+        let context_layers = document.context_layers(editing_clip_id.as_ref());
+        let layer_count = context_layers.len();
 
         // Calculate project duration from last clip endpoint across all layers
         let mut max_endpoint: f64 = 10.0; // Default minimum duration
-        for layer in &document.root.children {
+        for &layer in &context_layers {
             let clip_instances = match layer {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
@@ -2606,7 +2623,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, &mut shared.pending_actions, document);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, &mut shared.pending_actions, document, &context_layers);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
@@ -2614,7 +2631,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
@@ -2638,6 +2655,8 @@ impl PaneRenderer for TimelinePane {
             shared.playback_time,
             shared.is_playing,
             shared.audio_controller,
+            &context_layers,
+            editing_clip_id.as_ref(),
         );
 
         // Context menu: detect right-click on clips or empty timeline space
@@ -2646,7 +2665,7 @@ impl PaneRenderer for TimelinePane {
         if secondary_clicked {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if content_rect.contains(pos) {
-                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect) {
+                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect, editing_clip_id.as_ref()) {
                         // Right-clicked on a clip
                         if !shared.selection.contains_clip_instance(&clip_id) {
                             shared.selection.select_only_clip_instance(clip_id);
@@ -2934,7 +2953,7 @@ impl PaneRenderer for TimelinePane {
                     let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
 
                     // Get the layer at this index (accounting for reversed display order)
-                    let layers: Vec<_> = document.root.children.iter().rev().collect();
+                    let layers: Vec<_> = context_layers.iter().rev().copied().collect();
 
                     if let Some(layer) = layers.get(hovered_layer_index) {
                         let is_compatible = can_drop_on_layer(layer, dragging.clip_type);
@@ -3077,7 +3096,7 @@ impl PaneRenderer for TimelinePane {
                                     // Find or create sampled audio track where the audio won't overlap
                                     let audio_layer_id = {
                                         let doc = shared.action_executor.document();
-                                        let result = find_sampled_audio_track_for_clip(doc, linked_audio_clip_id, drop_time);
+                                        let result = find_sampled_audio_track_for_clip(doc, linked_audio_clip_id, drop_time, editing_clip_id.as_ref());
                                         if let Some(id) = result {
                                             eprintln!("DEBUG: Found existing audio track without overlap: {}", id);
                                         } else {

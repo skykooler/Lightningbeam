@@ -164,6 +164,13 @@ pub fn hit_test_clip_instances(
     timeline_time: f64,
 ) -> Option<Uuid> {
     for clip_instance in clip_instances.iter().rev() {
+        // Check time bounds: skip clip instances not active at this time
+        let clip_duration = document.get_clip_duration(&clip_instance.clip_id).unwrap_or(0.0);
+        let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_duration);
+        if timeline_time < clip_instance.timeline_start || timeline_time >= instance_end {
+            continue;
+        }
+
         let clip_time = ((timeline_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
 
         let content_bounds = if let Some(vector_clip) = document.get_vector_clip(&clip_instance.clip_id) {
@@ -196,6 +203,13 @@ pub fn hit_test_clip_instances_in_rect(
     let mut hits = Vec::new();
 
     for clip_instance in clip_instances {
+        // Check time bounds: skip clip instances not active at this time
+        let clip_duration = document.get_clip_duration(&clip_instance.clip_id).unwrap_or(0.0);
+        let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_duration);
+        if timeline_time < clip_instance.timeline_start || timeline_time >= instance_end {
+            continue;
+        }
+
         let clip_time = ((timeline_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
 
         let content_bounds = if let Some(vector_clip) = document.get_vector_clip(&clip_instance.clip_id) {

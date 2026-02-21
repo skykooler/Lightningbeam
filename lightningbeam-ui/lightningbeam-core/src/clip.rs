@@ -90,6 +90,30 @@ impl VectorClip {
         }
     }
 
+    /// Calculate the duration of this clip based on its internal keyframe content.
+    /// Returns the time of the last keyframe across all layers, plus one frame.
+    /// Falls back to the stored `duration` field if no keyframes exist.
+    pub fn content_duration(&self, framerate: f64) -> f64 {
+        let frame_duration = 1.0 / framerate;
+        let mut last_time: Option<f64> = None;
+
+        for layer_node in self.layers.iter() {
+            if let AnyLayer::Vector(vector_layer) = &layer_node.data {
+                if let Some(last_kf) = vector_layer.keyframes.last() {
+                    last_time = Some(match last_time {
+                        Some(t) => t.max(last_kf.time),
+                        None => last_kf.time,
+                    });
+                }
+            }
+        }
+
+        match last_time {
+            Some(t) => t + frame_duration,
+            None => self.duration,
+        }
+    }
+
     /// Calculate the bounding box of all content in this clip at a specific time
     ///
     /// This recursively calculates the union of all shape and nested clip bounding boxes

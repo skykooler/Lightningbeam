@@ -166,6 +166,11 @@ pub struct Document {
     /// Current playback time in seconds
     #[serde(skip)]
     pub current_time: f64,
+
+    /// Reverse lookup: layer_id → clip_id for layers inside vector clips.
+    /// Enables O(1) lookup in get_layer/get_layer_mut instead of scanning all clips.
+    #[serde(skip)]
+    pub layer_to_clip_map: HashMap<Uuid, Uuid>,
 }
 
 impl Default for Document {
@@ -195,6 +200,7 @@ impl Default for Document {
             ui_layout: None,
             ui_layout_base: None,
             current_time: 0.0,
+            layer_to_clip_map: HashMap::new(),
         }
     }
 }
@@ -216,6 +222,27 @@ impl Document {
             height,
             ..Default::default()
         }
+    }
+
+    /// Rebuild the layer→clip reverse lookup map from all vector clips.
+    /// Call after deserialization or bulk clip modifications.
+    pub fn rebuild_layer_to_clip_map(&mut self) {
+        self.layer_to_clip_map.clear();
+        for (clip_id, clip) in &self.vector_clips {
+            for node in &clip.layers.roots {
+                self.layer_to_clip_map.insert(node.data.id(), *clip_id);
+            }
+        }
+    }
+
+    /// Register a layer as belonging to a clip (for O(1) lookup).
+    pub fn register_layer_in_clip(&mut self, layer_id: Uuid, clip_id: Uuid) {
+        self.layer_to_clip_map.insert(layer_id, clip_id);
+    }
+
+    /// Unregister a layer from the clip lookup map.
+    pub fn unregister_layer_from_clip(&mut self, layer_id: &Uuid) {
+        self.layer_to_clip_map.remove(layer_id);
     }
 
     /// Set the background color
@@ -343,9 +370,31 @@ impl Document {
             .filter(|layer| layer.layer().visible)
     }
 
-    /// Get a layer by ID
+    /// Get visible layers for the current editing context
+    pub fn context_visible_layers(&self, clip_id: Option<&Uuid>) -> Vec<&AnyLayer> {
+        self.context_layers(clip_id)
+            .into_iter()
+            .filter(|layer| layer.layer().visible)
+            .collect()
+    }
+
+    /// Get a layer by ID (searches root layers, then clip layers via O(1) map lookup)
     pub fn get_layer(&self, id: &Uuid) -> Option<&AnyLayer> {
-        self.root.get_child(id)
+        // First check root layers
+        if let Some(layer) = self.root.get_child(id) {
+            return Some(layer);
+        }
+        // O(1) lookup: check if this layer belongs to a clip
+        if let Some(clip_id) = self.layer_to_clip_map.get(id) {
+            if let Some(clip) = self.vector_clips.get(clip_id) {
+                for node in &clip.layers.roots {
+                    if &node.data.id() == id {
+                        return Some(&node.data);
+                    }
+                }
+            }
+        }
+        None
     }
 
     // === MUTATION METHODS (pub(crate) - only accessible to action module) ===
@@ -358,12 +407,59 @@ impl Document {
         &mut self.root
     }
 
-    /// Get mutable access to a layer by ID
+    /// Get mutable access to a layer by ID (searches root layers, then clip layers via O(1) map lookup)
     ///
     /// This method is intentionally `pub(crate)` to ensure mutations
     /// only happen through the action system.
     pub fn get_layer_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
-        self.root.get_child_mut(id)
+        // First check root layers
+        if self.root.get_child(id).is_some() {
+            return self.root.get_child_mut(id);
+        }
+        // O(1) lookup: check if this layer belongs to a clip
+        if let Some(clip_id) = self.layer_to_clip_map.get(id).copied() {
+            if let Some(clip) = self.vector_clips.get_mut(&clip_id) {
+                for node in &mut clip.layers.roots {
+                    if &node.data.id() == id {
+                        return Some(&mut node.data);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // === EDITING CONTEXT METHODS ===
+
+    /// Get the layers for the current editing context.
+    /// When `clip_id` is None, returns root layers. When Some, returns the clip's layers.
+    pub fn context_layers(&self, clip_id: Option<&Uuid>) -> Vec<&AnyLayer> {
+        match clip_id {
+            None => self.root.children.iter().collect(),
+            Some(id) => self.vector_clips.get(id)
+                .map(|clip| clip.layers.root_data())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Get mutable layers for the current editing context.
+    pub fn context_layers_mut(&mut self, clip_id: Option<&Uuid>) -> Vec<&mut AnyLayer> {
+        match clip_id {
+            None => self.root.children.iter_mut().collect(),
+            Some(id) => self.vector_clips.get_mut(id)
+                .map(|clip| clip.layers.root_data_mut())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Look up a layer by ID within an editing context.
+    pub fn get_layer_in_context(&self, clip_id: Option<&Uuid>, layer_id: &Uuid) -> Option<&AnyLayer> {
+        self.context_layers(clip_id).into_iter().find(|l| &l.id() == layer_id)
+    }
+
+    /// Look up a mutable layer by ID within an editing context.
+    pub fn get_layer_in_context_mut(&mut self, clip_id: Option<&Uuid>, layer_id: &Uuid) -> Option<&mut AnyLayer> {
+        self.context_layers_mut(clip_id).into_iter().find(|l| &l.id() == layer_id)
     }
 
     // === CLIP LIBRARY METHODS ===
@@ -371,6 +467,10 @@ impl Document {
     /// Add a vector clip to the library
     pub fn add_vector_clip(&mut self, clip: VectorClip) -> Uuid {
         let id = clip.id;
+        // Register all layers in the clip for O(1) reverse lookup
+        for node in &clip.layers.roots {
+            self.layer_to_clip_map.insert(node.data.id(), id);
+        }
         self.vector_clips.insert(id, clip);
         id
     }
@@ -439,7 +539,15 @@ impl Document {
 
     /// Remove a vector clip from the library
     pub fn remove_vector_clip(&mut self, id: &Uuid) -> Option<VectorClip> {
-        self.vector_clips.remove(id)
+        if let Some(clip) = self.vector_clips.remove(id) {
+            // Unregister all layers from the reverse lookup map
+            for node in &clip.layers.roots {
+                self.layer_to_clip_map.remove(&node.data.id());
+            }
+            Some(clip)
+        } else {
+            None
+        }
     }
 
     /// Remove a video clip from the library
@@ -534,7 +642,11 @@ impl Document {
     /// have infinite internal duration.
     pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<f64> {
         if let Some(clip) = self.vector_clips.get(clip_id) {
-            Some(clip.duration)
+            if clip.is_group {
+                Some(clip.duration)
+            } else {
+                Some(clip.content_duration(self.framerate))
+            }
         } else if let Some(clip) = self.video_clips.get(clip_id) {
             Some(clip.duration)
         } else if let Some(clip) = self.audio_clips.get(clip_id) {

@@ -797,7 +797,7 @@ impl NodeGraphPane {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     match crate::sample_import::scan_folder(&path) {
                         Ok(samples) => {
-                            let scan_result = crate::sample_import::build_import_layers(samples, &path);
+                            let scan_result = crate::sample_import::build_import_layers(samples);
                             let track_id = backend_track_id;
                             let dialog = crate::sample_import_dialog::SampleImportDialog::new(
                                 path, scan_result, track_id, backend_node_id, node_id,
