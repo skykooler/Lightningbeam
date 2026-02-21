@@ -1,0 +1,346 @@
+{
+  "metadata": {
+    "name": "Drum Kit",
+    "description": "Acoustic drum kit (Salamander) \u2014 GM-compatible MIDI mapping",
+    "author": "Salamander Drumkit (Public Domain)",
+    "version": 1,
+    "tags": [
+      "drums",
+      "percussion",
+      "kit",
+      "acoustic"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Drum Kit Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.001,
+        "2": 0.5,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/cowbell_p.mp3",
+            "root_key": 56,
+            "velocity_min": 0,
+            "velocity_max": 41,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/cowbell_mp.mp3",
+            "root_key": 56,
+            "velocity_min": 42,
+            "velocity_max": 83,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/cowbell_ff.mp3",
+            "root_key": 56,
+            "velocity_min": 84,
+            "velocity_max": 127,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/crash1_p.mp3",
+            "root_key": 49,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 49,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/crash1_ff.mp3",
+            "root_key": 49,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 49,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/crash2_p.mp3",
+            "root_key": 57,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 57,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/crash2_ff.mp3",
+            "root_key": 57,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 57,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/hiTom_p.mp3",
+            "root_key": 50,
+            "velocity_min": 0,
+            "velocity_max": 41,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/hiTom_f.mp3",
+            "root_key": 50,
+            "velocity_min": 42,
+            "velocity_max": 83,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/hiTom_ff.mp3",
+            "root_key": 50,
+            "velocity_min": 84,
+            "velocity_max": 127,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/hihatClosed_p.mp3",
+            "root_key": 42,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 42,
+            "key_max": 42
+          },
+          {
+            "file_path": "samples/hihatClosed_f.mp3",
+            "root_key": 42,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 42,
+            "key_max": 42
+          },
+          {
+            "file_path": "samples/hihatFoot_mp.mp3",
+            "root_key": 44,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 44,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/hihatOpen_p.mp3",
+            "root_key": 46,
+            "velocity_min": 0,
+            "velocity_max": 41,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/hihatOpen_f.mp3",
+            "root_key": 46,
+            "velocity_min": 42,
+            "velocity_max": 83,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/hihatOpen_ff.mp3",
+            "root_key": 46,
+            "velocity_min": 84,
+            "velocity_max": 127,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/kick_p.mp3",
+            "root_key": 36,
+            "velocity_min": 0,
+            "velocity_max": 41,
+            "key_min": 36,
+            "key_max": 36
+          },
+          {
+            "file_path": "samples/kick_f.mp3",
+            "root_key": 36,
+            "velocity_min": 42,
+            "velocity_max": 83,
+            "key_min": 36,
+            "key_max": 36
+          },
+          {
+            "file_path": "samples/kick_ff.mp3",
+            "root_key": 36,
+            "velocity_min": 84,
+            "velocity_max": 127,
+            "key_min": 36,
+            "key_max": 36
+          },
+          {
+            "file_path": "samples/loTom_pp.mp3",
+            "root_key": 45,
+            "velocity_min": 0,
+            "velocity_max": 41,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/loTom_mp.mp3",
+            "root_key": 45,
+            "velocity_min": 42,
+            "velocity_max": 83,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/loTom_ff.mp3",
+            "root_key": 45,
+            "velocity_min": 84,
+            "velocity_max": 127,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/ride1Bell_f.mp3",
+            "root_key": 53,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 53,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/ride1_mp.mp3",
+            "root_key": 51,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 51,
+            "key_max": 51
+          },
+          {
+            "file_path": "samples/ride1_ff.mp3",
+            "root_key": 51,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 51,
+            "key_max": 51
+          },
+          {
+            "file_path": "samples/snareOFF_p.mp3",
+            "root_key": 40,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 40,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/snareOFF_f.mp3",
+            "root_key": 40,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 40,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/snareStick_f.mp3",
+            "root_key": 37,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 37,
+            "key_max": 37
+          },
+          {
+            "file_path": "samples/snare_ghost.mp3",
+            "root_key": 38,
+            "velocity_min": 0,
+            "velocity_max": 31,
+            "key_min": 38,
+            "key_max": 38
+          },
+          {
+            "file_path": "samples/snare_mp.mp3",
+            "root_key": 38,
+            "velocity_min": 32,
+            "velocity_max": 63,
+            "key_min": 38,
+            "key_max": 38
+          },
+          {
+            "file_path": "samples/snare_f.mp3",
+            "root_key": 38,
+            "velocity_min": 64,
+            "velocity_max": 95,
+            "key_min": 38,
+            "key_max": 38
+          },
+          {
+            "file_path": "samples/snare_ff.mp3",
+            "root_key": 38,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 38,
+            "key_max": 38
+          },
+          {
+            "file_path": "samples/splash1_p.mp3",
+            "root_key": 55,
+            "velocity_min": 0,
+            "velocity_max": 63,
+            "key_min": 55,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/splash1_f.mp3",
+            "root_key": 55,
+            "velocity_min": 64,
+            "velocity_max": 127,
+            "key_min": 55,
+            "key_max": 55
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}

@@ -1,0 +1,1122 @@
+{
+  "metadata": {
+    "name": "Acoustic Guitar",
+    "description": "Nylon-string classical guitar (Raimundo 118) with three velocity layers",
+    "author": "University of Iowa MIS",
+    "version": 1,
+    "tags": [
+      "guitar",
+      "acoustic",
+      "nylon",
+      "classical"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Acoustic Guitar Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.001,
+        "2": 0.8,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/E2_pp.mp3",
+            "root_key": 40,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 0,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/F2_pp.mp3",
+            "root_key": 41,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 41,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/F#2_pp.mp3",
+            "root_key": 42,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 42,
+            "key_max": 42
+          },
+          {
+            "file_path": "samples/G2_pp.mp3",
+            "root_key": 43,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 43,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/G#2_pp.mp3",
+            "root_key": 44,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 44,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/A2_pp.mp3",
+            "root_key": 45,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/A#2_pp.mp3",
+            "root_key": 46,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/B2_pp.mp3",
+            "root_key": 47,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 47,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/C3_pp.mp3",
+            "root_key": 48,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 48,
+            "key_max": 48
+          },
+          {
+            "file_path": "samples/C#3_pp.mp3",
+            "root_key": 49,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 49,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/D3_pp.mp3",
+            "root_key": 50,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/D#3_pp.mp3",
+            "root_key": 51,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 51,
+            "key_max": 51
+          },
+          {
+            "file_path": "samples/E3_pp.mp3",
+            "root_key": 52,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 52,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/F3_pp.mp3",
+            "root_key": 53,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 53,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/F#3_pp.mp3",
+            "root_key": 54,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 54,
+            "key_max": 54
+          },
+          {
+            "file_path": "samples/G3_pp.mp3",
+            "root_key": 55,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 55,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/G#3_pp.mp3",
+            "root_key": 56,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/A3_pp.mp3",
+            "root_key": 57,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 57,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/A#3_pp.mp3",
+            "root_key": 58,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 58,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/B3_pp.mp3",
+            "root_key": 59,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 59,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/C4_pp.mp3",
+            "root_key": 60,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 60,
+            "key_max": 60
+          },
+          {
+            "file_path": "samples/C#4_pp.mp3",
+            "root_key": 61,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 61,
+            "key_max": 61
+          },
+          {
+            "file_path": "samples/D4_pp.mp3",
+            "root_key": 62,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 62,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/D#4_pp.mp3",
+            "root_key": 63,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 63,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/E4_pp.mp3",
+            "root_key": 64,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 64,
+            "key_max": 64
+          },
+          {
+            "file_path": "samples/F4_pp.mp3",
+            "root_key": 65,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 65,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/F#4_pp.mp3",
+            "root_key": 66,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 66,
+            "key_max": 66
+          },
+          {
+            "file_path": "samples/G4_pp.mp3",
+            "root_key": 67,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 67,
+            "key_max": 67
+          },
+          {
+            "file_path": "samples/G#4_pp.mp3",
+            "root_key": 68,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 68,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/A4_pp.mp3",
+            "root_key": 69,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 69,
+            "key_max": 69
+          },
+          {
+            "file_path": "samples/A#4_pp.mp3",
+            "root_key": 70,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 70,
+            "key_max": 70
+          },
+          {
+            "file_path": "samples/B4_pp.mp3",
+            "root_key": 71,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 71,
+            "key_max": 71
+          },
+          {
+            "file_path": "samples/C5_pp.mp3",
+            "root_key": 72,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 72,
+            "key_max": 72
+          },
+          {
+            "file_path": "samples/C#5_pp.mp3",
+            "root_key": 73,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 73,
+            "key_max": 73
+          },
+          {
+            "file_path": "samples/D5_pp.mp3",
+            "root_key": 74,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 74,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/D#5_pp.mp3",
+            "root_key": 75,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 75,
+            "key_max": 75
+          },
+          {
+            "file_path": "samples/E5_pp.mp3",
+            "root_key": 76,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 76,
+            "key_max": 76
+          },
+          {
+            "file_path": "samples/F5_pp.mp3",
+            "root_key": 77,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 77,
+            "key_max": 77
+          },
+          {
+            "file_path": "samples/F#5_pp.mp3",
+            "root_key": 78,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 78,
+            "key_max": 78
+          },
+          {
+            "file_path": "samples/G5_pp.mp3",
+            "root_key": 79,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 79,
+            "key_max": 79
+          },
+          {
+            "file_path": "samples/G#5_pp.mp3",
+            "root_key": 80,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 80,
+            "key_max": 80
+          },
+          {
+            "file_path": "samples/A5_pp.mp3",
+            "root_key": 81,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 81,
+            "key_max": 81
+          },
+          {
+            "file_path": "samples/A#5_pp.mp3",
+            "root_key": 82,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 82,
+            "key_max": 82
+          },
+          {
+            "file_path": "samples/B5_pp.mp3",
+            "root_key": 83,
+            "velocity_min": 0,
+            "velocity_max": 42,
+            "key_min": 83,
+            "key_max": 127
+          },
+          {
+            "file_path": "samples/E2_mf.mp3",
+            "root_key": 40,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 0,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/F2_mf.mp3",
+            "root_key": 41,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 41,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/F#2_mf.mp3",
+            "root_key": 42,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 42,
+            "key_max": 42
+          },
+          {
+            "file_path": "samples/G2_mf.mp3",
+            "root_key": 43,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 43,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/G#2_mf.mp3",
+            "root_key": 44,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 44,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/A2_mf.mp3",
+            "root_key": 45,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/A#2_mf.mp3",
+            "root_key": 46,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/B2_mf.mp3",
+            "root_key": 47,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 47,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/C3_mf.mp3",
+            "root_key": 48,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 48,
+            "key_max": 48
+          },
+          {
+            "file_path": "samples/C#3_mf.mp3",
+            "root_key": 49,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 49,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/D3_mf.mp3",
+            "root_key": 50,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/D#3_mf.mp3",
+            "root_key": 51,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 51,
+            "key_max": 51
+          },
+          {
+            "file_path": "samples/E3_mf.mp3",
+            "root_key": 52,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 52,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/F3_mf.mp3",
+            "root_key": 53,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 53,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/F#3_mf.mp3",
+            "root_key": 54,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 54,
+            "key_max": 54
+          },
+          {
+            "file_path": "samples/G3_mf.mp3",
+            "root_key": 55,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 55,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/G#3_mf.mp3",
+            "root_key": 56,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/A3_mf.mp3",
+            "root_key": 57,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 57,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/A#3_mf.mp3",
+            "root_key": 58,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 58,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/B3_mf.mp3",
+            "root_key": 59,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 59,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/C4_mf.mp3",
+            "root_key": 60,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 60,
+            "key_max": 60
+          },
+          {
+            "file_path": "samples/C#4_mf.mp3",
+            "root_key": 61,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 61,
+            "key_max": 61
+          },
+          {
+            "file_path": "samples/D4_mf.mp3",
+            "root_key": 62,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 62,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/D#4_mf.mp3",
+            "root_key": 63,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 63,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/E4_mf.mp3",
+            "root_key": 64,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 64,
+            "key_max": 64
+          },
+          {
+            "file_path": "samples/F4_mf.mp3",
+            "root_key": 65,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 65,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/F#4_mf.mp3",
+            "root_key": 66,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 66,
+            "key_max": 66
+          },
+          {
+            "file_path": "samples/G4_mf.mp3",
+            "root_key": 67,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 67,
+            "key_max": 67
+          },
+          {
+            "file_path": "samples/G#4_mf.mp3",
+            "root_key": 68,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 68,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/A4_mf.mp3",
+            "root_key": 69,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 69,
+            "key_max": 69
+          },
+          {
+            "file_path": "samples/A#4_mf.mp3",
+            "root_key": 70,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 70,
+            "key_max": 70
+          },
+          {
+            "file_path": "samples/B4_mf.mp3",
+            "root_key": 71,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 71,
+            "key_max": 71
+          },
+          {
+            "file_path": "samples/C5_mf.mp3",
+            "root_key": 72,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 72,
+            "key_max": 72
+          },
+          {
+            "file_path": "samples/C#5_mf.mp3",
+            "root_key": 73,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 73,
+            "key_max": 73
+          },
+          {
+            "file_path": "samples/D5_mf.mp3",
+            "root_key": 74,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 74,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/D#5_mf.mp3",
+            "root_key": 75,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 75,
+            "key_max": 75
+          },
+          {
+            "file_path": "samples/E5_mf.mp3",
+            "root_key": 76,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 76,
+            "key_max": 76
+          },
+          {
+            "file_path": "samples/F5_mf.mp3",
+            "root_key": 77,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 77,
+            "key_max": 77
+          },
+          {
+            "file_path": "samples/F#5_mf.mp3",
+            "root_key": 78,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 78,
+            "key_max": 78
+          },
+          {
+            "file_path": "samples/G5_mf.mp3",
+            "root_key": 79,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 79,
+            "key_max": 79
+          },
+          {
+            "file_path": "samples/G#5_mf.mp3",
+            "root_key": 80,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 80,
+            "key_max": 80
+          },
+          {
+            "file_path": "samples/A5_mf.mp3",
+            "root_key": 81,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 81,
+            "key_max": 81
+          },
+          {
+            "file_path": "samples/A#5_mf.mp3",
+            "root_key": 82,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 82,
+            "key_max": 82
+          },
+          {
+            "file_path": "samples/B5_mf.mp3",
+            "root_key": 83,
+            "velocity_min": 43,
+            "velocity_max": 95,
+            "key_min": 83,
+            "key_max": 127
+          },
+          {
+            "file_path": "samples/E2_ff.mp3",
+            "root_key": 40,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 0,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/F2_ff.mp3",
+            "root_key": 41,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 41,
+            "key_max": 41
+          },
+          {
+            "file_path": "samples/F#2_ff.mp3",
+            "root_key": 42,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 42,
+            "key_max": 42
+          },
+          {
+            "file_path": "samples/G2_ff.mp3",
+            "root_key": 43,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 43,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/G#2_ff.mp3",
+            "root_key": 44,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 44,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/A2_ff.mp3",
+            "root_key": 45,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 45,
+            "key_max": 45
+          },
+          {
+            "file_path": "samples/A#2_ff.mp3",
+            "root_key": 46,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 46,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/B2_ff.mp3",
+            "root_key": 47,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 47,
+            "key_max": 47
+          },
+          {
+            "file_path": "samples/C3_ff.mp3",
+            "root_key": 48,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 48,
+            "key_max": 48
+          },
+          {
+            "file_path": "samples/C#3_ff.mp3",
+            "root_key": 49,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 49,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/D3_ff.mp3",
+            "root_key": 50,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 50,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/D#3_ff.mp3",
+            "root_key": 51,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 51,
+            "key_max": 51
+          },
+          {
+            "file_path": "samples/E3_ff.mp3",
+            "root_key": 52,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 52,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/F3_ff.mp3",
+            "root_key": 53,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 53,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/F#3_ff.mp3",
+            "root_key": 54,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 54,
+            "key_max": 54
+          },
+          {
+            "file_path": "samples/G3_ff.mp3",
+            "root_key": 55,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 55,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/G#3_ff.mp3",
+            "root_key": 56,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 56,
+            "key_max": 56
+          },
+          {
+            "file_path": "samples/A3_ff.mp3",
+            "root_key": 57,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 57,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/A#3_ff.mp3",
+            "root_key": 58,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 58,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/B3_ff.mp3",
+            "root_key": 59,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 59,
+            "key_max": 59
+          },
+          {
+            "file_path": "samples/C4_ff.mp3",
+            "root_key": 60,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 60,
+            "key_max": 60
+          },
+          {
+            "file_path": "samples/C#4_ff.mp3",
+            "root_key": 61,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 61,
+            "key_max": 61
+          },
+          {
+            "file_path": "samples/D4_ff.mp3",
+            "root_key": 62,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 62,
+            "key_max": 62
+          },
+          {
+            "file_path": "samples/D#4_ff.mp3",
+            "root_key": 63,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 63,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/E4_ff.mp3",
+            "root_key": 64,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 64,
+            "key_max": 64
+          },
+          {
+            "file_path": "samples/F4_ff.mp3",
+            "root_key": 65,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 65,
+            "key_max": 65
+          },
+          {
+            "file_path": "samples/F#4_ff.mp3",
+            "root_key": 66,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 66,
+            "key_max": 66
+          },
+          {
+            "file_path": "samples/G4_ff.mp3",
+            "root_key": 67,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 67,
+            "key_max": 67
+          },
+          {
+            "file_path": "samples/G#4_ff.mp3",
+            "root_key": 68,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 68,
+            "key_max": 68
+          },
+          {
+            "file_path": "samples/A4_ff.mp3",
+            "root_key": 69,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 69,
+            "key_max": 69
+          },
+          {
+            "file_path": "samples/A#4_ff.mp3",
+            "root_key": 70,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 70,
+            "key_max": 70
+          },
+          {
+            "file_path": "samples/B4_ff.mp3",
+            "root_key": 71,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 71,
+            "key_max": 71
+          },
+          {
+            "file_path": "samples/C5_ff.mp3",
+            "root_key": 72,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 72,
+            "key_max": 72
+          },
+          {
+            "file_path": "samples/C#5_ff.mp3",
+            "root_key": 73,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 73,
+            "key_max": 73
+          },
+          {
+            "file_path": "samples/D5_ff.mp3",
+            "root_key": 74,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 74,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/D#5_ff.mp3",
+            "root_key": 75,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 75,
+            "key_max": 75
+          },
+          {
+            "file_path": "samples/E5_ff.mp3",
+            "root_key": 76,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 76,
+            "key_max": 76
+          },
+          {
+            "file_path": "samples/F5_ff.mp3",
+            "root_key": 77,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 77,
+            "key_max": 77
+          },
+          {
+            "file_path": "samples/F#5_ff.mp3",
+            "root_key": 78,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 78,
+            "key_max": 78
+          },
+          {
+            "file_path": "samples/G5_ff.mp3",
+            "root_key": 79,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 79,
+            "key_max": 79
+          },
+          {
+            "file_path": "samples/G#5_ff.mp3",
+            "root_key": 80,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 80,
+            "key_max": 80
+          },
+          {
+            "file_path": "samples/A5_ff.mp3",
+            "root_key": 81,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 81,
+            "key_max": 81
+          },
+          {
+            "file_path": "samples/A#5_ff.mp3",
+            "root_key": 82,
+            "velocity_min": 96,
+            "velocity_max": 127,
+            "key_min": 82,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        700.0,
+        100.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    }
+  ]
+}
