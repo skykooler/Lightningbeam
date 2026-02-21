@@ -224,6 +224,21 @@ pub enum PendingScriptSampleLoad {
     FromFile { node_id: NodeId, backend_node_id: u32, slot_index: usize },
 }
 
+/// Info about an available NAM model for amp sim selection
+pub struct NamModelInfo {
+    pub name: String,
+    pub path: String,
+    pub is_bundled: bool,
+}
+
+/// Pending AmpSim model load request from bottom_ui(), handled by the node graph pane
+pub enum PendingAmpSimLoad {
+    /// Load a known model by path (from bundled list or previously loaded)
+    FromPath { node_id: NodeId, backend_node_id: u32, path: String, name: String },
+    /// Open file dialog to browse for a .nam file
+    FromFile { node_id: NodeId, backend_node_id: u32 },
+}
+
 /// Pending sampler load request from bottom_ui(), handled by the node graph pane
 pub enum PendingSamplerLoad {
     /// Load a single clip from the audio pool into a SimpleSampler
@@ -277,8 +292,12 @@ pub struct GraphState {
     pub pending_draw_param_changes: Vec<(NodeId, u32, f32)>,
     /// Active sample import dialog (folder import with heuristic mapping)
     pub sample_import_dialog: Option<crate::sample_import_dialog::SampleImportDialog>,
-    /// Pending AmpSim model load (node_id, backend_node_id) — triggers file dialog for .nam
-    pub pending_amp_sim_load: Option<(NodeId, u32)>,
+    /// Pending AmpSim model load — triggers file dialog or direct load
+    pub pending_amp_sim_load: Option<PendingAmpSimLoad>,
+    /// Available NAM models for amp sim selection, populated before draw
+    pub available_nam_models: Vec<NamModelInfo>,
+    /// Search text for the NAM model picker popup
+    pub nam_search_text: String,
 }
 
 impl Default for GraphState {
@@ -303,6 +322,8 @@ impl Default for GraphState {
             pending_draw_param_changes: Vec::new(),
             sample_import_dialog: None,
             pending_amp_sim_load: None,
+            available_nam_models: Vec::new(),
+            nam_search_text: String::new(),
         }
     }
 }
@@ -1400,9 +1421,77 @@ impl NodeDataTrait for NodeData {
             }
         } else if self.template == NodeTemplate::AmpSim {
             let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
-            let button_text = self.nam_model_name.as_deref().unwrap_or("Load Model...");
-            if ui.button(button_text).clicked() {
-                user_state.pending_amp_sim_load = Some((node_id, backend_node_id));
+            let button_text = self.nam_model_name.as_deref().unwrap_or("Select Model...");
+
+            let button = ui.button(button_text);
+            if button.clicked() {
+                user_state.nam_search_text.clear();
+            }
+            let popup_id = egui::Popup::default_response_id(&button);
+
+            let mut close_popup = false;
+            egui::Popup::from_toggle_button_response(&button)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .width(200.0)
+                .show(|ui| {
+                let search_width = ui.available_width();
+                ui.add_sized([search_width, 0.0], egui::TextEdit::singleline(&mut user_state.nam_search_text).hint_text("Search..."));
+                ui.separator();
+                let search = user_state.nam_search_text.to_lowercase();
+
+                let bundled: Vec<&NamModelInfo> = user_state.available_nam_models.iter()
+                    .filter(|m| m.is_bundled && (search.is_empty() || m.name.to_lowercase().contains(&search)))
+                    .collect();
+                let user_models: Vec<&NamModelInfo> = user_state.available_nam_models.iter()
+                    .filter(|m| !m.is_bundled && (search.is_empty() || m.name.to_lowercase().contains(&search)))
+                    .collect();
+
+                if !bundled.is_empty() {
+                    ui.label(egui::RichText::new("Bundled").small().weak());
+                    let items = bundled.iter().map(|m| {
+                        let selected = self.nam_model_name.as_deref() == Some(m.name.as_str());
+                        (selected, m.name.as_str())
+                    });
+                    if let Some(idx) = widgets::scrollable_list(ui, 200.0, items) {
+                        let model = bundled[idx];
+                        user_state.pending_amp_sim_load = Some(PendingAmpSimLoad::FromPath {
+                            node_id, backend_node_id,
+                            path: model.path.clone(),
+                            name: model.name.clone(),
+                        });
+                        close_popup = true;
+                    }
+                }
+
+                if !user_models.is_empty() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("User").small().weak());
+                    let items = user_models.iter().map(|m| {
+                        let selected = self.nam_model_name.as_deref() == Some(m.name.as_str());
+                        (selected, m.name.as_str())
+                    });
+                    if let Some(idx) = widgets::scrollable_list(ui, 200.0, items) {
+                        let model = user_models[idx];
+                        user_state.pending_amp_sim_load = Some(PendingAmpSimLoad::FromPath {
+                            node_id, backend_node_id,
+                            path: model.path.clone(),
+                            name: model.name.clone(),
+                        });
+                        close_popup = true;
+                    }
+                }
+
+                ui.separator();
+                if ui.button("Open...").clicked() {
+                    user_state.pending_amp_sim_load = Some(PendingAmpSimLoad::FromFile {
+                        node_id, backend_node_id,
+                    });
+                    close_popup = true;
+                }
+            });
+
+            if close_popup {
+                egui::Popup::close_id(ui.ctx(), popup_id);
             }
         } else {
             ui.label("");

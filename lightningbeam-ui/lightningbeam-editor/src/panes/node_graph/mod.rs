@@ -8,7 +8,7 @@ pub mod backend;
 pub mod graph_data;
 
 use backend::{BackendNodeId, GraphBackend};
-use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, VoiceAllocatorNodeTemplates, DataType, GraphState, NodeData, NodeTemplate, ValueType};
+use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, VoiceAllocatorNodeTemplates, DataType, GraphState, NamModelInfo, NodeData, NodeTemplate, PendingAmpSimLoad, ValueType};
 use super::NodePath;
 use eframe::egui;
 use egui_node_graph2::*;
@@ -403,6 +403,20 @@ impl NodeGraphPane {
                                                     );
                                                     self.node_id_map.insert(node_id, backend_id);
                                                     self.backend_to_frontend_map.insert(backend_id, node_id);
+
+                                                    // Auto-load default NAM model for new AmpSim nodes
+                                                    if node_type == "AmpSim" {
+                                                        if let Some(model) = self.user_state.available_nam_models.iter().find(|m| m.is_bundled) {
+                                                            controller.amp_sim_load_model(
+                                                                backend_track_id,
+                                                                backend_node.id,
+                                                                model.path.clone(),
+                                                            );
+                                                            if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                                                                node.user_data.nam_model_name = Some(model.name.clone());
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -665,6 +679,20 @@ impl NodeGraphPane {
                                             );
                                             self.node_id_map.insert(frontend_id, backend_id);
                                             self.backend_to_frontend_map.insert(backend_id, frontend_id);
+
+                                            // Auto-load default NAM model for new AmpSim nodes
+                                            if node_type == "AmpSim" {
+                                                if let Some(model) = self.user_state.available_nam_models.iter().find(|m| m.is_bundled) {
+                                                    controller.amp_sim_load_model(
+                                                        backend_track_id,
+                                                        backend_node.id,
+                                                        model.path.clone(),
+                                                    );
+                                                    if let Some(node) = self.state.graph.nodes.get_mut(frontend_id) {
+                                                        node.user_data.nam_model_name = Some(model.name.clone());
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -2469,6 +2497,46 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                     .collect();
                 self.user_state.available_scripts.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
+                // Bundled NAM models — discover once and cache
+                if self.user_state.available_nam_models.is_empty() {
+                    let bundled_dirs = [
+                        std::env::current_exe().ok()
+                            .and_then(|p| p.parent().map(|d| d.join("models")))
+                            .unwrap_or_default(),
+                        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../vendor/NeuralAudio/Utils/Models"),
+                    ];
+                    for dir in &bundled_dirs {
+                        if let Ok(canon) = dir.canonicalize() {
+                            if canon.is_dir() {
+                                for entry in std::fs::read_dir(&canon).into_iter().flatten().flatten() {
+                                    let path = entry.path();
+                                    if path.extension().map_or(false, |e| e == "nam") {
+                                        let stem = path.file_stem()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        // Skip LSTM variants (performance alternates, not separate amps)
+                                        if stem.ends_with("-LSTM") {
+                                            continue;
+                                        }
+                                        // Clean up display name: remove "-WaveNet" suffix
+                                        let name = stem.strip_suffix("-WaveNet")
+                                            .unwrap_or(&stem)
+                                            .to_string();
+                                        self.user_state.available_nam_models.push(NamModelInfo {
+                                            name,
+                                            path: path.to_string_lossy().to_string(),
+                                            is_bundled: true,
+                                        });
+                                    }
+                                }
+                                break; // use first directory found
+                            }
+                        }
+                    }
+                    self.user_state.available_nam_models.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+
                 // Node backend ID map
                 self.user_state.node_backend_ids = self.node_id_map.iter()
                     .map(|(&node_id, backend_id)| {
@@ -2518,25 +2586,45 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             }
 
             // Handle pending AmpSim model load from bottom_ui()
-            if let Some((node_id, backend_node_id)) = self.user_state.pending_amp_sim_load.take() {
+            if let Some(load) = self.user_state.pending_amp_sim_load.take() {
                 if let Some(backend_track_id) = self.backend_track_id {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("NAM Model", &["nam"])
-                        .pick_file()
-                    {
-                        let model_name = path.file_stem()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "Model".to_string());
-                        if let Some(controller_arc) = &shared.audio_controller {
-                            let mut controller = controller_arc.lock().unwrap();
-                            controller.amp_sim_load_model(
-                                backend_track_id,
-                                backend_node_id,
-                                path.to_string_lossy().to_string(),
-                            );
-                        }
-                        if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
-                            node.user_data.nam_model_name = Some(model_name);
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        match load {
+                            PendingAmpSimLoad::FromPath { node_id, backend_node_id, path, name } => {
+                                controller_arc.lock().unwrap().amp_sim_load_model(
+                                    backend_track_id, backend_node_id, path,
+                                );
+                                if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                                    node.user_data.nam_model_name = Some(name);
+                                }
+                            }
+                            PendingAmpSimLoad::FromFile { node_id, backend_node_id } => {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("NAM Model", &["nam"])
+                                    .pick_file()
+                                {
+                                    let model_name = path.file_stem()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "Model".to_string());
+                                    controller_arc.lock().unwrap().amp_sim_load_model(
+                                        backend_track_id,
+                                        backend_node_id,
+                                        path.to_string_lossy().to_string(),
+                                    );
+                                    if let Some(node) = self.state.graph.nodes.get_mut(node_id) {
+                                        node.user_data.nam_model_name = Some(model_name.clone());
+                                    }
+                                    // Add user-loaded model to the available list if not already present
+                                    let path_str = path.to_string_lossy().to_string();
+                                    if !self.user_state.available_nam_models.iter().any(|m| m.path == path_str) {
+                                        self.user_state.available_nam_models.push(NamModelInfo {
+                                            name: model_name,
+                                            path: path_str,
+                                            is_bundled: false,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
