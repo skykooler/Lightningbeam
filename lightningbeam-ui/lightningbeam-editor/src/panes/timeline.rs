@@ -20,18 +20,74 @@ const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim han
 const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
 const MIN_CLIP_WIDTH_PX: f32 = 8.0; // Minimum visible width for very short clips (e.g. groups)
 
-/// Calculate vertical bounds for a clip instance within a layer row.
-/// For vector layers with multiple clip instances, stacks them vertically.
-/// Returns (y_min, y_max) relative to the layer top.
-fn clip_instance_y_bounds(
+/// Compute stacking row assignments for clip instances on a vector layer.
+/// Only clips that overlap in time are stacked; non-overlapping clips share row 0.
+/// Returns a Vec of (row, total_rows) for each clip instance.
+fn compute_clip_stacking_from_ranges(
+    ranges: &[(f64, f64)],
+) -> Vec<(usize, usize)> {
+    if ranges.len() <= 1 {
+        return vec![(0, 1); ranges.len()];
+    }
+
+    // Greedy row assignment: assign each clip to the first row where it doesn't overlap
+    let mut row_assignments = vec![0usize; ranges.len()];
+    let mut row_ends: Vec<f64> = Vec::new(); // track the end time of the last clip in each row
+
+    // Sort indices by start time for greedy packing
+    let mut sorted_indices: Vec<usize> = (0..ranges.len()).collect();
+    sorted_indices.sort_by(|&a, &b| ranges[a].0.partial_cmp(&ranges[b].0).unwrap_or(std::cmp::Ordering::Equal));
+
+    for &idx in &sorted_indices {
+        let (start, end) = ranges[idx];
+        // Find first row where this clip fits (no overlap)
+        let mut assigned_row = None;
+        for (row, row_end) in row_ends.iter_mut().enumerate() {
+            if start >= *row_end {
+                *row_end = end;
+                assigned_row = Some(row);
+                break;
+            }
+        }
+        if let Some(row) = assigned_row {
+            row_assignments[idx] = row;
+        } else {
+            row_assignments[idx] = row_ends.len();
+            row_ends.push(end);
+        }
+    }
+
+    let total_rows = row_ends.len().max(1);
+    row_assignments.iter().map(|&row| (row, total_rows)).collect()
+}
+
+fn compute_clip_stacking(
+    document: &lightningbeam_core::document::Document,
     layer: &AnyLayer,
-    clip_index: usize,
-    clip_count: usize,
-) -> (f32, f32) {
-    if matches!(layer, AnyLayer::Vector(_)) && clip_count > 1 {
+    clip_instances: &[lightningbeam_core::clip::ClipInstance],
+) -> Vec<(usize, usize)> {
+    if !matches!(layer, AnyLayer::Vector(_)) || clip_instances.len() <= 1 {
+        return vec![(0, 1); clip_instances.len()];
+    }
+
+    let ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
+        let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(0.0);
+        let start = ci.effective_start();
+        let end = start + ci.total_duration(clip_dur);
+        (start, end)
+    }).collect();
+
+    compute_clip_stacking_from_ranges(&ranges)
+}
+
+/// Calculate vertical bounds for a clip instance within a layer row.
+/// `row` is the stacking row (0-based), `total_rows` is the total number of rows needed.
+/// Returns (y_min, y_max) relative to the layer top.
+fn clip_instance_y_bounds(row: usize, total_rows: usize) -> (f32, f32) {
+    if total_rows > 1 {
         let usable_height = LAYER_HEIGHT - 20.0; // 10px padding top/bottom
-        let row_height = (usable_height / clip_count as f32).min(20.0);
-        let top = 10.0 + clip_index as f32 * row_height;
+        let row_height = (usable_height / total_rows as f32).min(20.0);
+        let top = 10.0 + row as f32 * row_height;
         (top, top + row_height - 1.0)
     } else {
         (10.0, LAYER_HEIGHT - 10.0)
@@ -374,7 +430,7 @@ impl TimelinePane {
         };
 
         // Check each clip instance
-        let clip_count = clip_instances.len();
+        let stacking = compute_clip_stacking(document, layer, clip_instances);
         for (ci_idx, clip_instance) in clip_instances.iter().enumerate() {
             let clip_duration = effective_clip_duration(document, layer, clip_instance)?;
 
@@ -389,7 +445,8 @@ impl TimelinePane {
             if mouse_x >= start_x && mouse_x <= end_x {
                 // Check vertical bounds for stacked vector layer clips
                 let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
-                let (cy_min, cy_max) = clip_instance_y_bounds(layer, ci_idx, clip_count);
+                let (row, total_rows) = stacking[ci_idx];
+                let (cy_min, cy_max) = clip_instance_y_bounds(row, total_rows);
                 let mouse_rel_y = pointer_pos.y - layer_top;
                 if mouse_rel_y < cy_min || mouse_rel_y > cy_max {
                     continue;
@@ -1096,7 +1153,71 @@ impl TimelinePane {
                 None
             };
 
-            let clip_instance_count = clip_instances.len();
+            // Compute stacking using preview positions (with drag offsets) for vector layers
+            let clip_stacking = if matches!(layer, AnyLayer::Vector(_)) && clip_instances.len() > 1 {
+                let preview_ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
+                    let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(0.0);
+                    let mut start = ci.effective_start();
+                    let mut duration = ci.total_duration(clip_dur);
+
+                    let is_selected = selection.contains_clip_instance(&ci.id);
+                    let is_linked = if self.clip_drag_state.is_some() {
+                        instance_to_group.get(&ci.id).map_or(false, |group| {
+                            group.members.iter().any(|(_, mid)| *mid != ci.id && selection.contains_clip_instance(mid))
+                        })
+                    } else {
+                        false
+                    };
+
+                    if let Some(drag_type) = self.clip_drag_state {
+                        if is_selected || is_linked {
+                            match drag_type {
+                                ClipDragType::Move => {
+                                    if let Some(offset) = group_move_offset {
+                                        start = (ci.effective_start() + offset).max(0.0);
+                                    }
+                                }
+                                ClipDragType::TrimLeft => {
+                                    let new_trim = (ci.trim_start + self.drag_offset).max(0.0).min(clip_dur);
+                                    let offset = new_trim - ci.trim_start;
+                                    start = (ci.timeline_start + offset).max(0.0);
+                                    duration = (clip_dur - new_trim).max(0.0);
+                                    if let Some(trim_end) = ci.trim_end {
+                                        duration = (trim_end - new_trim).max(0.0);
+                                    }
+                                }
+                                ClipDragType::TrimRight => {
+                                    let old_trim_end = ci.trim_end.unwrap_or(clip_dur);
+                                    let new_trim_end = (old_trim_end + self.drag_offset).max(ci.trim_start).min(clip_dur);
+                                    duration = (new_trim_end - ci.trim_start).max(0.0);
+                                }
+                                ClipDragType::LoopExtendRight => {
+                                    let trim_end = ci.trim_end.unwrap_or(clip_dur);
+                                    let content_window = (trim_end - ci.trim_start).max(0.0);
+                                    let current_right = ci.timeline_duration.unwrap_or(content_window);
+                                    let new_right = (current_right + self.drag_offset).max(content_window);
+                                    let loop_before = ci.loop_before.unwrap_or(0.0);
+                                    duration = loop_before + new_right;
+                                }
+                                ClipDragType::LoopExtendLeft => {
+                                    let trim_end = ci.trim_end.unwrap_or(clip_dur);
+                                    let content_window = (trim_end - ci.trim_start).max(0.001);
+                                    let current_loop_before = ci.loop_before.unwrap_or(0.0);
+                                    let desired = (current_loop_before - self.drag_offset).max(0.0);
+                                    let snapped = (desired / content_window).round() * content_window;
+                                    start = ci.timeline_start - snapped;
+                                    duration = snapped + ci.effective_duration(clip_dur);
+                                }
+                            }
+                        }
+                    }
+
+                    (start, start + duration)
+                }).collect();
+                compute_clip_stacking_from_ranges(&preview_ranges)
+            } else {
+                compute_clip_stacking(document, layer, clip_instances)
+            };
             for (clip_instance_index, clip_instance) in clip_instances.iter().enumerate() {
                 // Get the clip to determine duration
                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
@@ -1314,7 +1435,8 @@ impl TimelinePane {
                             ),
                         };
 
-                        let (cy_min, cy_max) = clip_instance_y_bounds(layer, clip_instance_index, clip_instance_count);
+                        let (row, total_rows) = clip_stacking[clip_instance_index];
+                        let (cy_min, cy_max) = clip_instance_y_bounds(row, total_rows);
 
                         let clip_rect = egui::Rect::from_min_max(
                             egui::pos2(rect.min.x + visible_start_x, y + cy_min),
@@ -1787,7 +1909,7 @@ impl TimelinePane {
                             };
 
                             // Check if click is within any clip instance
-                            let click_clip_count = clip_instances.len();
+                            let click_stacking = compute_clip_stacking(document, layer, clip_instances);
                             let click_layer_top = pos.y - (relative_y % LAYER_HEIGHT);
                             for (ci_idx, clip_instance) in clip_instances.iter().enumerate() {
                                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
@@ -1801,7 +1923,8 @@ impl TimelinePane {
                                     let ci_start_x = self.time_to_x(instance_start);
                                     let ci_end_x = self.time_to_x(instance_end).max(ci_start_x + MIN_CLIP_WIDTH_PX);
                                     let click_x = pos.x - content_rect.min.x;
-                                    let (cy_min, cy_max) = clip_instance_y_bounds(layer, ci_idx, click_clip_count);
+                                    let (row, total_rows) = click_stacking[ci_idx];
+                                    let (cy_min, cy_max) = clip_instance_y_bounds(row, total_rows);
                                     let click_rel_y = pos.y - click_layer_top;
                                     if click_x >= ci_start_x && click_x <= ci_end_x
                                         && click_rel_y >= cy_min && click_rel_y <= cy_max
