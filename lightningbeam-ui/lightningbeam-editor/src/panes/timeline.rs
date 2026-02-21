@@ -1253,7 +1253,8 @@ impl TimelinePane {
 
                     // Track preview trim values for waveform rendering
                     let mut preview_trim_start = clip_instance.trim_start;
-                    let mut preview_clip_duration = clip_duration;
+                    let preview_trim_end_default = clip_instance.trim_end.unwrap_or(clip_duration);
+                    let mut preview_clip_duration = (preview_trim_end_default - preview_trim_start).max(0.0);
 
                     if let Some(drag_type) = self.clip_drag_state {
                         if is_selected || is_linked_to_dragged {
@@ -1301,6 +1302,7 @@ impl TimelinePane {
 
                                     // Update preview trim for waveform rendering
                                     preview_trim_start = new_trim_start;
+                                    preview_clip_duration = instance_duration;
                                 }
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
@@ -1443,8 +1445,8 @@ impl TimelinePane {
 
                         // Draw the clip instance background(s)
                         // For looping clips, draw each iteration as a separate rounded rect
-                        let trim_end_for_bg = clip_instance.trim_end.unwrap_or(clip_duration);
-                        let content_window_for_bg = (trim_end_for_bg - clip_instance.trim_start).max(0.0);
+                        // Use preview_clip_duration so trim drag previews don't show false loop iterations
+                        let content_window_for_bg = preview_clip_duration.max(0.0);
                         let is_looping_bg = instance_duration > content_window_for_bg + 0.001 && content_window_for_bg > 0.0;
 
                         if is_looping_bg {
@@ -1502,8 +1504,8 @@ impl TimelinePane {
                                     lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } => {
                                         if let Some(events) = midi_event_cache.get(midi_clip_id) {
                                             // Calculate content window for loop detection
-                                            let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                            let content_window = (preview_trim_end - preview_trim_start).max(0.0);
+                                            // preview_clip_duration accounts for TrimLeft/TrimRight drag previews
+                                            let content_window = preview_clip_duration.max(0.0);
                                             let is_looping = instance_duration > content_window + 0.001;
 
                                             if is_looping && content_window > 0.0 {
@@ -1527,7 +1529,7 @@ impl TimelinePane {
                                                         clip_rect,
                                                         rect.min.x,
                                                         events,
-                                                        clip_instance.trim_start,
+                                                        preview_trim_start,
                                                         iter_duration,
                                                         iter_start,
                                                         self.viewport_start_time,
@@ -1543,7 +1545,7 @@ impl TimelinePane {
                                                     clip_rect,
                                                     rect.min.x,
                                                     events,
-                                                    clip_instance.trim_start,
+                                                    preview_trim_start,
                                                     instance_duration,
                                                     instance_start,
                                                     self.viewport_start_time,

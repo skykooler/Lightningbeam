@@ -1898,6 +1898,9 @@ impl EditorApp {
                     self.selection.add_shape(id);
                 }
             }
+            ClipboardContent::MidiNotes { .. } => {
+                // MIDI notes are pasted directly in the piano roll pane, not here
+            }
         }
     }
 
@@ -1912,42 +1915,97 @@ impl EditorApp {
             None => return,
         };
 
-        let document = self.action_executor.document();
-        let selection = &self.selection;
+        // Gather all data from document in a scoped block so the borrow is released
+        let (_clips_to_duplicate, midi_clip_replacements, duplicates, cache_copies) = {
+            let document = self.action_executor.document();
+            let selection = &self.selection;
 
-        // Find selected clip instances on the active layer
-        let clips_to_duplicate: Vec<lightningbeam_core::clip::ClipInstance> = {
-            let layer = match document.get_layer(&active_layer_id) {
-                Some(l) => l,
-                None => return,
+            // Find selected clip instances on the active layer
+            let clips_to_duplicate: Vec<lightningbeam_core::clip::ClipInstance> = {
+                let layer = match document.get_layer(&active_layer_id) {
+                    Some(l) => l,
+                    None => return,
+                };
+                let instances = match layer {
+                    AnyLayer::Vector(vl) => &vl.clip_instances,
+                    AnyLayer::Audio(al) => &al.clip_instances,
+                    AnyLayer::Video(vl) => &vl.clip_instances,
+                    AnyLayer::Effect(el) => &el.clip_instances,
+                };
+                instances.iter()
+                    .filter(|ci| selection.contains_clip_instance(&ci.id))
+                    .cloned()
+                    .collect()
             };
-            let instances = match layer {
-                AnyLayer::Vector(vl) => &vl.clip_instances,
-                AnyLayer::Audio(al) => &al.clip_instances,
-                AnyLayer::Video(vl) => &vl.clip_instances,
-                AnyLayer::Effect(el) => &el.clip_instances,
-            };
-            instances.iter()
-                .filter(|ci| selection.contains_clip_instance(&ci.id))
-                .cloned()
-                .collect()
+
+            if clips_to_duplicate.is_empty() {
+                return;
+            }
+
+            // For MIDI clips, duplicate the backend clip to get independent note data.
+            let mut midi_clip_replacements: std::collections::HashMap<uuid::Uuid, (uuid::Uuid, lightningbeam_core::clip::AudioClip)> = std::collections::HashMap::new();
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                for original in &clips_to_duplicate {
+                    if let Some(clip) = document.audio_clips.get(&original.clip_id) {
+                        if let lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } = clip.clip_type {
+                            let query = daw_backend::command::types::Query::DuplicateMidiClipSync(midi_clip_id);
+                            if let Ok(daw_backend::command::types::QueryResponse::MidiClipDuplicated(Ok(new_midi_id))) = controller.send_query(query) {
+                                let new_clip_def_id = uuid::Uuid::new_v4();
+                                let mut new_clip = clip.clone();
+                                new_clip.id = new_clip_def_id;
+                                new_clip.clip_type = lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id: new_midi_id };
+                                new_clip.name = format!("{} (copy)", clip.name);
+                                midi_clip_replacements.insert(original.clip_id, (new_clip_def_id, new_clip));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build duplicate instances
+            let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
+                let mut duplicate = original.clone();
+                duplicate.id = uuid::Uuid::new_v4();
+                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
+                let effective_duration = original.effective_duration(clip_duration);
+                duplicate.timeline_start = original.timeline_start + effective_duration;
+                if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
+                    duplicate.clip_id = *new_clip_def_id;
+                }
+                duplicate
+            }).collect();
+
+            // Collect old->new MIDI clip ID pairs for cache copying
+            let cache_copies: Vec<(u32, u32)> = clips_to_duplicate.iter()
+                .filter_map(|original| {
+                    let (_, new_clip) = midi_clip_replacements.get(&original.clip_id)?;
+                    let old_midi_id = document.audio_clips.get(&original.clip_id)?.midi_clip_id()?;
+                    if let lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id: new_midi_id } = new_clip.clip_type {
+                        Some((old_midi_id, new_midi_id))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            (clips_to_duplicate, midi_clip_replacements, duplicates, cache_copies)
         };
-
-        if clips_to_duplicate.is_empty() {
-            return;
-        }
-
-        // Collect all duplicate instances upfront to release the document borrow
-        let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
-            let mut duplicate = original.clone();
-            duplicate.id = uuid::Uuid::new_v4();
-            let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
-            let effective_duration = original.effective_duration(clip_duration);
-            duplicate.timeline_start = original.timeline_start + effective_duration;
-            duplicate
-        }).collect();
+        // document borrow is now released
 
         let new_ids: Vec<uuid::Uuid> = duplicates.iter().map(|d| d.id).collect();
+
+        // Copy MIDI event cache entries
+        for (old_midi_id, new_midi_id) in cache_copies {
+            if let Some(events) = self.midi_event_cache.get(&old_midi_id).cloned() {
+                self.midi_event_cache.insert(new_midi_id, events);
+            }
+        }
+
+        // Register the new MIDI clip definitions in the document
+        for (_, (new_clip_def_id, new_clip)) in &midi_clip_replacements {
+            self.action_executor.document_mut().audio_clips.insert(*new_clip_def_id, new_clip.clone());
+        }
 
         for duplicate in duplicates {
             let action = AddClipInstanceAction::new(active_layer_id, duplicate);
@@ -4632,6 +4690,7 @@ impl eframe::App for EditorApp {
 
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
+        let mut clipboard_consumed = false;
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
 
@@ -4753,6 +4812,7 @@ impl eframe::App for EditorApp {
                 region_selection: &mut self.region_selection,
                 region_select_mode: &mut self.region_select_mode,
                 pending_graph_loads: &self.pending_graph_loads,
+                clipboard_consumed: &mut clipboard_consumed,
             };
 
             render_layout_node(
@@ -4908,18 +4968,21 @@ impl eframe::App for EditorApp {
             // Handle clipboard events (Ctrl+C/X/V) — winit converts these to
             // Event::Copy/Cut/Paste instead of regular key events, so
             // check_shortcuts won't see them via key_pressed().
-            for event in &i.events {
-                match event {
-                    egui::Event::Copy => {
-                        self.handle_menu_action(MenuAction::Copy);
+            // Skip if a pane (e.g. piano roll) already handled the clipboard event.
+            if !clipboard_consumed {
+                for event in &i.events {
+                    match event {
+                        egui::Event::Copy => {
+                            self.handle_menu_action(MenuAction::Copy);
+                        }
+                        egui::Event::Cut => {
+                            self.handle_menu_action(MenuAction::Cut);
+                        }
+                        egui::Event::Paste(_) => {
+                            self.handle_menu_action(MenuAction::Paste);
+                        }
+                        _ => {}
                     }
-                    egui::Event::Cut => {
-                        self.handle_menu_action(MenuAction::Cut);
-                    }
-                    egui::Event::Paste(_) => {
-                        self.handle_menu_action(MenuAction::Paste);
-                    }
-                    _ => {}
                 }
             }
 
@@ -5089,6 +5152,8 @@ struct RenderContext<'a> {
     region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
     /// Counter for in-flight graph preset loads (keeps repaint loop alive)
     pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set by panes when they handle Ctrl+C/X/V internally
+    clipboard_consumed: &'a mut bool,
 }
 
 /// Recursively render a layout node with drag support
@@ -5576,6 +5641,7 @@ fn render_pane(
                 region_selection: ctx.region_selection,
                 region_select_mode: ctx.region_select_mode,
                 pending_graph_loads: ctx.pending_graph_loads,
+                clipboard_consumed: ctx.clipboard_consumed,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
@@ -5657,6 +5723,7 @@ fn render_pane(
                 region_selection: ctx.region_selection,
                 region_select_mode: ctx.region_select_mode,
                 pending_graph_loads: ctx.pending_graph_loads,
+                clipboard_consumed: ctx.clipboard_consumed,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,

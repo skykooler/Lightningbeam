@@ -252,7 +252,7 @@ impl PianoRollPane {
             for instance in &audio_layer.clip_instances {
                 if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                     if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
-                        let duration = instance.timeline_duration.unwrap_or(clip.duration);
+                        let duration = instance.effective_duration(clip.duration);
                         clip_data.push((midi_clip_id, instance.timeline_start, instance.trim_start, duration, instance.id));
                     }
                 }
@@ -325,7 +325,7 @@ impl PianoRollPane {
             // Render notes
             if let Some(events) = shared.midi_event_cache.get(&midi_clip_id) {
                 let resolved = Self::resolve_notes(events);
-                self.render_notes(&grid_painter, grid_rect, &resolved, timeline_start, trim_start, opacity, is_selected);
+                self.render_notes(&grid_painter, grid_rect, &resolved, timeline_start, trim_start, duration, opacity, is_selected);
             }
         }
 
@@ -333,7 +333,8 @@ impl PianoRollPane {
         if let Some(ref temp) = self.creating_note {
             if let Some(selected_clip) = clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id) {
                 let timeline_start = selected_clip.1;
-                let x = self.time_to_x(timeline_start + temp.start_time, grid_rect);
+                let trim_start = selected_clip.2;
+                let x = self.time_to_x(timeline_start + (temp.start_time - trim_start), grid_rect);
                 let y = self.note_to_y(temp.note, grid_rect);
                 let w = (temp.duration as f32 * self.pixels_per_second).max(2.0);
                 let note_rect = Rect::from_min_size(pos2(x, y), vec2(w, self.note_height - 2.0));
@@ -488,12 +489,21 @@ impl PianoRollPane {
         grid_rect: Rect,
         notes: &[ResolvedNote],
         clip_timeline_start: f64,
-        _trim_start: f64,
+        trim_start: f64,
+        clip_duration: f64,
         opacity: f32,
         is_selected_clip: bool,
     ) {
         for (i, note) in notes.iter().enumerate() {
-            let global_time = clip_timeline_start + note.start_time;
+            // Skip notes entirely outside the visible trim window
+            if note.start_time + note.duration <= trim_start {
+                continue;
+            }
+            if note.start_time >= trim_start + clip_duration {
+                continue;
+            }
+
+            let global_time = clip_timeline_start + (note.start_time - trim_start);
 
             // Apply drag offset for selected notes during move
             let (display_time, display_note) = if is_selected_clip
@@ -697,6 +707,49 @@ impl PianoRollPane {
             }
         }
 
+        // Copy/Cut/Paste — winit converts Ctrl+C/X/V to Event::Copy/Cut/Paste
+        let (has_copy, has_cut, has_paste) = ui.input(|i| {
+            let mut copy = false;
+            let mut cut = false;
+            let mut paste = false;
+            for event in &i.events {
+                match event {
+                    egui::Event::Copy => copy = true,
+                    egui::Event::Cut => cut = true,
+                    egui::Event::Paste(_) => paste = true,
+                    _ => {}
+                }
+            }
+            (copy, cut, paste)
+        });
+
+        if has_copy && !self.selected_note_indices.is_empty() {
+            if let Some(clip_id) = self.selected_clip_id {
+                self.copy_selected_notes(clip_id, shared);
+                *shared.clipboard_consumed = true;
+            }
+        }
+
+        if has_cut && !self.selected_note_indices.is_empty() {
+            if let Some(clip_id) = self.selected_clip_id {
+                self.copy_selected_notes(clip_id, shared);
+                self.delete_selected_notes(clip_id, shared, clip_data);
+                *shared.clipboard_consumed = true;
+            }
+        }
+
+        if has_paste {
+            if let Some(clip_id) = self.selected_clip_id {
+                // Only consume if clipboard has MIDI notes
+                if shared.clipboard_manager.has_content() {
+                    if let Some(lightningbeam_core::clipboard::ClipboardContent::MidiNotes { .. }) = shared.clipboard_manager.paste() {
+                        self.paste_notes(clip_id, shared, clip_data);
+                        *shared.clipboard_consumed = true;
+                    }
+                }
+            }
+        }
+
         // Immediate press detection (fires on the actual press frame, before egui's drag threshold).
         // This ensures note preview and hit testing use the real press position.
         let pointer_just_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
@@ -823,7 +876,8 @@ impl PianoRollPane {
             // Create new note
             if let Some(selected_clip) = clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id) {
                 let clip_start = selected_clip.1;
-                let clip_local_time = (time - clip_start).max(0.0);
+                let trim_start = selected_clip.2;
+                let clip_local_time = (time - clip_start).max(0.0) + trim_start;
                 self.creating_note = Some(TempNote {
                     note,
                     start_time: clip_local_time,
@@ -857,7 +911,8 @@ impl PianoRollPane {
                 if let Some(ref mut temp) = self.creating_note {
                     if let Some(selected_clip) = clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id) {
                         let clip_start = selected_clip.1;
-                        let clip_local_time = (time - clip_start).max(0.0);
+                        let trim_start = selected_clip.2;
+                        let clip_local_time = (time - clip_start).max(0.0) + trim_start;
                         temp.duration = (clip_local_time - temp.start_time).max(MIN_NOTE_DURATION);
                     }
                 }
@@ -951,9 +1006,15 @@ impl PianoRollPane {
         let resolved = Self::resolve_notes(events);
         let clip_info = clip_data.iter().find(|c| c.0 == clip_id)?;
         let timeline_start = clip_info.1;
+        let trim_start = clip_info.2;
+        let clip_duration = clip_info.3;
 
         for (i, note) in resolved.iter().enumerate().rev() {
-            let x = self.time_to_x(timeline_start + note.start_time, grid_rect);
+            // Skip notes outside trim window
+            if note.start_time + note.duration <= trim_start || note.start_time >= trim_start + clip_duration {
+                continue;
+            }
+            let x = self.time_to_x(timeline_start + (note.start_time - trim_start), grid_rect);
             let y = self.note_to_y(note.note, grid_rect);
             let w = (note.duration as f32 * self.pixels_per_second).max(2.0);
             let note_rect = Rect::from_min_size(pos2(x, y), vec2(w, self.note_height - 2.0));
@@ -977,9 +1038,15 @@ impl PianoRollPane {
         let resolved = Self::resolve_notes(events);
         let clip_info = clip_data.iter().find(|c| c.0 == clip_id)?;
         let timeline_start = clip_info.1;
+        let trim_start = clip_info.2;
+        let clip_duration = clip_info.3;
 
         for (i, note) in resolved.iter().enumerate().rev() {
-            let x = self.time_to_x(timeline_start + note.start_time, grid_rect);
+            // Skip notes outside trim window
+            if note.start_time + note.duration <= trim_start || note.start_time >= trim_start + clip_duration {
+                continue;
+            }
+            let x = self.time_to_x(timeline_start + (note.start_time - trim_start), grid_rect);
             let y = self.note_to_y(note.note, grid_rect);
             let w = (note.duration as f32 * self.pixels_per_second).max(2.0);
             let note_rect = Rect::from_min_size(pos2(x, y), vec2(w, self.note_height - 2.0));
@@ -1022,9 +1089,15 @@ impl PianoRollPane {
             None => return,
         };
         let timeline_start = clip_info.1;
+        let trim_start = clip_info.2;
+        let clip_duration = clip_info.3;
 
         for (i, note) in resolved.iter().enumerate() {
-            let x = self.time_to_x(timeline_start + note.start_time, grid_rect);
+            // Skip notes outside trim window
+            if note.start_time + note.duration <= trim_start || note.start_time >= trim_start + clip_duration {
+                continue;
+            }
+            let x = self.time_to_x(timeline_start + (note.start_time - trim_start), grid_rect);
             let y = self.note_to_y(note.note, grid_rect);
             let w = (note.duration as f32 * self.pixels_per_second).max(2.0);
             let note_rect = Rect::from_min_size(pos2(x, y), vec2(w, self.note_height - 2.0));
@@ -1161,6 +1234,92 @@ impl PianoRollPane {
         Self::update_cache_from_resolved(clip_id, &new_resolved, shared);
         self.push_update_action("Delete notes", clip_id, old_notes, new_notes, shared, clip_data);
         self.selected_note_indices.clear();
+        self.cached_clip_id = None;
+    }
+
+    fn copy_selected_notes(&self, clip_id: u32, shared: &mut SharedPaneState) {
+        let events = match shared.midi_event_cache.get(&clip_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let resolved = Self::resolve_notes(events);
+
+        // Collect selected notes
+        let selected: Vec<&ResolvedNote> = self.selected_note_indices.iter()
+            .filter_map(|&i| resolved.get(i))
+            .collect();
+
+        if selected.is_empty() {
+            return;
+        }
+
+        // Find earliest start time as base offset
+        let min_time = selected.iter()
+            .map(|n| n.start_time)
+            .fold(f64::INFINITY, f64::min);
+
+        // Store as relative times
+        let notes: Vec<(f64, u8, u8, f64)> = selected.iter()
+            .map(|n| (n.start_time - min_time, n.note, n.velocity, n.duration))
+            .collect();
+
+        shared.clipboard_manager.copy(
+            lightningbeam_core::clipboard::ClipboardContent::MidiNotes { notes }
+        );
+    }
+
+    fn paste_notes(
+        &mut self,
+        clip_id: u32,
+        shared: &mut SharedPaneState,
+        clip_data: &[(u32, f64, f64, f64, Uuid)],
+    ) {
+        let notes_to_paste = match shared.clipboard_manager.paste() {
+            Some(lightningbeam_core::clipboard::ClipboardContent::MidiNotes { notes }) => notes,
+            _ => return,
+        };
+
+        if notes_to_paste.is_empty() {
+            return;
+        }
+
+        // Get clip info for trim offset
+        let clip_info = match clip_data.iter().find(|c| c.0 == clip_id) {
+            Some(c) => c,
+            None => return,
+        };
+        let clip_start = clip_info.1;
+        let trim_start = clip_info.2;
+
+        // Place pasted notes at current playhead position (clip-local time)
+        let paste_time = (*shared.playback_time - clip_start).max(0.0) + trim_start;
+
+        let events = match shared.midi_event_cache.get(&clip_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let mut resolved = Self::resolve_notes(events);
+        let old_notes = Self::notes_to_backend_format(&resolved);
+
+        let paste_start_index = resolved.len();
+        for &(rel_time, note, velocity, duration) in &notes_to_paste {
+            resolved.push(ResolvedNote {
+                note,
+                start_time: paste_time + rel_time,
+                duration,
+                velocity,
+            });
+        }
+        let new_notes = Self::notes_to_backend_format(&resolved);
+
+        Self::update_cache_from_resolved(clip_id, &resolved, shared);
+        self.push_update_action("Paste notes", clip_id, old_notes, new_notes, shared, clip_data);
+
+        // Select the pasted notes
+        self.selected_note_indices.clear();
+        for i in paste_start_index..resolved.len() {
+            self.selected_note_indices.insert(i);
+        }
         self.cached_clip_id = None;
     }
 

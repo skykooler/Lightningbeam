@@ -2507,6 +2507,12 @@ impl Engine {
                     Err(e) => QueryResponse::ProjectSet(Err(format!("Failed to rebuild audio graphs: {}", e))),
                 }
             }
+            Query::DuplicateMidiClipSync(clip_id) => {
+                match self.project.midi_clip_pool.duplicate_clip(clip_id) {
+                    Some(new_id) => QueryResponse::MidiClipDuplicated(Ok(new_id)),
+                    None => QueryResponse::MidiClipDuplicated(Err(format!("MIDI clip {} not found", clip_id))),
+                }
+            }
         };
 
         // Send response back

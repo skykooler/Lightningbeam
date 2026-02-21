@@ -405,6 +405,8 @@ pub enum Query {
     GetProject,
     /// Set the project (replaces current project state)
     SetProject(Box<crate::audio::project::Project>),
+    /// Duplicate a MIDI clip in the pool, returning the new clip's ID
+    DuplicateMidiClipSync(MidiClipId),
 }
 
 /// Oscilloscope data from a node
@@ -478,4 +480,6 @@ pub enum QueryResponse {
     ProjectRetrieved(Result<Box<crate::audio::project::Project>, String>),
     /// Project set
     ProjectSet(Result<(), String>),
+    /// MIDI clip duplicated (returns new clip ID)
+    MidiClipDuplicated(Result<MidiClipId, String>),
 }

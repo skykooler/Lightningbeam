@@ -241,6 +241,9 @@ pub struct SharedPaneState<'a> {
     /// GraphLoadPreset command so the repaint loop stays alive until the
     /// audio thread sends GraphPresetLoaded back
     pub pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set by panes (e.g. piano roll) when they handle Ctrl+C/X/V internally,
+    /// so main.rs skips its own clipboard handling for the current frame
+    pub clipboard_consumed: &'a mut bool,
 }
 
 /// Trait for pane rendering
