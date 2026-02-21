@@ -186,6 +186,9 @@ pub enum Command {
     /// Load audio sample data into a Script node's sample slot (track_id, node_id, slot_index, audio_data, sample_rate, name)
     GraphSetScriptSample(TrackId, u32, usize, Vec<f32>, u32, String),
 
+    /// Load a NAM model into an AmpSim node (track_id, node_id, model_path)
+    AmpSimLoadModel(TrackId, u32, String),
+
     /// Load a sample into a SimpleSampler node (track_id, node_id, file_path)
     SamplerLoadSample(TrackId, u32, String),
     /// Load a sample from the audio pool into a SimpleSampler node (track_id, node_id, pool_index)

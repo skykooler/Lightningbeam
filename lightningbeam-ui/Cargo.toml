@@ -50,6 +50,9 @@ notify-rust = "4.11"
 [profile.dev.package.daw-backend]
 opt-level = 2
 
+[profile.dev.package.nam-ffi]
+opt-level = 2
+
 [profile.dev.package.beamdsp]
 opt-level = 2
 

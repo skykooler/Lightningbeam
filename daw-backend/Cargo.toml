@@ -39,6 +39,9 @@ serde_json = "1.0"
 # BeamDSP scripting engine
 beamdsp = { path = "../lightningbeam-ui/beamdsp" }
 
+# Neural Amp Modeler FFI
+nam-ffi = { path = "../nam-ffi" }
+
 [dev-dependencies]
 
 [profile.release]

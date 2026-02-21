@@ -127,6 +127,10 @@ pub struct SerializedNode {
     /// For Script nodes: BeamDSP source code
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_source: Option<String>,
+
+    /// For AmpSim nodes: path to the .nam model file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nam_model_path: Option<String>,
 }
 
 /// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
@@ -222,6 +226,7 @@ impl SerializedNode {
             template_graph: None,
             sample_data: None,
             script_source: None,
+            nam_model_path: None,
         }
     }
 
