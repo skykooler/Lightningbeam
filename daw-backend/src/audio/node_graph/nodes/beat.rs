@@ -3,8 +3,8 @@ use crate::audio::midi::MidiEvent;
 
 const PARAM_RESOLUTION: u32 = 0;
 
-/// Hardcoded BPM until project tempo is implemented
 const DEFAULT_BPM: f32 = 120.0;
+const DEFAULT_BEATS_PER_BAR: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BeatResolution {
@@ -47,17 +47,19 @@ impl BeatResolution {
 
 /// Beat clock node — generates tempo-synced CV signals.
 ///
+/// BPM and time signature are synced from the project document via SetTempo.
 /// When playing: synced to timeline position.
-/// When stopped: free-runs continuously at the set BPM.
+/// When stopped: free-runs continuously at the project BPM.
 ///
 /// Outputs:
 /// - BPM: constant CV proportional to tempo (bpm / 240)
 /// - Beat Phase: sawtooth 0→1 per beat subdivision
-/// - Bar Phase: sawtooth 0→1 per bar (4 beats)
+/// - Bar Phase: sawtooth 0→1 per bar (uses project time signature)
 /// - Gate: 1.0 for first half of each subdivision, 0.0 otherwise
 pub struct BeatNode {
     name: String,
     bpm: f32,
+    beats_per_bar: u32,
     resolution: BeatResolution,
     /// Playback time in seconds, set by the graph before process()
     playback_time: f64,
@@ -88,6 +90,7 @@ impl BeatNode {
         Self {
             name: name.into(),
             bpm: DEFAULT_BPM,
+            beats_per_bar: DEFAULT_BEATS_PER_BAR,
             resolution: BeatResolution::Quarter,
             playback_time: 0.0,
             prev_playback_time: -1.0,
@@ -100,6 +103,11 @@ impl BeatNode {
 
     pub fn set_playback_time(&mut self, time: f64) {
         self.playback_time = time;
+    }
+
+    pub fn set_tempo(&mut self, bpm: f32, beats_per_bar: u32) {
+        self.bpm = bpm;
+        self.beats_per_bar = beats_per_bar;
     }
 }
 
@@ -167,8 +175,8 @@ impl AudioNode for BeatNode {
             // Beat subdivision phase: 0→1 sawtooth
             let sub_phase = ((beat_pos * subs_per_beat) % 1.0) as f32;
 
-            // Bar phase: 0→1 over 4 quarter-note beats
-            let bar_phase = ((beat_pos / 4.0) % 1.0) as f32;
+            // Bar phase: 0→1 over one bar (beats_per_bar beats)
+            let bar_phase = ((beat_pos / self.beats_per_bar as f64) % 1.0) as f32;
 
             // Gate: high for first half of each subdivision
             let gate = if sub_phase < 0.5 { 1.0f32 } else { 0.0 };
@@ -201,6 +209,7 @@ impl AudioNode for BeatNode {
         Box::new(Self {
             name: self.name.clone(),
             bpm: self.bpm,
+            beats_per_bar: self.beats_per_bar,
             resolution: self.resolution,
             playback_time: 0.0,
             prev_playback_time: -1.0,

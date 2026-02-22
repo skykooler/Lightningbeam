@@ -569,6 +569,17 @@ impl Project {
         }
     }
 
+    /// Propagate tempo to all audio graphs (for BeatNode sync)
+    pub fn set_tempo(&mut self, bpm: f32, beats_per_bar: u32) {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(t) => t.effects_graph.set_tempo(bpm, beats_per_bar),
+                TrackNode::Midi(t) => t.instrument_graph.set_tempo(bpm, beats_per_bar),
+                TrackNode::Group(g) => g.audio_graph.set_tempo(bpm, beats_per_bar),
+            }
+        }
+    }
+
     /// Process live MIDI input from all MIDI tracks (called even when not playing)
     pub fn process_live_midi(&mut self, output: &mut [f32], sample_rate: u32, channels: u32) {
         // Process all MIDI tracks to handle queued live input events

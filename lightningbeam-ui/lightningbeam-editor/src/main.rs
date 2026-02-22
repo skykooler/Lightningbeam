@@ -2940,6 +2940,13 @@ impl EditorApp {
                 return;
             }
             eprintln!("📊 [APPLY] Step 4: Set audio project took {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
+
+            // Sync BPM/time signature to metronome
+            let doc = self.action_executor.document();
+            controller.set_tempo(
+                doc.bpm as f32,
+                (doc.time_signature.numerator, doc.time_signature.denominator),
+            );
         }
 
         // Reset state and restore track mappings
