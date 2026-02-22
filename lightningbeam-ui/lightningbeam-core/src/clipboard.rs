@@ -75,6 +75,11 @@ pub enum ClipboardContent {
         /// Shapes (with embedded transforms)
         shapes: Vec<Shape>,
     },
+    /// MIDI notes from the piano roll
+    MidiNotes {
+        /// Notes: (start_time, note, velocity, duration) — times relative to selection start
+        notes: Vec<(f64, u8, u8, f64)>,
+    },
 }
 
 impl ClipboardContent {
@@ -164,6 +169,10 @@ impl ClipboardContent {
                     },
                     id_map,
                 )
+            }
+            ClipboardContent::MidiNotes { notes } => {
+                // No IDs to regenerate, just clone
+                (ClipboardContent::MidiNotes { notes: notes.clone() }, id_map)
             }
             ClipboardContent::Shapes { shapes } => {
                 // Regenerate shape IDs
