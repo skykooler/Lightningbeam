@@ -160,35 +160,17 @@ jobs:
           grep -A4 'fn get_ffmpeg_target_os' "$BUILDRS"
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
-      - name: Clean stale nam-ffi build artifacts
-        shell: bash
-        run: |
-          rm -rf lightningbeam-ui/target/release/build/nam-ffi-*
-          rm -rf lightningbeam-ui/target/debug/build/nam-ffi-*
-
       - name: Build release binary
         shell: bash
         env:
           FFMPEG_STATIC: "1"
         run: |
           cd lightningbeam-ui
+          TARGET_FLAG=""
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build -vv --release --bin lightningbeam-editor --target ${{ matrix.target }} 2>&1 | tee /tmp/build.log || {
-              echo "=== nam-ffi build output ==="
-              grep -A50 'running.*nam-ffi\|Compiling nam-ffi\|NeuralAudio' /tmp/build.log | head -80
-              echo "=== nam-ffi OUT_DIR contents ==="
-              find target -path '*/nam-ffi-*/out/build' -exec ls -R {} \; 2>/dev/null || echo "not found"
-              exit 1
-            }
-          else
-            cargo build -vv --release --bin lightningbeam-editor 2>&1 | tee /tmp/build.log || {
-              echo "=== nam-ffi build output ==="
-              grep -A50 'running.*nam-ffi\|Compiling nam-ffi\|NeuralAudio' /tmp/build.log | head -80
-              echo "=== nam-ffi OUT_DIR contents ==="
-              find target -path '*/nam-ffi-*/out/build' -exec ls -R {} \; 2>/dev/null || echo "not found"
-              exit 1
-            }
+            TARGET_FLAG="--target ${{ matrix.target }}"
           fi
+          cargo build --release --bin lightningbeam-editor $TARGET_FLAG
 
       - name: Copy cross-compiled binary to release dir
         if: matrix.target != ''
