@@ -1,9 +1,14 @@
-use std::ffi::CString;
 use std::path::Path;
+
+#[cfg(windows)]
+type WChar = u16;
+#[cfg(not(windows))]
+type WChar = u32;
 
 #[allow(dead_code)]
 mod ffi {
-    use std::os::raw::{c_char, c_float, c_int};
+    use super::WChar;
+    use std::os::raw::{c_float, c_int};
 
     #[repr(C)]
     pub struct NeuralModel {
@@ -11,7 +16,7 @@ mod ffi {
     }
 
     unsafe extern "C" {
-        pub fn CreateModelFromFile(model_path: *const c_char) -> *mut NeuralModel;
+        pub fn CreateModelFromFile(model_path: *const WChar) -> *mut NeuralModel;
         pub fn DeleteModel(model: *mut NeuralModel);
 
         pub fn SetLSTMLoadMode(load_mode: c_int);
@@ -37,14 +42,12 @@ mod ffi {
 
 #[derive(Debug)]
 pub enum NamError {
-    NullPath,
     ModelLoadFailed(String),
 }
 
 impl std::fmt::Display for NamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NamError::NullPath => write!(f, "Path contains null byte"),
             NamError::ModelLoadFailed(path) => write!(f, "Failed to load NAM model: {}", path),
         }
     }
@@ -56,12 +59,25 @@ pub struct NamModel {
 
 impl NamModel {
     pub fn from_file(path: &Path) -> Result<Self, NamError> {
-        let path_str = path.to_string_lossy();
-        let c_path = CString::new(path_str.as_bytes()).map_err(|_| NamError::NullPath)?;
+        let wide: Vec<WChar> = {
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+            }
+            #[cfg(not(windows))]
+            {
+                path.to_string_lossy()
+                    .chars()
+                    .map(|c| c as WChar)
+                    .chain(std::iter::once(0))
+                    .collect()
+            }
+        };
 
-        let ptr = unsafe { ffi::CreateModelFromFile(c_path.as_ptr()) };
+        let ptr = unsafe { ffi::CreateModelFromFile(wide.as_ptr()) };
         if ptr.is_null() {
-            return Err(NamError::ModelLoadFailed(path_str.into_owned()));
+            return Err(NamError::ModelLoadFailed(path.display().to_string()));
         }
 
         Ok(NamModel { ptr })

@@ -1,6 +1,9 @@
 @echo off
 REM Build script for Windows
-REM Requires: FFmpeg 8.0.0 dev files in C:\ffmpeg, LLVM installed
+REM Requires: FFmpeg 8.0.0 dev files in C:\ffmpeg, LLVM installed, VS Build Tools
+
+REM Set up MSVC environment
+call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
 
 REM FFmpeg location (headers + libs + DLLs)
 if not defined FFMPEG_DIR set FFMPEG_DIR=C:\ffmpeg
