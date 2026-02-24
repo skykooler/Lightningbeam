@@ -34,6 +34,16 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify submodules
+        shell: bash
+        run: |
+          echo "=== Submodule status ==="
+          git submodule status --recursive
+          echo "=== NeuralAudio deps ==="
+          ls -la vendor/NeuralAudio/deps/
+          ls vendor/NeuralAudio/deps/RTNeural/CMakeLists.txt
+          ls vendor/NeuralAudio/deps/math_approx/CMakeLists.txt
+
       - name: Clone egui fork
         run: git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
         env:
@@ -48,7 +58,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './lightningbeam-ui -> target'
-          key: ${{ matrix.artifact-name }}
+          key: ${{ matrix.artifact-name }}-v2
 
       # ── Linux dependencies ──
       - name: Install dependencies (Linux)
