@@ -35,7 +35,7 @@ jobs:
           submodules: true
 
       - name: Clone egui fork
-        run: git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
+        run: GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
