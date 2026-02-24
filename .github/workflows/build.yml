@@ -15,16 +15,12 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
-            target: ''
             artifact-name: linux-x86_64
           - platform: macos-latest
-            target: aarch64-apple-darwin
             artifact-name: macos-arm64
-          - platform: macos-latest
-            target: x86_64-apple-darwin
+          - platform: macos-13
             artifact-name: macos-x86_64
           - platform: windows-latest
-            target: ''
             artifact-name: windows-x86_64
 
     runs-on: ${{ matrix.platform }}
@@ -32,21 +28,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: recursive
 
       - name: Clone egui fork
-        run: GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
+        run: git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './lightningbeam-ui -> target'
-          key: ${{ matrix.target || 'default' }}
+          key: ${{ matrix.artifact-name }}
 
       # ── Linux dependencies ──
       - name: Install dependencies (Linux)
@@ -69,7 +65,7 @@ jobs:
 
       # ── macOS dependencies ──
       - name: Install dependencies (macOS)
-        if: matrix.platform == 'macos-latest'
+        if: startsWith(matrix.platform, 'macos')
         run: brew install nasm cmake create-dmg
 
       # ── Windows dependencies ──
@@ -125,18 +121,7 @@ jobs:
           FFMPEG_STATIC: "1"
         run: |
           cd lightningbeam-ui
-          if [ -n "${{ matrix.target }}" ]; then
-            cargo build --release --bin lightningbeam-editor --target ${{ matrix.target }}
-          else
-            cargo build --release --bin lightningbeam-editor
-          fi
-
-      - name: Copy cross-compiled binary to release dir (macOS cross)
-        if: matrix.target != ''
-        shell: bash
-        run: |
-          mkdir -p lightningbeam-ui/target/release
-          cp lightningbeam-ui/target/${{ matrix.target }}/release/lightningbeam-editor lightningbeam-ui/target/release/
+          cargo build --release --bin lightningbeam-editor
 
       # ── Stage presets next to binary for packaging ──
       - name: Stage presets in target dir
@@ -230,7 +215,7 @@ jobs:
       #  macOS Packaging
       # ══════════════════════════════════════════════
       - name: Create macOS .app bundle
-        if: matrix.platform == 'macos-latest'
+        if: startsWith(matrix.platform, 'macos')
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -272,11 +257,11 @@ jobs:
           EOF
 
       - name: Create macOS .dmg
-        if: matrix.platform == 'macos-latest'
+        if: startsWith(matrix.platform, 'macos')
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          ARCH="${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x86_64' }}"
+          ARCH="${{ matrix.platform == 'macos-latest' && 'arm64' || 'x86_64' }}"
           DMG_NAME="Lightningbeam_Editor-${VERSION}-macOS-${ARCH}.dmg"
 
           create-dmg \
@@ -291,7 +276,7 @@ jobs:
           # create-dmg returns non-zero if codesigning is skipped, but the .dmg is still valid
 
       - name: Collect macOS artifacts
-        if: matrix.platform == 'macos-latest'
+        if: startsWith(matrix.platform, 'macos')
         shell: bash
         run: |
           mkdir -p artifacts
