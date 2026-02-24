@@ -1875,8 +1875,7 @@ impl EditorApp {
                     }
                 };
 
-                // TODO: DCEL - paste shapes disabled during migration
-                // (was: push shapes into kf.shapes, select pasted shapes)
+                // TODO: DCEL - paste shapes not yet implemented
                 let _ = (vector_layer, shapes);
             }
             ClipboardContent::MidiNotes { .. } => {
@@ -2624,8 +2623,7 @@ impl EditorApp {
                 let mut rect_shape = Shape::new(rect_path);
                 rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
 
-                // TODO: DCEL - test shape creation disabled during migration
-                // (was: push shapes into kf.shapes)
+                // TODO: DCEL - test shape creation not yet implemented
                 let _ = (circle_shape, rect_shape);
 
                 // Add the layer to the clip

@@ -7,7 +7,7 @@
 /// - Document settings (when nothing is selected)
 
 use eframe::egui::{self, DragValue, Ui};
-use lightningbeam_core::actions::SetDocumentPropertiesAction;
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction};
 use lightningbeam_core::layer::AnyLayer;
 use lightningbeam_core::shape::ShapeColor;
 use lightningbeam_core::tool::{SimplifyMode, Tool};
@@ -283,9 +283,18 @@ impl InfopanelPane {
         &mut self,
         ui: &mut Ui,
         path: &NodePath,
-        _shared: &mut SharedPaneState,
+        shared: &mut SharedPaneState,
         info: &SelectionInfo,
     ) {
+        // Clone IDs and values we need before borrowing shared mutably
+        let layer_id = match info.layer_id {
+            Some(id) => id,
+            None => return,
+        };
+        let time = *shared.playback_time;
+        let face_ids: Vec<_> = shared.selection.selected_faces().iter().copied().collect();
+        let edge_ids: Vec<_> = shared.selection.selected_edges().iter().copied().collect();
+
         egui::CollapsingHeader::new("Shape")
             .id_salt(("shape", path))
             .default_open(self.shape_section_open)
@@ -293,19 +302,30 @@ impl InfopanelPane {
                 self.shape_section_open = true;
                 ui.add_space(4.0);
 
-                // Fill color (read-only display for now)
+                // Fill color
                 ui.horizontal(|ui| {
                     ui.label("Fill:");
                     match info.fill_color {
                         Some(Some(color)) => {
-                            let egui_color = egui::Color32::from_rgba_unmultiplied(
+                            let mut egui_color = egui::Color32::from_rgba_unmultiplied(
                                 color.r, color.g, color.b, color.a,
                             );
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(20.0, 20.0),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter().rect_filled(rect, 2.0, egui_color);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            ).changed() {
+                                let new_color = ShapeColor {
+                                    r: egui_color.r(),
+                                    g: egui_color.g(),
+                                    b: egui_color.b(),
+                                    a: egui_color.a(),
+                                };
+                                let action = SetShapePropertiesAction::set_fill_color(
+                                    layer_id, time, face_ids.clone(), Some(new_color),
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            }
                         }
                         Some(None) => {
                             ui.label("None");
@@ -316,19 +336,30 @@ impl InfopanelPane {
                     }
                 });
 
-                // Stroke color (read-only display for now)
+                // Stroke color
                 ui.horizontal(|ui| {
                     ui.label("Stroke:");
                     match info.stroke_color {
                         Some(Some(color)) => {
-                            let egui_color = egui::Color32::from_rgba_unmultiplied(
+                            let mut egui_color = egui::Color32::from_rgba_unmultiplied(
                                 color.r, color.g, color.b, color.a,
                             );
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(20.0, 20.0),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter().rect_filled(rect, 2.0, egui_color);
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            ).changed() {
+                                let new_color = ShapeColor {
+                                    r: egui_color.r(),
+                                    g: egui_color.g(),
+                                    b: egui_color.b(),
+                                    a: egui_color.a(),
+                                };
+                                let action = SetShapePropertiesAction::set_stroke_color(
+                                    layer_id, time, edge_ids.clone(), Some(new_color),
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            }
                         }
                         Some(None) => {
                             ui.label("None");
@@ -339,12 +370,21 @@ impl InfopanelPane {
                     }
                 });
 
-                // Stroke width (read-only display for now)
+                // Stroke width
                 ui.horizontal(|ui| {
                     ui.label("Stroke Width:");
                     match info.stroke_width {
-                        Some(width) => {
-                            ui.label(format!("{:.1}", width));
+                        Some(mut width) => {
+                            if ui.add(
+                                DragValue::new(&mut width)
+                                    .speed(0.1)
+                                    .range(0.1..=100.0),
+                            ).changed() {
+                                let action = SetShapePropertiesAction::set_stroke_width(
+                                    layer_id, time, edge_ids.clone(), width,
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            }
                         }
                         None => {
                             ui.label("--");

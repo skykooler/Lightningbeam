@@ -186,13 +186,15 @@ pub struct VectorLayer {
     /// Base layer properties
     pub layer: Layer,
 
-    /// Shapes defined in this layer (indexed by UUID for O(1) lookup)
+    /// Legacy shapes — kept for old .beam file compat, not written to new files.
+    #[serde(default, skip_serializing)]
     pub shapes: HashMap<Uuid, Shape>,
 
-    /// Shape instances (references to shapes with transforms)
+    /// Legacy shape instances — kept for old .beam file compat, not written to new files.
+    #[serde(default, skip_serializing)]
     pub shape_instances: Vec<ShapeInstance>,
 
-    /// Shape keyframes (sorted by time) — replaces shapes/shape_instances
+    /// Shape keyframes (sorted by time)
     #[serde(default)]
     pub keyframes: Vec<ShapeKeyframe>,
 

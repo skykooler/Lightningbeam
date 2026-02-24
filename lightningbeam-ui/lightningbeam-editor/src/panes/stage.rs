@@ -1476,7 +1476,77 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // For multiple objects: use axis-aligned bounding box (simpler for now)
 
                         let total_selected = self.ctx.selection.clip_instances().len();
-                        if total_selected == 1 {
+                        if self.ctx.selection.has_dcel_selection() {
+                            // DCEL selection: compute bbox from selected vertices
+                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
+                                let mut min_x = f64::INFINITY;
+                                let mut min_y = f64::INFINITY;
+                                let mut max_x = f64::NEG_INFINITY;
+                                let mut max_y = f64::NEG_INFINITY;
+                                let mut found_any = false;
+
+                                for &vid in self.ctx.selection.selected_vertices() {
+                                    let v = dcel.vertex(vid);
+                                    if v.deleted { continue; }
+                                    min_x = min_x.min(v.position.x);
+                                    min_y = min_y.min(v.position.y);
+                                    max_x = max_x.max(v.position.x);
+                                    max_y = max_y.max(v.position.y);
+                                    found_any = true;
+                                }
+
+                                if found_any {
+                                    let bbox = KurboRect::new(min_x, min_y, max_x, max_y);
+                                    let handle_size = (8.0 / self.ctx.zoom.max(0.5) as f64).max(6.0);
+                                    let handle_color = Color::from_rgb8(0, 120, 255);
+                                    let rotation_handle_offset = 20.0 / self.ctx.zoom.max(0.5) as f64;
+
+                                    scene.stroke(&Stroke::new(stroke_width), overlay_transform, handle_color, None, &bbox);
+
+                                    let corners = [
+                                        vello::kurbo::Point::new(bbox.x0, bbox.y0),
+                                        vello::kurbo::Point::new(bbox.x1, bbox.y0),
+                                        vello::kurbo::Point::new(bbox.x1, bbox.y1),
+                                        vello::kurbo::Point::new(bbox.x0, bbox.y1),
+                                    ];
+
+                                    for corner in &corners {
+                                        let handle_rect = KurboRect::new(
+                                            corner.x - handle_size / 2.0, corner.y - handle_size / 2.0,
+                                            corner.x + handle_size / 2.0, corner.y + handle_size / 2.0,
+                                        );
+                                        scene.fill(Fill::NonZero, overlay_transform, handle_color, None, &handle_rect);
+                                        scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &handle_rect);
+                                    }
+
+                                    let edges = [
+                                        vello::kurbo::Point::new(bbox.center().x, bbox.y0),
+                                        vello::kurbo::Point::new(bbox.x1, bbox.center().y),
+                                        vello::kurbo::Point::new(bbox.center().x, bbox.y1),
+                                        vello::kurbo::Point::new(bbox.x0, bbox.center().y),
+                                    ];
+
+                                    for edge in &edges {
+                                        let edge_circle = Circle::new(*edge, handle_size / 2.0);
+                                        scene.fill(Fill::NonZero, overlay_transform, handle_color, None, &edge_circle);
+                                        scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &edge_circle);
+                                    }
+
+                                    let rotation_handle_pos = vello::kurbo::Point::new(bbox.center().x, bbox.y0 - rotation_handle_offset);
+                                    let rotation_circle = Circle::new(rotation_handle_pos, handle_size / 2.0);
+                                    scene.fill(Fill::NonZero, overlay_transform, Color::from_rgb8(50, 200, 50), None, &rotation_circle);
+                                    scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(255, 255, 255), None, &rotation_circle);
+
+                                    let line_path = {
+                                        let mut path = vello::kurbo::BezPath::new();
+                                        path.move_to(rotation_handle_pos);
+                                        path.line_to(vello::kurbo::Point::new(bbox.center().x, bbox.y0));
+                                        path
+                                    };
+                                    scene.stroke(&Stroke::new(1.0), overlay_transform, Color::from_rgb8(50, 200, 50), None, &line_path);
+                                }
+                            }
+                        } else if total_selected == 1 {
                             // Single clip instance - draw rotated bounding box
                             let object_id = *self.ctx.selection.clip_instances().iter().next().unwrap();
 
@@ -4239,6 +4309,260 @@ impl StagePane {
         None
     }
 
+    /// Handle transform tool for DCEL elements (vertices/edges).
+    /// Uses snapshot-based undo via ModifyDcelAction.
+    fn handle_transform_dcel(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        point: vello::kurbo::Point,
+        active_layer_id: &uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+
+        let time = *shared.playback_time;
+
+        // Calculate bounding box of selected DCEL vertices
+        let selected_verts: Vec<lightningbeam_core::dcel::VertexId> =
+            shared.selection.selected_vertices().iter().copied().collect();
+
+        if selected_verts.is_empty() {
+            return;
+        }
+
+        let bbox = {
+            let document = shared.action_executor.document();
+            if let Some(AnyLayer::Vector(vl)) = document.get_layer(active_layer_id) {
+                if let Some(dcel) = vl.dcel_at_time(time) {
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
+                    for &vid in &selected_verts {
+                        let v = dcel.vertex(vid);
+                        if v.deleted { continue; }
+                        min_x = min_x.min(v.position.x);
+                        min_y = min_y.min(v.position.y);
+                        max_x = max_x.max(v.position.x);
+                        max_y = max_y.max(v.position.y);
+                    }
+                    if min_x > max_x { return; }
+                    vello::kurbo::Rect::new(min_x, min_y, max_x, max_y)
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        };
+
+        // If already transforming, handle drag and release
+        match shared.tool_state.clone() {
+            ToolState::Transforming { mode, start_mouse, original_bbox, .. } => {
+                // Drag: apply transform preview to DCEL
+                if response.dragged() {
+                    *shared.tool_state = ToolState::Transforming {
+                        mode: mode.clone(),
+                        original_transforms: std::collections::HashMap::new(),
+                        pivot: original_bbox.center(),
+                        start_mouse,
+                        current_mouse: point,
+                        original_bbox,
+                    };
+
+                    if let Some(ref cache) = self.dcel_editing_cache {
+                        let original_dcel = cache.dcel_before.clone();
+                        let selected_verts_set: std::collections::HashSet<lightningbeam_core::dcel::VertexId> =
+                            selected_verts.iter().copied().collect();
+                        let selected_edges: std::collections::HashSet<lightningbeam_core::dcel::EdgeId> =
+                            shared.selection.selected_edges().iter().copied().collect();
+
+                        let affine = Self::compute_transform_affine(
+                            &mode, start_mouse, point, &original_bbox,
+                        );
+
+                        let document = shared.action_executor.document_mut();
+                        if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(active_layer_id) {
+                            if let Some(dcel) = vl.dcel_at_time_mut(time) {
+                                Self::apply_dcel_transform(
+                                    dcel, &original_dcel, &selected_verts_set, &selected_edges, affine,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Release: finalize
+                if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(*shared.tool_state, ToolState::Transforming { .. })) {
+                    if let Some(cache) = self.dcel_editing_cache.take() {
+                        let dcel_after = {
+                            let document = shared.action_executor.document();
+                            match document.get_layer(active_layer_id) {
+                                Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time).cloned(),
+                                _ => None,
+                            }
+                        };
+                        if let Some(dcel_after) = dcel_after {
+                            use lightningbeam_core::actions::ModifyDcelAction;
+                            let action = ModifyDcelAction::new(
+                                cache.layer_id, cache.time, cache.dcel_before, dcel_after, "Transform",
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                    }
+                    *shared.tool_state = ToolState::Idle;
+                }
+
+                return;
+            }
+            _ => {}
+        }
+
+        // Idle: check for handle clicks to start a transform
+        if response.drag_started() || response.clicked() {
+            let tolerance = 10.0;
+            if let Some(mode) = Self::hit_test_transform_handle(point, bbox, tolerance) {
+                // Snapshot DCEL for undo
+                let document = shared.action_executor.document();
+                if let Some(AnyLayer::Vector(vl)) = document.get_layer(active_layer_id) {
+                    if let Some(dcel) = vl.dcel_at_time(time) {
+                        self.dcel_editing_cache = Some(DcelEditingCache {
+                            layer_id: *active_layer_id,
+                            time,
+                            dcel_before: dcel.clone(),
+                        });
+                    }
+                }
+
+                *shared.tool_state = ToolState::Transforming {
+                    mode,
+                    original_transforms: std::collections::HashMap::new(),
+                    pivot: bbox.center(),
+                    start_mouse: point,
+                    current_mouse: point,
+                    original_bbox: bbox,
+                };
+            }
+        }
+    }
+
+    /// Compute an Affine transform from a TransformMode, start mouse, and current mouse position.
+    fn compute_transform_affine(
+        mode: &lightningbeam_core::tool::TransformMode,
+        start_mouse: vello::kurbo::Point,
+        current_mouse: vello::kurbo::Point,
+        original_bbox: &vello::kurbo::Rect,
+    ) -> vello::kurbo::Affine {
+        use lightningbeam_core::tool::{TransformMode, Axis};
+        use vello::kurbo::Affine;
+
+        match mode {
+            TransformMode::ScaleCorner { origin } => {
+                let start_vec = start_mouse - *origin;
+                let current_vec = current_mouse - *origin;
+                let sx = if start_vec.x.abs() > 0.001 { current_vec.x / start_vec.x } else { 1.0 };
+                let sy = if start_vec.y.abs() > 0.001 { current_vec.y / start_vec.y } else { 1.0 };
+                Affine::translate((origin.x, origin.y))
+                    * Affine::scale_non_uniform(sx, sy)
+                    * Affine::translate((-origin.x, -origin.y))
+            }
+            TransformMode::ScaleEdge { axis, origin } => {
+                let (sx, sy) = match axis {
+                    Axis::Horizontal => {
+                        let sd = start_mouse.x - origin.x;
+                        let cd = current_mouse.x - origin.x;
+                        (if sd.abs() > 0.001 { cd / sd } else { 1.0 }, 1.0)
+                    }
+                    Axis::Vertical => {
+                        let sd = start_mouse.y - origin.y;
+                        let cd = current_mouse.y - origin.y;
+                        (1.0, if sd.abs() > 0.001 { cd / sd } else { 1.0 })
+                    }
+                };
+                Affine::translate((origin.x, origin.y))
+                    * Affine::scale_non_uniform(sx, sy)
+                    * Affine::translate((-origin.x, -origin.y))
+            }
+            TransformMode::Rotate { center } => {
+                let start_angle = (start_mouse.y - center.y).atan2(start_mouse.x - center.x);
+                let current_angle = (current_mouse.y - center.y).atan2(current_mouse.x - center.x);
+                let delta = current_angle - start_angle;
+                Affine::translate((center.x, center.y))
+                    * Affine::rotate(delta)
+                    * Affine::translate((-center.x, -center.y))
+            }
+            TransformMode::Skew { axis, origin } => {
+                let center = original_bbox.center();
+                let skew_radians = match axis {
+                    Axis::Horizontal => {
+                        let edge_y = if (origin.y - original_bbox.y0).abs() < 0.1 {
+                            original_bbox.y1
+                        } else {
+                            original_bbox.y0
+                        };
+                        let distance = edge_y - center.y;
+                        if distance.abs() > 0.1 {
+                            ((current_mouse.x - start_mouse.x) / distance).atan()
+                        } else {
+                            0.0
+                        }
+                    }
+                    Axis::Vertical => {
+                        let edge_x = if (origin.x - original_bbox.x0).abs() < 0.1 {
+                            original_bbox.x1
+                        } else {
+                            original_bbox.x0
+                        };
+                        let distance = edge_x - center.x;
+                        if distance.abs() > 0.1 {
+                            ((current_mouse.y - start_mouse.y) / distance).atan()
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+                let tan_s = skew_radians.tan();
+                let (kx, ky) = match axis {
+                    Axis::Horizontal => (tan_s, 0.0),
+                    Axis::Vertical => (0.0, tan_s),
+                };
+                // Skew around center: translate to center, skew, translate back
+                let skew = Affine::new([1.0, ky, kx, 1.0, 0.0, 0.0]);
+                Affine::translate((center.x, center.y))
+                    * skew
+                    * Affine::translate((-center.x, -center.y))
+            }
+        }
+    }
+
+    /// Apply an affine transform to selected DCEL vertices and their connected edge control points.
+    /// Reads original positions from `original_dcel` and writes transformed positions to `dcel`.
+    fn apply_dcel_transform(
+        dcel: &mut lightningbeam_core::dcel::Dcel,
+        original_dcel: &lightningbeam_core::dcel::Dcel,
+        selected_verts: &std::collections::HashSet<lightningbeam_core::dcel::VertexId>,
+        selected_edges: &std::collections::HashSet<lightningbeam_core::dcel::EdgeId>,
+        affine: vello::kurbo::Affine,
+    ) {
+        // Transform selected vertex positions
+        for &vid in selected_verts {
+            let original_pos = original_dcel.vertex(vid).position;
+            dcel.vertex_mut(vid).position = affine * original_pos;
+        }
+
+        // Transform edge curves for selected edges
+        for &eid in selected_edges {
+            let original_curve = original_dcel.edge(eid).curve;
+            let edge = dcel.edge_mut(eid);
+            edge.curve.p0 = affine * original_curve.p0;
+            edge.curve.p1 = affine * original_curve.p1;
+            edge.curve.p2 = affine * original_curve.p2;
+            edge.curve.p3 = affine * original_curve.p3;
+        }
+    }
+
     fn handle_transform_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -4282,6 +4606,12 @@ impl StagePane {
         // For video layers, transform the visible clip at playback time (no selection needed)
         if is_video_layer {
             self.handle_transform_video_clip(ui, response, point, &active_layer_id, shared);
+            return;
+        }
+
+        // For vector layers with DCEL selection, use DCEL-specific transform path
+        if shared.selection.has_dcel_selection() {
+            self.handle_transform_dcel(ui, response, point, &active_layer_id, shared);
             return;
         }
 
@@ -4451,27 +4781,18 @@ impl StagePane {
             if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
                 if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                     use std::collections::HashMap;
-                    use lightningbeam_core::actions::{TransformShapeInstancesAction, TransformClipInstancesAction};
+                    use lightningbeam_core::actions::TransformClipInstancesAction;
 
-                    let shape_instance_transforms = HashMap::new();
                     let mut clip_instance_transforms = HashMap::new();
 
                     // Get current transforms and pair with originals
                     if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                         for (object_id, original) in original_transforms {
-                            // TODO: DCEL - shape instance transform lookup disabled during migration
-                            // Try clip instance
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
                                 let new_transform = clip_instance.transform.clone();
                                 clip_instance_transforms.insert(object_id, (original, new_transform));
                             }
                         }
-                    }
-
-                    // Create action for shape instances
-                    if !shape_instance_transforms.is_empty() {
-                        let action = TransformShapeInstancesAction::new(active_layer_id, *shared.playback_time, shape_instance_transforms);
-                        shared.pending_actions.push(Box::new(action));
                     }
 
                     // Create action for clip instances
@@ -5195,32 +5516,22 @@ impl StagePane {
         if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
             if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                 use std::collections::HashMap;
-                use lightningbeam_core::actions::{TransformShapeInstancesAction, TransformClipInstancesAction};
+                use lightningbeam_core::actions::TransformClipInstancesAction;
 
-                let shape_instance_transforms = HashMap::new();
                 let mut clip_instance_transforms = HashMap::new();
 
                 if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                     for (obj_id, original) in original_transforms {
-                        // TODO: DCEL - shape instance transform lookup disabled during migration
-                        // Try clip instance
                         if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == obj_id) {
                             clip_instance_transforms.insert(obj_id, (original, clip_instance.transform.clone()));
                         }
                     }
                 } else if let Some(AnyLayer::Video(video_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
-                    // Handle Video layer clip instances
                     for (obj_id, original) in original_transforms {
                         if let Some(clip_instance) = video_layer.clip_instances.iter().find(|ci| ci.id == obj_id) {
                             clip_instance_transforms.insert(obj_id, (original, clip_instance.transform.clone()));
                         }
                     }
-                }
-
-                // Create action for shape instances
-                if !shape_instance_transforms.is_empty() {
-                    let action = TransformShapeInstancesAction::new(*active_layer_id, *shared.playback_time, shape_instance_transforms);
-                    shared.pending_actions.push(Box::new(action));
                 }
 
                 // Create action for clip instances
@@ -5459,6 +5770,71 @@ impl StagePane {
                 }
                 _ => {
                     // Other tools not implemented yet
+                }
+            }
+        }
+
+        // Delete/Backspace: remove selected DCEL elements
+        if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if shared.selection.has_dcel_selection() {
+                if let Some(active_layer_id) = *shared.active_layer_id {
+                    let time = *shared.playback_time;
+
+                    // Collect selected edge IDs before mutating
+                    let selected_edges: Vec<lightningbeam_core::dcel::EdgeId> =
+                        shared.selection.selected_edges().iter().copied().collect();
+
+                    if !selected_edges.is_empty() {
+                        // Snapshot before
+                        let dcel_before = {
+                            let document = shared.action_executor.document();
+                            match document.get_layer(&active_layer_id) {
+                                Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
+                                    vl.dcel_at_time(time).cloned()
+                                }
+                                _ => None,
+                            }
+                        };
+
+                        if let Some(dcel_before) = dcel_before {
+                            // Remove selected edges
+                            {
+                                let document = shared.action_executor.document_mut();
+                                if let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
+                                    if let Some(dcel) = vl.dcel_at_time_mut(time) {
+                                        for eid in &selected_edges {
+                                            dcel.remove_edge(*eid);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Snapshot after
+                            let dcel_after = {
+                                let document = shared.action_executor.document();
+                                match document.get_layer(&active_layer_id) {
+                                    Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
+                                        vl.dcel_at_time(time).cloned()
+                                    }
+                                    _ => None,
+                                }
+                            };
+
+                            if let Some(dcel_after) = dcel_after {
+                                use lightningbeam_core::actions::ModifyDcelAction;
+                                let action = ModifyDcelAction::new(
+                                    active_layer_id,
+                                    time,
+                                    dcel_before,
+                                    dcel_after,
+                                    "Delete",
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            }
+
+                            shared.selection.clear_dcel_selection();
+                        }
+                    }
                 }
             }
         }
