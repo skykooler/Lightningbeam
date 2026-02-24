@@ -15,12 +15,16 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-22.04
+            target: ''
             artifact-name: linux-x86_64
           - platform: macos-latest
+            target: ''
             artifact-name: macos-arm64
-          - platform: macos-13
+          - platform: macos-latest
+            target: x86_64-apple-darwin
             artifact-name: macos-x86_64
           - platform: windows-latest
+            target: ''
             artifact-name: windows-x86_64
 
     runs-on: ${{ matrix.platform }}
@@ -37,6 +41,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target != '' && matrix.target || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -73,6 +79,15 @@ jobs:
         if: matrix.platform == 'windows-latest'
         run: choco install nasm cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
         shell: pwsh
+
+      - name: Setup MSVC dev environment (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Add MSYS2 to PATH (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # ── Common build steps ──
       - name: Extract version
@@ -115,13 +130,31 @@ jobs:
             printf '\n[[package.metadata.generate-rpm.assets]]\nsource = "%s"\ndest = "%s"\nmode = "644"\n' "$rel" "$dest" >> lightningbeam-editor/Cargo.toml
           done
 
+      - name: Set FFmpeg cross-compile env (macOS x86_64)
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          echo "FFMPEG_EXTRA_ARGS=--arch=x86_64 --target-os=darwin --enable-cross-compile --cc=cc --cxx=c++" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+
       - name: Build release binary
         shell: bash
         env:
           FFMPEG_STATIC: "1"
         run: |
           cd lightningbeam-ui
-          cargo build --release --bin lightningbeam-editor
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --bin lightningbeam-editor --target ${{ matrix.target }}
+          else
+            cargo build --release --bin lightningbeam-editor
+          fi
+
+      - name: Copy cross-compiled binary to release dir
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          mkdir -p lightningbeam-ui/target/release
+          cp lightningbeam-ui/target/${{ matrix.target }}/release/lightningbeam-editor lightningbeam-ui/target/release/
 
       # ── Stage presets next to binary for packaging ──
       - name: Stage presets in target dir
@@ -261,7 +294,7 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          ARCH="${{ matrix.platform == 'macos-latest' && 'arm64' || 'x86_64' }}"
+          ARCH="${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || 'arm64' }}"
           DMG_NAME="Lightningbeam_Editor-${VERSION}-macOS-${ARCH}.dmg"
 
           create-dmg \
