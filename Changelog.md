@@ -1,3 +1,11 @@
+# 1.0.0-alpha:
+Changes:
+- New native GUI built with egui + wgpu (replaces Tauri/web frontend)
+- GPU-accelerated canvas with vello rendering
+- MIDI input and node-based audio graph improvements
+- Factory instrument presets
+- Video import and high performance playback
+
 # 0.8.1-alpha:
 Changes:
 - Rewrite timeline UI

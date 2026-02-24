@@ -1,0 +1,373 @@
+name: Build & Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: ''
+            artifact-name: linux-x86_64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact-name: macos-arm64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            artifact-name: macos-x86_64
+          - platform: windows-latest
+            target: ''
+            artifact-name: windows-x86_64
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Clone egui fork
+        run: git clone --depth 1 -b ibus-wayland-fix https://git.skyler.io/skyler/egui.git ../egui-fork
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './lightningbeam-ui -> target'
+          key: ${{ matrix.target || 'default' }}
+
+      # ── Linux dependencies ──
+      - name: Install dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config clang nasm cmake \
+            libasound2-dev libwayland-dev libwayland-cursor0 \
+            libx11-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libglib2.0-dev libgtk-3-dev libvulkan-dev \
+            yasm libx264-dev libx265-dev libvpx-dev libmp3lame-dev libopus-dev \
+            libpulse-dev squashfs-tools dpkg rpm
+
+      - name: Install cargo packaging tools (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      # ── macOS dependencies ──
+      - name: Install dependencies (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: brew install nasm cmake create-dmg
+
+      # ── Windows dependencies ──
+      - name: Install dependencies (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: choco install nasm cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        shell: pwsh
+
+      # ── Common build steps ──
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' lightningbeam-ui/lightningbeam-editor/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Enable FFmpeg build from source
+        shell: bash
+        run: |
+          sed -i.bak 's/ffmpeg-next = { version = "8.0", features = \["static"\] }/ffmpeg-next = { version = "8.0", features = ["build", "static"] }/' lightningbeam-ui/lightningbeam-editor/Cargo.toml
+
+      - name: Setup icons
+        shell: bash
+        run: |
+          mkdir -p lightningbeam-ui/lightningbeam-editor/assets/icons
+          cp -f src-tauri/icons/32x32.png lightningbeam-ui/lightningbeam-editor/assets/icons/
+          cp -f src-tauri/icons/128x128.png lightningbeam-ui/lightningbeam-editor/assets/icons/
+          cp -f src-tauri/icons/icon.png lightningbeam-ui/lightningbeam-editor/assets/icons/256x256.png
+
+      - name: Stage factory presets
+        shell: bash
+        run: |
+          mkdir -p lightningbeam-ui/lightningbeam-editor/assets/presets
+          cp -r src/assets/instruments/* lightningbeam-ui/lightningbeam-editor/assets/presets/
+          # Remove empty category dirs and README
+          find lightningbeam-ui/lightningbeam-editor/assets/presets -maxdepth 1 -type d -empty -delete
+          rm -f lightningbeam-ui/lightningbeam-editor/assets/presets/README.md
+
+      - name: Inject preset entries into RPM metadata (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          cd lightningbeam-ui
+          find lightningbeam-editor/assets/presets -type f | sort | while read -r f; do
+            rel="${f#lightningbeam-editor/}"
+            dest="/usr/share/lightningbeam-editor/presets/${f#lightningbeam-editor/assets/presets/}"
+            printf '\n[[package.metadata.generate-rpm.assets]]\nsource = "%s"\ndest = "%s"\nmode = "644"\n' "$rel" "$dest" >> lightningbeam-editor/Cargo.toml
+          done
+
+      - name: Build release binary
+        shell: bash
+        env:
+          FFMPEG_STATIC: "1"
+        run: |
+          cd lightningbeam-ui
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --bin lightningbeam-editor --target ${{ matrix.target }}
+          else
+            cargo build --release --bin lightningbeam-editor
+          fi
+
+      - name: Copy cross-compiled binary to release dir (macOS cross)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          mkdir -p lightningbeam-ui/target/release
+          cp lightningbeam-ui/target/${{ matrix.target }}/release/lightningbeam-editor lightningbeam-ui/target/release/
+
+      # ── Stage presets next to binary for packaging ──
+      - name: Stage presets in target dir
+        shell: bash
+        run: |
+          mkdir -p lightningbeam-ui/target/release/presets
+          cp -r lightningbeam-ui/lightningbeam-editor/assets/presets/* lightningbeam-ui/target/release/presets/
+
+      # ══════════════════════════════════════════════
+      #  Linux Packaging
+      # ══════════════════════════════════════════════
+      - name: Build .deb package
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          cd lightningbeam-ui
+          cargo deb -p lightningbeam-editor --no-build --no-strip
+
+          # Inject factory presets into .deb (cargo-deb doesn't handle recursive dirs well)
+          DEB=$(ls target/debian/*.deb | head -1)
+          WORK=$(mktemp -d)
+          dpkg-deb -R "$DEB" "$WORK"
+          mkdir -p "$WORK/usr/share/lightningbeam-editor/presets"
+          cp -r lightningbeam-editor/assets/presets/* "$WORK/usr/share/lightningbeam-editor/presets/"
+          dpkg-deb -b "$WORK" "$DEB"
+          rm -rf "$WORK"
+
+      - name: Build .rpm package
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          cd lightningbeam-ui
+          cargo generate-rpm -p lightningbeam-editor
+
+      - name: Build AppImage
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          cd lightningbeam-ui
+          VERSION="${{ steps.version.outputs.version }}"
+          APPDIR=/tmp/AppDir
+          ASSETS=lightningbeam-editor/assets
+
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin"
+          mkdir -p "$APPDIR/usr/bin/presets"
+          mkdir -p "$APPDIR/usr/share/applications"
+          mkdir -p "$APPDIR/usr/share/metainfo"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/32x32/apps"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/128x128/apps"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          cp target/release/lightningbeam-editor "$APPDIR/usr/bin/"
+          cp -r lightningbeam-editor/assets/presets/* "$APPDIR/usr/bin/presets/"
+
+          cp "$ASSETS/com.lightningbeam.editor.desktop" "$APPDIR/usr/share/applications/"
+          cp "$ASSETS/com.lightningbeam.editor.appdata.xml" "$APPDIR/usr/share/metainfo/"
+          cp "$ASSETS/icons/32x32.png" "$APPDIR/usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png"
+          cp "$ASSETS/icons/128x128.png" "$APPDIR/usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png"
+          cp "$ASSETS/icons/256x256.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
+
+          ln -sf usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png "$APPDIR/lightningbeam-editor.png"
+          ln -sf usr/share/applications/com.lightningbeam.editor.desktop "$APPDIR/lightningbeam-editor.desktop"
+
+          printf '#!/bin/bash\nSELF=$(readlink -f "$0")\nHERE=${SELF%%/*}\nexport XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"\nexec "${HERE}/usr/bin/lightningbeam-editor" "$@"\n' > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          # Download AppImage runtime
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64" \
+            -O /tmp/appimage-runtime
+          chmod +x /tmp/appimage-runtime
+
+          # Build squashfs and concatenate
+          mksquashfs "$APPDIR" /tmp/appimage.squashfs \
+            -root-owned -noappend -no-exports -no-xattrs \
+            -comp gzip -b 131072
+          cat /tmp/appimage-runtime /tmp/appimage.squashfs \
+            > "Lightningbeam_Editor-${VERSION}-x86_64.AppImage"
+          chmod +x "Lightningbeam_Editor-${VERSION}-x86_64.AppImage"
+
+      - name: Collect Linux artifacts
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp lightningbeam-ui/target/debian/*.deb artifacts/
+          cp lightningbeam-ui/target/generate-rpm/*.rpm artifacts/
+          cp lightningbeam-ui/Lightningbeam_Editor-*.AppImage artifacts/
+
+      # ══════════════════════════════════════════════
+      #  macOS Packaging
+      # ══════════════════════════════════════════════
+      - name: Create macOS .app bundle
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP="Lightningbeam Editor.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources/presets"
+
+          cp lightningbeam-ui/target/release/lightningbeam-editor "$APP/Contents/MacOS/"
+          cp src-tauri/icons/icon.icns "$APP/Contents/Resources/lightningbeam-editor.icns"
+          cp -r lightningbeam-ui/lightningbeam-editor/assets/presets/* "$APP/Contents/Resources/presets/"
+
+          cat > "$APP/Contents/Info.plist" << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Lightningbeam Editor</string>
+            <key>CFBundleDisplayName</key>
+            <string>Lightningbeam Editor</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.lightningbeam.editor</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleExecutable</key>
+            <string>lightningbeam-editor</string>
+            <key>CFBundleIconFile</key>
+            <string>lightningbeam-editor</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Create macOS .dmg
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.target == 'aarch64-apple-darwin' && 'arm64' || 'x86_64' }}"
+          DMG_NAME="Lightningbeam_Editor-${VERSION}-macOS-${ARCH}.dmg"
+
+          create-dmg \
+            --volname "Lightningbeam Editor" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Lightningbeam Editor.app" 175 190 \
+            --app-drop-link 425 190 \
+            "$DMG_NAME" \
+            "Lightningbeam Editor.app" || true
+          # create-dmg returns non-zero if codesigning is skipped, but the .dmg is still valid
+
+      - name: Collect macOS artifacts
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp Lightningbeam_Editor-*.dmg artifacts/
+
+      # ══════════════════════════════════════════════
+      #  Windows Packaging
+      # ══════════════════════════════════════════════
+      - name: Create Windows .zip
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ steps.version.outputs.version }}"
+          $DIST = "Lightningbeam_Editor-${VERSION}-Windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $DIST
+          Copy-Item "lightningbeam-ui/target/release/lightningbeam-editor.exe" "$DIST/"
+          Copy-Item -Recurse "lightningbeam-ui/target/release/presets" "$DIST/presets"
+          Compress-Archive -Path $DIST -DestinationPath "${DIST}.zip"
+
+      - name: Collect Windows artifacts
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          Copy-Item "Lightningbeam_Editor-*.zip" "artifacts/"
+
+      # ── Upload ──
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            lightningbeam-ui/lightningbeam-editor/Cargo.toml
+            Changelog.md
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' lightningbeam-ui/lightningbeam-editor/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes
+        id: notes
+        uses: sean0x42/markdown-extract@v2.1.0
+        with:
+          pattern: "${{ steps.version.outputs.version }}:"
+          file: Changelog.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lhR dist/
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.version.outputs.version }}"
+          name: "Lightningbeam v${{ steps.version.outputs.version }}"
+          body: ${{ steps.notes.outputs.markdown }}
+          draft: true
+          prerelease: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
