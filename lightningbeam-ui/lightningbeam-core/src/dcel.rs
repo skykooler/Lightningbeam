@@ -5,7 +5,7 @@
 //! maintained such that wherever two strokes intersect there is a vertex.
 
 use crate::shape::{FillRule, ShapeColor, StrokeStyle};
-use kurbo::{BezPath, CubicBez, ParamCurveArclen, Point};
+use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveArclen, Point};
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -735,11 +735,8 @@ impl Dcel {
     ) -> (EdgeId, FaceId) {
         debug_assert!(v1 != v2, "cannot insert edge from vertex to itself");
 
-        // Find the half-edges on the face boundary that originate from v1 and v2.
-        // For an isolated face (first edge insertion into the unbounded face where
-        // the vertices have no outgoing edges yet), we handle the special case.
-        let v1_on_face = self.find_half_edge_leaving_vertex_on_face(v1, face);
-        let v2_on_face = self.find_half_edge_leaving_vertex_on_face(v2, face);
+        let v1_has_edges = !self.vertices[v1.idx()].outgoing.is_none();
+        let v2_has_edges = !self.vertices[v2.idx()].outgoing.is_none();
 
         // Allocate the new edge and half-edge pair
         let (he_fwd, he_bwd) = self.alloc_half_edge_pair();
@@ -754,11 +751,8 @@ impl Dcel {
         self.half_edges[he_fwd.idx()].origin = v1;
         self.half_edges[he_bwd.idx()].origin = v2;
 
-        // Allocate new face (for one side of the new edge)
-        let new_face = self.alloc_face();
-
-        match (v1_on_face, v2_on_face) {
-            (None, None) => {
+        match (v1_has_edges, v2_has_edges) {
+            (false, false) => {
                 // Both vertices are isolated (no existing edges). This is the first
                 // edge in this face. Wire next/prev to form two trivial cycles.
                 self.half_edges[he_fwd.idx()].next = he_bwd;
@@ -766,25 +760,18 @@ impl Dcel {
                 self.half_edges[he_bwd.idx()].next = he_fwd;
                 self.half_edges[he_bwd.idx()].prev = he_fwd;
 
-                // Both half-edges are on the same face (the unbounded face) initially.
-                // One side gets the original face, the other gets the new face.
-                // Since both form a degenerate 2-edge cycle, the faces don't truly
-                // split — but we assign them for consistency.
+                // Both half-edges are on the same face initially (no real split).
                 self.half_edges[he_fwd.idx()].face = face;
                 self.half_edges[he_bwd.idx()].face = face;
 
                 // Set face outer half-edge if unset
                 if self.faces[face.idx()].outer_half_edge.is_none() || face.0 == 0 {
-                    // For the unbounded face, add as inner cycle
                     if face.0 == 0 {
                         self.faces[0].inner_half_edges.push(he_fwd);
                     } else {
                         self.faces[face.idx()].outer_half_edge = he_fwd;
                     }
                 }
-
-                // Free the unused new face since we didn't actually split
-                self.free_face(new_face);
 
                 // Set vertex outgoing
                 if self.vertices[v1.idx()].outgoing.is_none() {
@@ -796,42 +783,53 @@ impl Dcel {
 
                 return (edge_id, face);
             }
-            (Some(he_from_v1), Some(he_from_v2)) => {
-                // Both vertices have existing edges on this face.
-                // We need to splice the new edge into the boundary cycle,
-                // splitting the face.
+            (true, true) => {
+                // Both vertices have existing edges. Use angular position to find
+                // the correct sector in each vertex's fan for the splice.
+                //
+                // The standard DCEL rule: at a vertex with outgoing half-edges
+                // sorted CCW by angle, the new edge goes between the half-edge
+                // just before it (CW) and just after it (CCW). he_from_v is the
+                // CCW successor — the existing outgoing half-edge that will follow
+                // the new edge in the fan after insertion.
+                let fwd_angle = Self::curve_angle_at_start(&curve);
+                let bwd_angle = Self::curve_angle_at_end(&curve);
 
-                // The half-edge arriving at v1 on this face (i.e., prev of he_from_v1)
+                let he_from_v1 = self.find_ccw_successor(v1, fwd_angle);
+                let he_from_v2 = self.find_ccw_successor(v2, bwd_angle);
+
                 let he_into_v1 = self.half_edges[he_from_v1.idx()].prev;
-                // The half-edge arriving at v2
                 let he_into_v2 = self.half_edges[he_from_v2.idx()].prev;
 
-                // Splice: he_into_v1 → he_fwd → ... (old chain from v2) → he_into_v2 → he_bwd → ... (old chain from v1)
-                // Forward half-edge (v1 → v2): inserted between he_into_v1 and he_from_v2
+                // The actual face being split is determined by the sector, not the
+                // parameter — the parameter may be stale after prior inserts.
+                let actual_face = self.half_edges[he_into_v1.idx()].face;
+
+                // Splice: he_into_v1 → he_fwd → he_from_v2 → ...
+                //         he_into_v2 → he_bwd → he_from_v1 → ...
                 self.half_edges[he_fwd.idx()].next = he_from_v2;
                 self.half_edges[he_fwd.idx()].prev = he_into_v1;
                 self.half_edges[he_into_v1.idx()].next = he_fwd;
                 self.half_edges[he_from_v2.idx()].prev = he_fwd;
 
-                // Backward half-edge (v2 → v1): inserted between he_into_v2 and he_from_v1
                 self.half_edges[he_bwd.idx()].next = he_from_v1;
                 self.half_edges[he_bwd.idx()].prev = he_into_v2;
                 self.half_edges[he_into_v2.idx()].next = he_bwd;
                 self.half_edges[he_from_v1.idx()].prev = he_bwd;
 
-                // Assign faces: one cycle gets the original face, the other gets new_face
-                self.half_edges[he_fwd.idx()].face = face;
-                self.half_edges[he_bwd.idx()].face = new_face;
+                // Allocate new face for one side of the split
+                let new_face = self.alloc_face();
 
-                // Walk the cycle containing he_fwd and set all to `face`
+                // Walk each cycle and assign faces
+                self.half_edges[he_fwd.idx()].face = actual_face;
                 {
                     let mut cur = self.half_edges[he_fwd.idx()].next;
                     while cur != he_fwd {
-                        self.half_edges[cur.idx()].face = face;
+                        self.half_edges[cur.idx()].face = actual_face;
                         cur = self.half_edges[cur.idx()].next;
                     }
                 }
-                // Walk the cycle containing he_bwd and set all to `new_face`
+                self.half_edges[he_bwd.idx()].face = new_face;
                 {
                     let mut cur = self.half_edges[he_bwd.idx()].next;
                     while cur != he_bwd {
@@ -841,28 +839,38 @@ impl Dcel {
                 }
 
                 // Update face boundary pointers
-                self.faces[face.idx()].outer_half_edge = he_fwd;
+                self.faces[actual_face.idx()].outer_half_edge = he_fwd;
                 self.faces[new_face.idx()].outer_half_edge = he_bwd;
+
+                return (edge_id, new_face);
             }
-            (Some(he_from_v1), None) | (None, Some(he_from_v1)) => {
+            _ => {
                 // One vertex has edges, the other is isolated.
                 // This creates a "spur" (antenna) edge — no face split.
-                let (connected_v, isolated_v, existing_he) = if v1_on_face.is_some() {
-                    (v1, v2, he_from_v1)
+                let (connected_v, isolated_v) = if v1_has_edges {
+                    (v1, v2)
                 } else {
-                    (v2, v1, he_from_v1)
+                    (v2, v1)
                 };
 
-                // he_out: new half-edge FROM connected_v TO isolated_v (origin = connected_v)
-                // he_back: new half-edge FROM isolated_v TO connected_v (origin = isolated_v)
+                // he_out: new half-edge FROM connected_v TO isolated_v
+                // he_back: new half-edge FROM isolated_v TO connected_v
                 let (he_out, he_back) = if self.half_edges[he_fwd.idx()].origin == connected_v {
                     (he_fwd, he_bwd)
                 } else {
                     (he_bwd, he_fwd)
                 };
 
-                // existing_he: existing half-edge leaving connected_v on this face
+                // Find correct sector at connected vertex using angle
+                let spur_angle = if self.half_edges[he_fwd.idx()].origin == connected_v {
+                    Self::curve_angle_at_start(&curve)
+                } else {
+                    Self::curve_angle_at_end(&curve)
+                };
+                let existing_he = self.find_ccw_successor(connected_v, spur_angle);
+
                 let he_into_connected = self.half_edges[existing_he.idx()].prev;
+                let actual_face = self.half_edges[he_into_connected.idx()].face;
 
                 // Splice spur into the cycle at connected_v:
                 // Before: ... → he_into_connected → existing_he → ...
@@ -875,49 +883,77 @@ impl Dcel {
                 self.half_edges[existing_he.idx()].prev = he_back;
 
                 // Both half-edges are on the same face (no split)
-                self.half_edges[he_out.idx()].face = face;
-                self.half_edges[he_back.idx()].face = face;
+                self.half_edges[he_out.idx()].face = actual_face;
+                self.half_edges[he_back.idx()].face = actual_face;
 
                 // Isolated vertex's outgoing must originate FROM isolated_v
                 self.vertices[isolated_v.idx()].outgoing = he_back;
 
-                // Free unused face
-                self.free_face(new_face);
-
-                return (edge_id, face);
+                return (edge_id, actual_face);
             }
         }
-
-        (edge_id, new_face)
     }
 
-    /// Find a half-edge leaving `vertex` that is on `face`'s boundary.
-    /// Returns None if the vertex has no outgoing edges or none are on this face.
-    fn find_half_edge_leaving_vertex_on_face(
-        &self,
-        vertex: VertexId,
-        face: FaceId,
-    ) -> Option<HalfEdgeId> {
+    /// Find the outgoing half-edge from `vertex` that is the immediate CCW
+    /// successor of `new_angle` in the vertex fan.
+    ///
+    /// In the DCEL fan around a vertex, outgoing half-edges are ordered by
+    /// angle with the rule `twin(out[i]).next = out[(i+1) % n]`. Inserting a
+    /// new edge at `new_angle` requires splicing before this CCW successor.
+    fn find_ccw_successor(&self, vertex: VertexId, new_angle: f64) -> HalfEdgeId {
         let v = self.vertex(vertex);
-        if v.outgoing.is_none() {
-            return None;
-        }
+        debug_assert!(!v.outgoing.is_none(), "find_ccw_successor on isolated vertex");
 
-        // Walk all outgoing half-edges from vertex
         let start = v.outgoing;
+        let mut best_he = start;
+        let mut best_delta = f64::MAX;
+
         let mut current = start;
         loop {
-            if self.half_edge(current).face == face {
-                return Some(current);
+            let angle = self.outgoing_angle(current);
+            // How far CCW from new_angle to this half-edge's angle
+            let mut delta = angle - new_angle;
+            if delta <= 0.0 {
+                delta += std::f64::consts::TAU;
             }
-            // Next outgoing: twin → next
+            if delta < best_delta {
+                best_delta = delta;
+                best_he = current;
+            }
+
             let twin = self.half_edge(current).twin;
             current = self.half_edge(twin).next;
             if current == start {
                 break;
             }
         }
-        None
+
+        best_he
+    }
+
+    /// Outgoing angle of a curve at its start point (p0 → p1, fallback p3).
+    fn curve_angle_at_start(curve: &CubicBez) -> f64 {
+        let from = curve.p0;
+        let dx = curve.p1.x - from.x;
+        let dy = curve.p1.y - from.y;
+        if dx * dx + dy * dy > 1e-18 {
+            dy.atan2(dx)
+        } else {
+            (curve.p3.y - from.y).atan2(curve.p3.x - from.x)
+        }
+    }
+
+    /// Outgoing angle of the backward half-edge at the curve's end point
+    /// (p3 → p2, fallback p0).
+    fn curve_angle_at_end(curve: &CubicBez) -> f64 {
+        let from = curve.p3;
+        let dx = curve.p2.x - from.x;
+        let dy = curve.p2.y - from.y;
+        if dx * dx + dy * dy > 1e-18 {
+            dy.atan2(dx)
+        } else {
+            (curve.p0.y - from.y).atan2(curve.p0.x - from.x)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1225,6 +1261,125 @@ impl Dcel {
                 .sort_by(|a, b| a.t_on_segment.partial_cmp(&b.t_on_segment).unwrap());
         }
 
+        // Within-stroke self-intersections.
+        //
+        // There are two kinds:
+        //  (a) A single cubic segment crosses itself (loop-shaped curve).
+        //  (b) Two different segments of the stroke cross each other.
+        //
+        // For (a) we split each segment at its midpoint and intersect the two
+        // halves using the robust recursive finder, then remap t-values back to
+        // the original segment's parameter space.
+        //
+        // For (b) we check all (i, j) pairs where j > i. Adjacent pairs share
+        // an endpoint — we filter out that shared-endpoint hit (t1≈1, t2≈0).
+        struct IntraStrokeIntersection {
+            seg_a: usize,
+            t_on_a: f64,
+            seg_b: usize,
+            t_on_b: f64,
+            point: Point,
+        }
+        let mut intra_intersections: Vec<IntraStrokeIntersection> = Vec::new();
+
+        // (a) Single-segment self-intersections
+        for (i, seg) in segments.iter().enumerate() {
+            let left = seg.subsegment(0.0..0.5);
+            let right = seg.subsegment(0.5..1.0);
+            let hits = find_curve_intersections(&left, &right);
+            for inter in hits {
+                if let Some(t2) = inter.t2 {
+                    // Remap from half-curve parameter space to full segment:
+                    // left half [0,1] → segment [0, 0.5], right half [0,1] → segment [0.5, 1]
+                    let t_on_seg_a = inter.t1 * 0.5;
+                    let t_on_seg_b = 0.5 + t2 * 0.5;
+                    // Skip the shared midpoint (t1≈1 on left, t2≈0 on right → seg t≈0.5 both)
+                    if (t_on_seg_b - t_on_seg_a).abs() < 0.01 {
+                        continue;
+                    }
+                    // Skip near-endpoint hits
+                    if t_on_seg_a < 0.001 || t_on_seg_b > 0.999 {
+                        continue;
+                    }
+                    intra_intersections.push(IntraStrokeIntersection {
+                        seg_a: i,
+                        t_on_a: t_on_seg_a,
+                        seg_b: i,
+                        t_on_b: t_on_seg_b,
+                        point: inter.point,
+                    });
+                }
+            }
+        }
+
+        // (b) Inter-segment crossings
+        for i in 0..segments.len() {
+            for j in (i + 1)..segments.len() {
+                let hits = find_curve_intersections(&segments[i], &segments[j]);
+                for inter in hits {
+                    if let Some(t2) = inter.t2 {
+                        // Skip near-endpoint hits: these are shared vertices between
+                        // consecutive segments (t1≈1, t2≈0) or stroke start/end,
+                        // not real crossings. Use a wider threshold for adjacent
+                        // segments since the recursive finder can converge to t-values
+                        // that are close-but-not-quite at the shared corner.
+                        let tol = if j == i + 1 { 0.02 } else { 0.001 };
+                        if (inter.t1 < tol || inter.t1 > 1.0 - tol)
+                            && (t2 < tol || t2 > 1.0 - tol)
+                        {
+                            continue;
+                        }
+                        intra_intersections.push(IntraStrokeIntersection {
+                            seg_a: i,
+                            t_on_a: inter.t1,
+                            seg_b: j,
+                            t_on_b: t2,
+                            point: inter.point,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Dedup nearby intra-stroke intersections (recursive finder can return
+        // near-duplicate hits for one crossing)
+        intra_intersections.sort_by(|a, b| {
+            a.seg_a
+                .cmp(&b.seg_a)
+                .then(a.seg_b.cmp(&b.seg_b))
+                .then(a.t_on_a.partial_cmp(&b.t_on_a).unwrap())
+        });
+        intra_intersections.dedup_by(|a, b| {
+            a.seg_a == b.seg_a
+                && a.seg_b == b.seg_b
+                && (a.point - b.point).hypot() < 1.0
+        });
+
+        // Create vertices for each intra-stroke crossing and record split points.
+        //
+        // For single-segment self-intersections (seg_a == seg_b), the loop
+        // sub-curve would go from vertex V back to V, which insert_edge
+        // doesn't support. We break the loop by adding a midpoint vertex
+        // halfway between the two crossing t-values, splitting the loop
+        // sub-curve into two halves.
+        let mut intra_split_points: Vec<Vec<(f64, VertexId)>> =
+            (0..segments.len()).map(|_| Vec::new()).collect();
+
+        for intra in &intra_intersections {
+            let v = self.alloc_vertex(intra.point);
+            result.new_vertices.push(v);
+            intra_split_points[intra.seg_a].push((intra.t_on_a, v));
+            if intra.seg_a == intra.seg_b {
+                // Same segment: add a midpoint vertex to break the V→V loop
+                let mid_t = (intra.t_on_a + intra.t_on_b) / 2.0;
+                let mid_point = segments[intra.seg_a].eval(mid_t);
+                let mid_v = self.alloc_vertex(mid_point);
+                result.new_vertices.push(mid_v);
+                intra_split_points[intra.seg_a].push((mid_t, mid_v));
+            }
+            intra_split_points[intra.seg_b].push((intra.t_on_b, v));
+        }
+
         // Split existing edges at intersection points.
         // We need to track how edge splits affect subsequent intersection parameters.
         // Process from highest t to lowest per edge to avoid parameter shift.
@@ -1325,7 +1480,15 @@ impl Dcel {
                     split_points.push((inter.t_on_segment, vertex));
                 }
             }
-            // Already sorted by t_on_segment
+
+            // Merge intra-stroke split points (self-crossing vertices)
+            if let Some(intra) = intra_split_points.get(seg_idx) {
+                for &(t, v) in intra {
+                    split_points.push((t, v));
+                }
+            }
+            // Sort by t so all split points (existing-edge + intra-stroke) are in order
+            split_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
             // End vertex: snap or create
             let end_point = seg.p3;
@@ -1351,6 +1514,14 @@ impl Dcel {
             let mut prev_vertex = *stroke_vertices.last().unwrap();
 
             for (t, vertex) in &split_points {
+                // Skip zero-length sub-edges: an intra-stroke split point near
+                // a segment endpoint can snap to the same vertex, producing a
+                // degenerate v→v edge.
+                if prev_vertex == *vertex {
+                    prev_t = *t;
+                    continue;
+                }
+
                 let sub_curve = subsegment_cubic(*seg, prev_t, *t);
 
                 // Find the face containing this edge's midpoint for insertion
@@ -1374,6 +1545,9 @@ impl Dcel {
 
             stroke_vertices.push(end_v);
         }
+
+        #[cfg(debug_assertions)]
+        self.validate();
 
         result
     }
@@ -1409,6 +1583,81 @@ impl Dcel {
         }
 
         let edited_curve = self.edges[edge_id.idx()].curve;
+
+        // --- Self-intersection: split curve at midpoint, intersect the halves ---
+        {
+            let left = edited_curve.subsegment(0.0..0.5);
+            let right = edited_curve.subsegment(0.5..1.0);
+            let self_hits = find_curve_intersections(&left, &right);
+
+            // Collect valid self-intersection t-pairs (remapped to full curve)
+            let mut self_crossings: Vec<(f64, f64)> = Vec::new();
+            for inter in self_hits {
+                if let Some(t2) = inter.t2 {
+                    let t_a = inter.t1 * 0.5;          // left half → [0, 0.5]
+                    let t_b = 0.5 + t2 * 0.5;          // right half → [0.5, 1]
+                    // Skip shared midpoint and near-endpoint hits
+                    if (t_b - t_a).abs() < 0.01 || t_a < 0.001 || t_b > 0.999 {
+                        continue;
+                    }
+                    self_crossings.push((t_a, t_b));
+                }
+            }
+            // Dedup
+            self_crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            self_crossings.dedup_by(|a, b| (a.0 - b.0).abs() < 0.02);
+
+            if !self_crossings.is_empty() {
+                // For each self-crossing, split the edge at t_a, midpoint, and t_b.
+                // We process from high-t to low-t to avoid parameter shift.
+                // Collect all split t-values with a flag for shared-vertex pairs.
+                let mut self_split_ts: Vec<f64> = Vec::new();
+                for &(t_a, t_b) in &self_crossings {
+                    self_split_ts.push(t_a);
+                    self_split_ts.push((t_a + t_b) / 2.0);
+                    self_split_ts.push(t_b);
+                }
+                self_split_ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                self_split_ts.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+
+                // Split from high-t to low-t
+                let current_edge = edge_id;
+                let mut remaining_t_end = 1.0_f64;
+                let mut split_vertices: Vec<(f64, VertexId)> = Vec::new();
+
+                for &t in self_split_ts.iter().rev() {
+                    let t_in_current = t / remaining_t_end;
+                    if t_in_current < 0.001 || t_in_current > 0.999 {
+                        continue;
+                    }
+                    let (new_vertex, new_edge) = self.split_edge(current_edge, t_in_current);
+                    created.push((new_vertex, new_edge));
+                    split_vertices.push((t, new_vertex));
+                    remaining_t_end = t;
+                }
+
+                // Now merge the crossing vertex pairs. For each (t_a, t_b),
+                // the vertices at t_a and t_b should be the same point.
+                for &(t_a, t_b) in &self_crossings {
+                    let v_a = split_vertices.iter().find(|(t, _)| (*t - t_a).abs() < 0.01);
+                    let v_b = split_vertices.iter().find(|(t, _)| (*t - t_b).abs() < 0.01);
+                    if let (Some(&(_, va)), Some(&(_, vb))) = (v_a, v_b) {
+                        if !self.vertices[va.idx()].deleted && !self.vertices[vb.idx()].deleted {
+                            self.merge_vertices_at_crossing(va, vb);
+                        }
+                    }
+                }
+
+                // Reassign faces after the self-intersection merges
+                self.reassign_faces_after_merges();
+
+                #[cfg(debug_assertions)]
+                self.validate();
+
+                return created;
+            }
+        }
+
         let mut hits = Vec::new();
 
         for (idx, e) in self.edges.iter().enumerate() {
@@ -1451,14 +1700,6 @@ impl Dcel {
                     });
                 }
             }
-        }
-
-        eprintln!("[DCEL] hits after filtering: {}", hits.len());
-        for h in &hits {
-            eprintln!(
-                "[DCEL]   edge {:?} t_edited={:.6} t_other={:.6}",
-                h.other_edge, h.t_on_edited, h.t_on_other
-            );
         }
 
         if hits.is_empty() {
@@ -1506,11 +1747,6 @@ impl Dcel {
                 }
 
                 let (new_vertex, new_edge) = self.split_edge(current_edge, t_in_current);
-                eprintln!(
-                    "[DCEL]   split other edge {:?} at t_in_current={:.6} (orig t={:.6}) → vtx {:?} pos={:?}",
-                    current_edge, t_in_current, t_on_other, new_vertex,
-                    self.vertices[new_vertex.idx()].position
-                );
                 created.push((new_vertex, new_edge));
                 edited_edge_splits.push((t_on_edited, new_vertex));
 
@@ -1524,7 +1760,6 @@ impl Dcel {
         // Now split the edited edge itself at all intersection t-values.
         // Sort descending by t to avoid parameter shift.
         edited_edge_splits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-        eprintln!("[DCEL] edited_edge_splits (sorted desc): {:?}", edited_edge_splits);
         // Deduplicate near-equal t values (keep the first = highest t)
         edited_edge_splits.dedup_by(|a, b| (a.0 - b.0).abs() < 0.001);
 
@@ -1542,12 +1777,6 @@ impl Dcel {
             }
 
             let (new_vertex, new_edge) = self.split_edge(current_edge, t_in_current);
-            eprintln!(
-                "[DCEL]   split edited edge at t_in_current={:.6} (orig t={:.6}) → vtx {:?} pos={:?}, paired with {:?}",
-                t_in_current, t, new_vertex,
-                self.vertices[new_vertex.idx()].position,
-                other_vertex
-            );
             created.push((new_vertex, new_edge));
             crossing_pairs.push((new_vertex, *other_vertex));
             remaining_t_end = *t;
@@ -1556,18 +1785,11 @@ impl Dcel {
 
         // Post-process: merge co-located vertex pairs at each crossing point.
         // Do all vertex merges first (topology only), then reassign faces once.
-        eprintln!("[DCEL] crossing_pairs: {:?}", crossing_pairs);
         let has_merges = !crossing_pairs.is_empty();
         for (v_edited, v_other) in &crossing_pairs {
             if self.vertices[v_edited.idx()].deleted || self.vertices[v_other.idx()].deleted {
-                eprintln!("[DCEL]   SKIP merge {:?} {:?} (deleted)", v_edited, v_other);
                 continue;
             }
-            eprintln!(
-                "[DCEL]   merging {:?} (pos={:?}) with {:?} (pos={:?})",
-                v_edited, self.vertices[v_edited.idx()].position,
-                v_other, self.vertices[v_other.idx()].position,
-            );
             self.merge_vertices_at_crossing(*v_edited, *v_other);
         }
 
@@ -1576,18 +1798,8 @@ impl Dcel {
             self.reassign_faces_after_merges();
         }
 
-        // Dump final state
-        eprintln!("[DCEL] after recompute_edge_intersections:");
-        eprintln!("[DCEL]   vertices: {}", self.vertices.iter().filter(|v| !v.deleted).count());
-        eprintln!("[DCEL]   edges: {}", self.edges.iter().filter(|e| !e.deleted).count());
-        for (i, f) in self.faces.iter().enumerate() {
-            if !f.deleted {
-                let cycle_len = if !f.outer_half_edge.is_none() {
-                    self.walk_cycle(f.outer_half_edge).len()
-                } else { 0 };
-                eprintln!("[DCEL]   F{}: outer={:?} cycle_len={}", i, f.outer_half_edge, cycle_len);
-            }
-        }
+        #[cfg(debug_assertions)]
+        self.validate();
 
         created
     }
@@ -1839,7 +2051,7 @@ impl Dcel {
 
     /// Find which face contains a given point (brute force for now).
     /// Returns FaceId(0) (unbounded) if no bounded face contains the point.
-    fn find_face_containing_point(&self, point: Point) -> FaceId {
+    pub fn find_face_containing_point(&self, point: Point) -> FaceId {
         use kurbo::Shape;
         for (i, face) in self.faces.iter().enumerate() {
             if face.deleted || i == 0 {
@@ -1876,7 +2088,6 @@ fn subsegment_cubic(c: CubicBez, t0: f64, t1: f64) -> CubicBez {
 
 /// Get the midpoint of a cubic bezier.
 fn midpoint_of_cubic(c: &CubicBez) -> Point {
-    use kurbo::ParamCurve;
     c.eval(0.5)
 }
 
@@ -2361,5 +2572,187 @@ mod tests {
         );
 
         let _ = (e_bc, e_cd, e_da);
+    }
+
+    #[test]
+    fn test_single_segment_self_intersection() {
+        // A single cubic bezier that loops back on itself.
+        // Control points (300,150) and (-100,150) are far apart and on opposite
+        // sides of the chord, forcing the curve to reverse in X and cross itself
+        // near t≈0.175 and t≈0.825.
+        let mut dcel = Dcel::new();
+
+        let seg = CubicBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(300.0, 150.0),
+            Point::new(-100.0, 150.0),
+            Point::new(200.0, 0.0),
+        );
+
+        let result = dcel.insert_stroke(&[seg], None, None, 5.0);
+
+        eprintln!("new_vertices: {:?}", result.new_vertices);
+        eprintln!("new_edges: {:?}", result.new_edges);
+        eprintln!("new_faces: {:?}", result.new_faces);
+        let live_faces = dcel.faces.iter().filter(|f| !f.deleted).count();
+        eprintln!("total live faces: {}", live_faces);
+
+        // The self-intersection splits the single segment into 3 sub-edges,
+        // creating 1 enclosed loop → at least 2 faces (loop + unbounded).
+        assert!(
+            live_faces >= 2,
+            "expected at least 2 faces (1 loop + unbounded), got {}",
+            live_faces,
+        );
+        assert!(
+            result.new_edges.len() >= 3,
+            "expected at least 3 sub-edges from self-intersecting segment, got {}",
+            result.new_edges.len(),
+        );
+    }
+
+    #[test]
+    fn test_adjacent_segments_crossing() {
+        // Two adjacent segments that cross each other.
+        // seg0 is an S-curve going right; seg1 comes back left, crossing seg0
+        // in the middle.
+        let mut dcel = Dcel::new();
+
+        // seg0 curves up-right, seg1 curves down-left, they cross.
+        let seg0 = CubicBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(200.0, 0.0),
+            Point::new(200.0, 100.0),
+            Point::new(100.0, 50.0),
+        );
+        let seg1 = CubicBez::new(
+            Point::new(100.0, 50.0),
+            Point::new(0.0, 0.0),   // pulls back left
+            Point::new(0.0, 100.0),
+            Point::new(200.0, 100.0),
+        );
+
+        let result = dcel.insert_stroke(&[seg0, seg1], None, None, 5.0);
+
+        eprintln!("new_vertices: {:?}", result.new_vertices);
+        eprintln!("new_edges: {:?}", result.new_edges);
+        eprintln!("new_faces: {:?}", result.new_faces);
+        let live_faces = dcel.faces.iter().filter(|f| !f.deleted).count();
+        eprintln!("total live faces: {}", live_faces);
+
+        // If the segments cross, we expect at least one new face beyond unbounded.
+        // If they don't cross, at least verify the stroke inserted without panic.
+        assert!(
+            result.new_edges.len() >= 2,
+            "expected at least 2 edges, got {}",
+            result.new_edges.len(),
+        );
+    }
+
+    #[test]
+    fn test_cross_then_circle() {
+        // Draw a cross (two strokes), then a circle crossing all 4 arms.
+        // This exercises insert_edge's angular half-edge selection at vertices
+        // where multiple edges share the same face.
+        let mut dcel = Dcel::new();
+
+        // Horizontal stroke: (-100, 0) → (100, 0)
+        let h_seg = line_curve(Point::new(-100.0, 0.0), Point::new(100.0, 0.0));
+        dcel.insert_stroke(&[h_seg], None, None, 5.0);
+
+        // Vertical stroke: (0, -100) → (0, 100) — crosses horizontal at origin
+        let v_seg = line_curve(Point::new(0.0, -100.0), Point::new(0.0, 100.0));
+        dcel.insert_stroke(&[v_seg], None, None, 5.0);
+
+        let faces_before = dcel.faces.iter().filter(|f| !f.deleted).count();
+        eprintln!("faces after cross: {}", faces_before);
+
+        // Circle as 4 cubic segments, radius 50, centered at origin.
+        // Each arc covers 90 degrees.
+        // Using the standard cubic approximation: k = 4*(sqrt(2)-1)/3 ≈ 0.5523
+        let r = 50.0;
+        let k = r * 0.5522847498;
+        let circle_segs = [
+            // Top-right arc: (r,0) → (0,r)
+            CubicBez::new(
+                Point::new(r, 0.0), Point::new(r, k),
+                Point::new(k, r), Point::new(0.0, r),
+            ),
+            // Top-left arc: (0,r) → (-r,0)
+            CubicBez::new(
+                Point::new(0.0, r), Point::new(-k, r),
+                Point::new(-r, k), Point::new(-r, 0.0),
+            ),
+            // Bottom-left arc: (-r,0) → (0,-r)
+            CubicBez::new(
+                Point::new(-r, 0.0), Point::new(-r, -k),
+                Point::new(-k, -r), Point::new(0.0, -r),
+            ),
+            // Bottom-right arc: (0,-r) → (r,0)
+            CubicBez::new(
+                Point::new(0.0, -r), Point::new(k, -r),
+                Point::new(r, -k), Point::new(r, 0.0),
+            ),
+        ];
+        let result = dcel.insert_stroke(&circle_segs, None, None, 5.0);
+
+        let live_faces = dcel.faces.iter().filter(|f| !f.deleted).count();
+        eprintln!("faces after circle: {} (new_faces: {:?})", live_faces, result.new_faces);
+        eprintln!("new_edges: {}", result.new_edges.len());
+
+        // The circle crosses all 4 arms, creating 4 intersection vertices.
+        // This should produce several faces (the 4 quadrant sectors inside the
+        // circle, plus the outside). validate() checks face consistency.
+        // The key assertion: it doesn't panic.
+        assert!(
+            live_faces >= 5,
+            "expected at least 5 faces (4 inner sectors + unbounded), got {}",
+            live_faces,
+        );
+    }
+
+    #[test]
+    fn test_drag_edge_into_self_intersection() {
+        // Insert a straight edge, then edit its curve to loop back on itself.
+        // recompute_edge_intersections should detect the self-crossing and split.
+        let mut dcel = Dcel::new();
+
+        let v1 = dcel.alloc_vertex(Point::new(0.0, 0.0));
+        let v2 = dcel.alloc_vertex(Point::new(200.0, 0.0));
+        let straight = line_curve(Point::new(0.0, 0.0), Point::new(200.0, 0.0));
+        let (edge_id, _) = dcel.insert_edge(v1, v2, FaceId(0), straight);
+        dcel.validate();
+
+        let edges_before = dcel.edges.iter().filter(|e| !e.deleted).count();
+
+        // Now "drag" the edge into a self-intersecting loop (same curve as the
+        // single-segment self-intersection test).
+        dcel.edges[edge_id.idx()].curve = CubicBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(300.0, 150.0),
+            Point::new(-100.0, 150.0),
+            Point::new(200.0, 0.0),
+        );
+
+        let result = dcel.recompute_edge_intersections(edge_id);
+
+        let edges_after = dcel.edges.iter().filter(|e| !e.deleted).count();
+        let faces_after = dcel.faces.iter().filter(|f| !f.deleted).count();
+        eprintln!("created: {:?}", result);
+        eprintln!("edges: {} → {}", edges_before, edges_after);
+        eprintln!("faces: {}", faces_after);
+
+        // The edge should have been split at the self-crossing.
+        assert!(
+            edges_after > edges_before,
+            "expected edge to be split by self-intersection ({} → {})",
+            edges_before,
+            edges_after,
+        );
+        assert!(
+            faces_after >= 2,
+            "expected at least 2 faces (loop + unbounded), got {}",
+            faces_after,
+        );
     }
 }

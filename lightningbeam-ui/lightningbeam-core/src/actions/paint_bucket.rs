@@ -1,24 +1,23 @@
-//! Paint bucket fill action — STUB: needs DCEL rewrite
-//!
-//! With DCEL, paint bucket simply hit-tests faces and sets fill_color.
+//! Paint bucket fill action — sets fill_color on a DCEL face.
 
 use crate::action::Action;
+use crate::dcel::FaceId;
 use crate::document::Document;
-use crate::gap_handling::GapHandlingMode;
+use crate::layer::AnyLayer;
 use crate::shape::ShapeColor;
 use uuid::Uuid;
 use vello::kurbo::Point;
 
-/// Action that performs a paint bucket fill operation
-/// TODO: Rewrite to use DCEL face hit-testing
+/// Action that performs a paint bucket fill on a DCEL face.
 pub struct PaintBucketAction {
     layer_id: Uuid,
     time: f64,
     click_point: Point,
     fill_color: ShapeColor,
-    _tolerance: f64,
-    _gap_mode: GapHandlingMode,
-    created_shape_id: Option<Uuid>,
+    /// The face that was hit (resolved during execute)
+    hit_face: Option<FaceId>,
+    /// Previous fill color for undo
+    old_fill_color: Option<Option<ShapeColor>>,
 }
 
 impl PaintBucketAction {
@@ -27,30 +26,66 @@ impl PaintBucketAction {
         time: f64,
         click_point: Point,
         fill_color: ShapeColor,
-        tolerance: f64,
-        gap_mode: GapHandlingMode,
     ) -> Self {
         Self {
             layer_id,
             time,
             click_point,
             fill_color,
-            _tolerance: tolerance,
-            _gap_mode: gap_mode,
-            created_shape_id: None,
+            hit_face: None,
+            old_fill_color: None,
         }
     }
 }
 
 impl Action for PaintBucketAction {
-    fn execute(&mut self, _document: &mut Document) -> Result<(), String> {
-        let _ = (&self.layer_id, self.time, self.click_point, self.fill_color);
-        // TODO: Hit-test DCEL faces, set face.fill_color
+    fn execute(&mut self, document: &mut Document) -> Result<(), String> {
+        let layer = document
+            .get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        let vl = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return Err("Not a vector layer".to_string()),
+        };
+
+        let keyframe = vl.ensure_keyframe_at(self.time);
+        let dcel = &mut keyframe.dcel;
+
+        // Hit-test to find which face was clicked
+        let face_id = dcel.find_face_containing_point(self.click_point);
+        if face_id.0 == 0 {
+            // FaceId(0) is the unbounded exterior face — nothing to fill
+            return Err("No face at click point".to_string());
+        }
+
+        // Store for undo
+        self.hit_face = Some(face_id);
+        self.old_fill_color = Some(dcel.face(face_id).fill_color.clone());
+
+        // Apply fill
+        dcel.face_mut(face_id).fill_color = Some(self.fill_color.clone());
+
         Ok(())
     }
 
-    fn rollback(&mut self, _document: &mut Document) -> Result<(), String> {
-        self.created_shape_id = None;
+    fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
+        let face_id = self.hit_face.ok_or("No face to undo")?;
+
+        let layer = document
+            .get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        let vl = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return Err("Not a vector layer".to_string()),
+        };
+
+        let keyframe = vl.ensure_keyframe_at(self.time);
+        let dcel = &mut keyframe.dcel;
+
+        dcel.face_mut(face_id).fill_color = self.old_fill_color.take().unwrap_or(None);
+
         Ok(())
     }
 

@@ -3790,44 +3790,29 @@ impl StagePane {
         // Check if we have an active vector layer
         let active_layer_id = match shared.active_layer_id {
             Some(id) => id,
-            None => {
-                println!("Paint bucket: No active layer");
-                return;
-            }
+            None => return,
         };
 
         let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
-            None => {
-                println!("Paint bucket: Layer not found");
-                return;
-            }
+            None => return,
         };
 
-        // Only work on VectorLayer
         if !matches!(active_layer, AnyLayer::Vector(_)) {
-            println!("Paint bucket: Not a vector layer");
             return;
         }
 
-        // On click: execute paint bucket fill
         if response.clicked() {
             let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
             let fill_color = ShapeColor::from_egui(*shared.fill_color);
 
-            println!("Paint bucket clicked at ({:.1}, {:.1})", click_point.x, click_point.y);
-
-            // Create and execute paint bucket action
             let action = PaintBucketAction::new(
                 *active_layer_id,
                 *shared.playback_time,
                 click_point,
                 fill_color,
-                2.0, // tolerance - could be made configurable
-                lightningbeam_core::gap_handling::GapHandlingMode::BridgeSegment,
             );
             let _ = shared.action_executor.execute(Box::new(action));
-            println!("Paint bucket action executed");
         }
     }
 
