@@ -60,7 +60,7 @@ pub enum Cap {
 
 impl Default for Cap {
     fn default() -> Self {
-        Cap::Butt
+        Cap::Round
     }
 }
 
@@ -122,7 +122,7 @@ impl Default for StrokeStyle {
     fn default() -> Self {
         Self {
             width: 1.0,
-            cap: Cap::Butt,
+            cap: Cap::Round,
             join: Join::Miter,
             miter_limit: 4.0,
         }

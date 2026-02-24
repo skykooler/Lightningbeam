@@ -37,7 +37,7 @@ pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
 pub use add_layer::AddLayerAction;
 pub use add_shape::AddShapeAction;
-pub use modify_shape_path::ModifyShapePathAction;
+pub use modify_shape_path::ModifyDcelAction;
 pub use move_clip_instances::MoveClipInstancesAction;
 pub use move_objects::MoveShapeInstancesAction;
 pub use paint_bucket::PaintBucketAction;

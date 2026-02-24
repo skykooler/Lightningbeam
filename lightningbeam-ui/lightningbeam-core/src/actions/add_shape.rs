@@ -1,111 +1,124 @@
-//! Add shape action
+//! Add shape action — inserts strokes into the DCEL.
 //!
-//! Handles adding a new shape to a vector layer's keyframe.
+//! Converts a BezPath into cubic segments and inserts them via
+//! `Dcel::insert_stroke()`. Undo is handled by snapshotting the DCEL.
 
 use crate::action::Action;
+use crate::dcel::{bezpath_to_cubic_segments, Dcel, DEFAULT_SNAP_EPSILON};
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use crate::shape::Shape;
+use crate::shape::{ShapeColor, StrokeStyle};
+use kurbo::BezPath;
 use uuid::Uuid;
 
-/// Action that adds a shape to a vector layer's keyframe
+/// Action that inserts a drawn path into a vector layer's DCEL keyframe.
 pub struct AddShapeAction {
-    /// Layer ID to add the shape to
     layer_id: Uuid,
-
-    /// The shape to add (contains geometry, styling, transform, opacity)
-    shape: Shape,
-
-    /// Time of the keyframe to add to
     time: f64,
-
-    /// ID of the created shape (set after execution)
-    created_shape_id: Option<Uuid>,
+    path: BezPath,
+    stroke_style: Option<StrokeStyle>,
+    stroke_color: Option<ShapeColor>,
+    fill_color: Option<ShapeColor>,
+    is_closed: bool,
+    description_text: String,
+    /// Snapshot of the DCEL before insertion (for undo).
+    dcel_before: Option<Dcel>,
 }
 
 impl AddShapeAction {
-    pub fn new(layer_id: Uuid, shape: Shape, time: f64) -> Self {
+    pub fn new(
+        layer_id: Uuid,
+        time: f64,
+        path: BezPath,
+        stroke_style: Option<StrokeStyle>,
+        stroke_color: Option<ShapeColor>,
+        fill_color: Option<ShapeColor>,
+        is_closed: bool,
+    ) -> Self {
         Self {
             layer_id,
-            shape,
             time,
-            created_shape_id: None,
+            path,
+            stroke_style,
+            stroke_color,
+            fill_color,
+            is_closed,
+            description_text: "Add shape".to_string(),
+            dcel_before: None,
         }
+    }
+
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description_text = desc.into();
+        self
     }
 }
 
 impl Action for AddShapeAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        let layer = match document.get_layer_mut(&self.layer_id) {
-            Some(l) => l,
-            None => return Ok(()),
+        let layer = document
+            .get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
+
+        let vl = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return Err("Not a vector layer".to_string()),
         };
 
-        if let AnyLayer::Vector(vector_layer) = layer {
-            let shape_id = self.shape.id;
-            vector_layer.add_shape_to_keyframe(self.shape.clone(), self.time);
-            self.created_shape_id = Some(shape_id);
+        let keyframe = vl.ensure_keyframe_at(self.time);
+        let dcel = &mut keyframe.dcel;
+
+        // Snapshot for undo
+        self.dcel_before = Some(dcel.clone());
+
+        let subpaths = bezpath_to_cubic_segments(&self.path);
+
+        for segments in &subpaths {
+            if segments.is_empty() {
+                continue;
+            }
+            let result = dcel.insert_stroke(
+                segments,
+                self.stroke_style.clone(),
+                self.stroke_color.clone(),
+                DEFAULT_SNAP_EPSILON,
+            );
+
+            // Apply fill to new faces if this is a closed shape with fill
+            if self.is_closed {
+                if let Some(ref fill) = self.fill_color {
+                    for face_id in &result.new_faces {
+                        dcel.face_mut(*face_id).fill_color = Some(fill.clone());
+                    }
+                }
+            }
         }
+
+        dcel.rebuild_spatial_index();
+
         Ok(())
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        if let Some(shape_id) = self.created_shape_id {
-            let layer = match document.get_layer_mut(&self.layer_id) {
-                Some(l) => l,
-                None => return Ok(()),
-            };
+        let layer = document
+            .get_layer_mut(&self.layer_id)
+            .ok_or_else(|| format!("Layer {} not found", self.layer_id))?;
 
-            if let AnyLayer::Vector(vector_layer) = layer {
-                vector_layer.remove_shape_from_keyframe(&shape_id, self.time);
-            }
+        let vl = match layer {
+            AnyLayer::Vector(vl) => vl,
+            _ => return Err("Not a vector layer".to_string()),
+        };
 
-            self.created_shape_id = None;
-        }
+        let keyframe = vl.ensure_keyframe_at(self.time);
+        keyframe.dcel = self
+            .dcel_before
+            .take()
+            .ok_or_else(|| "No DCEL snapshot for undo".to_string())?;
+
         Ok(())
     }
 
     fn description(&self) -> String {
-        "Add shape".to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::layer::VectorLayer;
-    use crate::shape::ShapeColor;
-    use vello::kurbo::{Rect, Shape as KurboShape};
-
-    #[test]
-    fn test_add_shape_action_rectangle() {
-        let mut document = Document::new("Test");
-        let vector_layer = VectorLayer::new("Layer 1");
-        let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
-
-        let rect = Rect::new(0.0, 0.0, 100.0, 50.0);
-        let path = rect.to_path(0.1);
-        let shape = Shape::new(path)
-            .with_fill(ShapeColor::rgb(255, 0, 0))
-            .with_position(50.0, 50.0);
-
-        let mut action = AddShapeAction::new(layer_id, shape, 0.0);
-        action.execute(&mut document).unwrap();
-
-        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            let shapes = layer.shapes_at_time(0.0);
-            assert_eq!(shapes.len(), 1);
-            assert_eq!(shapes[0].transform.x, 50.0);
-            assert_eq!(shapes[0].transform.y, 50.0);
-        } else {
-            panic!("Layer not found or not a vector layer");
-        }
-
-        // Rollback
-        action.rollback(&mut document).unwrap();
-
-        if let Some(AnyLayer::Vector(layer)) = document.get_layer(&layer_id) {
-            assert_eq!(layer.shapes_at_time(0.0).len(), 0);
-        }
+        self.description_text.clone()
     }
 }

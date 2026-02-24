@@ -114,84 +114,9 @@ impl InfopanelPane {
             if let Some(layer) = document.get_layer(&layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
                     // Gather values from all selected instances
-                    let mut first = true;
-
-                    for instance_id in &info.instance_ids {
-                        if let Some(shape) = vector_layer.get_shape_in_keyframe(instance_id, *shared.playback_time) {
-                            info.shape_ids.push(*instance_id);
-
-                            if first {
-                                // First shape - set initial values
-                                info.x = Some(shape.transform.x);
-                                info.y = Some(shape.transform.y);
-                                info.rotation = Some(shape.transform.rotation);
-                                info.scale_x = Some(shape.transform.scale_x);
-                                info.scale_y = Some(shape.transform.scale_y);
-                                info.skew_x = Some(shape.transform.skew_x);
-                                info.skew_y = Some(shape.transform.skew_y);
-                                info.opacity = Some(shape.opacity);
-
-                                // Get shape properties
-                                info.fill_color = Some(shape.fill_color);
-                                info.stroke_color = Some(shape.stroke_color);
-                                info.stroke_width = shape
-                                    .stroke_style
-                                    .as_ref()
-                                    .map(|s| Some(s.width))
-                                    .unwrap_or(Some(1.0));
-
-                                first = false;
-                            } else {
-                                // Check if values differ (set to None if mixed)
-                                if info.x != Some(shape.transform.x) {
-                                    info.x = None;
-                                }
-                                if info.y != Some(shape.transform.y) {
-                                    info.y = None;
-                                }
-                                if info.rotation != Some(shape.transform.rotation) {
-                                    info.rotation = None;
-                                }
-                                if info.scale_x != Some(shape.transform.scale_x) {
-                                    info.scale_x = None;
-                                }
-                                if info.scale_y != Some(shape.transform.scale_y) {
-                                    info.scale_y = None;
-                                }
-                                if info.skew_x != Some(shape.transform.skew_x) {
-                                    info.skew_x = None;
-                                }
-                                if info.skew_y != Some(shape.transform.skew_y) {
-                                    info.skew_y = None;
-                                }
-                                if info.opacity != Some(shape.opacity) {
-                                    info.opacity = None;
-                                }
-
-                                // Check shape properties
-                                // Compare fill colors - set to None if mixed
-                                if let Some(current_fill) = &info.fill_color {
-                                    if *current_fill != shape.fill_color {
-                                        info.fill_color = None;
-                                    }
-                                }
-                                // Compare stroke colors - set to None if mixed
-                                if let Some(current_stroke) = &info.stroke_color {
-                                    if *current_stroke != shape.stroke_color {
-                                        info.stroke_color = None;
-                                    }
-                                }
-                                let stroke_w = shape
-                                    .stroke_style
-                                    .as_ref()
-                                    .map(|s| s.width)
-                                    .unwrap_or(1.0);
-                                if info.stroke_width != Some(stroke_w) {
-                                    info.stroke_width = None;
-                                }
-                            }
-                        }
-                    }
+                    // TODO: DCEL - shape property gathering disabled during migration
+                    // (was: get_shape_in_keyframe to gather transform/fill/stroke properties)
+                    let _ = vector_layer;
                 }
             }
         }

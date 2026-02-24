@@ -4,6 +4,7 @@
 
 use crate::animation::AnimationData;
 use crate::clip::ClipInstance;
+use crate::dcel::Dcel;
 use crate::effect_layer::EffectLayer;
 use crate::object::ShapeInstance;
 use crate::shape::Shape;
@@ -151,13 +152,13 @@ impl Default for TweenType {
     }
 }
 
-/// A keyframe containing all shapes at a point in time
+/// A keyframe containing vector artwork as a DCEL planar subdivision.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShapeKeyframe {
     /// Time in seconds
     pub time: f64,
-    /// All shapes at this keyframe
-    pub shapes: Vec<Shape>,
+    /// DCEL planar subdivision containing all vector artwork
+    pub dcel: Dcel,
     /// What happens between this keyframe and the next
     #[serde(default)]
     pub tween_after: TweenType,
@@ -172,17 +173,7 @@ impl ShapeKeyframe {
     pub fn new(time: f64) -> Self {
         Self {
             time,
-            shapes: Vec::new(),
-            tween_after: TweenType::None,
-            clip_instance_ids: Vec::new(),
-        }
-    }
-
-    /// Create a keyframe with shapes
-    pub fn with_shapes(time: f64, shapes: Vec<Shape>) -> Self {
-        Self {
-            time,
-            shapes,
+            dcel: Dcel::new(),
             tween_after: TweenType::None,
             clip_instance_ids: Vec::new(),
         }
@@ -370,12 +361,14 @@ impl VectorLayer {
         self.keyframes.iter().position(|kf| (kf.time - time).abs() < tolerance)
     }
 
-    /// Get shapes visible at a given time (from the keyframe at-or-before time)
-    pub fn shapes_at_time(&self, time: f64) -> &[Shape] {
-        match self.keyframe_at(time) {
-            Some(kf) => &kf.shapes,
-            None => &[],
-        }
+    /// Get the DCEL at a given time (from the keyframe at-or-before time)
+    pub fn dcel_at_time(&self, time: f64) -> Option<&Dcel> {
+        self.keyframe_at(time).map(|kf| &kf.dcel)
+    }
+
+    /// Get a mutable DCEL at a given time
+    pub fn dcel_at_time_mut(&mut self, time: f64) -> Option<&mut Dcel> {
+        self.keyframe_at_mut(time).map(|kf| &mut kf.dcel)
     }
 
     /// Get the duration of the keyframe span starting at-or-before `time`.
@@ -424,22 +417,10 @@ impl VectorLayer {
         time + frame_duration
     }
 
-    /// Get mutable shapes at a given time
-    pub fn shapes_at_time_mut(&mut self, time: f64) -> Option<&mut Vec<Shape>> {
-        self.keyframe_at_mut(time).map(|kf| &mut kf.shapes)
-    }
-
-    /// Find a shape by ID within the keyframe active at the given time
-    pub fn get_shape_in_keyframe(&self, shape_id: &Uuid, time: f64) -> Option<&Shape> {
-        self.keyframe_at(time)
-            .and_then(|kf| kf.shapes.iter().find(|s| &s.id == shape_id))
-    }
-
-    /// Find a mutable shape by ID within the keyframe active at the given time
-    pub fn get_shape_in_keyframe_mut(&mut self, shape_id: &Uuid, time: f64) -> Option<&mut Shape> {
-        self.keyframe_at_mut(time)
-            .and_then(|kf| kf.shapes.iter_mut().find(|s| &s.id == shape_id))
-    }
+    // Shape-based methods removed — use DCEL methods instead.
+    // - shapes_at_time_mut → dcel_at_time_mut
+    // - get_shape_in_keyframe → use DCEL vertex/edge/face accessors
+    // - get_shape_in_keyframe_mut → use DCEL vertex/edge/face accessors
 
     /// Ensure a keyframe exists at the exact time, creating an empty one if needed.
     /// Returns a mutable reference to the keyframe.
@@ -454,8 +435,7 @@ impl VectorLayer {
         &mut self.keyframes[insert_idx]
     }
 
-    /// Insert a new keyframe at time by copying shapes from the active keyframe.
-    /// Shape UUIDs are regenerated (no cross-keyframe identity).
+    /// Insert a new keyframe at time by cloning the DCEL from the active keyframe.
     /// If a keyframe already exists at the exact time, does nothing and returns it.
     pub fn insert_keyframe_from_current(&mut self, time: f64) -> &mut ShapeKeyframe {
         let tolerance = 0.001;
@@ -463,43 +443,20 @@ impl VectorLayer {
             return &mut self.keyframes[idx];
         }
 
-        // Clone shapes and clip instance IDs from the active keyframe
-        let (cloned_shapes, cloned_clip_ids) = self
+        // Clone DCEL and clip instance IDs from the active keyframe
+        let (cloned_dcel, cloned_clip_ids) = self
             .keyframe_at(time)
             .map(|kf| {
-                let shapes: Vec<Shape> = kf.shapes
-                    .iter()
-                    .map(|s| {
-                        let mut new_shape = s.clone();
-                        new_shape.id = Uuid::new_v4();
-                        new_shape
-                    })
-                    .collect();
-                let clip_ids = kf.clip_instance_ids.clone();
-                (shapes, clip_ids)
+                (kf.dcel.clone(), kf.clip_instance_ids.clone())
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| (Dcel::new(), Vec::new()));
 
         let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
-        let mut kf = ShapeKeyframe::with_shapes(time, cloned_shapes);
+        let mut kf = ShapeKeyframe::new(time);
+        kf.dcel = cloned_dcel;
         kf.clip_instance_ids = cloned_clip_ids;
         self.keyframes.insert(insert_idx, kf);
         &mut self.keyframes[insert_idx]
-    }
-
-    /// Add a shape to the keyframe at the given time.
-    /// Creates a keyframe if none exists at that time.
-    pub fn add_shape_to_keyframe(&mut self, shape: Shape, time: f64) {
-        let kf = self.ensure_keyframe_at(time);
-        kf.shapes.push(shape);
-    }
-
-    /// Remove a shape from the keyframe at the given time.
-    /// Returns the removed shape if found.
-    pub fn remove_shape_from_keyframe(&mut self, shape_id: &Uuid, time: f64) -> Option<Shape> {
-        let kf = self.keyframe_at_mut(time)?;
-        let idx = kf.shapes.iter().position(|s| &s.id == shape_id)?;
-        Some(kf.shapes.remove(idx))
     }
 
     /// Remove a keyframe at the exact time (within tolerance).

@@ -1887,10 +1887,9 @@ impl EditorApp {
 
                 let new_shape_ids: Vec<Uuid> = shapes.iter().map(|s| s.id).collect();
 
-                let kf = vector_layer.ensure_keyframe_at(self.playback_time);
-                for shape in shapes {
-                    kf.shapes.push(shape);
-                }
+                // TODO: DCEL - paste shapes disabled during migration
+                // (was: push shapes into kf.shapes)
+                let _ = (vector_layer, shapes);
 
                 // Select pasted shapes
                 self.selection.clear_shapes();
@@ -2098,11 +2097,9 @@ impl EditorApp {
             _ => return,
         };
 
-        for split in &region_sel.splits {
-            vector_layer.remove_shape_from_keyframe(&split.inside_shape_id, region_sel.time);
-            vector_layer.remove_shape_from_keyframe(&split.outside_shape_id, region_sel.time);
-            vector_layer.add_shape_to_keyframe(split.original_shape.clone(), region_sel.time);
-        }
+        // TODO: DCEL - region selection revert disabled during migration
+        // (was: remove/add_shape_from/to_keyframe for splits)
+        let _ = vector_layer;
 
         selection.clear();
     }
@@ -2626,7 +2623,7 @@ impl EditorApp {
                 let mut test_clip = VectorClip::new(&clip_name, 400.0, 400.0, 5.0);
 
                 // Create a layer with some shapes
-                let mut layer = VectorLayer::new("Shapes");
+                let layer = VectorLayer::new("Shapes");
 
                 // Create a red circle shape
                 let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
@@ -2638,10 +2635,9 @@ impl EditorApp {
                 let mut rect_shape = Shape::new(rect_path);
                 rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
 
-                // Add shapes to keyframe at time 0.0
-                let kf = layer.ensure_keyframe_at(0.0);
-                kf.shapes.push(circle_shape);
-                kf.shapes.push(rect_shape);
+                // TODO: DCEL - test shape creation disabled during migration
+                // (was: push shapes into kf.shapes)
+                let _ = (circle_shape, rect_shape);
 
                 // Add the layer to the clip
                 test_clip.layers.add_root(AnyLayer::Vector(layer));
@@ -2664,14 +2660,11 @@ impl EditorApp {
                 if let Some(layer_id) = self.active_layer_id {
                     let document = self.action_executor.document();
                     // Determine which selected objects are shape instances vs clip instances
-                    let mut shape_ids = Vec::new();
+                    let _shape_ids: Vec<uuid::Uuid> = Vec::new();
                     let mut clip_ids = Vec::new();
                     if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-                        for &id in self.selection.shape_instances() {
-                            if vl.get_shape_in_keyframe(&id, self.playback_time).is_some() {
-                                shape_ids.push(id);
-                            }
-                        }
+                        // TODO: DCEL - shape instance lookup disabled during migration
+                        // (was: get_shape_in_keyframe to check which selected objects are shapes)
                         for &id in self.selection.clip_instances() {
                             if vl.clip_instances.iter().any(|ci| ci.id == id) {
                                 clip_ids.push(id);
@@ -3555,34 +3548,10 @@ impl EditorApp {
                 // Get image dimensions
                 let (width, height) = asset_info.dimensions.unwrap_or((100.0, 100.0));
 
-                // Get document center position
-                let doc = self.action_executor.document();
-                let center_x = doc.width / 2.0;
-                let center_y = doc.height / 2.0;
-
-                // Create a rectangle path at the origin (position handled by transform)
-                use kurbo::BezPath;
-                let mut path = BezPath::new();
-                path.move_to((0.0, 0.0));
-                path.line_to((width, 0.0));
-                path.line_to((width, height));
-                path.line_to((0.0, height));
-                path.close_path();
-
-                // Create shape with image fill (references the ImageAsset)
-                use lightningbeam_core::shape::Shape;
-                let shape = Shape::new(path).with_image_fill(asset_info.clip_id);
-
-                // Set position on shape directly
-                let shape = shape.with_position(center_x, center_y);
-
-                // Create and execute action
-                let action = lightningbeam_core::actions::AddShapeAction::new(
-                    layer_id,
-                    shape,
-                    self.playback_time,
-                );
-                let _ = self.action_executor.execute(Box::new(action));
+                // TODO: Image fills on DCEL faces are a separate feature.
+                // For now, just log a message.
+                let _ = (layer_id, width, height);
+                eprintln!("Image drop to canvas not yet supported with DCEL backend");
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)

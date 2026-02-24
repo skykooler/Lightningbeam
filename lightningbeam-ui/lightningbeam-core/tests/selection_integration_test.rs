@@ -189,7 +189,7 @@ fn test_selection_with_transform_action() {
         transforms.insert(id, (old_transform.clone(), new_transform.clone()));
     }
 
-    let mut action = TransformClipInstancesAction::new(layer_id, transforms);
+    let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
     action.execute(&mut document);
 
     // Verify transform applied

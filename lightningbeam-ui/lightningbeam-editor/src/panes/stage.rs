@@ -11,7 +11,6 @@ use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::renderer::RenderedLayerType;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
-use vello::kurbo::Shape;
 
 /// Enable HDR compositing pipeline (per-layer rendering with proper opacity)
 /// Set to true to use the new pipeline, false for legacy single-scene rendering
@@ -376,11 +375,10 @@ struct VelloRenderContext {
     playback_time: f64,
     /// Video frame manager
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
-    /// Cache for vector editing preview
-    shape_editing_cache: Option<ShapeEditingCache>,
     /// Surface format for blit pipelines
     target_format: wgpu::TextureFormat,
     /// Which VectorClip is being edited (None = document root)
+    #[allow(dead_code)]
     editing_clip_id: Option<uuid::Uuid>,
     /// The clip instance ID being edited (for skip + re-render)
     editing_instance_id: Option<uuid::Uuid>,
@@ -470,22 +468,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             let mut image_cache = shared.image_cache.lock().unwrap();
 
-            // Skip rendering the shape instance being edited (for vector editing preview)
-            let skip_instance_id = self.ctx.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
-
-            // When editing inside a clip, skip the clip instance in the main pass
-            // (it will be re-rendered on top after the dim overlay)
-            let editing_skip_id = self.ctx.editing_clip_id.as_ref().and_then(|_| {
-                self.ctx.editing_instance_id
-            });
-            let effective_skip = skip_instance_id.or(editing_skip_id);
-
             let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
                 &self.ctx.document,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
-                effective_skip,
             );
             drop(image_cache);
 
@@ -804,21 +791,12 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             let mut scene = vello::Scene::new();
             let mut image_cache = shared.image_cache.lock().unwrap();
 
-            // Skip rendering the shape instance being edited (for vector editing preview)
-            let skip_instance_id = self.ctx.shape_editing_cache.as_ref().map(|cache| cache.instance_id);
-
-            let editing_skip_id = self.ctx.editing_clip_id.as_ref().and_then(|_| {
-                self.ctx.editing_instance_id
-            });
-            let effective_skip = skip_instance_id.or(editing_skip_id);
-
             lightningbeam_core::renderer::render_document_with_transform(
                 &self.ctx.document,
                 &mut scene,
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
-                effective_skip,
             );
 
             // When editing inside a clip: dim overlay + re-render the clip at full opacity
@@ -853,62 +831,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(layer) = self.ctx.document.get_layer(&active_layer_id) {
                 if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
                     if let lightningbeam_core::tool::ToolState::DraggingSelection { ref original_positions, .. } = self.ctx.tool_state {
-                        use vello::peniko::{Color, Fill, Brush};
+                        use vello::peniko::Color;
 
                         // Render each object at its preview position (original + delta)
                         for (object_id, original_pos) in original_positions {
-                            // Try shape instance first
-                            if let Some(shape) = vector_layer.get_shape_in_keyframe(object_id, self.ctx.playback_time) {
-                                    // New position = original + delta
-                                    let new_x = original_pos.x + delta.x;
-                                    let new_y = original_pos.y + delta.y;
+                            // TODO: DCEL - shape drag preview disabled during migration
+                            // (was: get_shape_in_keyframe for drag preview rendering)
 
-                                    // Build skew transform around shape center (matching renderer.rs)
-                                    let path = shape.path();
-                                    let skew_transform = if shape.transform.skew_x != 0.0 || shape.transform.skew_y != 0.0 {
-                                        let bbox = path.bounding_box();
-                                        let center_x = (bbox.x0 + bbox.x1) / 2.0;
-                                        let center_y = (bbox.y0 + bbox.y1) / 2.0;
-
-                                        let skew_x_affine = if shape.transform.skew_x != 0.0 {
-                                            Affine::skew(shape.transform.skew_x.to_radians().tan(), 0.0)
-                                        } else {
-                                            Affine::IDENTITY
-                                        };
-
-                                        let skew_y_affine = if shape.transform.skew_y != 0.0 {
-                                            Affine::skew(0.0, shape.transform.skew_y.to_radians().tan())
-                                        } else {
-                                            Affine::IDENTITY
-                                        };
-
-                                        Affine::translate((center_x, center_y))
-                                            * skew_x_affine
-                                            * skew_y_affine
-                                            * Affine::translate((-center_x, -center_y))
-                                    } else {
-                                        Affine::IDENTITY
-                                    };
-
-                                    // Build full transform: translate * rotate * scale * skew
-                                    let object_transform = Affine::translate((new_x, new_y))
-                                        * Affine::rotate(shape.transform.rotation.to_radians())
-                                        * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y)
-                                        * skew_transform;
-                                    let combined_transform = overlay_transform * object_transform;
-
-                                    // Render shape with semi-transparent fill (light blue, 40% opacity)
-                                    let alpha_color = Color::from_rgba8(100, 150, 255, 100);
-                                    scene.fill(
-                                        Fill::NonZero,
-                                        combined_transform,
-                                        &Brush::Solid(alpha_color),
-                                        None,
-                                        path,
-                                    );
-                            }
-                            // Try clip instance if not a shape instance
-                            else if let Some(clip_inst) = vector_layer.clip_instances.iter().find(|ci| ci.id == *object_id) {
+                            // Try clip instance
+                            if let Some(clip_inst) = vector_layer.clip_instances.iter().find(|ci| ci.id == *object_id) {
                                 // Render clip at preview position
                                 // For now, just render the bounding box outline in semi-transparent blue
                                 let new_x = original_pos.x + delta.x;
@@ -951,7 +882,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(layer) = self.ctx.document.get_layer(&active_layer_id) {
                 if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
                     use vello::peniko::{Color, Fill};
-                    use vello::kurbo::{Circle, Rect as KurboRect, Shape as KurboShape, Stroke};
+                    use vello::kurbo::{Circle, Rect as KurboRect, Stroke};
 
                     let selection_color = Color::from_rgb8(0, 120, 255); // Blue
                     let stroke_width = 2.0 / self.ctx.zoom.max(0.5) as f64;
@@ -959,57 +890,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     // 1. Draw selection outlines around selected objects
                     // NOTE: Skip this if Transform tool is active (it has its own handles)
                     if !self.ctx.selection.is_empty() && !matches!(self.ctx.selected_tool, Tool::Transform) {
-                        for &object_id in self.ctx.selection.shape_instances() {
-                            if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, self.ctx.playback_time) {
-                                    // Get shape bounding box
-                                    let bbox = shape.path().bounding_box();
-
-                                    // Apply object transform and camera transform
-                                    let object_transform = Affine::translate((shape.transform.x, shape.transform.y));
-                                    let combined_transform = overlay_transform * object_transform;
-
-                                    // Create selection rectangle
-                                    let selection_rect = KurboRect::new(bbox.x0, bbox.y0, bbox.x1, bbox.y1);
-
-                                    // Draw selection outline
-                                    scene.stroke(
-                                        &Stroke::new(stroke_width),
-                                        combined_transform,
-                                        selection_color,
-                                        None,
-                                        &selection_rect,
-                                    );
-
-                                    // Draw corner handles (4 circles at corners)
-                                    let handle_radius = (6.0 / self.ctx.zoom.max(0.5) as f64).max(4.0);
-                                    let corners = [
-                                        (bbox.x0, bbox.y0),
-                                        (bbox.x1, bbox.y0),
-                                        (bbox.x1, bbox.y1),
-                                        (bbox.x0, bbox.y1),
-                                    ];
-
-                                    for (x, y) in corners {
-                                        let corner_circle = Circle::new((x, y), handle_radius);
-                                        // Fill with blue
-                                        scene.fill(
-                                            Fill::NonZero,
-                                            combined_transform,
-                                            selection_color,
-                                            None,
-                                            &corner_circle,
-                                        );
-                                        // White outline
-                                        scene.stroke(
-                                            &Stroke::new(1.0),
-                                            combined_transform,
-                                            Color::from_rgb8(255, 255, 255),
-                                            None,
-                                            &corner_circle,
-                                        );
-                                    }
-                            }
-                        }
+                        // TODO: DCEL - shape selection outlines disabled during migration
+                        // (was: iterate shape_instances, get_shape_in_keyframe, draw bbox outlines)
 
                         // Also draw selection outlines for clip instances
                         for &clip_id in self.ctx.selection.clip_instances() {
@@ -1478,58 +1360,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
                     }
 
-                    // 8. Draw vector editing preview
-                    if let Some(cache) = &self.ctx.shape_editing_cache {
-                        use lightningbeam_core::bezpath_editing::rebuild_bezpath;
-
-                        // Rebuild the path from the modified editable curves
-                        let preview_path = rebuild_bezpath(&cache.editable_data);
-
-                        // Get the layer first, then the shape from the layer
-                        if let Some(layer) = (*self.ctx.document).get_layer(&cache.layer_id) {
-                            if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
-                                if let Some(shape) = vector_layer.get_shape_in_keyframe(&cache.shape_id, self.ctx.playback_time) {
-                                    let transform = overlay_transform * cache.local_to_world;
-
-                                    // Render fill with FULL OPACITY (same as original)
-                                    if let Some(fill_color) = &shape.fill_color {
-                                        scene.fill(
-                                            shape.fill_rule.into(),
-                                            transform,
-                                            fill_color.to_peniko(),
-                                            None,
-                                            &preview_path,
-                                        );
-                                    }
-
-                                    // Render stroke with FULL OPACITY (same as original)
-                                    if let Some(stroke_color) = &shape.stroke_color {
-                                        if let Some(stroke_style) = &shape.stroke_style {
-                                            scene.stroke(
-                                                &stroke_style.to_stroke(),
-                                                transform,
-                                                stroke_color.to_peniko(),
-                                                None,
-                                                &preview_path,
-                                            );
-                                        }
-                                    }
-
-                                    // If shape has neither fill nor stroke, render with default stroke
-                                    if shape.fill_color.is_none() && shape.stroke_color.is_none() {
-                                        let default_stroke = vello::kurbo::Stroke::new(2.0);
-                                        scene.stroke(
-                                            &default_stroke,
-                                            transform,
-                                            vello::peniko::Color::from_rgba8(100, 150, 255, 255),
-                                            None,
-                                            &preview_path,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // 8. Vector editing preview: DCEL edits are applied live to the document,
+                    // so the normal DCEL render path draws the current state. No separate
+                    // preview rendering is needed.
 
                     // 6. Draw transform tool handles (when Transform tool is active)
                     use lightningbeam_core::tool::Tool;
@@ -1547,204 +1380,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 *self.ctx.selection.clip_instances().iter().next().unwrap()
                             };
 
-                            if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, self.ctx.playback_time) {
-                                    let handle_size = (8.0 / self.ctx.zoom.max(0.5) as f64).max(6.0);
-                                    let handle_color = Color::from_rgb8(0, 120, 255); // Blue
-                                    let rotation_handle_offset = 20.0 / self.ctx.zoom.max(0.5) as f64;
-
-                                    // Get shape's local bounding box
-                                    let local_bbox = shape.path().bounding_box();
-
-                                    // Calculate the 4 corners in local space
-                                    let local_corners = [
-                                        vello::kurbo::Point::new(local_bbox.x0, local_bbox.y0), // Top-left
-                                        vello::kurbo::Point::new(local_bbox.x1, local_bbox.y0), // Top-right
-                                        vello::kurbo::Point::new(local_bbox.x1, local_bbox.y1), // Bottom-right
-                                        vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1), // Bottom-left
-                                    ];
-
-                                    // Build skew transforms around shape center
-                                    let center_x = (local_bbox.x0 + local_bbox.x1) / 2.0;
-                                    let center_y = (local_bbox.y0 + local_bbox.y1) / 2.0;
-
-                                    let skew_transform = if shape.transform.skew_x != 0.0 || shape.transform.skew_y != 0.0 {
-                                        let skew_x_affine = if shape.transform.skew_x != 0.0 {
-                                            let tan_skew = shape.transform.skew_x.to_radians().tan();
-                                            Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
-                                        } else {
-                                            Affine::IDENTITY
-                                        };
-
-                                        let skew_y_affine = if shape.transform.skew_y != 0.0 {
-                                            let tan_skew = shape.transform.skew_y.to_radians().tan();
-                                            Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
-                                        } else {
-                                            Affine::IDENTITY
-                                        };
-
-                                        Affine::translate((center_x, center_y))
-                                            * skew_x_affine
-                                            * skew_y_affine
-                                            * Affine::translate((-center_x, -center_y))
-                                    } else {
-                                        Affine::IDENTITY
-                                    };
-
-                                    // Transform to world space
-                                    let obj_transform = Affine::translate((shape.transform.x, shape.transform.y))
-                                        * Affine::rotate(shape.transform.rotation.to_radians())
-                                        * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y)
-                                        * skew_transform;
-
-                                    let world_corners: Vec<vello::kurbo::Point> = local_corners
-                                        .iter()
-                                        .map(|&p| obj_transform * p)
-                                        .collect();
-
-                                    // Draw rotated bounding box outline
-                                    let bbox_path = {
-                                        let mut path = vello::kurbo::BezPath::new();
-                                        path.move_to(world_corners[0]);
-                                        path.line_to(world_corners[1]);
-                                        path.line_to(world_corners[2]);
-                                        path.line_to(world_corners[3]);
-                                        path.close_path();
-                                        path
-                                    };
-
-                                    scene.stroke(
-                                        &Stroke::new(stroke_width),
-                                        overlay_transform,
-                                        handle_color,
-                                        None,
-                                        &bbox_path,
-                                    );
-
-                                    // Draw 4 corner handles (squares)
-                                    for corner in &world_corners {
-                                        let handle_rect = KurboRect::new(
-                                            corner.x - handle_size / 2.0,
-                                            corner.y - handle_size / 2.0,
-                                            corner.x + handle_size / 2.0,
-                                            corner.y + handle_size / 2.0,
-                                        );
-
-                                        // Fill
-                                        scene.fill(
-                                            Fill::NonZero,
-                                            overlay_transform,
-                                            handle_color,
-                                            None,
-                                            &handle_rect,
-                                        );
-
-                                        // White outline
-                                        scene.stroke(
-                                            &Stroke::new(1.0),
-                                            overlay_transform,
-                                            Color::from_rgb8(255, 255, 255),
-                                            None,
-                                            &handle_rect,
-                                        );
-                                    }
-
-                                    // Draw 4 edge handles (circles at midpoints)
-                                    let edge_midpoints = [
-                                        vello::kurbo::Point::new((world_corners[0].x + world_corners[1].x) / 2.0, (world_corners[0].y + world_corners[1].y) / 2.0), // Top
-                                        vello::kurbo::Point::new((world_corners[1].x + world_corners[2].x) / 2.0, (world_corners[1].y + world_corners[2].y) / 2.0), // Right
-                                        vello::kurbo::Point::new((world_corners[2].x + world_corners[3].x) / 2.0, (world_corners[2].y + world_corners[3].y) / 2.0), // Bottom
-                                        vello::kurbo::Point::new((world_corners[3].x + world_corners[0].x) / 2.0, (world_corners[3].y + world_corners[0].y) / 2.0), // Left
-                                    ];
-
-                                    for edge in &edge_midpoints {
-                                        let edge_circle = Circle::new(*edge, handle_size / 2.0);
-
-                                        // Fill
-                                        scene.fill(
-                                            Fill::NonZero,
-                                            overlay_transform,
-                                            handle_color,
-                                            None,
-                                            &edge_circle,
-                                        );
-
-                                        // White outline
-                                        scene.stroke(
-                                            &Stroke::new(1.0),
-                                            overlay_transform,
-                                            Color::from_rgb8(255, 255, 255),
-                                            None,
-                                            &edge_circle,
-                                        );
-                                    }
-
-                                    // Draw rotation handle (circle above top edge center)
-                                    let top_center = edge_midpoints[0];
-                                    // Calculate offset vector in object's rotated coordinate space
-                                    let rotation_rad = shape.transform.rotation.to_radians();
-                                    let cos_r = rotation_rad.cos();
-                                    let sin_r = rotation_rad.sin();
-                                    // Rotate the offset vector (0, -offset) by the object's rotation
-                                    let offset_x = -(-rotation_handle_offset) * sin_r;
-                                    let offset_y = -rotation_handle_offset * cos_r;
-                                    let rotation_handle_pos = vello::kurbo::Point::new(
-                                        top_center.x + offset_x,
-                                        top_center.y + offset_y,
-                                    );
-                                    let rotation_circle = Circle::new(rotation_handle_pos, handle_size / 2.0);
-
-                                    // Fill with different color (green)
-                                    scene.fill(
-                                        Fill::NonZero,
-                                        overlay_transform,
-                                        Color::from_rgb8(50, 200, 50),
-                                        None,
-                                        &rotation_circle,
-                                    );
-
-                                    // White outline
-                                    scene.stroke(
-                                        &Stroke::new(1.0),
-                                        overlay_transform,
-                                        Color::from_rgb8(255, 255, 255),
-                                        None,
-                                        &rotation_circle,
-                                    );
-
-                                    // Draw line connecting rotation handle to bbox
-                                    let line_path = {
-                                        let mut path = vello::kurbo::BezPath::new();
-                                        path.move_to(rotation_handle_pos);
-                                        path.line_to(top_center);
-                                        path
-                                    };
-
-                                    scene.stroke(
-                                        &Stroke::new(1.0),
-                                        overlay_transform,
-                                        Color::from_rgb8(50, 200, 50),
-                                        None,
-                                        &line_path,
-                                    );
-                            }
+                            // TODO: DCEL - single-object transform handles disabled during migration
+                            // (was: get_shape_in_keyframe for rotated bbox + handle drawing)
+                            let _ = object_id;
                         } else {
                             // Multiple objects - use axis-aligned bbox (existing code)
-                            let mut combined_bbox: Option<KurboRect> = None;
+                            let combined_bbox: Option<KurboRect> = None;
 
-                            for &object_id in self.ctx.selection.shape_instances() {
-                                if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, self.ctx.playback_time) {
-                                        let shape_bbox = shape.path().bounding_box();
-                                        let transform = Affine::translate((shape.transform.x, shape.transform.y))
-                                            * Affine::rotate(shape.transform.rotation.to_radians())
-                                            * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y);
-                                        let transformed_bbox = transform.transform_rect_bbox(shape_bbox);
-
-                                        combined_bbox = Some(match combined_bbox {
-                                            None => transformed_bbox,
-                                            Some(existing) => existing.union(transformed_bbox),
-                                        });
-                                }
-                            }
+                            // TODO: DCEL - multi-object shape bbox calculation disabled during migration
+                            // (was: iterate shape_instances, get_shape_in_keyframe, compute combined bbox)
 
                             if let Some(bbox) = combined_bbox {
                                 let handle_size = (8.0 / self.ctx.zoom.max(0.5) as f64).max(6.0);
@@ -2257,26 +1901,18 @@ pub struct StagePane {
     // Last known viewport rect (for zoom-to-fit calculation)
     last_viewport_rect: Option<egui::Rect>,
     // Vector editing cache
-    shape_editing_cache: Option<ShapeEditingCache>,
+    dcel_editing_cache: Option<DcelEditingCache>,
 }
 
-/// Cached data for editing a shape
+/// Cached DCEL snapshot for undo when editing vertices, curves, or control points
 #[derive(Clone)]
-struct ShapeEditingCache {
-    /// The layer ID containing the shape being edited
+struct DcelEditingCache {
+    /// The layer ID containing the DCEL being edited
     layer_id: uuid::Uuid,
-    /// The shape ID being edited
-    shape_id: uuid::Uuid,
-    /// The shape instance ID being edited
-    instance_id: uuid::Uuid,
-    /// Extracted editable curves and vertices
-    editable_data: lightningbeam_core::bezier_vertex::EditableBezierCurves,
-    /// The version index of the shape being edited
-    version_index: usize,
-    /// Transform from shape-local to world space
-    local_to_world: vello::kurbo::Affine,
-    /// Transform from world to shape-local space
-    world_to_local: vello::kurbo::Affine,
+    /// The time of the keyframe being edited
+    time: f64,
+    /// Snapshot of the DCEL at edit start (for undo)
+    dcel_before: lightningbeam_core::dcel::Dcel,
 }
 
 // Global counter for generating unique instance IDs
@@ -2296,7 +1932,7 @@ impl StagePane {
             instance_id,
             pending_eyedropper_sample: None,
             last_viewport_rect: None,
-            shape_editing_cache: None,
+            dcel_editing_cache: None,
         }
     }
 
@@ -2506,14 +2142,12 @@ impl StagePane {
             // Priority 1: Vector editing (vertices and curves)
             if let Some(hit) = vector_hit {
                 match hit {
-                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
-                        // Start editing a vertex
-                        self.start_vertex_editing(shape_instance_id, vertex_index, point, active_layer_id, shared);
+                    VectorEditHit::Vertex { vertex_id } => {
+                        self.start_vertex_editing(vertex_id, point, active_layer_id, shared);
                         return;
                     }
-                    VectorEditHit::Curve { shape_instance_id, curve_index, parameter_t } => {
-                        // Start editing a curve
-                        self.start_curve_editing(shape_instance_id, curve_index, parameter_t, point, active_layer_id, shared);
+                    VectorEditHit::Curve { edge_id, parameter_t } => {
+                        self.start_curve_editing(edge_id, parameter_t, point, active_layer_id, shared);
                         return;
                     }
                     _ => {
@@ -2559,15 +2193,9 @@ impl StagePane {
                         // If object is now selected, prepare for dragging
                         if shared.selection.contains_shape_instance(&object_id) {
                             // Store original positions of all selected objects
-                            let mut original_positions = std::collections::HashMap::new();
-                            for &obj_id in shared.selection.shape_instances() {
-                                if let Some(shape) = vector_layer.get_shape_in_keyframe(&obj_id, *shared.playback_time) {
-                                    original_positions.insert(
-                                        obj_id,
-                                        Point::new(shape.transform.x, shape.transform.y),
-                                    );
-                                }
-                            }
+                            let original_positions = std::collections::HashMap::new();
+                            // TODO: DCEL - shape position lookup disabled during migration
+                            // (was: get_shape_in_keyframe to store original positions for drag)
 
                             *shared.tool_state = ToolState::DraggingSelection {
                                 start_pos: point,
@@ -2654,9 +2282,9 @@ impl StagePane {
 
         if drag_stopped || (pointer_released && (is_drag_or_marquee || is_vector_editing)) {
             match shared.tool_state.clone() {
-                ToolState::EditingVertex { shape_id, .. } | ToolState::EditingCurve { shape_id, .. } | ToolState::EditingControlPoint { shape_id, .. } => {
+                ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. } => {
                     // Finish vector editing - create action
-                    self.finish_vector_editing(shape_id, active_layer_id, shared);
+                    self.finish_vector_editing(active_layer_id, shared);
                 }
                 ToolState::DraggingSelection { start_mouse, original_positions, .. } => {
                     // Calculate total delta
@@ -2804,240 +2432,156 @@ impl StagePane {
     /// Start editing a vertex - called when user clicks on a vertex
     fn start_vertex_editing(
         &mut self,
-        shape_instance_id: uuid::Uuid,
-        vertex_index: usize,
-        mouse_pos: vello::kurbo::Point,
+        vertex_id: lightningbeam_core::dcel::VertexId,
+        _mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::extract_editable_curves;
-        use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
-        use vello::kurbo::Affine;
+        use lightningbeam_core::tool::ToolState;
 
-        // Get the vector layer
-        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
+        let time = *shared.playback_time;
+        let document = shared.action_executor.document();
+        let layer = match document.get_layer(&active_layer_id) {
+            Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-
-        // Get the shape from keyframe
-        let shape = match vector_layer.get_shape_in_keyframe(&shape_instance_id, *shared.playback_time) {
-            Some(s) => s,
+        let dcel = match layer.dcel_at_time(time) {
+            Some(d) => d,
             None => return,
         };
 
-        // Extract editable curves
-        let editable_data = extract_editable_curves(shape.path());
-
-        // Validate vertex index
-        if vertex_index >= editable_data.vertices.len() {
-            return;
-        }
-
-        let vertex = &editable_data.vertices[vertex_index];
-
-        // Build transform matrices
-        let local_to_world = Affine::translate((shape.transform.x, shape.transform.y))
-            * Affine::rotate(shape.transform.rotation)
-            * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y);
-        let world_to_local = local_to_world.inverse();
-
-        // Store editing cache
-        self.shape_editing_cache = Some(ShapeEditingCache {
+        // Snapshot DCEL for undo
+        self.dcel_editing_cache = Some(DcelEditingCache {
             layer_id: active_layer_id,
-            shape_id: shape.id,
-            instance_id: shape_instance_id,
-            editable_data: editable_data.clone(),
-            version_index: shape.versions.len() - 1,
-            local_to_world,
-            world_to_local,
+            time,
+            dcel_before: dcel.clone(),
         });
 
-        // Set tool state
+        // Find connected edges: iterate outgoing half-edges, collect unique edge IDs
+        let outgoing = dcel.vertex_outgoing(vertex_id);
+        let mut connected_edges = Vec::new();
+        for he_id in &outgoing {
+            let edge_id = dcel.half_edge(*he_id).edge;
+            if !connected_edges.contains(&edge_id) {
+                connected_edges.push(edge_id);
+            }
+        }
+
         *shared.tool_state = ToolState::EditingVertex {
-            shape_id: shape.id,
-            vertex_index,
-            start_pos: vertex.point,
-            start_mouse: mouse_pos,
-            affected_curve_indices: vertex.start_curves.iter()
-                .chain(vertex.end_curves.iter())
-                .copied()
-                .collect(),
+            vertex_id,
+            connected_edges,
         };
     }
 
     /// Start editing a curve - called when user clicks on a curve
     fn start_curve_editing(
         &mut self,
-        shape_instance_id: uuid::Uuid,
-        curve_index: usize,
+        edge_id: lightningbeam_core::dcel::EdgeId,
         parameter_t: f64,
         mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::extract_editable_curves;
-        use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
-        use vello::kurbo::Affine;
+        use lightningbeam_core::tool::ToolState;
 
-        // Get the vector layer
-        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
+        let time = *shared.playback_time;
+        let document = shared.action_executor.document();
+        let layer = match document.get_layer(&active_layer_id) {
+            Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-
-        // Get the shape from keyframe
-        let shape = match vector_layer.get_shape_in_keyframe(&shape_instance_id, *shared.playback_time) {
-            Some(s) => s,
+        let dcel = match layer.dcel_at_time(time) {
+            Some(d) => d,
             None => return,
         };
 
-        // Extract editable curves
-        let editable_data = extract_editable_curves(shape.path());
+        let original_curve = dcel.edge(edge_id).curve;
 
-        // Validate curve index
-        if curve_index >= editable_data.curves.len() {
-            return;
-        }
-
-        let original_curve = editable_data.curves[curve_index];
-
-        // Build transform matrices
-        let local_to_world = Affine::translate((shape.transform.x, shape.transform.y))
-            * Affine::rotate(shape.transform.rotation)
-            * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y);
-        let world_to_local = local_to_world.inverse();
-
-        // Store editing cache
-        self.shape_editing_cache = Some(ShapeEditingCache {
+        // Snapshot DCEL for undo
+        self.dcel_editing_cache = Some(DcelEditingCache {
             layer_id: active_layer_id,
-            shape_id: shape.id,
-            instance_id: shape_instance_id,
-            editable_data,
-            version_index: shape.versions.len() - 1,
-            local_to_world,
-            world_to_local,
+            time,
+            dcel_before: dcel.clone(),
         });
 
-        // Set tool state
         *shared.tool_state = ToolState::EditingCurve {
-            shape_id: shape.id,
-            curve_index,
+            edge_id,
             original_curve,
             start_mouse: mouse_pos,
             parameter_t,
         };
     }
 
-    /// Update vector editing during drag
+    /// Update vector editing during drag — mutates DCEL directly for live preview
     fn update_vector_editing(
         &mut self,
         mouse_pos: vello::kurbo::Point,
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::bezpath_editing::mold_curve;
+        use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::tool::ToolState;
+        use vello::kurbo::Vec2;
 
-        // Clone tool state to get owned values
-        let tool_state = shared.tool_state.clone();
-
-        let cache = match &mut self.shape_editing_cache {
+        let cache = match &self.dcel_editing_cache {
             Some(c) => c,
             None => return,
         };
+        let layer_id = cache.layer_id;
+        let time = cache.time;
+
+        // Clone tool state to avoid borrow conflict
+        let tool_state = shared.tool_state.clone();
+
+        // Get mutable DCEL access
+        let document = shared.action_executor.document_mut();
+        let dcel = match document.get_layer_mut(&layer_id) {
+            Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time_mut(time) {
+                Some(d) => d,
+                None => return,
+            },
+            _ => return,
+        };
 
         match tool_state {
-            ToolState::EditingVertex { vertex_index, start_pos, start_mouse, affected_curve_indices, .. } => {
-                // Transform mouse position to local space
-                let local_mouse = cache.world_to_local * mouse_pos;
-                let local_start_mouse = cache.world_to_local * start_mouse;
+            ToolState::EditingVertex { vertex_id, connected_edges } => {
+                // Snap vertex directly to cursor position
+                let old_pos = dcel.vertex(vertex_id).position;
+                let delta = Vec2::new(mouse_pos.x - old_pos.x, mouse_pos.y - old_pos.y);
+                dcel.vertex_mut(vertex_id).position = mouse_pos;
 
-                // Calculate delta in local space
-                let delta = local_mouse - local_start_mouse;
-                let new_vertex_pos = start_pos + delta;
+                // Update connected edges: shift the adjacent control point by the same delta
+                for &edge_id in &connected_edges {
+                    let edge = dcel.edge(edge_id);
+                    let [he_fwd, _he_bwd] = edge.half_edges;
+                    let fwd_origin = dcel.half_edge(he_fwd).origin;
+                    let mut curve = dcel.edge(edge_id).curve;
 
-                // Update the vertex position
-                if vertex_index < cache.editable_data.vertices.len() {
-                    cache.editable_data.vertices[vertex_index].point = new_vertex_pos;
+                    if fwd_origin == vertex_id {
+                        // This vertex is p0 of the curve
+                        curve.p0 = mouse_pos;
+                        curve.p1 = curve.p1 + delta;
+                    } else {
+                        // This vertex is p3 of the curve
+                        curve.p3 = mouse_pos;
+                        curve.p2 = curve.p2 + delta;
+                    }
+                    dcel.edge_mut(edge_id).curve = curve;
                 }
-
-                // Update all affected curves
-                for &curve_idx in affected_curve_indices.iter() {
-                    if curve_idx >= cache.editable_data.curves.len() {
-                        continue;
-                    }
-
-                    let curve = &mut cache.editable_data.curves[curve_idx];
-                    let vertex = &cache.editable_data.vertices[vertex_index];
-
-                    // Check if this curve starts at this vertex
-                    if vertex.start_curves.contains(&curve_idx) {
-                        // Update endpoint p0 and adjacent control point p1
-                        let endpoint_delta = new_vertex_pos - curve.p0;
-                        curve.p0 = new_vertex_pos;
-                        curve.p1 = curve.p1 + endpoint_delta;
-                    }
-
-                    // Check if this curve ends at this vertex
-                    if vertex.end_curves.contains(&curve_idx) {
-                        // Update endpoint p3 and adjacent control point p2
-                        let endpoint_delta = new_vertex_pos - curve.p3;
-                        curve.p3 = new_vertex_pos;
-                        curve.p2 = curve.p2 + endpoint_delta;
-                    }
-                }
-
-                // Note: We're only updating the cache here. The actual shape path will be updated
-                // via ModifyShapePathAction when the user releases the mouse button.
-                // For now, we'll skip live preview since we can't mutate through the vector_layer reference.
             }
-            ToolState::EditingCurve { curve_index, original_curve, start_mouse, .. } => {
-                // Transform mouse positions to local space
-                let local_mouse = cache.world_to_local * mouse_pos;
-                let local_start_mouse = cache.world_to_local * start_mouse;
-
-                // Apply moldCurve algorithm
-                let molded_curve = mold_curve(&original_curve, &local_mouse, &local_start_mouse);
-
-                // Update the curve in the cache
-                if curve_index < cache.editable_data.curves.len() {
-                    cache.editable_data.curves[curve_index] = molded_curve;
-                }
-
-                // Note: We're only updating the cache here. The actual shape path will be updated
-                // via ModifyShapePathAction when the user releases the mouse button.
+            ToolState::EditingCurve { edge_id, original_curve, start_mouse, .. } => {
+                let molded_curve = mold_curve(&original_curve, &mouse_pos, &start_mouse);
+                dcel.edge_mut(edge_id).curve = molded_curve;
             }
-            ToolState::EditingControlPoint { curve_index, point_index, .. } => {
-                // Transform mouse position to local space
-                let local_mouse = cache.world_to_local * mouse_pos;
-
-                // Calculate new control point position
-                let new_control_point = local_mouse;
-
-                // Update the control point in the cache
-                if curve_index < cache.editable_data.curves.len() {
-                    let curve = &mut cache.editable_data.curves[curve_index];
-                    match point_index {
-                        1 => curve.p1 = new_control_point,
-                        2 => curve.p2 = new_control_point,
-                        _ => {} // Invalid point index
-                    }
+            ToolState::EditingControlPoint { edge_id, point_index, .. } => {
+                let curve = &mut dcel.edge_mut(edge_id).curve;
+                match point_index {
+                    1 => curve.p1 = mouse_pos,
+                    2 => curve.p2 = mouse_pos,
+                    _ => {}
                 }
-
-                // Note: We're only updating the cache here. The actual shape path will be updated
-                // via ModifyShapePathAction when the user releases the mouse button.
             }
             _ => {}
         }
@@ -3046,80 +2590,55 @@ impl StagePane {
     /// Finish vector editing and create action for undo/redo
     fn finish_vector_editing(
         &mut self,
-        shape_id: uuid::Uuid,
-        layer_id: uuid::Uuid,
+        active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::rebuild_bezpath;
-        use lightningbeam_core::actions::ModifyShapePathAction;
-        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::actions::ModifyDcelAction;
+        use lightningbeam_core::layer::AnyLayer;
 
-        let cache = match self.shape_editing_cache.take() {
+        // Consume the cache
+        let cache = match self.dcel_editing_cache.take() {
             Some(c) => c,
             None => {
-                *shared.tool_state = ToolState::Idle;
+                *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
                 return;
             }
         };
 
-        // Get the original shape to retrieve the old path
-        let document = shared.action_executor.document();
-        let layer = match document.get_layer(&layer_id) {
-            Some(l) => l,
-            None => {
-                *shared.tool_state = ToolState::Idle;
-                return;
-            }
-        };
-
-        let vector_layer = match layer {
-            lightningbeam_core::layer::AnyLayer::Vector(vl) => vl,
-            _ => {
-                *shared.tool_state = ToolState::Idle;
-                return;
-            }
-        };
-
-        let old_path = match vector_layer.get_shape_in_keyframe(&shape_id, *shared.playback_time) {
-            Some(shape) => {
-                if cache.version_index < shape.versions.len() {
-                    // The shape has been temporarily updated during dragging
-                    // We need to get the original path from history or recreate it
-                    // For now, we'll use the version_index we stored
-                    if let Some(version) = shape.versions.get(cache.version_index) {
-                        version.path.clone()
-                    } else {
-                        // Fallback: use current path
-                        shape.path().clone()
+        // Get current DCEL state (after edits) as dcel_after
+        let dcel_after = {
+            let document = shared.action_executor.document();
+            match document.get_layer(&active_layer_id) {
+                Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time(cache.time) {
+                    Some(d) => d.clone(),
+                    None => {
+                        *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
+                        return;
                     }
-                } else {
-                    shape.path().clone()
+                },
+                _ => {
+                    *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
+                    return;
                 }
             }
-            None => {
-                *shared.tool_state = ToolState::Idle;
-                return;
-            }
         };
 
-        // Rebuild the new path from edited curves
-        let new_path = rebuild_bezpath(&cache.editable_data);
+        // Create the undo action
+        let action = ModifyDcelAction::new(
+            cache.layer_id,
+            cache.time,
+            cache.dcel_before,
+            dcel_after,
+            "Edit vector path",
+        );
 
-        // Only create action if the path actually changed
-        if old_path != new_path {
-            let action = ModifyShapePathAction::with_old_path(
-                layer_id,
-                shape_id,
-                *shared.playback_time,
-                cache.version_index,
-                old_path,
-                new_path,
-            );
-            shared.pending_actions.push(Box::new(action));
-        }
+        // Execute via action system (this replaces the DCEL with dcel_after,
+        // which is the same as current state, so it's a no-op — but it registers
+        // the action in the undo stack with dcel_before for rollback)
+        let _ = shared.action_executor.execute(Box::new(action));
 
         // Reset tool state
-        *shared.tool_state = ToolState::Idle;
+        *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
     }
 
     /// Handle BezierEdit tool - similar to Select but with control point editing
@@ -3172,19 +2691,16 @@ impl StagePane {
             // Priority 1: Vector editing (control points, vertices, and curves)
             if let Some(hit) = vector_hit {
                 match hit {
-                    VectorEditHit::ControlPoint { shape_instance_id, curve_index, point_index } => {
-                        // Start editing a control point
-                        self.start_control_point_editing(shape_instance_id, curve_index, point_index, point, active_layer_id, shared);
+                    VectorEditHit::ControlPoint { edge_id, point_index } => {
+                        self.start_control_point_editing(edge_id, point_index, point, active_layer_id, shared);
                         return;
                     }
-                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
-                        // Start editing a vertex
-                        self.start_vertex_editing(shape_instance_id, vertex_index, point, active_layer_id, shared);
+                    VectorEditHit::Vertex { vertex_id } => {
+                        self.start_vertex_editing(vertex_id, point, active_layer_id, shared);
                         return;
                     }
-                    VectorEditHit::Curve { shape_instance_id, curve_index, parameter_t } => {
-                        // Start editing a curve
-                        self.start_curve_editing(shape_instance_id, curve_index, parameter_t, point, active_layer_id, shared);
+                    VectorEditHit::Curve { edge_id, parameter_t } => {
+                        self.start_curve_editing(edge_id, parameter_t, point, active_layer_id, shared);
                         return;
                     }
                     _ => {
@@ -3212,9 +2728,8 @@ impl StagePane {
 
         if drag_stopped || (pointer_released && is_vector_editing) {
             match shared.tool_state.clone() {
-                ToolState::EditingVertex { shape_id, .. } | ToolState::EditingCurve { shape_id, .. } | ToolState::EditingControlPoint { shape_id, .. } => {
-                    // Finish vector editing - create action
-                    self.finish_vector_editing(shape_id, active_layer_id, shared);
+                ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. } => {
+                    self.finish_vector_editing(active_layer_id, shared);
                 }
                 _ => {}
             }
@@ -3224,73 +2739,42 @@ impl StagePane {
     /// Start editing a control point - called when user clicks on a control point
     fn start_control_point_editing(
         &mut self,
-        shape_instance_id: uuid::Uuid,
-        curve_index: usize,
+        edge_id: lightningbeam_core::dcel::EdgeId,
         point_index: u8,
         _mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::extract_editable_curves;
-        use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
-        use vello::kurbo::Affine;
+        use lightningbeam_core::tool::ToolState;
 
-        // Get the vector layer
-        let layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
+        let time = *shared.playback_time;
+        let document = shared.action_executor.document();
+        let layer = match document.get_layer(&active_layer_id) {
+            Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-
-        // Get the shape from keyframe
-        let shape = match vector_layer.get_shape_in_keyframe(&shape_instance_id, *shared.playback_time) {
-            Some(s) => s,
+        let dcel = match layer.dcel_at_time(time) {
+            Some(d) => d,
             None => return,
         };
 
-        // Extract editable curves
-        let editable_data = extract_editable_curves(shape.path());
-
-        // Validate curve index
-        if curve_index >= editable_data.curves.len() {
-            return;
-        }
-
-        let original_curve = editable_data.curves[curve_index];
-
-        // Get the control point position
+        let original_curve = dcel.edge(edge_id).curve;
         let start_pos = match point_index {
             1 => original_curve.p1,
             2 => original_curve.p2,
-            _ => return, // Invalid point index
+            _ => return,
         };
 
-        // Build transform matrices
-        let local_to_world = Affine::translate((shape.transform.x, shape.transform.y))
-            * Affine::rotate(shape.transform.rotation)
-            * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y);
-        let world_to_local = local_to_world.inverse();
-
-        // Store editing cache
-        self.shape_editing_cache = Some(ShapeEditingCache {
+        // Snapshot DCEL for undo
+        self.dcel_editing_cache = Some(DcelEditingCache {
             layer_id: active_layer_id,
-            shape_id: shape.id,
-            instance_id: shape_instance_id,
-            editable_data,
-            version_index: shape.versions.len() - 1,
-            local_to_world,
-            world_to_local,
+            time,
+            dcel_before: dcel.clone(),
         });
 
-        // Set tool state
         *shared.tool_state = ToolState::EditingControlPoint {
-            shape_id: shape.id,
-            curve_index,
+            edge_id,
             point_index,
             original_curve,
             start_pos,
@@ -3353,78 +2837,74 @@ impl StagePane {
         // Mouse up: create the rectangle shape
         if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingRectangle { .. })) {
             if let ToolState::CreatingRectangle { start_point, current_point, centered, constrain_square } = shared.tool_state.clone() {
-                // Calculate rectangle bounds and center position based on mode
-                let (width, height, center) = if centered {
+                // Calculate rectangle bounds in world space
+                let (min_x, min_y, max_x, max_y) = if centered {
                     // Centered mode: start_point is center
                     let dx = current_point.x - start_point.x;
                     let dy = current_point.y - start_point.y;
 
-                    let (w, h) = if constrain_square {
-                        let size = dx.abs().max(dy.abs()) * 2.0;
-                        (size, size)
+                    let (half_w, half_h) = if constrain_square {
+                        let half = dx.abs().max(dy.abs());
+                        (half, half)
                     } else {
-                        (dx.abs() * 2.0, dy.abs() * 2.0)
+                        (dx.abs(), dy.abs())
                     };
 
-                    // start_point is already the center
-                    (w, h, start_point)
+                    (start_point.x - half_w, start_point.y - half_h,
+                     start_point.x + half_w, start_point.y + half_h)
                 } else {
                     // Corner mode: start_point is corner
-                    let mut min_x = start_point.x.min(current_point.x);
-                    let mut min_y = start_point.y.min(current_point.y);
-                    let mut max_x = start_point.x.max(current_point.x);
-                    let mut max_y = start_point.y.max(current_point.y);
+                    let mut mn_x = start_point.x.min(current_point.x);
+                    let mut mn_y = start_point.y.min(current_point.y);
+                    let mut mx_x = start_point.x.max(current_point.x);
+                    let mut mx_y = start_point.y.max(current_point.y);
 
                     if constrain_square {
-                        let width = max_x - min_x;
-                        let height = max_y - min_y;
-                        let size = width.max(height);
+                        let w = mx_x - mn_x;
+                        let h = mx_y - mn_y;
+                        let size = w.max(h);
 
                         if current_point.x > start_point.x {
-                            max_x = min_x + size;
+                            mx_x = mn_x + size;
                         } else {
-                            min_x = max_x - size;
+                            mn_x = mx_x - size;
                         }
 
                         if current_point.y > start_point.y {
-                            max_y = min_y + size;
+                            mx_y = mn_y + size;
                         } else {
-                            min_y = max_y - size;
+                            mn_y = mx_y - size;
                         }
                     }
 
-                    // Return width, height, and center position
-                    let center_x = (min_x + max_x) / 2.0;
-                    let center_y = (min_y + max_y) / 2.0;
-                    (max_x - min_x, max_y - min_y, Point::new(center_x, center_y))
+                    (mn_x, mn_y, mx_x, mx_y)
                 };
+
+                let width = max_x - min_x;
+                let height = max_y - min_y;
 
                 // Only create shape if rectangle has non-zero size
                 if width > 1.0 && height > 1.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
-
+                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with rectangle path centered at origin
-                    let path = Self::create_rectangle_path(width, height);
-                    let mut shape = Shape::new(path);
+                    let path = Self::create_rectangle_path(min_x, min_y, max_x, max_y);
 
-                    // Apply fill if enabled
-                    if *shared.fill_enabled {
-                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
-                    }
+                    let fill_color = if *shared.fill_enabled {
+                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    } else {
+                        None
+                    };
 
-                    // Apply stroke with configured width
-                    shape = shape.with_stroke(
-                        ShapeColor::from_egui(*shared.stroke_color),
-                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
-                    );
-
-                    // Set position on shape
-                    let shape = shape.with_position(center.x, center.y);
-
-                    // Create and execute action immediately
-                    let action = AddShapeAction::new(active_layer_id, shape, *shared.playback_time);
+                    let action = AddShapeAction::new(
+                        active_layer_id,
+                        *shared.playback_time,
+                        path,
+                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                        Some(ShapeColor::from_egui(*shared.stroke_color)),
+                        fill_color,
+                        true, // closed
+                    ).with_description("Add rectangle");
                     let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -3529,30 +3009,26 @@ impl StagePane {
 
                 // Only create shape if ellipse has non-zero size
                 if rx > 1.0 && ry > 1.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
-
+                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with ellipse path (built from bezier curves)
-                    let path = Self::create_ellipse_path(rx, ry);
-                    let mut shape = Shape::new(path);
+                    let path = Self::create_ellipse_path(position.x, position.y, rx, ry);
 
-                    // Apply fill if enabled
-                    if *shared.fill_enabled {
-                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
-                    }
+                    let fill_color = if *shared.fill_enabled {
+                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    } else {
+                        None
+                    };
 
-                    // Apply stroke with configured width
-                    shape = shape.with_stroke(
-                        ShapeColor::from_egui(*shared.stroke_color),
-                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
-                    );
-
-                    // Set position on shape
-                    let shape = shape.with_position(position.x, position.y);
-
-                    // Create and execute action immediately
-                    let action = AddShapeAction::new(active_layer_id, shape, *shared.playback_time);
+                    let action = AddShapeAction::new(
+                        active_layer_id,
+                        *shared.playback_time,
+                        path,
+                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                        Some(ShapeColor::from_egui(*shared.stroke_color)),
+                        fill_color,
+                        true, // closed
+                    ).with_description("Add ellipse");
                     let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -3621,30 +3097,20 @@ impl StagePane {
 
                 // Only create shape if line has reasonable length
                 if length > 1.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor, StrokeStyle};
-
+                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with line path centered at origin
-                    let path = Self::create_line_path(dx, dy);
+                    let path = Self::create_line_path(start_point, current_point);
 
-                    // Lines should have stroke by default, not fill
-                    let shape = Shape::new(path)
-                        .with_stroke(
-                            ShapeColor::from_egui(*shared.stroke_color),
-                            StrokeStyle {
-                                width: *shared.stroke_width,
-                                ..Default::default()
-                            }
-                        );
-
-                    // Set position at the center of the line
-                    let center_x = (start_point.x + current_point.x) / 2.0;
-                    let center_y = (start_point.y + current_point.y) / 2.0;
-                    let shape = shape.with_position(center_x, center_y);
-
-                    // Create and execute action immediately
-                    let action = AddShapeAction::new(active_layer_id, shape, *shared.playback_time);
+                    let action = AddShapeAction::new(
+                        active_layer_id,
+                        *shared.playback_time,
+                        path,
+                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                        Some(ShapeColor::from_egui(*shared.stroke_color)),
+                        None, // no fill for lines
+                        false, // not closed
+                    ).with_description("Add line");
                     let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -3715,27 +3181,26 @@ impl StagePane {
 
                 // Only create shape if polygon has reasonable size
                 if radius > 5.0 {
-                    use lightningbeam_core::shape::{Shape, ShapeColor};
-
+                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
                     use lightningbeam_core::actions::AddShapeAction;
 
-                    // Create shape with polygon path
-                    let path = Self::create_polygon_path(num_sides, radius);
-                    use lightningbeam_core::shape::StrokeStyle;
-                    let mut shape = Shape::new(path);
-                    if *shared.fill_enabled {
-                        shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
-                    }
-                    shape = shape.with_stroke(
-                        ShapeColor::from_egui(*shared.stroke_color),
-                        StrokeStyle { width: *shared.stroke_width, ..Default::default() }
-                    );
+                    let path = Self::create_polygon_path(center, num_sides, radius);
 
-                    // Set position on shape
-                    let shape = shape.with_position(center.x, center.y);
+                    let fill_color = if *shared.fill_enabled {
+                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    } else {
+                        None
+                    };
 
-                    // Create and execute action immediately
-                    let action = AddShapeAction::new(active_layer_id, shape, *shared.playback_time);
+                    let action = AddShapeAction::new(
+                        active_layer_id,
+                        *shared.playback_time,
+                        path,
+                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                        Some(ShapeColor::from_egui(*shared.stroke_color)),
+                        fill_color,
+                        true, // closed
+                    ).with_description("Add polygon");
                     let _ = shared.action_executor.execute(Box::new(action));
 
                     // Clear tool state to stop preview rendering
@@ -3858,8 +3323,6 @@ impl StagePane {
     ) {
         use lightningbeam_core::hit_test;
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::region_select;
-        use lightningbeam_core::selection::ShapeSplit;
         use vello::kurbo::Affine;
 
         let time = *shared.playback_time;
@@ -3891,81 +3354,10 @@ impl StagePane {
         }
 
         // For intersecting shapes: compute clip and create temporary splits
-        let mut splits = Vec::new();
+        let splits = Vec::new();
 
-        // Collect shape data we need before mutating the document
-        let shape_data: Vec<_> = {
-            let document = shared.action_executor.document();
-            let layer = document.get_layer(&layer_id).unwrap();
-            let vector_layer = match layer {
-                AnyLayer::Vector(vl) => vl,
-                _ => return,
-            };
-            classification.intersecting.iter().filter_map(|id| {
-                vector_layer.get_shape_in_keyframe(id, time)
-                    .map(|shape| {
-                        // Transform path to world space for clipping
-                        let mut world_path = shape.path().clone();
-                        world_path.apply_affine(shape.transform.to_affine());
-                        (shape.clone(), world_path)
-                    })
-            }).collect()
-        };
-
-        for (shape, world_path) in &shape_data {
-            let clip_result = region_select::clip_path_to_region(world_path, &region_path);
-
-            if clip_result.inside.elements().is_empty() {
-                continue;
-            }
-
-            let inside_id = uuid::Uuid::new_v4();
-            let outside_id = uuid::Uuid::new_v4();
-
-            // Transform clipped paths back to local space
-            let inv_transform = shape.transform.to_affine().inverse();
-            let mut inside_path = clip_result.inside;
-            inside_path.apply_affine(inv_transform);
-            let mut outside_path = clip_result.outside;
-            outside_path.apply_affine(inv_transform);
-
-            splits.push(ShapeSplit {
-                original_shape: shape.clone(),
-                inside_shape_id: inside_id,
-                inside_path: inside_path.clone(),
-                outside_shape_id: outside_id,
-                outside_path: outside_path.clone(),
-            });
-
-            shared.selection.add_shape_instance(inside_id);
-        }
-
-        // Apply temporary split to document
-        if !splits.is_empty() {
-            let doc = shared.action_executor.document_mut();
-            let layer = doc.get_layer_mut(&layer_id).unwrap();
-            let vector_layer = match layer {
-                AnyLayer::Vector(vl) => vl,
-                _ => return,
-            };
-
-            for split in &splits {
-                // Remove original shape
-                vector_layer.remove_shape_from_keyframe(&split.original_shape.id, time);
-
-                // Add inside shape
-                let mut inside_shape = split.original_shape.clone();
-                inside_shape.id = split.inside_shape_id;
-                inside_shape.versions[0].path = split.inside_path.clone();
-                vector_layer.add_shape_to_keyframe(inside_shape, time);
-
-                // Add outside shape
-                let mut outside_shape = split.original_shape.clone();
-                outside_shape.id = split.outside_shape_id;
-                outside_shape.versions[0].path = split.outside_path.clone();
-                vector_layer.add_shape_to_keyframe(outside_shape, time);
-            }
-        }
+        // TODO: DCEL - region selection shape splitting disabled during migration
+        // (was: get_shape_in_keyframe for intersecting shapes, clip paths, add/remove_shape_from_keyframe)
 
         // Store region selection state
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
@@ -4002,51 +3394,30 @@ impl StagePane {
             _ => return,
         };
 
-        for split in &region_sel.splits {
-            // Remove temporary inside/outside shapes
-            vector_layer.remove_shape_from_keyframe(&split.inside_shape_id, region_sel.time);
-            vector_layer.remove_shape_from_keyframe(&split.outside_shape_id, region_sel.time);
-            // Restore original
-            vector_layer.add_shape_to_keyframe(split.original_shape.clone(), region_sel.time);
-        }
+        // TODO: DCEL - region selection revert disabled during migration
+        // (was: remove_shape_from_keyframe for splits, add_shape_to_keyframe to restore originals)
+        let _ = vector_layer;
 
         shared.selection.clear();
     }
 
     /// Create a rectangle path centered at origin (easier for curve editing later)
-    fn create_rectangle_path(width: f64, height: f64) -> vello::kurbo::BezPath {
+    fn create_rectangle_path(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
 
-        let half_w = width / 2.0;
-        let half_h = height / 2.0;
-
         let mut path = BezPath::new();
-
-        // Start at top-left (centered at origin)
-        path.move_to(Point::new(-half_w, -half_h));
-
-        // Top-right
-        path.line_to(Point::new(half_w, -half_h));
-
-        // Bottom-right
-        path.line_to(Point::new(half_w, half_h));
-
-        // Bottom-left
-        path.line_to(Point::new(-half_w, half_h));
-
-        // Close path (back to top-left)
+        path.move_to(Point::new(min_x, min_y));
+        path.line_to(Point::new(max_x, min_y));
+        path.line_to(Point::new(max_x, max_y));
+        path.line_to(Point::new(min_x, max_y));
         path.close_path();
-
         path
     }
 
-    /// Create an ellipse path from bezier curves (easier for curve editing later)
-    /// Uses 4 cubic bezier segments to approximate the ellipse
-    fn create_ellipse_path(rx: f64, ry: f64) -> vello::kurbo::BezPath {
+    /// Create an ellipse path in world space from bezier curves.
+    fn create_ellipse_path(cx: f64, cy: f64, rx: f64, ry: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
 
-        // Magic constant for circular arc approximation with cubic beziers
-        // k = 4/3 * (sqrt(2) - 1) ≈ 0.5522847498
         const KAPPA: f64 = 0.5522847498;
 
         let kx = rx * KAPPA;
@@ -4054,64 +3425,53 @@ impl StagePane {
 
         let mut path = BezPath::new();
 
-        // Start at right point (rx, 0)
-        path.move_to(Point::new(rx, 0.0));
+        // Start at right point
+        path.move_to(Point::new(cx + rx, cy));
 
         // Top-right quadrant (to top point)
         path.curve_to(
-            Point::new(rx, -ky),      // control point 1
-            Point::new(kx, -ry),      // control point 2
-            Point::new(0.0, -ry),     // end point (top)
+            Point::new(cx + rx, cy - ky),
+            Point::new(cx + kx, cy - ry),
+            Point::new(cx, cy - ry),
         );
 
         // Top-left quadrant (to left point)
         path.curve_to(
-            Point::new(-kx, -ry),     // control point 1
-            Point::new(-rx, -ky),     // control point 2
-            Point::new(-rx, 0.0),     // end point (left)
+            Point::new(cx - kx, cy - ry),
+            Point::new(cx - rx, cy - ky),
+            Point::new(cx - rx, cy),
         );
 
         // Bottom-left quadrant (to bottom point)
         path.curve_to(
-            Point::new(-rx, ky),      // control point 1
-            Point::new(-kx, ry),      // control point 2
-            Point::new(0.0, ry),      // end point (bottom)
+            Point::new(cx - rx, cy + ky),
+            Point::new(cx - kx, cy + ry),
+            Point::new(cx, cy + ry),
         );
 
         // Bottom-right quadrant (back to right point)
         path.curve_to(
-            Point::new(kx, ry),       // control point 1
-            Point::new(rx, ky),       // control point 2
-            Point::new(rx, 0.0),      // end point (right)
+            Point::new(cx + kx, cy + ry),
+            Point::new(cx + rx, cy + ky),
+            Point::new(cx + rx, cy),
         );
 
         path.close_path();
-
         path
     }
 
-    /// Create a line path centered at origin
-    fn create_line_path(dx: f64, dy: f64) -> vello::kurbo::BezPath {
-        use vello::kurbo::{BezPath, Point};
+    /// Create a line path in world space from start to end.
+    fn create_line_path(start: vello::kurbo::Point, end: vello::kurbo::Point) -> vello::kurbo::BezPath {
+        use vello::kurbo::BezPath;
 
         let mut path = BezPath::new();
-
-        // Line goes from -half to +half so it's centered at origin
-        let half_dx = dx / 2.0;
-        let half_dy = dy / 2.0;
-
-        path.move_to(Point::new(-half_dx, -half_dy));
-        path.line_to(Point::new(half_dx, half_dy));
-
+        path.move_to(start);
+        path.line_to(end);
         path
     }
 
-    /// Create a regular polygon path centered at origin
-    ///
-    /// # Arguments
-    /// * `num_sides` - Number of sides for the polygon (must be >= 3)
-    /// * `radius` - Radius from center to vertices
-    fn create_polygon_path(num_sides: u32, radius: f64) -> vello::kurbo::BezPath {
+    /// Create a regular polygon path in world space.
+    fn create_polygon_path(center: vello::kurbo::Point, num_sides: u32, radius: f64) -> vello::kurbo::BezPath {
         use vello::kurbo::{BezPath, Point};
         use std::f64::consts::PI;
 
@@ -4121,28 +3481,21 @@ impl StagePane {
             return path;
         }
 
-        // Calculate angle between vertices
         let angle_step = 2.0 * PI / num_sides as f64;
-
-        // Start at top (angle = -PI/2 so first vertex is at top)
         let start_angle = -PI / 2.0;
 
-        // First vertex
-        let first_x = radius * (start_angle).cos();
-        let first_y = radius * (start_angle).sin();
+        let first_x = center.x + radius * start_angle.cos();
+        let first_y = center.y + radius * start_angle.sin();
         path.move_to(Point::new(first_x, first_y));
 
-        // Add remaining vertices
         for i in 1..num_sides {
             let angle = start_angle + angle_step * i as f64;
-            let x = radius * angle.cos();
-            let y = radius * angle.sin();
+            let x = center.x + radius * angle.cos();
+            let y = center.y + radius * angle.sin();
             path.line_to(Point::new(x, y));
         }
 
-        // Close the path back to first vertex
         path.close_path();
-
         path
     }
 
@@ -4208,8 +3561,7 @@ impl StagePane {
                     use lightningbeam_core::path_fitting::{
                         simplify_rdp, fit_bezier_curves, RdpConfig, SchneiderConfig,
                     };
-                    use lightningbeam_core::shape::{Shape, ShapeColor};
-
+                    use lightningbeam_core::shape::ShapeColor;
                     use lightningbeam_core::actions::AddShapeAction;
 
                     // Convert points to the appropriate path based on simplify mode
@@ -4249,32 +3601,24 @@ impl StagePane {
 
                     // Only create shape if path is not empty
                     if !path.is_empty() {
-                        // Calculate bounding box center for object position
-                        let bbox = path.bounding_box();
-                        let center_x = (bbox.x0 + bbox.x1) / 2.0;
-                        let center_y = (bbox.y0 + bbox.y1) / 2.0;
-
-                        // Translate path so its center is at origin (0,0)
-                        use vello::kurbo::Affine;
-                        let transform = Affine::translate((-center_x, -center_y));
-                        let translated_path = transform * path;
-
-                        // Create shape with fill (if enabled) and stroke
                         use lightningbeam_core::shape::StrokeStyle;
-                        let mut shape = Shape::new(translated_path);
-                        if *shared.fill_enabled {
-                            shape = shape.with_fill(ShapeColor::from_egui(*shared.fill_color));
-                        }
-                        shape = shape.with_stroke(
-                            ShapeColor::from_egui(*shared.stroke_color),
-                            StrokeStyle { width: *shared.stroke_width, ..Default::default() }
-                        );
+                        // Path is already in world space from mouse coordinates
 
-                        // Set position on shape
-                        let shape = shape.with_position(center_x, center_y);
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
 
-                        // Create and execute action immediately
-                        let action = AddShapeAction::new(active_layer_id, shape, *shared.playback_time);
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            false, // drawn paths are open strokes
+                        ).with_description("Draw path");
                         let _ = shared.action_executor.execute(Box::new(action));
                     }
                 }
@@ -4349,7 +3693,7 @@ impl StagePane {
         start_mouse: vello::kurbo::Point,
         current_mouse: vello::kurbo::Point,
         original_bbox: vello::kurbo::Rect,
-        time: f64,
+        _time: f64,
     ) {
         use lightningbeam_core::tool::{TransformMode, Axis};
 
@@ -4487,12 +3831,8 @@ impl StagePane {
 
                 // Step 2: Apply to each object using matrix composition
                 for (object_id, original_transform) in original_transforms {
-                    // Get original opacity (now separate from transform)
-                    let original_opacity = if let Some(shape) = vector_layer.get_shape_in_keyframe(object_id, time) {
-                        shape.opacity
-                    } else {
-                        1.0
-                    };
+                    // TODO: DCEL - opacity lookup disabled during migration
+                    let original_opacity = 1.0_f64;
 
                     // New position: transform the object's position through bbox_transform
                     let new_pos = bbox_transform * kurbo::Point::new(original_transform.x, original_transform.y);
@@ -4618,22 +3958,8 @@ impl StagePane {
                 for (object_id, original_transform) in original_transforms {
                     // Calculate the world-space center where the renderer applies skew
                     // This is the shape's bounding box center transformed to world space
-                    let shape_center_world = if let Some(shape) = vector_layer.get_shape_in_keyframe(object_id, time) {
-                            use kurbo::Shape as KurboShape;
-                            let shape_bbox = shape.path().bounding_box();
-                            let local_center_x = (shape_bbox.x0 + shape_bbox.x1) / 2.0;
-                            let local_center_y = (shape_bbox.y0 + shape_bbox.y1) / 2.0;
-
-                            // Transform to world space (same as renderer)
-                            let world_center = kurbo::Affine::translate((original_transform.x, original_transform.y))
-                                * kurbo::Affine::rotate(original_transform.rotation.to_radians())
-                                * kurbo::Affine::scale_non_uniform(original_transform.scale_x, original_transform.scale_y)
-                                * kurbo::Point::new(local_center_x, local_center_y);
-                            (world_center.x, world_center.y)
-                    } else {
-                        // Fallback to object position if shape not found
-                        (original_transform.x, original_transform.y)
-                    };
+                    // TODO: DCEL - shape center lookup disabled during migration
+                    let shape_center_world = (original_transform.x, original_transform.y);
 
                     vector_layer.modify_object_internal(object_id, |obj| {
                         // Distance from selection center using the object's actual skew center
@@ -4839,27 +4165,8 @@ impl StagePane {
 
             // Get immutable reference just for bbox calculation
             if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
-                // Calculate bounding box for shape instances
-                for &object_id in shared.selection.shape_instances() {
-                    if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, *shared.playback_time) {
-                            // Get shape's local bounding box
-                            let shape_bbox = shape.path().bounding_box();
-
-                            // Transform to world space: translate by object position
-                            // Then apply scale and rotation around that position
-                            use vello::kurbo::Affine;
-                            let transform = Affine::translate((shape.transform.x, shape.transform.y))
-                                * Affine::rotate(shape.transform.rotation.to_radians())
-                                * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y);
-
-                            let transformed_bbox = transform.transform_rect_bbox(shape_bbox);
-
-                            combined_bbox = Some(match combined_bbox {
-                                None => transformed_bbox,
-                                Some(existing) => existing.union(transformed_bbox),
-                            });
-                    }
-                }
+                // TODO: DCEL - shape instance bbox calculation disabled during migration
+                // (was: get_shape_in_keyframe to compute combined bbox for shape instances)
 
                 // Calculate bounding box for clip instances
                 for &clip_id in shared.selection.clip_instances() {
@@ -4950,12 +4257,8 @@ impl StagePane {
                 let mut original_transforms = HashMap::new();
 
                 if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
-                    // Store shape instance transforms
-                    for &object_id in shared.selection.shape_instances() {
-                        if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, *shared.playback_time) {
-                            original_transforms.insert(object_id, shape.transform.clone());
-                        }
-                    }
+                    // TODO: DCEL - shape instance transform storage disabled during migration
+                    // (was: get_shape_in_keyframe for each selected shape instance)
 
                     // Store clip instance transforms
                     for &clip_id in shared.selection.clip_instances() {
@@ -5018,19 +4321,15 @@ impl StagePane {
                     use std::collections::HashMap;
                     use lightningbeam_core::actions::{TransformShapeInstancesAction, TransformClipInstancesAction};
 
-                    let mut shape_instance_transforms = HashMap::new();
+                    let shape_instance_transforms = HashMap::new();
                     let mut clip_instance_transforms = HashMap::new();
 
                     // Get current transforms and pair with originals
                     if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                         for (object_id, original) in original_transforms {
-                            // Try shape instance first
-                            if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, *shared.playback_time) {
-                                let new_transform = shape.transform.clone();
-                                shape_instance_transforms.insert(object_id, (original, new_transform));
-                            }
-                            // Try clip instance if not found as shape instance
-                            else if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
+                            // TODO: DCEL - shape instance transform lookup disabled during migration
+                            // Try clip instance
+                            if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
                                 let new_transform = clip_instance.transform.clone();
                                 clip_instance_transforms.insert(object_id, (original, new_transform));
                             }
@@ -5080,58 +4379,9 @@ impl StagePane {
         // Calculate rotated bounding box corners
         let (local_bbox, world_corners, obj_transform, transform) = {
             if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
-                // Try shape instance first
-                if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, *shared.playback_time) {
-                        let local_bbox = shape.path().bounding_box();
-
-                        let local_corners = [
-                            vello::kurbo::Point::new(local_bbox.x0, local_bbox.y0),
-                            vello::kurbo::Point::new(local_bbox.x1, local_bbox.y0),
-                            vello::kurbo::Point::new(local_bbox.x1, local_bbox.y1),
-                            vello::kurbo::Point::new(local_bbox.x0, local_bbox.y1),
-                        ];
-
-                        // Build skew transforms around shape center
-                        let center_x = (local_bbox.x0 + local_bbox.x1) / 2.0;
-                        let center_y = (local_bbox.y0 + local_bbox.y1) / 2.0;
-
-                        let skew_transform = if shape.transform.skew_x != 0.0 || shape.transform.skew_y != 0.0 {
-                            let skew_x_affine = if shape.transform.skew_x != 0.0 {
-                                let tan_skew = shape.transform.skew_x.to_radians().tan();
-                                Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
-                            } else {
-                                Affine::IDENTITY
-                            };
-
-                            let skew_y_affine = if shape.transform.skew_y != 0.0 {
-                                let tan_skew = shape.transform.skew_y.to_radians().tan();
-                                Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
-                            } else {
-                                Affine::IDENTITY
-                            };
-
-                            Affine::translate((center_x, center_y))
-                                * skew_x_affine
-                                * skew_y_affine
-                                * Affine::translate((-center_x, -center_y))
-                        } else {
-                            Affine::IDENTITY
-                        };
-
-                        let obj_transform = Affine::translate((shape.transform.x, shape.transform.y))
-                            * Affine::rotate(shape.transform.rotation.to_radians())
-                            * Affine::scale_non_uniform(shape.transform.scale_x, shape.transform.scale_y)
-                            * skew_transform;
-
-                        let world_corners: Vec<vello::kurbo::Point> = local_corners
-                            .iter()
-                            .map(|&p| obj_transform * p)
-                            .collect();
-
-                        (local_bbox, world_corners, obj_transform, shape.transform.clone())
-                }
-                // Try clip instance if not a shape instance
-                else if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
+                // TODO: DCEL - shape instance bbox for single-object transform disabled during migration
+                // Try clip instance
+                if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
                     // Calculate clip-local time
                     let clip_time = ((*shared.playback_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
 
@@ -5664,74 +4914,9 @@ impl StagePane {
                                     });
                                 }
                                 lightningbeam_core::tool::TransformMode::Skew { axis, origin } => {
-                                    // Get the shape's bounding box
-                                    if let Some(shape) = vector_layer.get_shape_in_keyframe(&object_id, *shared.playback_time) {
-                                        use kurbo::Shape as KurboShape;
-                                        let shape_bbox = shape.path().bounding_box();
-
-                                        // Transform origin to local space to determine which edge
-                                        let original_transform = Affine::translate((original.x, original.y))
-                                            * Affine::rotate(original.rotation.to_radians())
-                                            * Affine::scale_non_uniform(original.scale_x, original.scale_y);
-                                        let inv_original_transform = original_transform.inverse();
-                                        let local_origin = inv_original_transform * origin;
-                                        let local_current = inv_original_transform * point;
-
-                                        use lightningbeam_core::tool::Axis;
-                                        // Calculate skew angle such that edge follows mouse
-                                        let skew_radians = match axis {
-                                            Axis::Horizontal => {
-                                                // Determine which horizontal edge we're dragging
-                                                let edge_y = if (local_origin.y - shape_bbox.y0).abs() < 0.1 {
-                                                    shape_bbox.y1 // Origin at top, dragging bottom
-                                                } else {
-                                                    shape_bbox.y0 // Origin at bottom, dragging top
-                                                };
-                                                let distance = edge_y - local_origin.y;
-                                                if distance.abs() > 0.1 {
-                                                    let tan_skew = (local_current.x - local_origin.x) / distance;
-                                                    tan_skew.atan()
-                                                } else {
-                                                    0.0
-                                                }
-                                            }
-                                            Axis::Vertical => {
-                                                // Determine which vertical edge we're dragging
-                                                let edge_x = if (local_origin.x - shape_bbox.x0).abs() < 0.1 {
-                                                    shape_bbox.x1 // Origin at left, dragging right
-                                                } else {
-                                                    shape_bbox.x0 // Origin at right, dragging left
-                                                };
-                                                let distance = edge_x - local_origin.x;
-                                                if distance.abs() > 0.1 {
-                                                    let tan_skew = (local_current.y - local_origin.y) / distance;
-                                                    tan_skew.atan()
-                                                } else {
-                                                    0.0
-                                                }
-                                            }
-                                        };
-                                        let skew_degrees = skew_radians.to_degrees();
-
-                                        vector_layer.modify_object_internal(&object_id, |obj| {
-                                            // Apply skew based on axis
-                                            match axis {
-                                                Axis::Horizontal => {
-                                                    obj.transform.skew_x = original.skew_x + skew_degrees;
-                                                }
-                                                Axis::Vertical => {
-                                                    obj.transform.skew_y = original.skew_y + skew_degrees;
-                                                }
-                                            }
-
-                                            // Keep other transform properties unchanged
-                                            obj.transform.x = original.x;
-                                            obj.transform.y = original.y;
-                                            obj.transform.rotation = original.rotation;
-                                            obj.transform.scale_x = original.scale_x;
-                                            obj.transform.scale_y = original.scale_y;
-                                        });
-                                    }
+                                    // TODO: DCEL - skew transform for shape instances disabled during migration
+                                    // (was: get_shape_in_keyframe to get bbox, compute skew angle, modify_object_internal)
+                                    let _ = (axis, origin);
                                 }
                             }
                         }
@@ -5882,17 +5067,14 @@ impl StagePane {
                 use std::collections::HashMap;
                 use lightningbeam_core::actions::{TransformShapeInstancesAction, TransformClipInstancesAction};
 
-                let mut shape_instance_transforms = HashMap::new();
+                let shape_instance_transforms = HashMap::new();
                 let mut clip_instance_transforms = HashMap::new();
 
                 if let Some(AnyLayer::Vector(vector_layer)) = shared.action_executor.document().get_layer(&active_layer_id) {
                     for (obj_id, original) in original_transforms {
-                        // Try shape instance first
-                        if let Some(shape) = vector_layer.get_shape_in_keyframe(&obj_id, *shared.playback_time) {
-                            shape_instance_transforms.insert(obj_id, (original, shape.transform.clone()));
-                        }
-                        // Try clip instance if not found as shape instance
-                        else if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == obj_id) {
+                        // TODO: DCEL - shape instance transform lookup disabled during migration
+                        // Try clip instance
+                        if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == obj_id) {
                             clip_instance_transforms.insert(obj_id, (original, clip_instance.transform.clone()));
                         }
                     }
@@ -6218,9 +5400,8 @@ impl StagePane {
         rect: egui::Rect,
         shared: &SharedPaneState,
     ) {
-        use lightningbeam_core::bezpath_editing::extract_editable_curves;
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::tool::{Tool, ToolState};
+        use lightningbeam_core::tool::Tool;
         use lightningbeam_core::hit_test::{hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
         use vello::kurbo::{Affine, Point};
 
@@ -6262,7 +5443,7 @@ impl StagePane {
             egui::pos2(screen_x, screen_y)
         };
 
-        let painter = ui.painter();
+        let painter = ui.painter_at(rect);
 
         // Perform hit testing to find what's under the mouse
         let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
@@ -6275,206 +5456,117 @@ impl StagePane {
             is_bezier_edit_mode,
         );
 
+        // Get the DCEL for drawing overlays
+        let dcel = match layer.dcel_at_time(*shared.playback_time) {
+            Some(d) => d,
+            None => return,
+        };
+
+        // Visual constants
+        let vertex_radius = 4.0_f32;
+        let vertex_hover_radius = 6.0_f32;
+        let cp_radius = 3.0_f32;
+        let cp_hover_radius = 5.0_f32;
+        let vertex_color = egui::Color32::WHITE;
+        let vertex_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(40, 100, 220));
+        let vertex_hover_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(60, 140, 255));
+        let cp_color = egui::Color32::from_rgba_premultiplied(180, 180, 255, 200);
+        let cp_hover_color = egui::Color32::from_rgb(100, 160, 255);
+        let cp_line_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(120, 120, 200, 150));
+        let curve_hover_stroke = egui::Stroke::new(3.0 / self.zoom, egui::Color32::from_rgb(60, 140, 255));
+
+        // Determine what's hovered
+        let hover_vertex = match hit {
+            Some(VectorEditHit::Vertex { vertex_id }) => Some(vertex_id),
+            _ => None,
+        };
+        let hover_edge = match hit {
+            Some(VectorEditHit::Curve { edge_id, .. }) => Some(edge_id),
+            _ => None,
+        };
+        let hover_cp = match hit {
+            Some(VectorEditHit::ControlPoint { edge_id, point_index }) => Some((edge_id, point_index)),
+            _ => None,
+        };
+
         if is_bezier_edit_mode {
-            // BezierEdit mode: Show all vertices and control points for all shapes
-            // Also highlight the element under the mouse
-            let (hover_vertex, hover_control_point) = match hit {
-                Some(VectorEditHit::Vertex { shape_instance_id, vertex_index }) => {
-                    (Some((shape_instance_id, vertex_index)), None)
-                }
-                Some(VectorEditHit::ControlPoint { shape_instance_id, curve_index, point_index }) => {
-                    (None, Some((shape_instance_id, curve_index, point_index)))
-                }
-                _ => (None, None),
-            };
+            // BezierEdit mode: Draw all vertices, control points, and tangent lines
 
-            for shape in layer.shapes_at_time(*shared.playback_time) {
-                let local_to_world = shape.transform.to_affine();
+            // Draw control point tangent lines and control points for all edges
+            for (i, edge) in dcel.edges.iter().enumerate() {
+                if edge.deleted { continue; }
+                let edge_id = lightningbeam_core::dcel::EdgeId(i as u32);
+                let curve = &edge.curve;
 
-                // Use modified curves from cache if this shape is being edited
-                let editable = if let Some(cache) = &self.shape_editing_cache {
-                    if cache.instance_id == shape.id {
-                        cache.editable_data.clone()
-                    } else {
-                        extract_editable_curves(shape.path())
-                    }
+                // Tangent lines from endpoints to control points
+                let p0_screen = world_to_screen(curve.p0);
+                let p1_screen = world_to_screen(curve.p1);
+                let p2_screen = world_to_screen(curve.p2);
+                let p3_screen = world_to_screen(curve.p3);
+
+                painter.line_segment([p0_screen, p1_screen], cp_line_stroke);
+                painter.line_segment([p3_screen, p2_screen], cp_line_stroke);
+
+                // Draw control point p1
+                let is_hover_p1 = hover_cp == Some((edge_id, 1));
+                if is_hover_p1 {
+                    painter.circle_filled(p1_screen, cp_hover_radius, cp_hover_color);
                 } else {
-                    extract_editable_curves(shape.path())
-                };
-
-                // Determine active element from tool state (being dragged)
-                let (active_vertex, active_control_point) = match &*shared.tool_state {
-                    ToolState::EditingVertex { shape_id, vertex_index, .. } if *shape_id == shape.id => {
-                        (Some(*vertex_index), None)
-                    }
-                    ToolState::EditingControlPoint { shape_id, curve_index, point_index, .. }
-                        if *shape_id == shape.id => {
-                        (None, Some((*curve_index, *point_index)))
-                    }
-                    _ => (None, None),
-                };
-
-                // Render all vertices
-                for (i, vertex) in editable.vertices.iter().enumerate() {
-                    let world_pos = local_to_world * vertex.point;
-                    let screen_pos = world_to_screen(world_pos);
-                    let vertex_size = 10.0;
-
-                    let rect = egui::Rect::from_center_size(
-                        screen_pos,
-                        egui::vec2(vertex_size, vertex_size),
-                    );
-
-                    // Determine color: orange if active (dragging), yellow if hover, black otherwise
-                    let (fill_color, stroke_width) = if Some(i) == active_vertex {
-                        (egui::Color32::from_rgb(255, 200, 0), 2.0) // Orange if being dragged
-                    } else if hover_vertex == Some((shape.id, i)) {
-                        (egui::Color32::from_rgb(255, 255, 100), 2.0) // Yellow if hovering
-                    } else {
-                        (egui::Color32::from_rgba_premultiplied(0, 0, 0, 170), 1.0)
-                    };
-
-                    painter.rect_filled(rect, 0.0, fill_color);
-                    painter.rect_stroke(
-                        rect,
-                        0.0,
-                        egui::Stroke::new(stroke_width, egui::Color32::WHITE),
-                        egui::StrokeKind::Middle,
-                    );
+                    painter.circle_filled(p1_screen, cp_radius, cp_color);
                 }
 
-                // Render all control points
-                for (i, curve) in editable.curves.iter().enumerate() {
-                    let p0_world = local_to_world * curve.p0;
-                    let p1_world = local_to_world * curve.p1;
-                    let p2_world = local_to_world * curve.p2;
-                    let p3_world = local_to_world * curve.p3;
+                // Draw control point p2
+                let is_hover_p2 = hover_cp == Some((edge_id, 2));
+                if is_hover_p2 {
+                    painter.circle_filled(p2_screen, cp_hover_radius, cp_hover_color);
+                } else {
+                    painter.circle_filled(p2_screen, cp_radius, cp_color);
+                }
+            }
 
-                    let p0_screen = world_to_screen(p0_world);
-                    let p1_screen = world_to_screen(p1_world);
-                    let p2_screen = world_to_screen(p2_world);
-                    let p3_screen = world_to_screen(p3_world);
-
-                    // Draw handle lines
-                    painter.line_segment(
-                        [p0_screen, p1_screen],
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 255)),
-                    );
-                    painter.line_segment(
-                        [p2_screen, p3_screen],
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 255)),
-                    );
-
-                    let radius = 6.0;
-
-                    // p1 control point
-                    let (p1_fill, p1_stroke_width) = if active_control_point == Some((i, 1)) {
-                        (egui::Color32::from_rgb(255, 150, 0), 2.0) // Orange if being dragged
-                    } else if hover_control_point == Some((shape.id, i, 1)) {
-                        (egui::Color32::from_rgb(150, 150, 255), 2.0) // Lighter blue if hovering
-                    } else {
-                        (egui::Color32::from_rgb(100, 100, 255), 1.0)
-                    };
-                    painter.circle_filled(p1_screen, radius, p1_fill);
-                    painter.circle_stroke(p1_screen, radius, egui::Stroke::new(p1_stroke_width, egui::Color32::WHITE));
-
-                    // p2 control point
-                    let (p2_fill, p2_stroke_width) = if active_control_point == Some((i, 2)) {
-                        (egui::Color32::from_rgb(255, 150, 0), 2.0) // Orange if being dragged
-                    } else if hover_control_point == Some((shape.id, i, 2)) {
-                        (egui::Color32::from_rgb(150, 150, 255), 2.0) // Lighter blue if hovering
-                    } else {
-                        (egui::Color32::from_rgb(100, 100, 255), 1.0)
-                    };
-                    painter.circle_filled(p2_screen, radius, p2_fill);
-                    painter.circle_stroke(p2_screen, radius, egui::Stroke::new(p2_stroke_width, egui::Color32::WHITE));
+            // Draw vertices on top of everything
+            for (i, vertex) in dcel.vertices.iter().enumerate() {
+                if vertex.deleted { continue; }
+                let vid = lightningbeam_core::dcel::VertexId(i as u32);
+                let screen_pos = world_to_screen(vertex.position);
+                let is_hovered = hover_vertex == Some(vid);
+                if is_hovered {
+                    painter.circle(screen_pos, vertex_hover_radius, vertex_color, vertex_hover_stroke);
+                } else {
+                    painter.circle(screen_pos, vertex_radius, vertex_color, vertex_stroke);
                 }
             }
         } else {
-            // Select mode: Only show hover highlights based on hit testing
-            if let Some(hit_result) = hit {
-                match hit_result {
-                    VectorEditHit::Vertex { shape_instance_id, vertex_index } => {
-                        // Highlight the vertex under the mouse
-                        if let Some(shape) = layer.get_shape_in_keyframe(&shape_instance_id, *shared.playback_time) {
-                                let local_to_world = shape.transform.to_affine();
+            // Select mode: Only show hover highlight for the element under the mouse
+            if let Some(vid) = hover_vertex {
+                let pos = dcel.vertex(vid).position;
+                let screen_pos = world_to_screen(pos);
+                painter.circle(screen_pos, vertex_hover_radius, vertex_color, vertex_hover_stroke);
+            }
 
-                                // Use modified curves from cache if this shape is being edited
-                                let editable = if let Some(cache) = &self.shape_editing_cache {
-                                    if cache.instance_id == shape.id {
-                                        cache.editable_data.clone()
-                                    } else {
-                                        extract_editable_curves(shape.path())
-                                    }
-                                } else {
-                                    extract_editable_curves(shape.path())
-                                };
-
-                                if vertex_index < editable.vertices.len() {
-                                    let vertex = &editable.vertices[vertex_index];
-                                    let world_pos = local_to_world * vertex.point;
-                                    let screen_pos = world_to_screen(world_pos);
-                                    let vertex_size = 10.0;
-
-                                    let rect = egui::Rect::from_center_size(
-                                        screen_pos,
-                                        egui::vec2(vertex_size, vertex_size),
-                                    );
-
-                                    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(255, 200, 0));
-                                    painter.rect_stroke(
-                                        rect,
-                                        0.0,
-                                        egui::Stroke::new(2.0, egui::Color32::WHITE),
-                                        egui::StrokeKind::Middle,
-                                    );
-                                }
-                        }
-                    }
-                    VectorEditHit::Curve { shape_instance_id, curve_index, .. } => {
-                        // Highlight the curve under the mouse
-                        if let Some(shape) = layer.get_shape_in_keyframe(&shape_instance_id, *shared.playback_time) {
-                                let local_to_world = shape.transform.to_affine();
-
-                                // Use modified curves from cache if this shape is being edited
-                                let editable = if let Some(cache) = &self.shape_editing_cache {
-                                    if cache.instance_id == shape.id {
-                                        cache.editable_data.clone()
-                                    } else {
-                                        extract_editable_curves(shape.path())
-                                    }
-                                } else {
-                                    extract_editable_curves(shape.path())
-                                };
-
-                                if curve_index < editable.curves.len() {
-                                    let curve = &editable.curves[curve_index];
-                                    let num_samples = 20;
-
-                                    for j in 0..num_samples {
-                                        let t1 = j as f64 / num_samples as f64;
-                                        let t2 = (j + 1) as f64 / num_samples as f64;
-
-                                        use vello::kurbo::ParamCurve;
-                                        let p1_local = curve.eval(t1);
-                                        let p2_local = curve.eval(t2);
-
-                                        let p1_world = local_to_world * p1_local;
-                                        let p2_world = local_to_world * p2_local;
-
-                                        let p1_screen = world_to_screen(p1_world);
-                                        let p2_screen = world_to_screen(p2_world);
-
-                                        painter.line_segment(
-                                            [p1_screen, p2_screen],
-                                            egui::Stroke::new(3.0, egui::Color32::from_rgb(255, 0, 255)),
-                                        );
-                                    }
-                                }
-                        }
-                    }
-                    _ => {}
+            if let Some(eid) = hover_edge {
+                // Highlight the hovered curve by drawing it thicker
+                let curve = &dcel.edge(eid).curve;
+                // Sample points along the curve for drawing
+                let segments = 20;
+                let points: Vec<egui::Pos2> = (0..=segments)
+                    .map(|i| {
+                        let t = i as f64 / segments as f64;
+                        use vello::kurbo::ParamCurve;
+                        let p = curve.eval(t);
+                        world_to_screen(p)
+                    })
+                    .collect();
+                for pair in points.windows(2) {
+                    painter.line_segment([pair[0], pair[1]], curve_hover_stroke);
                 }
+            }
+
+            if let Some((eid, pidx)) = hover_cp {
+                let curve = &dcel.edge(eid).curve;
+                let cp_pos = if pidx == 1 { curve.p1 } else { curve.p2 };
+                let screen_pos = world_to_screen(cp_pos);
+                painter.circle_filled(screen_pos, cp_hover_radius, cp_hover_color);
             }
         }
     }
@@ -6614,32 +5706,9 @@ impl PaneRenderer for StagePane {
                         if let Some(layer_id) = target_layer_id {
                             // For images, create a shape with image fill instead of a clip instance
                             if dragging.clip_type == DragClipType::Image {
-                                // Get image dimensions (from the dragging info)
-                                let (width, height) = dragging.dimensions.unwrap_or((100.0, 100.0));
-
-                                // Create a rectangle path at the origin (position handled by transform)
-                                use kurbo::BezPath;
-                                let mut path = BezPath::new();
-                                path.move_to((0.0, 0.0));
-                                path.line_to((width, 0.0));
-                                path.line_to((width, height));
-                                path.line_to((0.0, height));
-                                path.close_path();
-
-                                // Create shape with image fill (references the ImageAsset)
-                                use lightningbeam_core::shape::Shape;
-                                let shape = Shape::new(path).with_image_fill(dragging.clip_id);
-
-                                // Set position on shape at drop position
-                                let shape = shape.with_position(world_pos.x as f64, world_pos.y as f64);
-
-                                // Create and queue action
-                                let action = lightningbeam_core::actions::AddShapeAction::new(
-                                    layer_id,
-                                    shape,
-                                    *shared.playback_time,
-                                );
-                                shared.pending_actions.push(Box::new(action));
+                                // TODO: Image fills on DCEL faces are a separate feature.
+                                let _ = (layer_id, world_pos);
+                                eprintln!("Image drag to stage not yet supported with DCEL backend");
                             } else if dragging.clip_type == DragClipType::Effect {
                                 // Handle effect drops specially
                                 // Get effect definition from registry or document
@@ -6862,7 +5931,6 @@ impl PaneRenderer for StagePane {
             eyedropper_request: self.pending_eyedropper_sample,
             playback_time: *shared.playback_time,
             video_manager: shared.video_manager.clone(),
-            shape_editing_cache: self.shape_editing_cache.clone(),
             target_format: shared.target_format,
             editing_clip_id: shared.editing_clip_id,
             editing_instance_id: shared.editing_instance_id,

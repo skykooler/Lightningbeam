@@ -17,7 +17,7 @@ use crate::object::Transform;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
-use vello::kurbo::{Rect, Shape as KurboShape};
+use vello::kurbo::Rect;
 
 /// Vector clip containing nested layers
 ///
@@ -167,20 +167,19 @@ impl VectorClip {
         for layer_node in self.layers.iter() {
             // Only process vector layers (skip other layer types)
             if let AnyLayer::Vector(vector_layer) = &layer_node.data {
-                // Calculate bounds for all shapes in the active keyframe
-                for shape in vector_layer.shapes_at_time(clip_time) {
-                    // Get the local bounding box of the shape's path
-                    let local_bbox = shape.path().bounding_box();
-
-                    // Apply the shape's transform
-                    let shape_transform = shape.transform.to_affine();
-                    let transformed_bbox = shape_transform.transform_rect_bbox(local_bbox);
-
-                    // Union with combined bounds
-                    combined_bounds = Some(match combined_bounds {
-                        None => transformed_bbox,
-                        Some(existing) => existing.union(transformed_bbox),
-                    });
+                // Calculate bounds from DCEL edges
+                if let Some(dcel) = vector_layer.dcel_at_time(clip_time) {
+                    use kurbo::Shape as KurboShape;
+                    for edge in &dcel.edges {
+                        if edge.deleted {
+                            continue;
+                        }
+                        let edge_bbox = edge.curve.bounding_box();
+                        combined_bounds = Some(match combined_bounds {
+                            None => edge_bbox,
+                            Some(existing) => existing.union(edge_bbox),
+                        });
+                    }
                 }
 
                 // Handle nested clip instances recursively
@@ -847,11 +846,13 @@ mod tests {
 
     #[test]
     fn test_audio_clip_midi() {
-        let events = vec![MidiEvent::note_on(0.0, 0, 60, 100)];
-        let clip = AudioClip::new_midi("Piano Melody", 60.0, events.clone(), false);
+        let clip = AudioClip::new_midi("Piano Melody", 1, 60.0);
         assert_eq!(clip.name, "Piano Melody");
         assert_eq!(clip.duration, 60.0);
-        assert_eq!(clip.midi_events().map(|e| e.len()), Some(1));
+        match &clip.clip_type {
+            AudioClipType::Midi { midi_clip_id } => assert_eq!(*midi_clip_id, 1),
+            _ => panic!("Expected Midi clip type"),
+        }
     }
 
     #[test]

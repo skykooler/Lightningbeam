@@ -13,7 +13,7 @@ use crate::clip::{ClipInstance, ImageAsset};
 use crate::document::Document;
 use crate::gpu::BlendMode;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
-use kurbo::{Affine, Shape};
+use kurbo::Affine;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -178,7 +178,6 @@ pub fn render_document_for_compositing(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) -> CompositeRenderResult {
     let time = document.current_time;
 
@@ -212,7 +211,6 @@ pub fn render_document_for_compositing(
             base_transform,
             image_cache,
             video_manager,
-            skip_instance_id,
         );
         rendered_layers.push(rendered);
     }
@@ -237,7 +235,6 @@ pub fn render_layer_isolated(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) -> RenderedLayer {
     let layer_id = layer.id();
     let opacity = layer.opacity() as f32;
@@ -259,9 +256,9 @@ pub fn render_layer_isolated(
                 1.0, // Full opacity - layer opacity handled in compositing
                 image_cache,
                 video_manager,
-                skip_instance_id,
             );
-            rendered.has_content = !vector_layer.shapes_at_time(time).is_empty()
+            rendered.has_content = vector_layer.dcel_at_time(time)
+                .map_or(false, |dcel| !dcel.edges.iter().all(|e| e.deleted) || !dcel.faces.iter().skip(1).all(|f| f.deleted))
                 || !vector_layer.clip_instances.is_empty();
         }
         AnyLayer::Audio(_) => {
@@ -306,9 +303,7 @@ fn render_vector_layer_to_scene(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) {
-    // Render using the existing function but to this isolated scene
     render_vector_layer(
         document,
         time,
@@ -318,7 +313,6 @@ fn render_vector_layer_to_scene(
         parent_opacity,
         image_cache,
         video_manager,
-        skip_instance_id,
     );
 }
 
@@ -355,7 +349,7 @@ pub fn render_document(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
 ) {
-    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache, video_manager, None);
+    render_document_with_transform(document, scene, Affine::IDENTITY, image_cache, video_manager);
 }
 
 /// Render a document to a Vello scene with a base transform
@@ -366,7 +360,6 @@ pub fn render_document_with_transform(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // 1. Draw background
     render_background(document, scene, base_transform);
@@ -380,10 +373,10 @@ pub fn render_document_with_transform(
     for layer in document.visible_layers() {
         if any_soloed {
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
             }
         } else {
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, skip_instance_id);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
         }
     }
 }
@@ -415,11 +408,10 @@ fn render_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) {
     match layer {
         AnyLayer::Vector(vector_layer) => {
-            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager, skip_instance_id)
+            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager)
         }
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
@@ -620,7 +612,7 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager, None);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager);
     }
 }
 
@@ -792,6 +784,89 @@ fn render_video_layer(
 }
 
 /// Render a vector layer with all its clip instances and shape instances
+/// Render a DCEL to a Vello scene.
+///
+/// Walks faces for fills and edges for strokes.
+pub fn render_dcel(
+    dcel: &crate::dcel::Dcel,
+    scene: &mut Scene,
+    base_transform: Affine,
+    layer_opacity: f64,
+    document: &Document,
+    image_cache: &mut ImageCache,
+) {
+    let opacity_f32 = layer_opacity as f32;
+
+    // 1. Render faces (fills)
+    for (i, face) in dcel.faces.iter().enumerate() {
+        if face.deleted || i == 0 {
+            continue; // Skip unbounded face and deleted faces
+        }
+        if face.fill_color.is_none() && face.image_fill.is_none() {
+            continue; // No fill to render
+        }
+
+        let face_id = crate::dcel::FaceId(i as u32);
+        let path = dcel.face_to_bezpath_with_holes(face_id);
+        let fill_rule: Fill = face.fill_rule.into();
+
+        let mut filled = false;
+
+        // Image fill
+        if let Some(image_asset_id) = face.image_fill {
+            if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
+                if let Some(image) = image_cache.get_or_decode(image_asset) {
+                    let image_with_alpha = (*image).clone().with_alpha(opacity_f32);
+                    scene.fill(fill_rule, base_transform, &image_with_alpha, None, &path);
+                    filled = true;
+                }
+            }
+        }
+
+        // Color fill
+        if !filled {
+            if let Some(fill_color) = &face.fill_color {
+                let alpha = ((fill_color.a as f32 / 255.0) * opacity_f32 * 255.0) as u8;
+                let adjusted = crate::shape::ShapeColor::rgba(
+                    fill_color.r,
+                    fill_color.g,
+                    fill_color.b,
+                    alpha,
+                );
+                scene.fill(fill_rule, base_transform, adjusted.to_peniko(), None, &path);
+            }
+        }
+    }
+
+    // 2. Render edges (strokes)
+    for edge in &dcel.edges {
+        if edge.deleted {
+            continue;
+        }
+        if let (Some(stroke_color), Some(stroke_style)) = (&edge.stroke_color, &edge.stroke_style) {
+            let alpha = ((stroke_color.a as f32 / 255.0) * opacity_f32 * 255.0) as u8;
+            let adjusted = crate::shape::ShapeColor::rgba(
+                stroke_color.r,
+                stroke_color.g,
+                stroke_color.b,
+                alpha,
+            );
+
+            let mut path = kurbo::BezPath::new();
+            path.move_to(edge.curve.p0);
+            path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
+
+            scene.stroke(
+                &stroke_style.to_stroke(),
+                base_transform,
+                adjusted.to_peniko(),
+                None,
+                &path,
+            );
+        }
+    }
+}
+
 fn render_vector_layer(
     document: &Document,
     time: f64,
@@ -801,7 +876,6 @@ fn render_vector_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
-    skip_instance_id: Option<uuid::Uuid>,
 ) {
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
@@ -818,124 +892,9 @@ fn render_vector_layer(
         render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time);
     }
 
-    // Render each shape in the active keyframe
-    for shape in layer.shapes_at_time(time) {
-        // Skip this shape if it's being edited
-        if Some(shape.id) == skip_instance_id {
-            continue;
-        }
-
-        // Use shape's transform directly (keyframe model — no animation evaluation)
-        let x = shape.transform.x;
-        let y = shape.transform.y;
-        let rotation = shape.transform.rotation;
-        let scale_x = shape.transform.scale_x;
-        let scale_y = shape.transform.scale_y;
-        let skew_x = shape.transform.skew_x;
-        let skew_y = shape.transform.skew_y;
-        let opacity = shape.opacity;
-
-        // Get the path
-        let path = shape.path();
-
-        // Build transform matrix (compose with base transform for camera)
-        let shape_bbox = path.bounding_box();
-        let center_x = (shape_bbox.x0 + shape_bbox.x1) / 2.0;
-        let center_y = (shape_bbox.y0 + shape_bbox.y1) / 2.0;
-
-        // Build skew transforms (applied around shape center)
-        let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
-            let skew_x_affine = if skew_x != 0.0 {
-                let tan_skew = skew_x.to_radians().tan();
-                Affine::new([1.0, 0.0, tan_skew, 1.0, 0.0, 0.0])
-            } else {
-                Affine::IDENTITY
-            };
-
-            let skew_y_affine = if skew_y != 0.0 {
-                let tan_skew = skew_y.to_radians().tan();
-                Affine::new([1.0, tan_skew, 0.0, 1.0, 0.0, 0.0])
-            } else {
-                Affine::IDENTITY
-            };
-
-            Affine::translate((center_x, center_y))
-                * skew_x_affine
-                * skew_y_affine
-                * Affine::translate((-center_x, -center_y))
-        } else {
-            Affine::IDENTITY
-        };
-
-        let object_transform = Affine::translate((x, y))
-            * Affine::rotate(rotation.to_radians())
-            * Affine::scale_non_uniform(scale_x, scale_y)
-            * skew_transform;
-        let affine = base_transform * object_transform;
-
-        // Calculate final opacity (cascaded from parent → layer → shape)
-        let final_opacity = (layer_opacity * opacity) as f32;
-
-        // Determine fill rule
-        let fill_rule = match shape.fill_rule {
-            crate::shape::FillRule::NonZero => Fill::NonZero,
-            crate::shape::FillRule::EvenOdd => Fill::EvenOdd,
-        };
-
-        // Render fill - prefer image fill over color fill
-        let mut filled = false;
-
-        // Check for image fill first
-        if let Some(image_asset_id) = shape.image_fill {
-            if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
-                if let Some(image) = image_cache.get_or_decode(image_asset) {
-                    let image_with_alpha = (*image).clone().with_alpha(final_opacity);
-                    scene.fill(fill_rule, affine, &image_with_alpha, None, &path);
-                    filled = true;
-                }
-            }
-        }
-
-        // Fall back to color fill if no image fill (or image failed to load)
-        if !filled {
-            if let Some(fill_color) = &shape.fill_color {
-                let alpha = ((fill_color.a as f32 / 255.0) * final_opacity * 255.0) as u8;
-                let adjusted_color = crate::shape::ShapeColor::rgba(
-                    fill_color.r,
-                    fill_color.g,
-                    fill_color.b,
-                    alpha,
-                );
-
-                scene.fill(
-                    fill_rule,
-                    affine,
-                    adjusted_color.to_peniko(),
-                    None,
-                    &path,
-                );
-            }
-        }
-
-        // Render stroke if present
-        if let (Some(stroke_color), Some(stroke_style)) = (&shape.stroke_color, &shape.stroke_style)
-        {
-            let alpha = ((stroke_color.a as f32 / 255.0) * final_opacity * 255.0) as u8;
-            let adjusted_color = crate::shape::ShapeColor::rgba(
-                stroke_color.r,
-                stroke_color.g,
-                stroke_color.b,
-                alpha,
-            );
-
-            scene.stroke(
-                &stroke_style.to_stroke(),
-                affine,
-                adjusted_color.to_peniko(),
-                None,
-                &path,
-            );
-        }
+    // Render DCEL from active keyframe
+    if let Some(dcel) = layer.dcel_at_time(time) {
+        render_dcel(dcel, scene, base_transform, layer_opacity, document, image_cache);
     }
 }
 
