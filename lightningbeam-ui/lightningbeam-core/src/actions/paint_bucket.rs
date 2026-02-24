@@ -52,8 +52,20 @@ impl Action for PaintBucketAction {
         let keyframe = vl.ensure_keyframe_at(self.time);
         let dcel = &mut keyframe.dcel;
 
+        // Record for debug test generation (if recording is active)
+        dcel.record_paint_point(self.click_point);
+
         // Hit-test to find which face was clicked
         let face_id = dcel.find_face_containing_point(self.click_point);
+
+        // Dump cumulative test to stderr after every paint click (if recording)
+        // Do this before the early return so failed clicks are captured too.
+        if dcel.is_recording() {
+            eprintln!("\n--- DCEL debug test (cumulative, face={:?}) ---", face_id);
+            dcel.debug_recorder.as_ref().unwrap().dump_test("test_recorded");
+            eprintln!("--- end test ---\n");
+        }
+
         if face_id.0 == 0 {
             // FaceId(0) is the unbounded exterior face — nothing to fill
             return Err("No face at click point".to_string());

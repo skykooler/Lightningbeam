@@ -90,16 +90,37 @@ fn find_intersections_recursive(
         return;
     }
 
-    // If we've recursed deep enough or ranges are small enough, record intersection
+    // If we've recursed deep enough or ranges are small enough,
+    // refine with line-line intersection for sub-pixel accuracy.
     if depth >= MAX_DEPTH ||
        ((t1_end - t1_start) < MIN_RANGE && (t2_end - t2_start) < MIN_RANGE) {
-        let t1 = (t1_start + t1_end) / 2.0;
-        let t2 = (t2_start + t2_end) / 2.0;
+        // At this scale the curves are essentially straight lines.
+        // Evaluate endpoints of each subsegment and solve line-line.
+        let a0 = orig_curve1.eval(t1_start);
+        let a1 = orig_curve1.eval(t1_end);
+        let b0 = orig_curve2.eval(t2_start);
+        let b1 = orig_curve2.eval(t2_end);
+
+        let (t1, t2, point) = if let Some((s, u)) = line_line_intersect(a0, a1, b0, b1) {
+            let s = s.clamp(0.0, 1.0);
+            let u = u.clamp(0.0, 1.0);
+            let t1 = t1_start + s * (t1_end - t1_start);
+            let t2 = t2_start + u * (t2_end - t2_start);
+            // Average the two lines' estimates for the point
+            let p1 = Point::new(a0.x + s * (a1.x - a0.x), a0.y + s * (a1.y - a0.y));
+            let p2 = Point::new(b0.x + u * (b1.x - b0.x), b0.y + u * (b1.y - b0.y));
+            (t1, t2, Point::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5))
+        } else {
+            // Lines are parallel/degenerate — fall back to midpoint
+            let t1 = (t1_start + t1_end) / 2.0;
+            let t2 = (t2_start + t2_end) / 2.0;
+            (t1, t2, orig_curve1.eval(t1))
+        };
 
         intersections.push(Intersection {
             t1,
             t2: Some(t2),
-            point: orig_curve1.eval(t1),
+            point,
         });
         return;
     }
@@ -252,30 +273,86 @@ fn refine_self_intersection(curve: &CubicBez, mut t1: f64, mut t2: f64) -> (f64,
     (t1.clamp(0.0, 1.0), t2.clamp(0.0, 1.0))
 }
 
-/// Remove duplicate intersections within a tolerance
-fn dedup_intersections(intersections: &mut Vec<Intersection>, tolerance: f64) {
-    let mut i = 0;
-    while i < intersections.len() {
-        let mut j = i + 1;
-        while j < intersections.len() {
-            let dist = (intersections[i].point - intersections[j].point).hypot();
-            // Also check parameter distance — two intersections at the same
-            // spatial location but with very different t-values are distinct
-            // (e.g. a shared vertex vs. a real crossing nearby).
-            let t1_dist = (intersections[i].t1 - intersections[j].t1).abs();
-            let t2_dist = match (intersections[i].t2, intersections[j].t2) {
-                (Some(a), Some(b)) => (a - b).abs(),
-                _ => 0.0,
-            };
-            let param_close = t1_dist < 0.05 && t2_dist < 0.05;
-            if dist < tolerance && param_close {
-                intersections.remove(j);
-            } else {
-                j += 1;
-            }
-        }
-        i += 1;
+/// Remove duplicate intersections by clustering on parameter proximity.
+///
+/// Raw hits from subdivision can produce chains of near-duplicates spaced
+/// just over the spatial tolerance (e.g. 4 hits at 1.02 px apart for a
+/// single crossing of shallow-angle curves). Pairwise spatial dedup fails
+/// on these chains. Instead, we sort by t1, cluster consecutive hits whose
+/// t1 values are within `param_tol`, and keep the median of each cluster.
+fn dedup_intersections(intersections: &mut Vec<Intersection>, _tolerance: f64) {
+    if intersections.is_empty() {
+        return;
     }
+
+    const PARAM_TOL: f64 = 0.05;
+
+    // Sort by t1 (primary) then t2 (secondary)
+    intersections.sort_by(|a, b| {
+        a.t1.partial_cmp(&b.t1)
+            .unwrap()
+            .then_with(|| {
+                let at2 = a.t2.unwrap_or(0.0);
+                let bt2 = b.t2.unwrap_or(0.0);
+                at2.partial_cmp(&bt2).unwrap()
+            })
+    });
+
+    // Cluster consecutive intersections that are close in both t1 and t2
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut current_cluster = vec![0usize];
+
+    for i in 1..intersections.len() {
+        let prev = &intersections[*current_cluster.last().unwrap()];
+        let curr = &intersections[i];
+        let t1_close = (curr.t1 - prev.t1).abs() < PARAM_TOL;
+        let t2_close = match (curr.t2, prev.t2) {
+            (Some(a), Some(b)) => (a - b).abs() < PARAM_TOL,
+            _ => true,
+        };
+        if t1_close && t2_close {
+            current_cluster.push(i);
+        } else {
+            clusters.push(std::mem::take(&mut current_cluster));
+            current_cluster = vec![i];
+        }
+    }
+    clusters.push(current_cluster);
+
+    // Keep the median of each cluster
+    let mut result = Vec::with_capacity(clusters.len());
+    for cluster in &clusters {
+        let median_idx = cluster[cluster.len() / 2];
+        result.push(intersections[median_idx].clone());
+    }
+
+    *intersections = result;
+}
+
+/// 2D line-line intersection.
+///
+/// Given line segment A (a0→a1) and line segment B (b0→b1),
+/// returns `Some((s, u))` where `s` is the parameter on A and
+/// `u` is the parameter on B at the intersection point.
+/// Returns `None` if the lines are parallel or degenerate.
+fn line_line_intersect(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<(f64, f64)> {
+    let dx_a = a1.x - a0.x;
+    let dy_a = a1.y - a0.y;
+    let dx_b = b1.x - b0.x;
+    let dy_b = b1.y - b0.y;
+
+    let denom = dx_a * dy_b - dy_a * dx_b;
+    if denom.abs() < 1e-12 {
+        return None; // parallel or degenerate
+    }
+
+    let dx_ab = b0.x - a0.x;
+    let dy_ab = b0.y - a0.y;
+
+    let s = (dx_ab * dy_b - dy_ab * dx_b) / denom;
+    let u = (dx_ab * dy_a - dy_ab * dx_a) / denom;
+
+    Some((s, u))
 }
 
 #[cfg(test)]

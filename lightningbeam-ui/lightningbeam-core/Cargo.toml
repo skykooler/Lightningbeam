@@ -46,3 +46,6 @@ rstar = "0.12"
 
 # System clipboard
 arboard = "3"
+
+[dev-dependencies]
+tiny-skia = "0.11"

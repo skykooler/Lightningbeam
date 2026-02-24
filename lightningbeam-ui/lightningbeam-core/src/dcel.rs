@@ -172,6 +172,85 @@ pub struct Dcel {
     /// Transient spatial index — rebuilt on load, not serialized.
     #[serde(skip)]
     vertex_rtree: Option<RTree<VertexEntry>>,
+
+    /// Debug recorder: captures strokes and paint bucket clicks for test generation.
+    /// Enable with `dcel.set_recording(true)`.
+    #[serde(skip)]
+    pub debug_recorder: Option<DebugRecorder>,
+}
+
+/// Records DCEL operations for test case generation.
+#[derive(Clone, Debug, Default)]
+pub struct DebugRecorder {
+    pub strokes: Vec<Vec<CubicBez>>,
+    pub paint_points: Vec<Point>,
+}
+
+impl DebugRecorder {
+    /// Record a stroke (called from insert_stroke).
+    pub fn record_stroke(&mut self, segments: &[CubicBez]) {
+        self.strokes.push(segments.to_vec());
+    }
+
+    /// Record a paint bucket click (called from find_face_containing_point).
+    pub fn record_paint(&mut self, point: Point) {
+        self.paint_points.push(point);
+    }
+
+    /// Dump a Rust test function to stderr that reproduces the recorded operations.
+    pub fn dump_test(&self, name: &str) {
+        eprintln!("    #[test]");
+        eprintln!("    fn {name}() {{");
+        eprintln!("        let mut dcel = Dcel::new();");
+        eprintln!();
+
+        for (i, stroke) in self.strokes.iter().enumerate() {
+            eprintln!("        // Stroke {i}");
+            eprintln!("        dcel.insert_stroke(&[");
+            for seg in stroke {
+                eprintln!(
+                    "            CubicBez::new(Point::new({:.1}, {:.1}), Point::new({:.1}, {:.1}), Point::new({:.1}, {:.1}), Point::new({:.1}, {:.1})),",
+                    seg.p0.x, seg.p0.y, seg.p1.x, seg.p1.y,
+                    seg.p2.x, seg.p2.y, seg.p3.x, seg.p3.y,
+                );
+            }
+            eprintln!("        ], None, None, 5.0);");
+            eprintln!();
+        }
+
+        if !self.paint_points.is_empty() {
+            eprintln!("        // Each paint point should hit a bounded face, and no two should share a face");
+            eprintln!("        let paint_points = vec![");
+            for pt in &self.paint_points {
+                eprintln!("            Point::new({:.1}, {:.1}),", pt.x, pt.y);
+            }
+            eprintln!("        ];");
+            eprintln!("        let mut seen_faces = std::collections::HashSet::new();");
+            eprintln!("        for (i, &pt) in paint_points.iter().enumerate() {{");
+            eprintln!("            let face = dcel.find_face_containing_point(pt);");
+            eprintln!("            eprintln!(\"paint point {{i}} at ({{:.1}}, {{:.1}}) → face {{:?}}\", pt.x, pt.y, face);");
+            eprintln!("            assert!(");
+            eprintln!("                face.0 != 0,");
+            eprintln!("                \"paint point {{i}} at ({{:.1}}, {{:.1}}) hit unbounded face\",");
+            eprintln!("                pt.x, pt.y,");
+            eprintln!("            );");
+            eprintln!("            assert!(");
+            eprintln!("                seen_faces.insert(face),");
+            eprintln!("                \"paint point {{i}} at ({{:.1}}, {{:.1}}) hit face {{:?}} which was already painted\",");
+            eprintln!("                pt.x, pt.y, face,");
+            eprintln!("            );");
+            eprintln!("        }}");
+        }
+
+        eprintln!("    }}");
+    }
+
+    /// Dump the test to stderr and clear the recorder for the next test.
+    pub fn dump_and_reset(&mut self, name: &str) {
+        self.dump_test(name);
+        self.strokes.clear();
+        self.paint_points.clear();
+    }
 }
 
 impl Default for Dcel {
@@ -191,6 +270,12 @@ impl Dcel {
             fill_rule: FillRule::NonZero,
             deleted: false,
         };
+        let debug_recorder = if std::env::var("DAW_DCEL_RECORD").is_ok() {
+            eprintln!("[DCEL_RECORD] Recording enabled for new DCEL");
+            Some(DebugRecorder::default())
+        } else {
+            None
+        };
         Dcel {
             vertices: Vec::new(),
             half_edges: Vec::new(),
@@ -201,6 +286,29 @@ impl Dcel {
             free_edges: Vec::new(),
             free_faces: Vec::new(),
             vertex_rtree: None,
+            debug_recorder,
+        }
+    }
+
+    /// Enable or disable debug recording at runtime.
+    pub fn set_recording(&mut self, enabled: bool) {
+        if enabled {
+            self.debug_recorder.get_or_insert_with(DebugRecorder::default);
+        } else {
+            self.debug_recorder = None;
+        }
+    }
+
+    /// Returns true if debug recording is active.
+    pub fn is_recording(&self) -> bool {
+        self.debug_recorder.is_some()
+    }
+
+    /// Dump the recorded test and reset the recorder.
+    /// Does nothing if recording is not active.
+    pub fn dump_recorded_test(&mut self, name: &str) {
+        if let Some(ref mut rec) = self.debug_recorder {
+            rec.dump_and_reset(name);
         }
     }
 
@@ -492,22 +600,136 @@ impl Dcel {
         self.cycle_to_bezpath(&boundary)
     }
 
-    /// Build a BezPath from a half-edge cycle.
+    /// Build a BezPath from a half-edge cycle (raw, no spur stripping).
+    /// Used for topology operations (winding tests, area comparisons).
     fn cycle_to_bezpath(&self, cycle: &[HalfEdgeId]) -> BezPath {
-        let mut path = BezPath::new();
-        if cycle.is_empty() {
-            return path;
+        self.halfedges_to_bezpath(cycle)
+    }
+
+    /// Build a BezPath with spur edges and vertex-revisit loops stripped.
+    ///
+    /// Spur edges (antennae) appear in the cycle as consecutive pairs that
+    /// traverse the same edge in opposite directions. These contribute zero
+    /// area but can cause fill rendering artifacts when the path is rasterized.
+    ///
+    /// Vertex-revisit loops occur when a face cycle visits the same vertex
+    /// twice (e.g. A→B→C→D→E→C→F). The sub-path between the two visits
+    /// (C→D→E→C) is a peninsula that inflates the cycle without enclosing
+    /// additional area. We keep the last visit to each vertex and drop
+    /// the loop: A→B→C→F.
+    fn cycle_to_bezpath_stripped(&self, cycle: &[HalfEdgeId]) -> BezPath {
+        let stripped = self.strip_cycle(cycle);
+        if stripped.is_empty() {
+            return BezPath::new();
+        }
+        self.halfedges_to_bezpath(&stripped)
+    }
+
+    /// Strip spur edges and vertex-revisit loops from a half-edge cycle.
+    ///
+    /// Returns the simplified list of half-edge IDs.
+    fn strip_cycle(&self, cycle: &[HalfEdgeId]) -> Vec<HalfEdgeId> {
+        // Pass 1: strip consecutive same-edge spur pairs (stack-based)
+        let mut stripped: Vec<HalfEdgeId> = Vec::with_capacity(cycle.len());
+        for &he_id in cycle {
+            let edge = self.half_edge(he_id).edge;
+            if let Some(&top) = stripped.last() {
+                if self.half_edge(top).edge == edge {
+                    stripped.pop();
+                    continue;
+                }
+            }
+            stripped.push(he_id);
+        }
+        // Handle wrap-around spur pairs.
+        while stripped.len() >= 2 {
+            let first_edge = self.half_edge(stripped[0]).edge;
+            let last_edge = self.half_edge(*stripped.last().unwrap()).edge;
+            if first_edge == last_edge {
+                stripped.pop();
+                stripped.remove(0);
+            } else {
+                break;
+            }
         }
 
-        for (i, &he_id) in cycle.iter().enumerate() {
+        // Pass 2: strip vertex-revisit loops.
+        // Walk the stripped cycle. For each half-edge, record the *source*
+        // vertex. If we've seen that vertex before, remove the sub-path
+        // between the first and current visit (keeping the later path).
+        //
+        // We repeat until no more revisits are found, since removing one
+        // loop can expose another.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut result: Vec<HalfEdgeId> = Vec::with_capacity(stripped.len());
+            // Map from VertexId → index in `result` where that vertex was last seen as source
+            let mut vertex_pos: std::collections::HashMap<VertexId, usize> = std::collections::HashMap::new();
+            for &he_id in &stripped {
+                let src = self.half_edge_source(he_id);
+                if let Some(&prev_pos) = vertex_pos.get(&src) {
+                    // Vertex revisit! Remove the loop between prev_pos and here.
+                    // Keep result[0..prev_pos], drop result[prev_pos..], continue from here.
+                    // Also remove stale vertex_pos entries for dropped half-edges.
+                    let removed: Vec<HalfEdgeId> = result.drain(prev_pos..).collect();
+                    for &removed_he in &removed {
+                        let removed_src = self.half_edge_source(removed_he);
+                        // Only remove from map if it points to a removed position
+                        if let Some(&pos) = vertex_pos.get(&removed_src) {
+                            if pos >= prev_pos {
+                                vertex_pos.remove(&removed_src);
+                            }
+                        }
+                    }
+                    changed = true;
+                }
+                vertex_pos.insert(src, result.len());
+                result.push(he_id);
+            }
+            // Check wrap-around: if the last half-edge's destination == first half-edge's source,
+            // that's the expected cycle closure, not a revisit. But if the destination appears
+            // as a source of some middle half-edge, we have a wrap-around revisit.
+            if !result.is_empty() {
+                let last_he = *result.last().unwrap();
+                let last_dst = self.half_edge_dest(last_he);
+                let first_src = self.half_edge_source(result[0]);
+                if last_dst != first_src {
+                    // The destination of the last edge should match the source of the first
+                    // for a valid cycle. If not, something is off — don't strip further.
+                } else if let Some(&wrap_pos) = vertex_pos.get(&first_src) {
+                    if wrap_pos > 0 {
+                        // The cycle start vertex appears mid-cycle. Drop the prefix.
+                        result.drain(..wrap_pos);
+                        changed = true;
+                    }
+                }
+            }
+            stripped = result;
+        }
+
+        stripped
+    }
+
+    /// Get the source (origin) vertex of a half-edge.
+    #[inline]
+    fn half_edge_source(&self, he_id: HalfEdgeId) -> VertexId {
+        self.half_edge(he_id).origin
+    }
+
+    /// Convert a slice of half-edge IDs to a BezPath.
+    fn halfedges_to_bezpath(&self, hes: &[HalfEdgeId]) -> BezPath {
+        let mut path = BezPath::new();
+        if hes.is_empty() {
+            return path;
+        }
+        for (i, &he_id) in hes.iter().enumerate() {
             let he = self.half_edge(he_id);
             let edge_data = self.edge(he.edge);
-            // Determine if this half-edge is the forward or backward direction
             let is_forward = edge_data.half_edges[0] == he_id;
             let curve = if is_forward {
                 edge_data.curve
             } else {
-                // Reverse the cubic bezier
                 CubicBez::new(
                     edge_data.curve.p3,
                     edge_data.curve.p2,
@@ -515,7 +737,6 @@ impl Dcel {
                     edge_data.curve.p0,
                 )
             };
-
             if i == 0 {
                 path.move_to(curve.p0);
             }
@@ -525,16 +746,27 @@ impl Dcel {
         path
     }
 
+    /// Build a BezPath for a face with spur edges stripped (for fill rendering).
+    ///
+    /// Spur edges cause fill rendering artifacts because the back-and-forth
+    /// path can enclose neighboring regions. Use this for all rendering;
+    /// use `face_to_bezpath` (raw) for topology operations like winding tests.
+    pub fn face_to_bezpath_stripped(&self, face_id: FaceId) -> BezPath {
+        let boundary = self.face_boundary(face_id);
+        self.cycle_to_bezpath_stripped(&boundary)
+    }
+
     /// Build a BezPath for a face including holes (for correct filled rendering).
     /// Outer boundary is CCW, holes are CW (opposite winding for non-zero fill).
+    /// Spur edges are stripped.
     pub fn face_to_bezpath_with_holes(&self, face_id: FaceId) -> BezPath {
-        let mut path = self.face_to_bezpath(face_id);
+        let boundary = self.face_boundary(face_id);
+        let mut path = self.cycle_to_bezpath_stripped(&boundary);
 
         let face = self.face(face_id);
         for &inner_he in &face.inner_half_edges {
             let hole_cycle = self.walk_cycle(inner_he);
-            let hole_path = self.cycle_to_bezpath(&hole_cycle);
-            // Append hole path — its winding should be opposite to outer
+            let hole_path = self.cycle_to_bezpath_stripped(&hole_cycle);
             for el in hole_path.elements() {
                 path.push(*el);
             }
@@ -694,6 +926,86 @@ impl Dcel {
                 e_id
             );
         }
+
+        // 6. No unsplit crossings: every pair of non-deleted edges that
+        //    geometrically cross must share a vertex at the crossing point.
+        //    An interior crossing (away from endpoints) without a shared
+        //    vertex means insert_stroke failed to split the edge.
+        {
+            use crate::curve_intersections::find_curve_intersections;
+
+            // Collect live edges with their endpoint vertex IDs.
+            let live_edges: Vec<(EdgeId, CubicBez, [VertexId; 2])> = self
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.deleted)
+                .map(|(i, e)| {
+                    let eid = EdgeId(i as u32);
+                    let v0 = self.half_edges[e.half_edges[0].idx()].origin;
+                    let v1 = self.half_edges[e.half_edges[1].idx()].origin;
+                    (eid, e.curve, [v0, v1])
+                })
+                .collect();
+
+            for i in 0..live_edges.len() {
+                for j in (i + 1)..live_edges.len() {
+                    let (eid_a, curve_a, verts_a) = &live_edges[i];
+                    let (eid_b, curve_b, verts_b) = &live_edges[j];
+
+                    // Shared endpoint vertices — intersections near endpoints are expected.
+                    let shared: Vec<VertexId> = verts_a
+                        .iter()
+                        .filter(|v| verts_b.contains(v))
+                        .copied()
+                        .collect();
+
+                    let hits = find_curve_intersections(curve_a, curve_b);
+                    for hit in &hits {
+                        let t1 = hit.t1;
+                        let t2 = hit.t2.unwrap_or(0.5);
+
+                        // Check if intersection is close to a shared endpoint vertex.
+                        // This handles edges that share a vertex and run nearly
+                        // parallel near the junction — the intersection finder can
+                        // report a hit a few pixels from the shared vertex.
+                        let close_to_shared = shared.iter().any(|&sv| {
+                            let sv_pos = self.vertex(sv).position;
+                            (hit.point - sv_pos).hypot() < 2.0
+                        });
+                        if close_to_shared {
+                            continue;
+                        }
+
+                        // Skip intersections that are at/near both endpoints
+                        // (shared vertex at a T-junction or crossing already resolved).
+                        let near_endpoint_a = t1 < 0.02 || t1 > 0.98;
+                        let near_endpoint_b = t2 < 0.02 || t2 > 0.98;
+                        if near_endpoint_a && near_endpoint_b {
+                            continue;
+                        }
+
+                        // Interior crossing — check if ANY vertex exists near this point.
+                        let has_vertex_at_crossing = self.vertices.iter().any(|v| {
+                            !v.deleted && (v.position - hit.point).hypot() < 2.0
+                        });
+
+                        assert!(
+                            has_vertex_at_crossing,
+                            "Unsplit edge crossing: edge {:?} (t={:.3}) x edge {:?} (t={:.3}) \
+                             at ({:.1}, {:.1}) — no vertex at crossing point.\n\
+                             Edge A vertices: V{} ({:.1},{:.1}) → V{} ({:.1},{:.1})\n\
+                             Edge B vertices: V{} ({:.1},{:.1}) → V{} ({:.1},{:.1})",
+                            eid_a, t1, eid_b, t2, hit.point.x, hit.point.y,
+                            verts_a[0].0, self.vertex(verts_a[0]).position.x, self.vertex(verts_a[0]).position.y,
+                            verts_a[1].0, self.vertex(verts_a[1]).position.x, self.vertex(verts_a[1]).position.y,
+                            verts_b[0].0, self.vertex(verts_b[0]).position.x, self.vertex(verts_b[0]).position.y,
+                            verts_b[1].0, self.vertex(verts_b[1]).position.x, self.vertex(verts_b[1]).position.y,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -801,9 +1113,48 @@ impl Dcel {
                 let he_into_v1 = self.half_edges[he_from_v1.idx()].prev;
                 let he_into_v2 = self.half_edges[he_from_v2.idx()].prev;
 
-                // The actual face being split is determined by the sector, not the
-                // parameter — the parameter may be stale after prior inserts.
                 let actual_face = self.half_edges[he_into_v1.idx()].face;
+
+                if cfg!(test) && std::env::var("DCEL_TRACE").is_ok() {
+                    let face_v1 = self.half_edges[he_into_v1.idx()].face;
+                    let face_v2 = self.half_edges[he_into_v2.idx()].face;
+                    eprintln!("    (true,true) v1=V{} v2=V{} fwd_angle={:.3} bwd_angle={:.3}",
+                        v1.0, v2.0, fwd_angle, bwd_angle);
+                    // Dump fan at v1
+                    {
+                        let start = self.vertices[v1.idx()].outgoing;
+                        let mut cur = start;
+                        eprint!("      v1 fan:");
+                        loop {
+                            let a = self.outgoing_angle(cur);
+                            let f = self.half_edge(cur).face;
+                            eprint!(" HE{}(a={:.3},F{})", cur.0, a, f.0);
+                            let twin = self.half_edge(cur).twin;
+                            cur = self.half_edge(twin).next;
+                            if cur == start { break; }
+                        }
+                        eprintln!();
+                    }
+                    // Dump fan at v2
+                    {
+                        let start = self.vertices[v2.idx()].outgoing;
+                        let mut cur = start;
+                        eprint!("      v2 fan:");
+                        loop {
+                            let a = self.outgoing_angle(cur);
+                            let f = self.half_edge(cur).face;
+                            eprint!(" HE{}(a={:.3},F{})", cur.0, a, f.0);
+                            let twin = self.half_edge(cur).twin;
+                            cur = self.half_edge(twin).next;
+                            if cur == start { break; }
+                        }
+                        eprintln!();
+                    }
+                    eprintln!("      he_from_v1=HE{} he_into_v1=HE{} face_at_v1=F{}",
+                        he_from_v1.0, he_into_v1.0, face_v1.0);
+                    eprintln!("      he_from_v2=HE{} he_into_v2=HE{} face_at_v2=F{}",
+                        he_from_v2.0, he_into_v2.0, face_v2.0);
+                }
 
                 // Splice: he_into_v1 → he_fwd → he_from_v2 → ...
                 //         he_into_v2 → he_bwd → he_from_v1 → ...
@@ -817,32 +1168,117 @@ impl Dcel {
                 self.half_edges[he_into_v2.idx()].next = he_bwd;
                 self.half_edges[he_from_v1.idx()].prev = he_bwd;
 
-                // Allocate new face for one side of the split
-                let new_face = self.alloc_face();
-
-                // Walk each cycle and assign faces
-                self.half_edges[he_fwd.idx()].face = actual_face;
-                {
+                // Detect split vs bridge: walk from he_fwd and check if
+                // we encounter he_bwd (same cycle = bridge) or return to
+                // he_fwd without seeing it (separate cycles = split).
+                let is_split = {
                     let mut cur = self.half_edges[he_fwd.idx()].next;
+                    let mut found = false;
                     while cur != he_fwd {
-                        self.half_edges[cur.idx()].face = actual_face;
+                        if cur == he_bwd {
+                            found = true;
+                            break;
+                        }
                         cur = self.half_edges[cur.idx()].next;
                     }
-                }
-                self.half_edges[he_bwd.idx()].face = new_face;
-                {
-                    let mut cur = self.half_edges[he_bwd.idx()].next;
-                    while cur != he_bwd {
-                        self.half_edges[cur.idx()].face = new_face;
+                    !found
+                };
+
+                if cfg!(test) && std::env::var("DCEL_TRACE").is_ok() {
+                    // Dump the cycle from he_fwd
+                    eprint!("      fwd_cycle:");
+                    let mut cur = he_fwd;
+                    let mut count = 0;
+                    loop {
+                        eprint!(" HE{}", cur.0);
                         cur = self.half_edges[cur.idx()].next;
+                        count += 1;
+                        if cur == he_fwd || count > 50 { break; }
                     }
+                    eprintln!(" (len={})", count);
+                    eprint!("      bwd_cycle:");
+                    cur = he_bwd;
+                    count = 0;
+                    loop {
+                        eprint!(" HE{}", cur.0);
+                        cur = self.half_edges[cur.idx()].next;
+                        count += 1;
+                        if cur == he_bwd || count > 50 { break; }
+                    }
+                    eprintln!(" (len={})", count);
+                    eprintln!("      is_split={is_split} actual_face=F{}", actual_face.0);
                 }
 
-                // Update face boundary pointers
-                self.faces[actual_face.idx()].outer_half_edge = he_fwd;
-                self.faces[new_face.idx()].outer_half_edge = he_bwd;
+                if is_split {
+                    // Normal case: splice split one cycle into two.
+                    let new_face = self.alloc_face();
 
-                return (edge_id, new_face);
+                    // Decide which cycle keeps actual_face and which gets new_face.
+                    //
+                    // For the unbounded face (FaceId(0)), we must keep FaceId(0) on
+                    // the exterior cycle. The interior (bounded) cycle becomes the
+                    // new face. We detect this by computing the signed area of each
+                    // cycle via the bezpath: positive area = CCW interior, negative
+                    // or larger absolute = CW exterior.
+                    let (he_old, he_new) = if actual_face.0 == 0 {
+                        // Compute signed area of both cycles to determine which is
+                        // the exterior. The exterior has larger absolute area.
+                        let fwd_cycle = self.walk_cycle(he_fwd);
+                        let bwd_cycle = self.walk_cycle(he_bwd);
+                        let fwd_path = self.cycle_to_bezpath(&fwd_cycle);
+                        let bwd_path = self.cycle_to_bezpath(&bwd_cycle);
+                        let fwd_area = kurbo::Shape::area(&fwd_path);
+                        let bwd_area = kurbo::Shape::area(&bwd_path);
+                        if fwd_area.abs() < bwd_area.abs() {
+                            // he_fwd is the smaller (interior) → he_fwd gets new_face
+                            (he_bwd, he_fwd)
+                        } else {
+                            // he_fwd is the larger (exterior) → he_bwd gets new_face
+                            (he_fwd, he_bwd)
+                        }
+                    } else {
+                        // For bounded faces, convention: he_fwd → old, he_bwd → new
+                        (he_fwd, he_bwd)
+                    };
+
+                    self.half_edges[he_old.idx()].face = actual_face;
+                    {
+                        let mut cur = self.half_edges[he_old.idx()].next;
+                        while cur != he_old {
+                            self.half_edges[cur.idx()].face = actual_face;
+                            cur = self.half_edges[cur.idx()].next;
+                        }
+                    }
+                    self.half_edges[he_new.idx()].face = new_face;
+                    {
+                        let mut cur = self.half_edges[he_new.idx()].next;
+                        while cur != he_new {
+                            self.half_edges[cur.idx()].face = new_face;
+                            cur = self.half_edges[cur.idx()].next;
+                        }
+                    }
+
+                    self.faces[actual_face.idx()].outer_half_edge = he_old;
+                    self.faces[new_face.idx()].outer_half_edge = he_new;
+
+                    return (edge_id, new_face);
+                } else {
+                    // Bridge case: splice merged two cycles into one.
+                    // No face split — assign the whole cycle to actual_face.
+                    self.half_edges[he_fwd.idx()].face = actual_face;
+                    {
+                        let mut cur = self.half_edges[he_fwd.idx()].next;
+                        while cur != he_fwd {
+                            self.half_edges[cur.idx()].face = actual_face;
+                            cur = self.half_edges[cur.idx()].next;
+                        }
+                    }
+                    if actual_face.0 != 0 {
+                        self.faces[actual_face.idx()].outer_half_edge = he_fwd;
+                    }
+
+                    return (edge_id, actual_face);
+                }
             }
             _ => {
                 // One vertex has edges, the other is isolated.
@@ -962,6 +1398,8 @@ impl Dcel {
 
     /// Split an edge at parameter `t` (0..1), inserting a new vertex at the split point.
     /// The original edge is shortened to [0, t], a new edge covers [t, 1].
+    /// If an existing vertex is within snap tolerance of the split point,
+    /// it is reused so that crossing strokes share the same vertex.
     /// Returns `(new_vertex_id, new_edge_id)`.
     pub fn split_edge(&mut self, edge_id: EdgeId, t: f64) -> (VertexId, EdgeId) {
         debug_assert!((0.0..=1.0).contains(&t), "t must be in [0, 1]");
@@ -971,7 +1409,9 @@ impl Dcel {
         let (curve_a, curve_b) = subdivide_cubic(original_curve, t);
 
         let split_point = curve_a.p3; // == curve_b.p0
-        let new_vertex = self.alloc_vertex(split_point);
+        let new_vertex = self
+            .snap_vertex(split_point, DEFAULT_SNAP_EPSILON)
+            .unwrap_or_else(|| self.alloc_vertex(split_point));
 
         // Get the original half-edges
         let [he_fwd, he_bwd] = self.edges[edge_id.idx()].half_edges;
@@ -1201,6 +1641,13 @@ impl Dcel {
     ) -> InsertStrokeResult {
         use crate::curve_intersections::find_curve_intersections;
 
+        // Record the stroke for debug test generation
+        if let Some(ref mut rec) = self.debug_recorder {
+            eprintln!("[DCEL_RECORD] insert_stroke: recording {} segments (total strokes: {})",
+                segments.len(), rec.strokes.len() + 1);
+            rec.record_stroke(segments);
+        }
+
         let mut result = InsertStrokeResult {
             new_vertices: Vec::new(),
             new_edges: Vec::new(),
@@ -1413,16 +1860,21 @@ impl Dcel {
             std::collections::HashMap::new();
 
         for (_edge_raw, mut splits) in splits_by_edge {
-            // Sort descending by t so we split from end to start (no parameter shift)
+            // Sort descending by t so we split from end to start.
+            // After each split, current_edge is the lower portion [0, t] in original
+            // parameter space. Its parameter 1.0 maps to t in original space.
             splits.sort_by(|a, b| b.t.partial_cmp(&a.t).unwrap());
 
             let current_edge = splits[0].edge_id;
-            let remaining_t_start = 0.0_f64;
+            // Upper bound of current_edge's range in original parameter space.
+            // Initially [0, 1], then [0, t_high] after first split, etc.
+            let mut current_t_end = 1.0_f64;
 
             for split in &splits {
-                // Remap t from original [0,1] to current sub-edge's parameter space
-                let t_in_current = if remaining_t_start < split.t {
-                    (split.t - remaining_t_start) / (1.0 - remaining_t_start)
+                // Remap original t to current_edge's parameter space [0, 1]
+                // which maps to original [0, current_t_end].
+                let t_in_current = if current_t_end > 1e-12 {
+                    split.t / current_t_end
                 } else {
                     0.0
                 };
@@ -1444,12 +1896,9 @@ impl Dcel {
                 result.split_edges.push((current_edge, split.t, new_vertex, new_edge));
                 split_vertex_map.insert((split.seg_idx, split.inter_idx), new_vertex);
 
-                // After splitting at t_in_current, the "upper" portion is new_edge.
-                // For subsequent splits (which have smaller t), they are on current_edge.
-                // remaining_t_start stays the same since we split descending.
-                // Actually, since we sorted descending, the next split has a smaller t
-                // and is on the first portion (current_edge, which is now [remaining_t_start, split.t]).
-                // remaining_t_start stays same — current_edge is the lower portion
+                // After splitting at t_in_current, current_edge now covers
+                // [0, split.t] in original space. Update the upper bound.
+                current_t_end = split.t;
                 let _ = new_edge;
             }
         }
@@ -1525,10 +1974,22 @@ impl Dcel {
                 let sub_curve = subsegment_cubic(*seg, prev_t, *t);
 
                 // Find the face containing this edge's midpoint for insertion
-                let face = self.find_face_containing_point(midpoint_of_cubic(&sub_curve));
+                let mid = midpoint_of_cubic(&sub_curve);
+                let face = self.find_face_containing_point(mid);
+
+                if cfg!(test) && std::env::var("DCEL_TRACE").is_ok() {
+                    let p1 = self.vertices[prev_vertex.idx()].position;
+                    let p2 = self.vertices[vertex.idx()].position;
+                    eprintln!("  insert_edge: V{}({:.1},{:.1}) → V{}({:.1},{:.1}) face=F{} mid=({:.1},{:.1})",
+                        prev_vertex.0, p1.x, p1.y, vertex.0, p2.x, p2.y, face.0, mid.x, mid.y);
+                }
 
                 let (edge_id, maybe_new_face) =
                     self.insert_edge(prev_vertex, *vertex, face, sub_curve);
+
+                if cfg!(test) && std::env::var("DCEL_TRACE").is_ok() {
+                    eprintln!("    → E{} new_face=F{}", edge_id.0, maybe_new_face.0);
+                }
 
                 // Apply stroke style
                 self.edges[edge_id.idx()].stroke_style = stroke_style.clone();
@@ -2049,10 +2510,27 @@ impl Dcel {
         }
     }
 
-    /// Find which face contains a given point (brute force for now).
+    /// Record a paint bucket click point for debug test generation.
+    /// Call this before `find_face_containing_point` when the paint bucket is used.
+    pub fn record_paint_point(&mut self, point: Point) {
+        if let Some(ref mut rec) = self.debug_recorder {
+            eprintln!("[DCEL_RECORD] paint_point: ({:.1}, {:.1}) (total points: {})",
+                point.x, point.y, rec.paint_points.len() + 1);
+            rec.record_paint(point);
+        }
+    }
+
+    /// Find which face contains a given point.
+    ///
+    /// Returns the smallest-area face whose boundary encloses the point.
+    /// This handles the case where a large "exterior boundary" face encloses
+    /// smaller interior faces — we want the innermost one.
     /// Returns FaceId(0) (unbounded) if no bounded face contains the point.
     pub fn find_face_containing_point(&self, point: Point) -> FaceId {
         use kurbo::Shape;
+        let mut best_face = FaceId(0);
+        let mut best_area = f64::MAX;
+
         for (i, face) in self.faces.iter().enumerate() {
             if face.deleted || i == 0 {
                 continue;
@@ -2060,12 +2538,18 @@ impl Dcel {
             if face.outer_half_edge.is_none() {
                 continue;
             }
-            let path = self.face_to_bezpath(FaceId(i as u32));
+            // Use stripped cycle to avoid bloated winding/area from spur
+            // edges and vertex-revisit peninsulas.
+            let path = self.face_to_bezpath_stripped(FaceId(i as u32));
             if path.winding(point) != 0 {
-                return FaceId(i as u32);
+                let area = path.area().abs();
+                if area < best_area {
+                    best_area = area;
+                    best_face = FaceId(i as u32);
+                }
             }
         }
-        FaceId(0)
+        best_face
     }
 }
 
@@ -2202,6 +2686,96 @@ pub fn bezpath_to_cubic_segments(path: &BezPath) -> Vec<Vec<CubicBez>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Render all filled faces of a DCEL to a tiny-skia pixmap.
+    /// Returns the pixmap so callers can check pixel values.
+    fn render_dcel_fills(dcel: &Dcel, width: u32, height: u32) -> tiny_skia::Pixmap {
+        let mut pixmap = tiny_skia::Pixmap::new(width, height).unwrap();
+
+        for (i, face) in dcel.faces.iter().enumerate() {
+            if face.deleted || i == 0 { continue; }
+            if face.fill_color.is_none() { continue; }
+            if face.outer_half_edge.is_none() { continue; }
+
+            let bez = dcel.face_to_bezpath_stripped(FaceId(i as u32));
+
+            // Convert kurbo BezPath to tiny-skia PathBuilder
+            let mut pb = tiny_skia::PathBuilder::new();
+            for el in bez.elements() {
+                match el {
+                    kurbo::PathEl::MoveTo(p) => pb.move_to(p.x as f32, p.y as f32),
+                    kurbo::PathEl::LineTo(p) => pb.line_to(p.x as f32, p.y as f32),
+                    kurbo::PathEl::CurveTo(p1, p2, p3) => {
+                        pb.cubic_to(
+                            p1.x as f32, p1.y as f32,
+                            p2.x as f32, p2.y as f32,
+                            p3.x as f32, p3.y as f32,
+                        );
+                    }
+                    kurbo::PathEl::QuadTo(p1, p2) => {
+                        pb.quad_to(p1.x as f32, p1.y as f32, p2.x as f32, p2.y as f32);
+                    }
+                    kurbo::PathEl::ClosePath => pb.close(),
+                }
+            }
+
+            if let Some(path) = pb.finish() {
+                let paint = tiny_skia::Paint {
+                    shader: tiny_skia::Shader::SolidColor(
+                        tiny_skia::Color::from_rgba8(0, 0, 255, 255),
+                    ),
+                    anti_alias: false,
+                    ..Default::default()
+                };
+                pixmap.fill_path(
+                    &path,
+                    &paint,
+                    tiny_skia::FillRule::Winding,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        pixmap
+    }
+
+    /// Check that a pixel at (x, y) is NOT filled (is transparent/background).
+    fn assert_pixel_unfilled(pixmap: &tiny_skia::Pixmap, x: f64, y: f64, msg: &str) {
+        let px = x.round() as u32;
+        let py = y.round() as u32;
+        if px >= pixmap.width() || py >= pixmap.height() {
+            panic!("{msg}: point ({x:.1}, {y:.1}) is outside the pixmap");
+        }
+        let pixel = pixmap.pixel(px, py).unwrap();
+        assert!(
+            pixel.alpha() == 0,
+            "{msg}: pixel at ({x:.1}, {y:.1}) is already filled (rgba={},{},{},{})",
+            pixel.red(), pixel.green(), pixel.blue(), pixel.alpha(),
+        );
+    }
+
+    /// Simulate paint bucket clicks: for each point, assert the pixel is unfilled,
+    /// find the face, fill it, re-render, and continue.
+    fn assert_paint_sequence(dcel: &mut Dcel, paint_points: &[Point], width: u32, height: u32) {
+        for (i, &pt) in paint_points.iter().enumerate() {
+            // Render current state and check this pixel is unfilled
+            let pixmap = render_dcel_fills(dcel, width, height);
+            assert_pixel_unfilled(
+                &pixmap, pt.x, pt.y,
+                &format!("paint point {i} at ({:.1}, {:.1})", pt.x, pt.y),
+            );
+
+            // Find and fill the face
+            let face = dcel.find_face_containing_point(pt);
+            assert!(
+                face.0 != 0,
+                "paint point {i} at ({:.1}, {:.1}) hit unbounded face",
+                pt.x, pt.y,
+            );
+            dcel.face_mut(face).fill_color = Some(ShapeColor::new(0, 0, 255, 255));
+        }
+    }
 
     #[test]
     fn test_new_dcel_has_unbounded_face() {
@@ -2754,5 +3328,860 @@ mod tests {
             "expected at least 2 faces (loop + unbounded), got {}",
             faces_after,
         );
+    }
+
+    #[test]
+    fn test_recorded_seven_lines() {
+        // 7 line segments drawn across each other, creating triangles/quads/pentagon.
+        // Recorded from live editor with DAW_DCEL_RECORD=1.
+        let mut dcel = Dcel::new();
+
+        let strokes: Vec<Vec<CubicBez>> = vec![
+            vec![CubicBez::new(Point::new(172.3, 252.0), Point::new(342.2, 210.5), Point::new(512.0, 169.1), Point::new(681.8, 127.6))],
+            vec![CubicBez::new(Point::new(222.6, 325.7), Point::new(365.7, 248.3), Point::new(508.7, 171.0), Point::new(651.7, 93.7))],
+            vec![CubicBez::new(Point::new(210.4, 204.1), Point::new(359.4, 258.0), Point::new(508.4, 311.9), Point::new(657.5, 365.8))],
+            vec![CubicBez::new(Point::new(287.5, 333.0), Point::new(323.8, 238.4), Point::new(360.2, 143.9), Point::new(396.6, 49.3))],
+            vec![CubicBez::new(Point::new(425.9, 372.1), Point::new(418.7, 258.2), Point::new(411.6, 144.4), Point::new(404.5, 30.5))],
+            vec![CubicBez::new(Point::new(363.1, 360.1), Point::new(421.4, 263.3), Point::new(479.8, 166.6), Point::new(538.2, 69.9))],
+            vec![CubicBez::new(Point::new(292.8, 99.1), Point::new(398.5, 158.6), Point::new(504.3, 218.2), Point::new(610.0, 277.7))],
+        ];
+
+        for segs in &strokes {
+            dcel.insert_stroke(segs, None, None, 5.0);
+        }
+
+        // Each paint point should hit a bounded face, and no two should share a face
+        let paint_points = vec![
+            Point::new(312.4, 224.1),
+            Point::new(325.5, 259.2),
+            Point::new(364.7, 223.4),
+            Point::new(402.9, 247.7),
+            Point::new(427.2, 226.3),
+            Point::new(431.6, 198.7),
+            Point::new(421.2, 181.6),
+            Point::new(364.7, 177.0),
+        ];
+        let mut seen_faces = std::collections::HashSet::new();
+        for (i, &pt) in paint_points.iter().enumerate() {
+            let face = dcel.find_face_containing_point(pt);
+            assert!(
+                face.0 != 0,
+                "paint point {i} at ({:.1}, {:.1}) hit unbounded face",
+                pt.x, pt.y,
+            );
+            assert!(
+                seen_faces.insert(face),
+                "paint point {i} at ({:.1}, {:.1}) hit face {:?} which was already painted",
+                pt.x, pt.y, face,
+            );
+        }
+    }
+
+    #[test]
+    fn test_recorded_curves() {
+        // 7 curved strokes (one multi-segment). Recorded from live editor.
+        let mut dcel = Dcel::new();
+
+        let strokes: Vec<Vec<CubicBez>> = vec![
+            vec![CubicBez::new(Point::new(186.9, 301.1), Point::new(295.3, 221.6), Point::new(478.9, 181.7), Point::new(612.8, 148.2))],
+            vec![CubicBez::new(Point::new(159.8, 189.5), Point::new(315.6, 210.9), Point::new(500.4, 371.0), Point::new(600.7, 371.0))],
+            vec![CubicBez::new(Point::new(279.0, 330.6), Point::new(251.0, 262.7), Point::new(220.9, 175.9), Point::new(245.6, 102.1))],
+            vec![CubicBez::new(Point::new(183.3, 119.3), Point::new(250.6, 132.8), Point::new(542.6, 225.7), Point::new(575.6, 225.7))],
+            vec![CubicBez::new(Point::new(377.0, 353.6), Point::new(377.0, 280.8), Point::new(369.1, 166.5), Point::new(427.2, 108.5))],
+            vec![
+                CubicBez::new(Point::new(345.6, 333.3), Point::new(388.4, 299.7), Point::new(436.5, 274.6), Point::new(480.9, 243.5)),
+                CubicBez::new(Point::new(480.9, 243.5), Point::new(525.0, 212.5), Point::new(565.2, 174.9), Point::new(610.1, 145.0)),
+            ],
+            vec![CubicBez::new(Point::new(493.5, 115.8), Point::new(475.6, 199.1), Point::new(461.0, 280.7), Point::new(461.0, 365.6))],
+        ];
+
+        for segs in &strokes {
+            dcel.insert_stroke(segs, None, None, 5.0);
+        }
+
+        let paint_points = vec![
+            Point::new(255.6, 232.3),
+            Point::new(297.2, 200.0),
+            Point::new(342.6, 248.4),
+            Point::new(396.0, 192.5),
+            Point::new(403.5, 233.3),
+            Point::new(442.2, 288.3),
+            Point::new(490.6, 218.3),
+            Point::new(514.2, 194.9),
+        ];
+        // Dump per-stroke topology
+        // Re-run from scratch with per-stroke tracking
+        let mut dcel2 = Dcel::new();
+        let strokes2 = strokes.clone();
+        for (s, segs) in strokes2.iter().enumerate() {
+            dcel2.insert_stroke(segs, None, None, 5.0);
+            let face_info: Vec<_> = dcel2.faces.iter().enumerate()
+                .filter(|(i, f)| !f.deleted && *i > 0 && !f.outer_half_edge.is_none())
+                .map(|(i, _)| {
+                    let cycle = dcel2.face_boundary(FaceId(i as u32));
+                    (i, cycle.len())
+                }).collect();
+            eprintln!("After stroke {s}: faces={:?}", face_info);
+        }
+
+        // Dump all faces with cycle lengths
+        for (i, face) in dcel.faces.iter().enumerate() {
+            if face.deleted || i == 0 { continue; }
+            if face.outer_half_edge.is_none() { continue; }
+            let cycle = dcel.face_boundary(FaceId(i as u32));
+            let path = dcel.face_to_bezpath(FaceId(i as u32));
+            let area = kurbo::Shape::area(&path).abs();
+            eprintln!("  Face {i}: cycle_len={}, area={:.1}", cycle.len(), area);
+        }
+
+        let mut seen_faces = std::collections::HashSet::new();
+        for (i, &pt) in paint_points.iter().enumerate() {
+            let face = dcel.find_face_containing_point(pt);
+            let cycle_len = if face.0 != 0 {
+                dcel.face_boundary(face).len()
+            } else { 0 };
+            eprintln!("paint point {i} at ({:.1}, {:.1}) → face {:?} (cycle_len={})", pt.x, pt.y, face, cycle_len);
+            assert!(
+                face.0 != 0,
+                "paint point {i} at ({:.1}, {:.1}) hit unbounded face",
+                pt.x, pt.y,
+            );
+            assert!(
+                seen_faces.insert(face),
+                "paint point {i} at ({:.1}, {:.1}) hit face {:?} which was already painted",
+                pt.x, pt.y, face,
+            );
+        }
+    }
+
+    #[test]
+    fn test_recorded_complex_curves() {
+        let mut dcel = Dcel::new();
+
+        // Stroke 0
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(285.4, 88.3), Point::new(211.5, 148.8), Point::new(140.3, 214.8), Point::new(98.2, 301.9)),
+            CubicBez::new(Point::new(98.2, 301.9), Point::new(83.7, 331.9), Point::new(71.1, 364.5), Point::new(52.5, 392.4)),
+        ], None, None, 5.0);
+
+        // Stroke 1
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(96.5, 281.3), Point::new(244.8, 254.4), Point::new(304.4, 327.7), Point::new(427.7, 327.7)),
+        ], None, None, 5.0);
+
+        // Stroke 2
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(88.8, 86.7), Point::new(141.9, 105.4), Point::new(194.0, 126.2), Point::new(240.4, 158.6)),
+            CubicBez::new(Point::new(240.4, 158.6), Point::new(273.3, 181.6), Point::new(297.7, 213.4), Point::new(327.6, 239.5)),
+            CubicBez::new(Point::new(327.6, 239.5), Point::new(378.8, 284.1), Point::new(451.3, 317.7), Point::new(467.3, 389.8)),
+            CubicBez::new(Point::new(467.3, 389.8), Point::new(470.1, 402.3), Point::new(480.1, 418.3), Point::new(461.2, 410.8)),
+        ], None, None, 5.0);
+
+        // Stroke 3
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(320.6, 375.9), Point::new(359.8, 251.8), Point::new(402.3, 201.6), Point::new(525.7, 160.4)),
+        ], None, None, 5.0);
+
+        // Stroke 4
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(72.2, 181.1), Point::new(97.2, 211.1), Point::new(129.2, 234.8), Point::new(154.8, 264.6)),
+            CubicBez::new(Point::new(154.8, 264.6), Point::new(182.3, 296.5), Point::new(199.7, 334.9), Point::new(232.1, 363.0)),
+            CubicBez::new(Point::new(232.1, 363.0), Point::new(251.8, 380.1), Point::new(276.7, 390.0), Point::new(295.4, 408.7)),
+        ], None, None, 5.0);
+
+        // Stroke 5
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(102.9, 316.2), Point::new(167.0, 209.3), Point::new(263.1, 110.6), Point::new(399.0, 110.6)),
+        ], None, None, 5.0);
+
+        // Stroke 6
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(159.4, 87.6), Point::new(216.5, 159.0), Point::new(260.1, 346.3), Point::new(229.7, 437.4)),
+        ], None, None, 5.0);
+
+        // Points 6, 7, 8 should each hit unique bounded faces
+        let paint_points = vec![
+            Point::new(217.4, 160.1),
+            Point::new(184.2, 242.9),
+            Point::new(202.0, 141.4),
+        ];
+        let mut seen_faces = std::collections::HashSet::new();
+        for (i, &pt) in paint_points.iter().enumerate() {
+            let face = dcel.find_face_containing_point(pt);
+            assert!(
+                face.0 != 0,
+                "paint point {i} at ({:.1}, {:.1}) hit unbounded face",
+                pt.x, pt.y,
+            );
+            assert!(
+                seen_faces.insert(face),
+                "paint point {i} at ({:.1}, {:.1}) hit face {:?} which was already painted",
+                pt.x, pt.y, face,
+            );
+        }
+    }
+
+    #[test]
+    fn test_d_shape_fill() {
+        let mut dcel = Dcel::new();
+
+        // Stroke 0: vertical line
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(354.2, 97.9), Point::new(354.2, 208.0), Point::new(357.7, 318.7), Point::new(357.7, 429.0)),
+        ], None, None, 5.0);
+
+        // Stroke 1: inner curve of D
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(332.9, 218.6), Point::new(359.1, 224.5), Point::new(386.8, 225.0), Point::new(412.0, 234.5)),
+            CubicBez::new(Point::new(412.0, 234.5), Point::new(457.5, 251.5), Point::new(416.1, 313.5), Point::new(287.3, 313.5)),
+        ], None, None, 5.0);
+
+        // Stroke 2: outer curve of D
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(319.5, 154.5), Point::new(548.7, 154.5), Point::new(553.4, 359.5), Point::new(337.9, 392.6)),
+            CubicBez::new(Point::new(337.9, 392.6), Point::new(310.3, 396.9), Point::new(279.8, 405.8), Point::new(251.8, 398.8)),
+        ], None, None, 5.0);
+
+        // The D-shape region should be fillable
+        let face = dcel.find_face_containing_point(Point::new(439.8, 319.6));
+        assert!(face.0 != 0, "D-shape region hit unbounded face");
+    }
+
+    #[test]
+    fn test_recorded_seven_strokes() {
+        let mut dcel = Dcel::new();
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(194.8, 81.4), Point::new(314.0, 126.0), Point::new(413.6, 198.4), Point::new(518.5, 268.3)),
+            CubicBez::new(Point::new(518.5, 268.3), Point::new(558.0, 294.7), Point::new(598.6, 322.6), Point::new(638.9, 347.4)),
+            CubicBez::new(Point::new(638.9, 347.4), Point::new(646.8, 352.3), Point::new(672.4, 358.1), Point::new(663.5, 360.6)),
+            CubicBez::new(Point::new(663.5, 360.6), Point::new(654.9, 363.0), Point::new(644.3, 358.5), Point::new(636.2, 356.2)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(223.9, 308.2), Point::new(392.2, 242.0), Point::new(603.6, 211.2), Point::new(786.1, 211.2)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(157.2, 201.6), Point::new(287.7, 136.3), Point::new(442.7, 100.0), Point::new(589.3, 100.0)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(247.4, 56.4), Point::new(284.2, 122.7), Point::new(271.2, 201.4), Point::new(289.0, 272.2)),
+            CubicBez::new(Point::new(289.0, 272.2), Point::new(298.4, 310.2), Point::new(314.3, 344.7), Point::new(327.6, 380.0)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(249.3, 383.6), Point::new(287.6, 353.0), Point::new(604.8, 19.5), Point::new(612.9, 17.5)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(436.9, 73.9), Point::new(520.7, 157.8), Point::new(574.8, 262.5), Point::new(574.8, 383.2)),
+        ], None, None, 5.0);
+
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(361.1, 356.7), Point::new(311.8, 291.0), Point::new(299.5, 204.6), Point::new(174.0, 183.6)),
+        ], None, None, 5.0);
+
+        let paint_points = vec![
+            Point::new(303.9, 296.1),
+            Point::new(290.4, 260.4),
+            Point::new(245.1, 186.4),
+            Point::new(284.2, 133.3),
+            Point::new(334.1, 201.4),
+            Point::new(329.3, 283.7),
+            Point::new(425.6, 229.4),
+            Point::new(405.2, 145.5),
+            Point::new(492.9, 115.7),
+            Point::new(480.0, 208.1),
+            Point::new(521.2, 249.9),
+        ];
+        assert_paint_sequence(&mut dcel, &paint_points, 800, 450);
+    }
+
+    #[test]
+    fn test_recorded_eight_strokes() {
+        let mut dcel = Dcel::new();
+
+        // Stroke 0
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(205.0, 366.2), Point::new(244.7, 255.0), Point::new(301.5, 184.3), Point::new(398.7, 119.5)),
+            CubicBez::new(Point::new(398.7, 119.5), Point::new(419.4, 105.7), Point::new(438.3, 87.0), Point::new(464.6, 87.0)),
+        ], None, None, 5.0);
+
+        // Stroke 1
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(131.7, 126.8), Point::new(278.6, 184.4), Point::new(420.9, 260.3), Point::new(570.1, 310.0)),
+        ], None, None, 5.0);
+
+        // Stroke 2
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(252.7, 369.6), Point::new(245.6, 297.8), Point::new(246.6, 225.3), Point::new(240.6, 153.5)),
+            CubicBez::new(Point::new(240.6, 153.5), Point::new(238.9, 132.9), Point::new(228.3, 112.7), Point::new(228.3, 92.0)),
+        ], None, None, 5.0);
+
+        // Stroke 3
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(362.6, 105.6), Point::new(317.6, 210.5), Point::new(160.1, 315.5), Point::new(149.0, 332.1)),
+        ], None, None, 5.0);
+
+        // Stroke 4
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(134.6, 218.2), Point::new(228.4, 208.3), Point::new(368.1, 233.7), Point::new(458.8, 263.9)),
+        ], None, None, 5.0);
+
+        // Stroke 5
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(329.0, 300.6), Point::new(339.5, 221.5), Point::new(342.3, 147.5), Point::new(316.7, 70.4)),
+        ], None, None, 5.0);
+
+        // Stroke 6
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(186.0, 99.2), Point::new(263.5, 118.6), Point::new(342.2, 129.8), Point::new(417.9, 156.3)),
+            CubicBez::new(Point::new(417.9, 156.3), Point::new(456.4, 169.8), Point::new(494.6, 191.3), Point::new(533.9, 201.1)),
+        ], None, None, 5.0);
+
+        // Stroke 7
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(287.5, 73.5), Point::new(266.9, 135.2), Point::new(224.9, 188.7), Point::new(202.3, 251.0)),
+            CubicBez::new(Point::new(202.3, 251.0), Point::new(187.7, 291.0), Point::new(194.5, 335.7), Point::new(181.2, 375.8)),
+        ], None, None, 5.0);
+
+        // Dump face topology after all strokes
+        for (i, face) in dcel.faces.iter().enumerate() {
+            if face.deleted || i == 0 { continue; }
+            if face.outer_half_edge.is_none() { continue; }
+            let cycle = dcel.face_boundary(FaceId(i as u32));
+            let path = dcel.face_to_bezpath(FaceId(i as u32));
+            let area = kurbo::Shape::area(&path).abs();
+            eprintln!("  Face {i}: cycle_len={}, area={:.1}", cycle.len(), area);
+            if cycle.len() > 20 {
+                // Dump the full cycle for bloated faces
+                let start = face.outer_half_edge;
+                let mut cur = start;
+                let mut step = 0;
+                loop {
+                    let he = &dcel.half_edges[cur.idx()];
+                    let origin = he.origin;
+                    let pos = dcel.vertices[origin.idx()].position;
+                    let edge = he.edge;
+                    let twin = dcel.edges[edge.idx()].half_edges;
+                    let is_fwd = twin[0] == cur;
+                    eprintln!("    step {step}: he={:?} origin={:?} ({:.1},{:.1}) edge={:?} dir={}",
+                        cur, origin, pos.x, pos.y, edge, if is_fwd {"fwd"} else {"bwd"});
+                    cur = he.next;
+                    step += 1;
+                    if cur == start || step > 60 { break; }
+                }
+            }
+        }
+
+        // Check what face each point lands on
+        let paint_points = vec![
+            Point::new(219.8, 233.7),
+            Point::new(227.2, 205.8),
+            Point::new(253.2, 203.3),
+            Point::new(281.2, 149.0),
+        ];
+        for (i, &pt) in paint_points.iter().enumerate() {
+            let face = dcel.find_face_containing_point(pt);
+            if face.0 != 0 {
+                let cycle = dcel.face_boundary(face);
+                let stripped = dcel.strip_cycle(&cycle);
+                let path_raw = dcel.face_to_bezpath(face);
+                let path_stripped = dcel.face_to_bezpath_stripped(face);
+                let area_raw = kurbo::Shape::area(&path_raw).abs();
+                let area_stripped = kurbo::Shape::area(&path_stripped).abs();
+                eprintln!("paint point {i} at ({:.1}, {:.1}) → face {:?} raw_len={} stripped_len={} raw_area={:.1} stripped_area={:.1}",
+                    pt.x, pt.y, face, cycle.len(), stripped.len(), area_raw, area_stripped);
+                if i == 2 {
+                    eprintln!("  Raw cycle vertices for face {:?}:", face);
+                    for (j, &he_id) in cycle.iter().enumerate() {
+                        let src = dcel.half_edge_source(he_id);
+                        let pos = dcel.vertex(src).position;
+                        eprintln!("    step {j}: HE{} src=V{} ({:.1},{:.1})", he_id.0, src.0, pos.x, pos.y);
+                    }
+                    eprintln!("  Stripped cycle vertices for face {:?}:", face);
+                    for (j, &he_id) in stripped.iter().enumerate() {
+                        let src = dcel.half_edge_source(he_id);
+                        let pos = dcel.vertex(src).position;
+                        eprintln!("    step {j}: HE{} src=V{} ({:.1},{:.1})", he_id.0, src.0, pos.x, pos.y);
+                    }
+                }
+            } else {
+                eprintln!("paint point {i} at ({:.1}, {:.1}) → UNBOUNDED", pt.x, pt.y);
+            }
+        }
+
+        assert_paint_sequence(&mut dcel, &paint_points, 600, 400);
+    }
+
+    #[test]
+    fn test_dump_svg() {
+        let mut dcel = Dcel::new();
+
+        // Same 8 strokes as test_recorded_eight_strokes
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(205.0, 366.2), Point::new(244.7, 255.0), Point::new(301.5, 184.3), Point::new(398.7, 119.5)),
+            CubicBez::new(Point::new(398.7, 119.5), Point::new(419.4, 105.7), Point::new(438.3, 87.0), Point::new(464.6, 87.0)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(131.7, 126.8), Point::new(278.6, 184.4), Point::new(420.9, 260.3), Point::new(570.1, 310.0)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(252.7, 369.6), Point::new(245.6, 297.8), Point::new(246.6, 225.3), Point::new(240.6, 153.5)),
+            CubicBez::new(Point::new(240.6, 153.5), Point::new(238.9, 132.9), Point::new(228.3, 112.7), Point::new(228.3, 92.0)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(362.6, 105.6), Point::new(317.6, 210.5), Point::new(160.1, 315.5), Point::new(149.0, 332.1)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(134.6, 218.2), Point::new(228.4, 208.3), Point::new(368.1, 233.7), Point::new(458.8, 263.9)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(329.0, 300.6), Point::new(339.5, 221.5), Point::new(342.3, 147.5), Point::new(316.7, 70.4)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(186.0, 99.2), Point::new(263.5, 118.6), Point::new(342.2, 129.8), Point::new(417.9, 156.3)),
+            CubicBez::new(Point::new(417.9, 156.3), Point::new(456.4, 169.8), Point::new(494.6, 191.3), Point::new(533.9, 201.1)),
+        ], None, None, 5.0);
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(287.5, 73.5), Point::new(266.9, 135.2), Point::new(224.9, 188.7), Point::new(202.3, 251.0)),
+            CubicBez::new(Point::new(202.3, 251.0), Point::new(187.7, 291.0), Point::new(194.5, 335.7), Point::new(181.2, 375.8)),
+        ], None, None, 5.0);
+
+        // Generate distinct colors via HSL hue rotation
+        fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+            let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+            let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+            let m = l - c / 2.0;
+            let (r1, g1, b1) = if h < 60.0 { (c, x, 0.0) }
+                else if h < 120.0 { (x, c, 0.0) }
+                else if h < 180.0 { (0.0, c, x) }
+                else if h < 240.0 { (0.0, x, c) }
+                else if h < 300.0 { (x, 0.0, c) }
+                else { (c, 0.0, x) };
+            (((r1 + m) * 255.0) as u8, ((g1 + m) * 255.0) as u8, ((b1 + m) * 255.0) as u8)
+        }
+
+        let mut svg = String::new();
+        svg.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"100 40 500 380\" width=\"1200\" height=\"912\">\n");
+        svg.push_str("<rect x=\"100\" y=\"40\" width=\"500\" height=\"380\" fill=\"white\"/>\n");
+        svg.push_str("<defs><marker id=\"ah\" markerWidth=\"1.6\" markerHeight=\"1.2\" refX=\"1.6\" refY=\"0.6\" orient=\"auto\"><path d=\"M0,0 L1.6,0.6 L0,1.2\" fill=\"context-stroke\"/></marker></defs>\n");
+
+        // Draw each half-edge as a colored arrow
+        let n_he = dcel.half_edges.len();
+        for (i, he) in dcel.half_edges.iter().enumerate() {
+            if he.deleted { continue; }
+            let he_id = HalfEdgeId(i as u32);
+            let edge = &dcel.edges[he.edge.idx()];
+            let is_fwd = edge.half_edges[0] == he_id;
+
+            let curve = if is_fwd {
+                edge.curve
+            } else {
+                CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+            };
+
+            // Color based on half-edge index
+            let hue = (i as f64 / n_he as f64) * 360.0;
+            let (r, g, b) = hsl_to_rgb(hue, 0.9, 0.4);
+
+            // Offset slightly so fwd/bwd don't overlap perfectly
+            let offset = if is_fwd { -1.5 } else { 1.5 };
+            // Simple normal offset: perpendicular to start→end direction
+            let dx = curve.p3.x - curve.p0.x;
+            let dy = curve.p3.y - curve.p0.y;
+            let len = (dx * dx + dy * dy).sqrt().max(0.01);
+            let nx = -dy / len * offset;
+            let ny = dx / len * offset;
+
+            svg.push_str(&format!(
+                "<path d=\"M{:.1},{:.1} C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" \
+                 fill=\"none\" stroke=\"rgb({r},{g},{b})\" stroke-width=\"1.5\" \
+                 marker-end=\"url(#ah)\" opacity=\"0.8\">\
+                 <title>HE{i} E{} F{} {}</title></path>\n",
+                curve.p0.x + nx, curve.p0.y + ny,
+                curve.p1.x + nx, curve.p1.y + ny,
+                curve.p2.x + nx, curve.p2.y + ny,
+                curve.p3.x + nx, curve.p3.y + ny,
+                he.edge.0, he.face.0, if is_fwd { "fwd" } else { "bwd" },
+            ));
+
+            // Label near destination (t=0.85) so fwd/bwd labels don't overlap
+            let label_pt = curve.eval(0.85);
+            svg.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"1.4\" fill=\"rgb({r},{g},{b})\" \
+                 text-anchor=\"middle\" dominant-baseline=\"middle\" opacity=\"0.9\">HE{i}</text>\n",
+                label_pt.x + nx * 3.0, label_pt.y + ny * 3.0,
+            ));
+        }
+
+        // Draw vertices as labeled circles
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            if v.deleted { continue; }
+            svg.push_str(&format!(
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"0.6\" fill=\"black\"/>\n\
+                 <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"1.8\" font-weight=\"bold\" \
+                 fill=\"black\" text-anchor=\"start\" dominant-baseline=\"hanging\">V{i}</text>\n",
+                v.position.x, v.position.y,
+                v.position.x + 1.0, v.position.y + 0.2,
+            ));
+        }
+
+        // Mark paint points
+        let paint_points = [
+            (219.8, 233.7, "P0"),
+            (227.2, 205.8, "P1"),
+            (253.2, 203.3, "P2"),
+            (281.2, 149.0, "P3"),
+        ];
+        for (x, y, label) in &paint_points {
+            let is_p2 = *label == "P2";
+            let color = if is_p2 { "magenta" } else { "red" };
+            let r = if is_p2 { "1.4" } else { "1.0" };
+            let sw = if is_p2 { "0.6" } else { "0.4" };
+            let extra = if is_p2 { " (BLOATED)" } else { "" };
+            svg.push_str(&format!(
+                "<circle cx=\"{x}\" cy=\"{y}\" r=\"{r}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"{sw}\"/>\n\
+                 <text x=\"{}\" y=\"{}\" font-size=\"2\" font-weight=\"bold\" fill=\"{color}\">{label}{extra}</text>\n",
+                x + 1.5, y - 0.4,
+            ));
+        }
+
+        // Highlight Face 15 stripped cycle
+        let face15 = FaceId(15);
+        if !dcel.faces[15].deleted && !dcel.faces[15].outer_half_edge.is_none() {
+            let cycle = dcel.face_boundary(face15);
+            let stripped = dcel.strip_cycle(&cycle);
+            let mut d = String::new();
+            for (j, &he_id) in stripped.iter().enumerate() {
+                let edge = &dcel.edges[dcel.half_edge(he_id).edge.idx()];
+                let is_fwd = edge.half_edges[0] == he_id;
+                let curve = if is_fwd {
+                    edge.curve
+                } else {
+                    CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+                };
+                if j == 0 {
+                    d.push_str(&format!("M{:.1},{:.1} ", curve.p0.x, curve.p0.y));
+                }
+                d.push_str(&format!("C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} ",
+                    curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, curve.p3.x, curve.p3.y));
+            }
+            d.push_str("Z");
+            svg.push_str(&format!(
+                "<path d=\"{d}\" fill=\"rgba(255,0,0,0.12)\" stroke=\"red\" stroke-width=\"2\" stroke-dasharray=\"6,3\">\
+                 <title>Face 15 stripped cycle ({} edges)</title></path>\n",
+                stripped.len(),
+            ));
+        }
+
+        svg.push_str("</svg>\n");
+
+        std::fs::write("/tmp/dcel_debug.svg", &svg).expect("write SVG");
+        eprintln!("Wrote /tmp/dcel_debug.svg");
+
+        // --- Zoomed SVG around P2, V7/V37, V3/V11 ---
+        let mut svg2 = String::new();
+        // V38=(241.8,169.1) V7=(246.8,274.7) — center ~(244, 222), span ~130
+        svg2.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"215 155 65 135\" width=\"975\" height=\"2025\">\n");
+        svg2.push_str("<rect x=\"215\" y=\"155\" width=\"65\" height=\"135\" fill=\"white\"/>\n");
+        svg2.push_str("<defs><marker id=\"ah\" markerWidth=\"1.6\" markerHeight=\"1.2\" refX=\"1.6\" refY=\"0.6\" orient=\"auto\"><path d=\"M0,0 L1.6,0.6 L0,1.2\" fill=\"context-stroke\"/></marker></defs>\n");
+
+        // Draw all half-edges (clipped by viewBox naturally)
+        for (i, he) in dcel.half_edges.iter().enumerate() {
+            if he.deleted { continue; }
+            let he_id = HalfEdgeId(i as u32);
+            let edge = &dcel.edges[he.edge.idx()];
+            let is_fwd = edge.half_edges[0] == he_id;
+            let curve = if is_fwd {
+                edge.curve
+            } else {
+                CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+            };
+            let hue = (i as f64 / n_he as f64) * 360.0;
+            let (r, g, b) = hsl_to_rgb(hue, 0.9, 0.4);
+            let offset = if is_fwd { -0.8 } else { 0.8 };
+            let dx = curve.p3.x - curve.p0.x;
+            let dy = curve.p3.y - curve.p0.y;
+            let len = (dx * dx + dy * dy).sqrt().max(0.01);
+            let nx = -dy / len * offset;
+            let ny = dx / len * offset;
+
+            svg2.push_str(&format!(
+                "<path d=\"M{:.1},{:.1} C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}\" \
+                 fill=\"none\" stroke=\"rgb({r},{g},{b})\" stroke-width=\"0.4\" \
+                 marker-end=\"url(#ah)\" opacity=\"0.8\">\
+                 <title>HE{i} E{} F{} {}</title></path>\n",
+                curve.p0.x + nx, curve.p0.y + ny,
+                curve.p1.x + nx, curve.p1.y + ny,
+                curve.p2.x + nx, curve.p2.y + ny,
+                curve.p3.x + nx, curve.p3.y + ny,
+                he.edge.0, he.face.0, if is_fwd { "fwd" } else { "bwd" },
+            ));
+
+            let label_pt = curve.eval(0.85);
+            svg2.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"1.2\" fill=\"rgb({r},{g},{b})\" \
+                 text-anchor=\"middle\" dominant-baseline=\"middle\" opacity=\"0.9\">HE{i}</text>\n",
+                label_pt.x + nx * 2.0, label_pt.y + ny * 2.0,
+            ));
+        }
+
+        // Vertices
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            if v.deleted { continue; }
+            // Highlight V38,V7 specially
+            let special = matches!(i, 38 | 7);
+            let (fill, rad, fs) = if special {
+                ("blue", "0.8", "1.6")
+            } else {
+                ("black", "0.4", "1.2")
+            };
+            svg2.push_str(&format!(
+                "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{rad}\" fill=\"{fill}\"/>\n\
+                 <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"{fs}\" font-weight=\"bold\" \
+                 fill=\"{fill}\" text-anchor=\"start\" dominant-baseline=\"hanging\">V{i}</text>\n",
+                v.position.x, v.position.y,
+                v.position.x + 1.0, v.position.y + 0.2,
+            ));
+        }
+
+        // Paint points
+        for (x, y, label) in &paint_points {
+            let is_p2 = *label == "P2";
+            let color = if is_p2 { "magenta" } else { "red" };
+            let r = if is_p2 { "1.4" } else { "1.0" };
+            let sw = if is_p2 { "0.3" } else { "0.2" };
+            svg2.push_str(&format!(
+                "<circle cx=\"{x}\" cy=\"{y}\" r=\"{r}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"{sw}\"/>\n\
+                 <text x=\"{}\" y=\"{}\" font-size=\"1.6\" font-weight=\"bold\" fill=\"{color}\">{label}</text>\n",
+                x + 1.5, y - 0.4,
+            ));
+        }
+
+        // Face 15 stripped outline
+        if !dcel.faces[15].deleted && !dcel.faces[15].outer_half_edge.is_none() {
+            let cycle = dcel.face_boundary(face15);
+            let stripped = dcel.strip_cycle(&cycle);
+            let mut d = String::new();
+            for (j, &he_id) in stripped.iter().enumerate() {
+                let edge = &dcel.edges[dcel.half_edge(he_id).edge.idx()];
+                let is_fwd = edge.half_edges[0] == he_id;
+                let curve = if is_fwd {
+                    edge.curve
+                } else {
+                    CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+                };
+                if j == 0 {
+                    d.push_str(&format!("M{:.1},{:.1} ", curve.p0.x, curve.p0.y));
+                }
+                d.push_str(&format!("C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} ",
+                    curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, curve.p3.x, curve.p3.y));
+            }
+            d.push_str("Z");
+            svg2.push_str(&format!(
+                "<path d=\"{d}\" fill=\"rgba(255,0,0,0.08)\" stroke=\"red\" stroke-width=\"0.4\" stroke-dasharray=\"1,0.5\">\
+                 <title>Face 15 stripped</title></path>\n",
+            ));
+        }
+
+        // Also draw ALL non-exterior face boundaries so we can see the inner cycle
+        for (fi, face) in dcel.faces.iter().enumerate() {
+            if face.deleted || fi == 0 || face.outer_half_edge.is_none() { continue; }
+            if fi == 15 { continue; } // already drawn
+            let fid = FaceId(fi as u32);
+            let cycle = dcel.face_boundary(fid);
+            let stripped = dcel.strip_cycle(&cycle);
+            if stripped.is_empty() { continue; }
+            // Check if this face's stripped path contains P2
+            let fp = dcel.cycle_to_bezpath_stripped(&cycle);
+            let w = kurbo::Shape::winding(&fp, Point::new(253.2, 203.3));
+            if w == 0 { continue; } // Only draw faces that contain P2
+            let a = kurbo::Shape::area(&fp).abs();
+            let mut d = String::new();
+            for (j, &he_id) in stripped.iter().enumerate() {
+                let edge = &dcel.edges[dcel.half_edge(he_id).edge.idx()];
+                let is_fwd = edge.half_edges[0] == he_id;
+                let curve = if is_fwd {
+                    edge.curve
+                } else {
+                    CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+                };
+                if j == 0 {
+                    d.push_str(&format!("M{:.1},{:.1} ", curve.p0.x, curve.p0.y));
+                }
+                d.push_str(&format!("C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1} ",
+                    curve.p1.x, curve.p1.y, curve.p2.x, curve.p2.y, curve.p3.x, curve.p3.y));
+            }
+            d.push_str("Z");
+            svg2.push_str(&format!(
+                "<path d=\"{d}\" fill=\"rgba(0,128,255,0.1)\" stroke=\"blue\" stroke-width=\"0.3\" stroke-dasharray=\"1,0.5\">\
+                 <title>Face {fi} (area={a:.0}, {}-edge stripped)</title></path>\n",
+                stripped.len(),
+            ));
+        }
+
+        svg2.push_str("</svg>\n");
+        std::fs::write("/tmp/dcel_zoom.svg", &svg2).expect("write zoomed SVG");
+        eprintln!("Wrote /tmp/dcel_zoom.svg");
+    }
+
+    /// Minimal test to isolate bloated face bug from eight_strokes test.
+    #[test]
+    fn test_bloated_face_minimal() {
+        fn strip_spurs_len(dcel: &Dcel, cycle: &[HalfEdgeId]) -> usize {
+            let mut stripped: Vec<HalfEdgeId> = Vec::new();
+            for &he_id in cycle {
+                let edge = dcel.half_edge(he_id).edge;
+                if let Some(&top) = stripped.last() {
+                    if dcel.half_edge(top).edge == edge { stripped.pop(); continue; }
+                }
+                stripped.push(he_id);
+            }
+            while stripped.len() >= 2 {
+                let fe = dcel.half_edge(stripped[0]).edge;
+                let le = dcel.half_edge(*stripped.last().unwrap()).edge;
+                if fe == le { stripped.pop(); stripped.remove(0); } else { break; }
+            }
+            if stripped.is_empty() { cycle.len() } else { stripped.len() }
+        }
+        fn max_stripped_cycle(dcel: &Dcel) -> (usize, usize) {
+            let mut worst = (0usize, 0usize);
+            for (i, face) in dcel.faces.iter().enumerate() {
+                if face.deleted || i == 0 || face.outer_half_edge.is_none() { continue; }
+                let cycle = dcel.face_boundary(FaceId(i as u32));
+                let n = strip_spurs_len(dcel, &cycle);
+                if n > worst.1 { worst = (i, n); }
+            }
+            worst
+        }
+
+        // Strokes 0-3 from seven_strokes test (stroke 0 simplified to first seg only)
+        // Eight strokes test data — reduce to find minimal reproduction
+        let strokes: Vec<Vec<CubicBez>> = vec![
+            vec![ // 0
+                CubicBez::new(Point::new(205.0, 366.2), Point::new(244.7, 255.0), Point::new(301.5, 184.3), Point::new(398.7, 119.5)),
+                CubicBez::new(Point::new(398.7, 119.5), Point::new(419.4, 105.7), Point::new(438.3, 87.0), Point::new(464.6, 87.0)),
+            ],
+            vec![CubicBez::new(Point::new(131.7, 126.8), Point::new(278.6, 184.4), Point::new(420.9, 260.3), Point::new(570.1, 310.0))], // 1
+            vec![ // 2
+                CubicBez::new(Point::new(252.7, 369.6), Point::new(245.6, 297.8), Point::new(246.6, 225.3), Point::new(240.6, 153.5)),
+                CubicBez::new(Point::new(240.6, 153.5), Point::new(238.9, 132.9), Point::new(228.3, 112.7), Point::new(228.3, 92.0)),
+            ],
+            vec![CubicBez::new(Point::new(362.6, 105.6), Point::new(317.6, 210.5), Point::new(160.1, 315.5), Point::new(149.0, 332.1))], // 3
+            vec![CubicBez::new(Point::new(134.6, 218.2), Point::new(228.4, 208.3), Point::new(368.1, 233.7), Point::new(458.8, 263.9))], // 4
+            vec![CubicBez::new(Point::new(329.0, 300.6), Point::new(339.5, 221.5), Point::new(342.3, 147.5), Point::new(316.7, 70.4))], // 5
+            vec![ // 6
+                CubicBez::new(Point::new(186.0, 99.2), Point::new(263.5, 118.6), Point::new(342.2, 129.8), Point::new(417.9, 156.3)),
+                CubicBez::new(Point::new(417.9, 156.3), Point::new(456.4, 169.8), Point::new(494.6, 191.3), Point::new(533.9, 201.1)),
+            ],
+            vec![ // 7
+                CubicBez::new(Point::new(287.5, 73.5), Point::new(266.9, 135.2), Point::new(224.9, 188.7), Point::new(202.3, 251.0)),
+                CubicBez::new(Point::new(202.3, 251.0), Point::new(187.7, 291.0), Point::new(194.5, 335.7), Point::new(181.2, 375.8)),
+            ],
+        ];
+
+        // Per-stroke tracking (disabled to avoid DCEL_TRACE noise)
+        // let mut dcel = Dcel::new();
+        // for (i, s) in strokes.iter().enumerate() {
+        //     dcel.insert_stroke(s, None, None, 5.0);
+        //     let (f, c) = max_stripped_cycle(&dcel);
+        //     eprintln!("After stroke {i}: worst stripped Face {f} cycle={c}");
+        // }
+
+        // Focus: strokes 0-3 create a face. Stroke 4 should split it but grows it.
+        fn dump_all_faces(d: &Dcel, label: &str) {
+            eprintln!("\n  {label}:");
+            for (i, face) in d.faces.iter().enumerate() {
+                if face.deleted || i == 0 || face.outer_half_edge.is_none() { continue; }
+                let cycle = d.face_boundary(FaceId(i as u32));
+                let stripped_n = strip_spurs_len(d, &cycle);
+                eprintln!("    Face {i}: raw={} stripped={stripped_n}", cycle.len());
+                // Show stripped half-edges
+                let mut stripped: Vec<HalfEdgeId> = Vec::new();
+                for &he_id in &cycle {
+                    let edge = d.half_edge(he_id).edge;
+                    if let Some(&top) = stripped.last() {
+                        if d.half_edge(top).edge == edge { stripped.pop(); continue; }
+                    }
+                    stripped.push(he_id);
+                }
+                while stripped.len() >= 2 {
+                    let fe = d.half_edge(stripped[0]).edge;
+                    let le = d.half_edge(*stripped.last().unwrap()).edge;
+                    if fe == le { stripped.pop(); stripped.remove(0); } else { break; }
+                }
+                for (s, &he_id) in stripped.iter().enumerate() {
+                    let he = d.half_edge(he_id);
+                    let pos = d.vertices[he.origin.idx()].position;
+                    let edge_data = d.edge(he.edge);
+                    let dir = if edge_data.half_edges[0] == he_id { "fwd" } else { "bwd" };
+                    let dest_he = d.half_edge(he.twin);
+                    let dest_pos = d.vertices[dest_he.origin.idx()].position;
+                    eprintln!("      [{s}] HE{} V{}({:.1},{:.1})->V{}({:.1},{:.1}) E{} {dir}",
+                        he_id.0, he.origin.0, pos.x, pos.y,
+                        dest_he.origin.0, dest_pos.x, dest_pos.y,
+                        he.edge.0, );
+                }
+            }
+        }
+
+        let mut d = Dcel::new();
+        for i in 0..3 {
+            d.insert_stroke(&strokes[i], None, None, 5.0);
+        }
+        dump_all_faces(&d, "After strokes 0-2");
+
+        let result3 = d.insert_stroke(&strokes[3], None, None, 5.0);
+        eprintln!("\nStroke 3 result: splits={} new_faces={:?} new_verts={:?}",
+            result3.split_edges.len(), result3.new_faces, result3.new_vertices);
+        dump_all_faces(&d, "After stroke 3");
+
+        // Dump vertex fans at key vertices before stroke 4
+        fn dump_vertex_fan(d: &Dcel, v: VertexId, label: &str) {
+            let pos = d.vertices[v.idx()].position;
+            eprintln!("  Vertex fan at V{}({:.1},{:.1}) {label}:", v.0, pos.x, pos.y);
+            let start = d.vertices[v.idx()].outgoing;
+            if start.is_none() { eprintln!("    (no edges)"); return; }
+            let mut cur = start;
+            loop {
+                let he = d.half_edge(cur);
+                let dest = d.half_edge(he.twin).origin;
+                let dest_pos = d.vertices[dest.idx()].position;
+                let angle = d.outgoing_angle(cur);
+                let face = he.face;
+                let edge = he.edge;
+                let edge_data = d.edge(edge);
+                let dir = if edge_data.half_edges[0] == cur { "fwd" } else { "bwd" };
+                eprintln!("    HE{} → V{}({:.1},{:.1}) E{} {} angle={:.3} face=F{}",
+                    cur.0, dest.0, dest_pos.x, dest_pos.y, edge.0, dir, angle, face.0);
+                let twin = he.twin;
+                cur = d.half_edge(twin).next;
+                if cur == start { break; }
+            }
+        }
+
+        // Before stroke 4, dump the fan at key vertices
+        eprintln!("\n--- Before stroke 4 ---");
+        // Find all non-isolated vertices
+        for vi in 0..d.vertices.len() {
+            if d.vertices[vi].outgoing.is_none() { continue; }
+            dump_vertex_fan(&d, VertexId(vi as u32), "before stroke 4");
+        }
+
+        let result4 = d.insert_stroke(&strokes[4], None, None, 5.0);
+        eprintln!("\nStroke 4 result: splits={} new_faces={:?} new_verts={:?}",
+            result4.split_edges.len(), result4.new_faces, result4.new_vertices);
+
+        // After stroke 4, dump fans at vertices on the problematic face
+        eprintln!("\n--- After stroke 4 ---");
+        for vi in 0..d.vertices.len() {
+            if d.vertices[vi].outgoing.is_none() { continue; }
+            dump_vertex_fan(&d, VertexId(vi as u32), "after stroke 4");
+        }
+
+        dump_all_faces(&d, "After stroke 4");
     }
 }

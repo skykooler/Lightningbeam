@@ -3447,6 +3447,7 @@ dependencies = [
  "rstar",
  "serde",
  "serde_json",
+ "tiny-skia",
  "uuid",
  "vello",
  "wgpu",
