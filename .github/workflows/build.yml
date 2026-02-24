@@ -87,7 +87,10 @@ jobs:
       - name: Add MSYS2 to PATH (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
-        run: echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        run: |
+          # Rename MSYS2's link.exe so it doesn't shadow MSVC's linker
+          Rename-Item "C:\msys64\usr\bin\link.exe" "C:\msys64\usr\bin\link.exe.bak" -ErrorAction SilentlyContinue
+          echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # ── Common build steps ──
       - name: Extract version
@@ -130,11 +133,19 @@ jobs:
             printf '\n[[package.metadata.generate-rpm.assets]]\nsource = "%s"\ndest = "%s"\nmode = "644"\n' "$rel" "$dest" >> lightningbeam-editor/Cargo.toml
           done
 
-      - name: Set FFmpeg cross-compile env (macOS x86_64)
+      - name: Fix FFmpeg cross-compile OS detection (macOS x86_64)
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
         run: |
-          echo "FFMPEG_EXTRA_ARGS=--arch=x86_64 --target-os=darwin --enable-cross-compile --cc=cc --cxx=c++" >> "$GITHUB_ENV"
+          # ffmpeg-sys-next passes --target-os=macos to FFmpeg configure, but FFmpeg
+          # expects --target-os=darwin. Fetch crates, then patch the build script.
+          cd lightningbeam-ui
+          cargo fetch
+          BUILDRS=$(find $HOME/.cargo/registry/src -path '*/ffmpeg-sys-next-*/build.rs' | head -1)
+          echo "Patching $BUILDRS to fix macos -> darwin mapping"
+          # Add "macos" => "darwin" to the match in get_ffmpeg_target_os()
+          sed -i.bak 's/"ios" => "darwin"/"ios" | "macos" => "darwin"/' "$BUILDRS"
+          grep -A4 'fn get_ffmpeg_target_os' "$BUILDRS"
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Build release binary
