@@ -259,7 +259,16 @@ fn dedup_intersections(intersections: &mut Vec<Intersection>, tolerance: f64) {
         let mut j = i + 1;
         while j < intersections.len() {
             let dist = (intersections[i].point - intersections[j].point).hypot();
-            if dist < tolerance {
+            // Also check parameter distance — two intersections at the same
+            // spatial location but with very different t-values are distinct
+            // (e.g. a shared vertex vs. a real crossing nearby).
+            let t1_dist = (intersections[i].t1 - intersections[j].t1).abs();
+            let t2_dist = match (intersections[i].t2, intersections[j].t2) {
+                (Some(a), Some(b)) => (a - b).abs(),
+                _ => 0.0,
+            };
+            let param_close = t1_dist < 0.05 && t2_dist < 0.05;
+            if dist < tolerance && param_close {
                 intersections.remove(j);
             } else {
                 j += 1;

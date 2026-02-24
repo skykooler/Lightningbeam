@@ -130,6 +130,13 @@ pub enum ToolState {
         parameter_t: f64,
     },
 
+    /// Pending curve interaction: click selects edge, drag starts curve editing
+    PendingCurveInteraction {
+        edge_id: crate::dcel::EdgeId,
+        parameter_t: f64,
+        start_mouse: Point,
+    },
+
     /// Drawing a region selection rectangle
     RegionSelectingRect {
         start: Point,

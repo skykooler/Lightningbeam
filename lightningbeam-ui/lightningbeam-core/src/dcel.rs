@@ -5,7 +5,7 @@
 //! maintained such that wherever two strokes intersect there is a vertex.
 
 use crate::shape::{FillRule, ShapeColor, StrokeStyle};
-use kurbo::{BezPath, CubicBez, Point};
+use kurbo::{BezPath, CubicBez, ParamCurveArclen, Point};
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1036,9 +1036,11 @@ impl Dcel {
             self.vertices[v1.idx()].outgoing = HalfEdgeId::NONE;
             self.vertices[v2.idx()].outgoing = HalfEdgeId::NONE;
         } else if fwd_next == he_bwd {
-            // he_fwd → he_bwd is a spur: bwd_prev → fwd_prev
-            self.half_edges[bwd_prev.idx()].next = bwd_next;
-            self.half_edges[bwd_next.idx()].prev = bwd_prev;
+            // he_fwd → he_bwd is a spur (consecutive in cycle):
+            // ... → fwd_prev → he_fwd → he_bwd → bwd_next → ...
+            // Splice both out: fwd_prev → bwd_next
+            self.half_edges[fwd_prev.idx()].next = bwd_next;
+            self.half_edges[bwd_next.idx()].prev = fwd_prev;
             // v2 (origin of he_bwd) becomes isolated
             self.vertices[v2.idx()].outgoing = HalfEdgeId::NONE;
             // Update v1's outgoing if needed
@@ -1046,9 +1048,11 @@ impl Dcel {
                 self.vertices[v1.idx()].outgoing = bwd_next;
             }
         } else if bwd_next == he_fwd {
-            // Similar spur in the other direction
-            self.half_edges[fwd_prev.idx()].next = fwd_next;
-            self.half_edges[fwd_next.idx()].prev = fwd_prev;
+            // he_bwd → he_fwd is a spur (consecutive in cycle):
+            // ... → bwd_prev → he_bwd → he_fwd → fwd_next → ...
+            // Splice both out: bwd_prev → fwd_next
+            self.half_edges[bwd_prev.idx()].next = fwd_next;
+            self.half_edges[fwd_next.idx()].prev = bwd_prev;
             self.vertices[v1.idx()].outgoing = HalfEdgeId::NONE;
             if self.vertices[v2.idx()].outgoing == he_bwd {
                 self.vertices[v2.idx()].outgoing = fwd_next;
@@ -1071,18 +1075,33 @@ impl Dcel {
 
         // Reassign all half-edges from dying face to surviving face
         if surviving != dying && !dying.is_none() {
-            // Walk the remaining boundary of the dying face
-            // (After removal, the dying face's half-edges are now part of surviving)
-            if !self.faces[dying.idx()].outer_half_edge.is_none()
-                && self.faces[dying.idx()].outer_half_edge != he_fwd
-                && self.faces[dying.idx()].outer_half_edge != he_bwd
-            {
-                let start = self.faces[dying.idx()].outer_half_edge;
-                let mut cur = start;
+            // Find a valid starting half-edge for the walk.
+            // The dying face's outer_half_edge may point to one of the removed half-edges,
+            // so we use a surviving neighbor (fwd_next or bwd_next) that was spliced in.
+            let dying_ohe = self.faces[dying.idx()].outer_half_edge;
+            let walk_start = if dying_ohe.is_none() {
+                HalfEdgeId::NONE
+            } else if dying_ohe != he_fwd && dying_ohe != he_bwd {
+                dying_ohe
+            } else {
+                // The outer_half_edge was removed; use a surviving neighbor instead.
+                // After splicing, fwd_next and bwd_next are the half-edges that replaced
+                // the removed ones in the cycle. Pick one that belongs to dying face.
+                if !fwd_next.is_none() && fwd_next != he_fwd && fwd_next != he_bwd {
+                    fwd_next
+                } else if !bwd_next.is_none() && bwd_next != he_fwd && bwd_next != he_bwd {
+                    bwd_next
+                } else {
+                    HalfEdgeId::NONE
+                }
+            };
+
+            if !walk_start.is_none() {
+                let mut cur = walk_start;
                 loop {
                     self.half_edges[cur.idx()].face = surviving;
                     cur = self.half_edges[cur.idx()].next;
-                    if cur == start {
+                    if cur == walk_start {
                         break;
                     }
                 }
@@ -1357,6 +1376,465 @@ impl Dcel {
         }
 
         result
+    }
+
+    // -----------------------------------------------------------------------
+    // recompute_edge_intersections: find and split new intersections after edit
+    // -----------------------------------------------------------------------
+
+    /// Recompute intersections between `edge_id` and all other non-deleted edges.
+    ///
+    /// After a curve edit, the moved edge may now cross other edges. This method
+    /// finds those intersections and splits both the edited edge and the crossed
+    /// edges at each intersection point (mirroring the logic in `insert_stroke`).
+    ///
+    /// Returns a list of `(new_vertex, new_edge)` pairs created by splits.
+    pub fn recompute_edge_intersections(
+        &mut self,
+        edge_id: EdgeId,
+    ) -> Vec<(VertexId, EdgeId)> {
+        use crate::curve_intersections::find_curve_intersections;
+
+        let mut created = Vec::new();
+
+        if self.edges[edge_id.idx()].deleted {
+            return created;
+        }
+
+        // Collect intersections between the edited edge and every other edge.
+        struct Hit {
+            t_on_edited: f64,
+            t_on_other: f64,
+            other_edge: EdgeId,
+        }
+
+        let edited_curve = self.edges[edge_id.idx()].curve;
+        let mut hits = Vec::new();
+
+        for (idx, e) in self.edges.iter().enumerate() {
+            if e.deleted {
+                continue;
+            }
+            let other_id = EdgeId(idx as u32);
+            if other_id == edge_id {
+                continue;
+            }
+
+            // Approximate arc lengths for scaling the near-endpoint
+            // threshold to a consistent spatial tolerance (pixels).
+            let edited_len = edited_curve.arclen(0.5).max(1.0);
+            let other_len = e.curve.arclen(0.5).max(1.0);
+            let spatial_tol = 1.0_f64; // pixels
+            let t1_tol = spatial_tol / edited_len;
+            let t2_tol = spatial_tol / other_len;
+
+            let intersections = find_curve_intersections(&edited_curve, &e.curve);
+            for inter in intersections {
+                if let Some(t2) = inter.t2 {
+                    // Skip intersections where either t is too close to an
+                    // endpoint to produce a usable split. The threshold is
+                    // scaled by arc length so it corresponds to a consistent
+                    // spatial tolerance. This filters:
+                    // - Shared-vertex hits (both t near endpoints)
+                    // - Spurious near-vertex bbox-overlap false positives
+                    // - Hits that would create one-sided splits
+                    if inter.t1 < t1_tol || inter.t1 > 1.0 - t1_tol
+                        || t2 < t2_tol || t2 > 1.0 - t2_tol
+                    {
+                        continue;
+                    }
+
+                    hits.push(Hit {
+                        t_on_edited: inter.t1,
+                        t_on_other: t2,
+                        other_edge: other_id,
+                    });
+                }
+            }
+        }
+
+        eprintln!("[DCEL] hits after filtering: {}", hits.len());
+        for h in &hits {
+            eprintln!(
+                "[DCEL]   edge {:?} t_edited={:.6} t_other={:.6}",
+                h.other_edge, h.t_on_edited, h.t_on_other
+            );
+        }
+
+        if hits.is_empty() {
+            return created;
+        }
+
+        // Group by other_edge, split each from high-t to low-t to avoid param shift.
+        let mut by_other: std::collections::HashMap<u32, Vec<(f64, f64)>> =
+            std::collections::HashMap::new();
+        for h in &hits {
+            by_other
+                .entry(h.other_edge.0)
+                .or_default()
+                .push((h.t_on_other, h.t_on_edited));
+        }
+
+        // Deduplicate within each group: the recursive intersection finder
+        // often returns many near-identical hits for one crossing. Keep one
+        // representative per cluster (using t_on_other distance < 0.1).
+        for splits in by_other.values_mut() {
+            splits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            splits.dedup_by(|a, b| (a.0 - b.0).abs() < 0.1);
+        }
+
+        // Track (t_on_edited, vertex_from_other_edge_split) pairs so we can
+        // later split the edited edge and merge each pair of co-located vertices.
+        let mut edited_edge_splits: Vec<(f64, VertexId)> = Vec::new();
+
+        for (other_raw, mut splits) in by_other {
+            let other_edge = EdgeId(other_raw);
+            // Sort descending by t_on_other
+            splits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+            let current_edge = other_edge;
+            // Upper bound of current_edge in original parameter space.
+            // split_edge(edge, t) keeps [0, t] on current_edge, so after
+            // splitting at t_high the edge spans [0, t_high] (reparam to [0,1]).
+            let mut remaining_t_end = 1.0_f64;
+
+            for (t_on_other, t_on_edited) in splits {
+                let t_in_current = t_on_other / remaining_t_end;
+
+                if t_in_current < 0.001 || t_in_current > 0.999 {
+                    continue;
+                }
+
+                let (new_vertex, new_edge) = self.split_edge(current_edge, t_in_current);
+                eprintln!(
+                    "[DCEL]   split other edge {:?} at t_in_current={:.6} (orig t={:.6}) → vtx {:?} pos={:?}",
+                    current_edge, t_in_current, t_on_other, new_vertex,
+                    self.vertices[new_vertex.idx()].position
+                );
+                created.push((new_vertex, new_edge));
+                edited_edge_splits.push((t_on_edited, new_vertex));
+
+                // After splitting at t_in_current, current_edge is [0, t_on_other]
+                // in original space. Update remaining_t_end for the next iteration.
+                remaining_t_end = t_on_other;
+                let _ = new_edge;
+            }
+        }
+
+        // Now split the edited edge itself at all intersection t-values.
+        // Sort descending by t to avoid parameter shift.
+        edited_edge_splits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        eprintln!("[DCEL] edited_edge_splits (sorted desc): {:?}", edited_edge_splits);
+        // Deduplicate near-equal t values (keep the first = highest t)
+        edited_edge_splits.dedup_by(|a, b| (a.0 - b.0).abs() < 0.001);
+
+        let current_edge = edge_id;
+        let mut remaining_t_end = 1.0_f64;
+
+        // Collect crossing pairs: (vertex_on_edited_edge, vertex_on_other_edge)
+        let mut crossing_pairs: Vec<(VertexId, VertexId)> = Vec::new();
+
+        for (t, other_vertex) in &edited_edge_splits {
+            let t_in_current = *t / remaining_t_end;
+
+            if t_in_current < 0.001 || t_in_current > 0.999 {
+                continue;
+            }
+
+            let (new_vertex, new_edge) = self.split_edge(current_edge, t_in_current);
+            eprintln!(
+                "[DCEL]   split edited edge at t_in_current={:.6} (orig t={:.6}) → vtx {:?} pos={:?}, paired with {:?}",
+                t_in_current, t, new_vertex,
+                self.vertices[new_vertex.idx()].position,
+                other_vertex
+            );
+            created.push((new_vertex, new_edge));
+            crossing_pairs.push((new_vertex, *other_vertex));
+            remaining_t_end = *t;
+            let _ = new_edge;
+        }
+
+        // Post-process: merge co-located vertex pairs at each crossing point.
+        // Do all vertex merges first (topology only), then reassign faces once.
+        eprintln!("[DCEL] crossing_pairs: {:?}", crossing_pairs);
+        let has_merges = !crossing_pairs.is_empty();
+        for (v_edited, v_other) in &crossing_pairs {
+            if self.vertices[v_edited.idx()].deleted || self.vertices[v_other.idx()].deleted {
+                eprintln!("[DCEL]   SKIP merge {:?} {:?} (deleted)", v_edited, v_other);
+                continue;
+            }
+            eprintln!(
+                "[DCEL]   merging {:?} (pos={:?}) with {:?} (pos={:?})",
+                v_edited, self.vertices[v_edited.idx()].position,
+                v_other, self.vertices[v_other.idx()].position,
+            );
+            self.merge_vertices_at_crossing(*v_edited, *v_other);
+        }
+
+        // Now that all merges are done, walk all cycles and assign faces.
+        if has_merges {
+            self.reassign_faces_after_merges();
+        }
+
+        // Dump final state
+        eprintln!("[DCEL] after recompute_edge_intersections:");
+        eprintln!("[DCEL]   vertices: {}", self.vertices.iter().filter(|v| !v.deleted).count());
+        eprintln!("[DCEL]   edges: {}", self.edges.iter().filter(|e| !e.deleted).count());
+        for (i, f) in self.faces.iter().enumerate() {
+            if !f.deleted {
+                let cycle_len = if !f.outer_half_edge.is_none() {
+                    self.walk_cycle(f.outer_half_edge).len()
+                } else { 0 };
+                eprintln!("[DCEL]   F{}: outer={:?} cycle_len={}", i, f.outer_half_edge, cycle_len);
+            }
+        }
+
+        created
+    }
+
+    /// Compute the outgoing angle (in radians, via atan2) of a half-edge at its
+    /// origin vertex. Used to sort half-edges CCW around a vertex.
+    fn outgoing_angle(&self, he: HalfEdgeId) -> f64 {
+        let he_data = self.half_edge(he);
+        let edge_data = self.edge(he_data.edge);
+        let is_forward = edge_data.half_edges[0] == he;
+
+        let (from, to, fallback) = if is_forward {
+            // Forward half-edge: direction from curve.p0 → curve.p1 (fallback curve.p3)
+            (edge_data.curve.p0, edge_data.curve.p1, edge_data.curve.p3)
+        } else {
+            // Backward half-edge: direction from curve.p3 → curve.p2 (fallback curve.p0)
+            (edge_data.curve.p3, edge_data.curve.p2, edge_data.curve.p0)
+        };
+
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+        if dx * dx + dy * dy > 1e-18 {
+            dy.atan2(dx)
+        } else {
+            // Degenerate: control point coincides with endpoint, use far endpoint
+            let dx = fallback.x - from.x;
+            let dy = fallback.y - from.y;
+            dy.atan2(dx)
+        }
+    }
+
+    /// Merge two co-located vertices at a crossing point and relink half-edges.
+    ///
+    /// After `split_edge()` creates two separate vertices at the same crossing,
+    /// this merges them into one, sorts the (now valence-4) outgoing half-edges
+    /// by angle, and relinks `next`/`prev` using the standard DCEL vertex rule.
+    ///
+    /// Face assignment is NOT done here — call `reassign_faces_after_merges()`
+    /// once after all merges are complete.
+    fn merge_vertices_at_crossing(
+        &mut self,
+        v_keep: VertexId,
+        v_remove: VertexId,
+    ) {
+        // Re-home half-edges from v_remove → v_keep
+        for i in 0..self.half_edges.len() {
+            if self.half_edges[i].deleted {
+                continue;
+            }
+            if self.half_edges[i].origin == v_remove {
+                self.half_edges[i].origin = v_keep;
+            }
+        }
+
+        // Collect & sort outgoing half-edges by angle (CCW).
+        // We can't use vertex_outgoing() because the next/prev links
+        // aren't correct for the merged vertex yet.
+        let mut outgoing: Vec<HalfEdgeId> = Vec::new();
+        for i in 0..self.half_edges.len() {
+            if self.half_edges[i].deleted {
+                continue;
+            }
+            if self.half_edges[i].origin == v_keep {
+                outgoing.push(HalfEdgeId(i as u32));
+            }
+        }
+        outgoing.sort_by(|&a, &b| {
+            let angle_a = self.outgoing_angle(a);
+            let angle_b = self.outgoing_angle(b);
+            angle_a.partial_cmp(&angle_b).unwrap()
+        });
+
+        let n = outgoing.len();
+        if n < 2 {
+            self.vertices[v_keep.idx()].outgoing = if n == 1 {
+                outgoing[0]
+            } else {
+                HalfEdgeId::NONE
+            };
+            self.free_vertex(v_remove);
+            return;
+        }
+
+        // Relink next/prev at vertex using the standard DCEL rule:
+        //     twin(outgoing[i]).next = outgoing[(i+1) % N]
+        for i in 0..n {
+            let twin_i = self.half_edges[outgoing[i].idx()].twin;
+            let next_out = outgoing[(i + 1) % n];
+            self.half_edges[twin_i.idx()].next = next_out;
+            self.half_edges[next_out.idx()].prev = twin_i;
+        }
+
+        // Cleanup vertex
+        self.vertices[v_keep.idx()].outgoing = outgoing[0];
+        self.free_vertex(v_remove);
+    }
+
+    /// After merging vertices at crossing points, walk all face cycles and
+    /// reassign faces. This must be called once after all merges are done,
+    /// because individual merges can break cycles created by earlier merges.
+    fn reassign_faces_after_merges(&mut self) {
+        let mut visited = vec![false; self.half_edges.len()];
+        let mut cycles: Vec<(HalfEdgeId, Vec<HalfEdgeId>)> = Vec::new();
+
+        // Discover all face cycles by walking from every unvisited half-edge.
+        for i in 0..self.half_edges.len() {
+            if self.half_edges[i].deleted || visited[i] {
+                continue;
+            }
+            let start_he = HalfEdgeId(i as u32);
+            let mut cycle_hes: Vec<HalfEdgeId> = Vec::new();
+            let mut cur = start_he;
+            loop {
+                if visited[cur.idx()] {
+                    break;
+                }
+                visited[cur.idx()] = true;
+                cycle_hes.push(cur);
+                cur = self.half_edges[cur.idx()].next;
+                if cur == start_he {
+                    break;
+                }
+                if cycle_hes.len() > self.half_edges.len() {
+                    debug_assert!(false, "infinite loop in face reassignment cycle walk");
+                    break;
+                }
+            }
+            if !cycle_hes.is_empty() {
+                cycles.push((start_he, cycle_hes));
+            }
+        }
+
+        // Collect old face assignments from half-edges (before reassignment).
+        // Each cycle votes on which old face it belongs to.
+        struct CycleInfo {
+            start_he: HalfEdgeId,
+            half_edges: Vec<HalfEdgeId>,
+            face_votes: std::collections::HashMap<u32, usize>,
+        }
+        let cycle_infos: Vec<CycleInfo> = cycles
+            .into_iter()
+            .map(|(start_he, hes)| {
+                let mut face_votes: std::collections::HashMap<u32, usize> =
+                    std::collections::HashMap::new();
+                for &he in &hes {
+                    let f = self.half_edges[he.idx()].face;
+                    if !f.is_none() {
+                        *face_votes.entry(f.0).or_insert(0) += 1;
+                    }
+                }
+                CycleInfo {
+                    start_he,
+                    half_edges: hes,
+                    face_votes,
+                }
+            })
+            .collect();
+
+        // Collect all old faces referenced.
+        let mut all_old_faces: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for c in &cycle_infos {
+            for &f in c.face_votes.keys() {
+                all_old_faces.insert(f);
+            }
+        }
+
+        // For each old face, assign it to the cycle with the most votes.
+        let mut cycle_face_assignment: Vec<Option<FaceId>> =
+            vec![None; cycle_infos.len()];
+
+        for &old_face_raw in &all_old_faces {
+            let mut best_idx: Option<usize> = None;
+            let mut best_count: usize = 0;
+            for (i, c) in cycle_infos.iter().enumerate() {
+                if cycle_face_assignment[i].is_some() {
+                    continue;
+                }
+                let count = c.face_votes.get(&old_face_raw).copied().unwrap_or(0);
+                if count > best_count {
+                    best_count = count;
+                    best_idx = Some(i);
+                }
+            }
+            if let Some(idx) = best_idx {
+                cycle_face_assignment[idx] = Some(FaceId(old_face_raw));
+            }
+        }
+
+        // Any cycle without an assigned face gets a new one, inheriting
+        // fill properties from the old face it voted for most.
+        for i in 0..cycle_infos.len() {
+            if cycle_face_assignment[i].is_none() {
+                // Determine which face to inherit fill from. Check both
+                // the cycle's own old face votes AND the adjacent faces
+                // (via twin half-edges), because at crossings the inside/
+                // outside flips and the cycle's own votes may point to F0.
+                let mut fill_candidates: std::collections::HashMap<u32, usize> =
+                    std::collections::HashMap::new();
+                // Own votes
+                for (&face_raw, &count) in &cycle_infos[i].face_votes {
+                    *fill_candidates.entry(face_raw).or_insert(0) += count;
+                }
+                // Adjacent faces (twins)
+                for &he in &cycle_infos[i].half_edges {
+                    let twin = self.half_edges[he.idx()].twin;
+                    let twin_face = self.half_edges[twin.idx()].face;
+                    if !twin_face.is_none() {
+                        *fill_candidates.entry(twin_face.0).or_insert(0) += 1;
+                    }
+                }
+                // Pick the best non-F0 candidate (F0 is unbounded, no fill).
+                let parent_face = fill_candidates
+                    .iter()
+                    .filter(|(&face_raw, _)| face_raw != 0)
+                    .max_by_key(|&(_, &count)| count)
+                    .map(|(&face_raw, _)| FaceId(face_raw));
+
+                let f = self.alloc_face();
+                // Copy fill properties from the parent face.
+                if let Some(parent) = parent_face {
+                    self.faces[f.idx()].fill_color =
+                        self.faces[parent.idx()].fill_color.clone();
+                    self.faces[f.idx()].image_fill =
+                        self.faces[parent.idx()].image_fill;
+                    self.faces[f.idx()].fill_rule =
+                        self.faces[parent.idx()].fill_rule;
+                }
+                cycle_face_assignment[i] = Some(f);
+            }
+        }
+
+        // Apply assignments.
+        for (i, cycle) in cycle_infos.iter().enumerate() {
+            let face = cycle_face_assignment[i].unwrap();
+            for &he in &cycle.half_edges {
+                self.half_edges[he.idx()].face = face;
+            }
+            if face.0 == 0 {
+                self.faces[0]
+                    .inner_half_edges
+                    .retain(|h| !cycle.half_edges.contains(h));
+                self.faces[0].inner_half_edges.push(cycle.start_he);
+            } else {
+                self.faces[face.idx()].outer_half_edge = cycle.start_he;
+            }
+        }
     }
 
     /// Find which face contains a given point (brute force for now).
@@ -1736,5 +2214,152 @@ mod tests {
         // The new face should produce a non-empty BezPath
         let path = dcel.face_to_bezpath(new_face);
         assert!(!path.elements().is_empty());
+    }
+
+    /// Rectangle ABCD, drag midpoint of AB across BC creating crossing X.
+    /// Two polygons should result: AXCD and a bigon XB (the "XMB" region).
+    #[test]
+    fn test_crossing_creates_two_faces() {
+        let mut dcel = Dcel::new();
+
+        // Rectangle at pixel scale: A=(0,100), B=(100,100), C=(100,0), D=(0,0)
+        let a = dcel.alloc_vertex(Point::new(0.0, 100.0));
+        let b = dcel.alloc_vertex(Point::new(100.0, 100.0));
+        let c = dcel.alloc_vertex(Point::new(100.0, 0.0));
+        let d = dcel.alloc_vertex(Point::new(0.0, 0.0));
+
+        // Build rectangle edges AB, BC, CD, DA
+        let (e_ab, _) = dcel.insert_edge(
+            a, b, FaceId(0),
+            line_curve(Point::new(0.0, 100.0), Point::new(100.0, 100.0)),
+        );
+        let (e_bc, _) = dcel.insert_edge(
+            b, c, FaceId(0),
+            line_curve(Point::new(100.0, 100.0), Point::new(100.0, 0.0)),
+        );
+        let (e_cd, _) = dcel.insert_edge(
+            c, d, FaceId(0),
+            line_curve(Point::new(100.0, 0.0), Point::new(0.0, 0.0)),
+        );
+        let (e_da, _) = dcel.insert_edge(
+            d, a, FaceId(0),
+            line_curve(Point::new(0.0, 0.0), Point::new(0.0, 100.0)),
+        );
+
+        dcel.validate();
+
+        let faces_before = dcel.faces.iter().filter(|f| !f.deleted).count();
+
+        // Simulate dragging midpoint M of AB to (200, 50).
+        // Control points at (180, 50) and (220, 50) — same as user's
+        // coordinates scaled by 100.
+        let new_ab_curve = CubicBez::new(
+            Point::new(0.0, 100.0),
+            Point::new(180.0, 50.0),
+            Point::new(220.0, 50.0),
+            Point::new(100.0, 100.0),
+        );
+        dcel.edges[e_ab.idx()].curve = new_ab_curve;
+
+        // Recompute intersections — this should split AB and BC at the crossing,
+        // merge the co-located vertices, and create the new face.
+        let created = dcel.recompute_edge_intersections(e_ab);
+
+        // Should have created vertices and edges from the splits
+        assert!(
+            !created.is_empty(),
+            "recompute_edge_intersections should have found the crossing"
+        );
+
+        dcel.validate();
+
+        let faces_after = dcel.faces.iter().filter(|f| !f.deleted).count();
+        assert!(
+            faces_after > faces_before,
+            "a new face should have been created for the XMB region \
+             (before: {}, after: {})",
+            faces_before,
+            faces_after
+        );
+
+        let _ = (e_bc, e_cd, e_da);
+    }
+
+    #[test]
+    fn test_two_crossings_creates_three_faces() {
+        let mut dcel = Dcel::new();
+
+        // Rectangle at pixel scale: A=(0,100), B=(100,100), C=(100,0), D=(0,0)
+        let a = dcel.alloc_vertex(Point::new(0.0, 100.0));
+        let b = dcel.alloc_vertex(Point::new(100.0, 100.0));
+        let c = dcel.alloc_vertex(Point::new(100.0, 0.0));
+        let d = dcel.alloc_vertex(Point::new(0.0, 0.0));
+
+        let (e_ab, _) = dcel.insert_edge(
+            a, b, FaceId(0),
+            line_curve(Point::new(0.0, 100.0), Point::new(100.0, 100.0)),
+        );
+        let (e_bc, _) = dcel.insert_edge(
+            b, c, FaceId(0),
+            line_curve(Point::new(100.0, 100.0), Point::new(100.0, 0.0)),
+        );
+        let (e_cd, _) = dcel.insert_edge(
+            c, d, FaceId(0),
+            line_curve(Point::new(100.0, 0.0), Point::new(0.0, 0.0)),
+        );
+        let (e_da, _) = dcel.insert_edge(
+            d, a, FaceId(0),
+            line_curve(Point::new(0.0, 0.0), Point::new(0.0, 100.0)),
+        );
+
+        dcel.validate();
+        let faces_before = dcel.faces.iter().filter(|f| !f.deleted).count();
+
+        // Drag M through CD: curve from A to B that dips below y=0,
+        // crossing CD (y=0 line) twice.
+        let new_ab_curve = CubicBez::new(
+            Point::new(0.0, 100.0),
+            Point::new(30.0, -80.0),
+            Point::new(70.0, -80.0),
+            Point::new(100.0, 100.0),
+        );
+        dcel.edges[e_ab.idx()].curve = new_ab_curve;
+
+        let created = dcel.recompute_edge_intersections(e_ab);
+
+        eprintln!("created: {:?}", created);
+        eprintln!("vertices: {}", dcel.vertices.iter().filter(|v| !v.deleted).count());
+        eprintln!("edges: {}", dcel.edges.iter().filter(|e| !e.deleted).count());
+        eprintln!("faces (non-deleted):");
+        for (i, f) in dcel.faces.iter().enumerate() {
+            if !f.deleted {
+                let cycle_len = if !f.outer_half_edge.is_none() {
+                    dcel.walk_cycle(f.outer_half_edge).len()
+                } else {
+                    0
+                };
+                eprintln!("  F{}: outer={:?} cycle_len={}", i, f.outer_half_edge, cycle_len);
+            }
+        }
+
+        // Should have 4 splits (2 on CD, 2 on AB)
+        assert!(
+            created.len() >= 4,
+            "expected at least 4 splits, got {}",
+            created.len()
+        );
+
+        dcel.validate();
+
+        let faces_after = dcel.faces.iter().filter(|f| !f.deleted).count();
+        // Before: 2 faces (interior + exterior). After: 4 (AX1D, X1X2M, X2BC + exterior)
+        assert!(
+            faces_after >= faces_before + 2,
+            "should have at least 2 new faces (before: {}, after: {})",
+            faces_before,
+            faces_after
+        );
+
+        let _ = (e_bc, e_cd, e_da);
     }
 }

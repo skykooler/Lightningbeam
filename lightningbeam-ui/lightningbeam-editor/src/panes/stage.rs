@@ -386,6 +386,8 @@ struct VelloRenderContext {
     editing_parent_layer_id: Option<uuid::Uuid>,
     /// Active region selection state (for rendering boundary overlay)
     region_selection: Option<lightningbeam_core::selection::RegionSelection>,
+    /// Mouse position in document-local (clip-local) world coordinates, for hover hit testing
+    mouse_world_pos: Option<vello::kurbo::Point>,
 }
 
 /// Callback for Vello rendering within egui
@@ -887,11 +889,54 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     let selection_color = Color::from_rgb8(0, 120, 255); // Blue
                     let stroke_width = 2.0 / self.ctx.zoom.max(0.5) as f64;
 
-                    // 1. Draw selection outlines around selected objects
+                    // 1. Draw selection stipple overlay on selected DCEL elements + clip outlines
                     // NOTE: Skip this if Transform tool is active (it has its own handles)
                     if !self.ctx.selection.is_empty() && !matches!(self.ctx.selected_tool, Tool::Transform) {
-                        // TODO: DCEL - shape selection outlines disabled during migration
-                        // (was: iterate shape_instances, get_shape_in_keyframe, draw bbox outlines)
+                        // Draw Flash-style stipple pattern on selected edges and faces
+                        if self.ctx.selection.has_dcel_selection() {
+                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
+                                let stipple_brush = selection_stipple_brush();
+                                // brush_transform scales the stipple so 1 pattern pixel = 1 screen pixel.
+                                // The shape is in document space, transformed to screen by overlay_transform
+                                // (which includes zoom). The brush tiles in document space by default,
+                                // so we scale it by 1/zoom to make each 2x2 tile = 2x2 screen pixels.
+                                let inv_zoom = 1.0 / self.ctx.zoom as f64;
+                                let brush_xform = Some(Affine::scale(inv_zoom));
+
+                                // Stipple selected faces
+                                for &face_id in self.ctx.selection.selected_faces() {
+                                    let face = dcel.face(face_id);
+                                    if face.deleted || face_id.0 == 0 { continue; }
+                                    let path = dcel.face_to_bezpath_with_holes(face_id);
+                                    scene.fill(
+                                        Fill::NonZero,
+                                        overlay_transform,
+                                        stipple_brush,
+                                        brush_xform,
+                                        &path,
+                                    );
+                                }
+
+                                // Stipple selected edges
+                                for &edge_id in self.ctx.selection.selected_edges() {
+                                    let edge = dcel.edge(edge_id);
+                                    if edge.deleted { continue; }
+                                    let width = edge.stroke_style.as_ref()
+                                        .map(|s| s.width)
+                                        .unwrap_or(2.0);
+                                    let mut path = vello::kurbo::BezPath::new();
+                                    path.move_to(edge.curve.p0);
+                                    path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
+                                    scene.stroke(
+                                        &Stroke::new(width),
+                                        overlay_transform,
+                                        stipple_brush,
+                                        brush_xform,
+                                        &path,
+                                    );
+                                }
+                            }
+                        }
 
                         // Also draw selection outlines for clip instances
                         for &clip_id in self.ctx.selection.clip_instances() {
@@ -956,6 +1001,65 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         Color::from_rgb8(255, 255, 255),
                                         None,
                                         &corner_circle,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // 1b. Draw stipple hover highlight on the curve under the mouse
+                    // During active curve editing, lock highlight to the edited curve
+                    if matches!(self.ctx.selected_tool, Tool::Select | Tool::BezierEdit) {
+                        use lightningbeam_core::tool::ToolState;
+
+                        // Determine which edge to highlight: active edit takes priority over hover
+                        let highlight_edge = match &self.ctx.tool_state {
+                            ToolState::EditingCurve { edge_id, .. }
+                            | ToolState::PendingCurveInteraction { edge_id, .. } => {
+                                Some(*edge_id)
+                            }
+                            _ => {
+                                // Fall back to hover hit test
+                                self.ctx.mouse_world_pos.and_then(|mouse_pos| {
+                                    use lightningbeam_core::hit_test::{hit_test_vector_editing, EditingHitTolerance, VectorEditHit};
+                                    let is_bezier = matches!(self.ctx.selected_tool, Tool::BezierEdit);
+                                    let tolerance = EditingHitTolerance::scaled_by_zoom(self.ctx.zoom as f64);
+                                    let hit = hit_test_vector_editing(
+                                        vector_layer,
+                                        self.ctx.playback_time,
+                                        mouse_pos,
+                                        &tolerance,
+                                        Affine::IDENTITY,
+                                        is_bezier,
+                                    );
+                                    match hit {
+                                        Some(VectorEditHit::Curve { edge_id, .. }) => Some(edge_id),
+                                        _ => None,
+                                    }
+                                })
+                            }
+                        };
+
+                        if let Some(edge_id) = highlight_edge {
+                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
+                                let edge = dcel.edge(edge_id);
+                                if !edge.deleted {
+                                    let stipple_brush = selection_stipple_brush();
+                                    let inv_zoom = 1.0 / self.ctx.zoom as f64;
+                                    let brush_xform = Some(Affine::scale(inv_zoom));
+                                    let width = edge.stroke_style.as_ref()
+                                        .map(|s| s.width + 4.0)
+                                        .unwrap_or(3.0)
+                                        .max(3.0);
+                                    let mut path = vello::kurbo::BezPath::new();
+                                    path.move_to(edge.curve.p0);
+                                    path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
+                                    scene.stroke(
+                                        &Stroke::new(width),
+                                        overlay_transform,
+                                        stipple_brush,
+                                        brush_xform,
+                                        &path,
                                     );
                                 }
                             }
@@ -1371,14 +1475,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // For single object: use object-aligned (rotated) bounding box
                         // For multiple objects: use axis-aligned bounding box (simpler for now)
 
-                        let total_selected = self.ctx.selection.shape_instances().len() + self.ctx.selection.clip_instances().len();
+                        let total_selected = self.ctx.selection.clip_instances().len();
                         if total_selected == 1 {
-                            // Single object - draw rotated bounding box
-                            let object_id = if let Some(&id) = self.ctx.selection.shape_instances().iter().next() {
-                                id
-                            } else {
-                                *self.ctx.selection.clip_instances().iter().next().unwrap()
-                            };
+                            // Single clip instance - draw rotated bounding box
+                            let object_id = *self.ctx.selection.clip_instances().iter().next().unwrap();
 
                             // TODO: DCEL - single-object transform handles disabled during migration
                             // (was: get_shape_in_keyframe for rotated bbox + handle drawing)
@@ -1921,6 +2021,36 @@ static INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 // Global storage for eyedropper results (instance_id -> (color, color_mode))
 static EYEDROPPER_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, (egui::Color32, super::ColorMode)>>>> = OnceLock::new();
 
+/// Cached 2x2 stipple image brush for selection overlay.
+/// Pattern: [[black, transparent], [transparent, white]]
+/// Tiled with nearest-neighbor sampling so each pixel stays crisp.
+static SELECTION_STIPPLE: OnceLock<vello::peniko::ImageBrush> = OnceLock::new();
+
+fn selection_stipple_brush() -> &'static vello::peniko::ImageBrush {
+    SELECTION_STIPPLE.get_or_init(|| {
+        use vello::peniko::{Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality};
+        // 2x2 RGBA pixels: row-major order
+        // [0,0] = black opaque,  [1,0] = transparent
+        // [0,1] = transparent,   [1,1] = white opaque
+        let pixels: Vec<u8> = vec![
+            0,   0,   0,   255, // (0,0) black
+            0,   0,   0,   0,   // (1,0) transparent
+            0,   0,   0,   0,   // (0,1) transparent
+            255, 255, 255, 255, // (1,1) white
+        ];
+        let image_data = ImageData {
+            data: Blob::from(pixels),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 2,
+            height: 2,
+        };
+        ImageBrush::new(image_data)
+            .with_extend(Extend::Repeat)
+            .with_quality(ImageQuality::Low)
+    })
+}
+
 impl StagePane {
     pub fn new() -> Self {
         let instance_id = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2139,7 +2269,7 @@ impl StagePane {
                 Affine::IDENTITY,
                 false, // Select tool doesn't show control points
             );
-            // Priority 1: Vector editing (vertices and curves)
+            // Priority 1: Vector editing (vertices immediately, curves deferred)
             if let Some(hit) = vector_hit {
                 match hit {
                     VectorEditHit::Vertex { vertex_id } => {
@@ -2147,7 +2277,12 @@ impl StagePane {
                         return;
                     }
                     VectorEditHit::Curve { edge_id, parameter_t } => {
-                        self.start_curve_editing(edge_id, parameter_t, point, active_layer_id, shared);
+                        // Defer: drag → curve editing, click → edge selection
+                        *shared.tool_state = ToolState::PendingCurveInteraction {
+                            edge_id,
+                            parameter_t,
+                            start_mouse: point,
+                        };
                         return;
                     }
                     _ => {
@@ -2171,38 +2306,39 @@ impl StagePane {
             let hit_result = if let Some(clip_id) = clip_hit {
                 Some(hit_test::HitResult::ClipInstance(clip_id))
             } else {
-                // No clip hit, test shape instances
+                // No clip hit, test DCEL edges and faces
                 hit_test::hit_test_layer(vector_layer, *shared.playback_time, point, 5.0, Affine::IDENTITY)
-                    .map(|id| hit_test::HitResult::ShapeInstance(id))
+                    .map(|dcel_hit| match dcel_hit {
+                        hit_test::DcelHitResult::Edge(eid) => hit_test::HitResult::Edge(eid),
+                        hit_test::DcelHitResult::Face(fid) => hit_test::HitResult::Face(fid),
+                    })
             };
 
             if let Some(hit) = hit_result {
                 match hit {
-                    hit_test::HitResult::ShapeInstance(object_id) => {
-                        // Shape instance was hit
-                        if shift_held {
-                            // Shift: toggle selection
-                            shared.selection.toggle_shape_instance(object_id);
-                        } else {
-                            // No shift: replace selection
-                            if !shared.selection.contains_shape_instance(&object_id) {
-                                shared.selection.select_only_shape_instance(object_id);
+                    hit_test::HitResult::Edge(edge_id) => {
+                        // DCEL edge was hit
+                        if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                            if shift_held {
+                                shared.selection.toggle_edge(edge_id, dcel);
+                            } else {
+                                shared.selection.clear_dcel_selection();
+                                shared.selection.select_edge(edge_id, dcel);
                             }
                         }
-
-                        // If object is now selected, prepare for dragging
-                        if shared.selection.contains_shape_instance(&object_id) {
-                            // Store original positions of all selected objects
-                            let original_positions = std::collections::HashMap::new();
-                            // TODO: DCEL - shape position lookup disabled during migration
-                            // (was: get_shape_in_keyframe to store original positions for drag)
-
-                            *shared.tool_state = ToolState::DraggingSelection {
-                                start_pos: point,
-                                start_mouse: point,
-                                original_positions,
-                            };
+                        // DCEL element dragging deferred to Phase 3
+                    }
+                    hit_test::HitResult::Face(face_id) => {
+                        // DCEL face was hit
+                        if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                            if shift_held {
+                                shared.selection.toggle_face(face_id, dcel);
+                            } else {
+                                shared.selection.clear_dcel_selection();
+                                shared.selection.select_face(face_id, dcel);
+                            }
                         }
+                        // DCEL element dragging deferred to Phase 3
                     }
                     hit_test::HitResult::ClipInstance(clip_id) => {
                         // Clip instance was hit
@@ -2255,6 +2391,14 @@ impl StagePane {
         // Mouse drag: update tool state
         if response.dragged() {
             match shared.tool_state {
+                ToolState::PendingCurveInteraction { edge_id, parameter_t, start_mouse } => {
+                    // Drag detected — transition to curve editing
+                    let edge_id = *edge_id;
+                    let parameter_t = *parameter_t;
+                    let start_mouse = *start_mouse;
+                    self.start_curve_editing(edge_id, parameter_t, start_mouse, active_layer_id, shared);
+                    self.update_vector_editing(point, shared);
+                }
                 ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } => {
                     // Vector editing - update happens in helper method
                     self.update_vector_editing(point, shared);
@@ -2277,11 +2421,28 @@ impl StagePane {
         // Mouse up: finish interaction
         let drag_stopped = response.drag_stopped();
         let pointer_released = ui.input(|i| i.pointer.any_released());
+        let is_pending_curve = matches!(shared.tool_state, ToolState::PendingCurveInteraction { .. });
         let is_drag_or_marquee = matches!(shared.tool_state, ToolState::DraggingSelection { .. } | ToolState::MarqueeSelecting { .. });
         let is_vector_editing = matches!(shared.tool_state, ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. });
 
-        if drag_stopped || (pointer_released && (is_drag_or_marquee || is_vector_editing)) {
+        if drag_stopped || (pointer_released && (is_drag_or_marquee || is_vector_editing || is_pending_curve)) {
             match shared.tool_state.clone() {
+                ToolState::PendingCurveInteraction { edge_id, .. } => {
+                    // Mouse released without drag — select the edge
+                    let shift_held = ui.input(|i| i.modifiers.shift);
+                    let document = shared.action_executor.document();
+                    if let Some(layer) = document.get_layer(&active_layer_id) {
+                        if let AnyLayer::Vector(vl) = layer {
+                            if let Some(dcel) = vl.dcel_at_time(*shared.playback_time) {
+                                if !shift_held {
+                                    shared.selection.clear_dcel_selection();
+                                }
+                                shared.selection.select_edge(edge_id, dcel);
+                            }
+                        }
+                    }
+                    *shared.tool_state = ToolState::Idle;
+                }
                 ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. } => {
                     // Finish vector editing - create action
                     self.finish_vector_editing(active_layer_id, shared);
@@ -2305,8 +2466,7 @@ impl StagePane {
                             _ => return,
                         };
 
-                        // Separate shape instances from clip instances
-                        let mut shape_instance_positions = HashMap::new();
+                        // Process clip instance drags
                         let mut clip_instance_transforms = HashMap::new();
 
                         for (id, original_pos) in original_positions {
@@ -2315,12 +2475,7 @@ impl StagePane {
                                 original_pos.y + delta.y,
                             );
 
-                            // Check if this is a shape instance or clip instance
-                            if shared.selection.contains_shape_instance(&id) {
-                                shape_instance_positions.insert(id, (original_pos, new_pos));
-                            } else if shared.selection.contains_clip_instance(&id) {
-                                // For clip instances, we need to get the full Transform
-                                // Find the clip instance in the layer
+                            if shared.selection.contains_clip_instance(&id) {
                                 if let Some(clip_inst) = vector_layer.clip_instances.iter()
                                     .find(|ci| ci.id == id) {
                                     let mut old_transform = clip_inst.transform.clone();
@@ -2334,13 +2489,6 @@ impl StagePane {
                                     clip_instance_transforms.insert(id, (old_transform, new_transform));
                                 }
                             }
-                        }
-
-                        // Create and submit move action for shape instances
-                        if !shape_instance_positions.is_empty() {
-                            use lightningbeam_core::actions::MoveShapeInstancesAction;
-                            let action = MoveShapeInstancesAction::new(active_layer_id, *shared.playback_time, shape_instance_positions);
-                            shared.pending_actions.push(Box::new(action));
                         }
 
                         // Create and submit transform action for clip instances
@@ -2383,8 +2531,8 @@ impl StagePane {
                         *shared.playback_time,
                     );
 
-                    // Hit test shape instances in rectangle
-                    let shape_hits = hit_test::hit_test_objects_in_rect(
+                    // Hit test DCEL elements in rectangle
+                    let dcel_hits = hit_test::hit_test_dcel_in_rect(
                         vector_layer,
                         *shared.playback_time,
                         selection_rect,
@@ -2393,31 +2541,16 @@ impl StagePane {
 
                     // Add clip instances to selection
                     for clip_id in clip_hits {
-                        if shift_held {
-                            shared.selection.add_clip_instance(clip_id);
-                        } else {
-                            // First hit replaces selection
-                            if shared.selection.is_empty() {
-                                shared.selection.add_clip_instance(clip_id);
-                            } else {
-                                // Subsequent hits add to selection
-                                shared.selection.add_clip_instance(clip_id);
-                            }
-                        }
+                        shared.selection.add_clip_instance(clip_id);
                     }
 
-                    // Add shape instances to selection
-                    for obj_id in shape_hits {
-                        if shift_held {
-                            shared.selection.add_shape_instance(obj_id);
-                        } else {
-                            // First hit replaces selection
-                            if shared.selection.is_empty() {
-                                shared.selection.add_shape_instance(obj_id);
-                            } else {
-                                // Subsequent hits add to selection
-                                shared.selection.add_shape_instance(obj_id);
-                            }
+                    // Add DCEL elements to selection
+                    if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                        for edge_id in dcel_hits.edges {
+                            shared.selection.select_edge(edge_id, dcel);
+                        }
+                        for face_id in dcel_hits.faces {
+                            shared.selection.select_face(face_id, dcel);
                         }
                     }
 
@@ -2605,7 +2738,24 @@ impl StagePane {
             }
         };
 
-        // Get current DCEL state (after edits) as dcel_after
+        // If we were editing a curve, recompute intersections before snapshotting.
+        // This detects new crossings between the edited edge and other edges,
+        // splitting them to maintain valid DCEL topology.
+        let editing_edge_id = match &*shared.tool_state {
+            lightningbeam_core::tool::ToolState::EditingCurve { edge_id, .. } => Some(*edge_id),
+            _ => None,
+        };
+
+        if let Some(edge_id) = editing_edge_id {
+            let document = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
+                if let Some(dcel) = vl.dcel_at_time_mut(cache.time) {
+                    dcel.recompute_edge_intersections(edge_id);
+                }
+            }
+        }
+
+        // Get current DCEL state (after edits + intersection splits) as dcel_after
         let dcel_after = {
             let document = shared.action_executor.document();
             match document.get_layer(&active_layer_id) {
@@ -3348,10 +3498,7 @@ impl StagePane {
 
         shared.selection.clear();
 
-        // Select fully-inside shapes directly
-        for &id in &classification.fully_inside {
-            shared.selection.add_shape_instance(id);
-        }
+        // TODO: DCEL - region selection element selection deferred to Phase 2
 
         // For intersecting shapes: compute clip and create temporary splits
         let splits = Vec::new();
@@ -4154,7 +4301,7 @@ impl StagePane {
         }
 
         // For vector layers: single object uses rotated bbox, multiple objects use axis-aligned bbox
-        let total_selected = shared.selection.shape_instances().len() + shared.selection.clip_instances().len();
+        let total_selected = shared.selection.clip_instances().len();
         if total_selected == 1 {
             // Single object - rotated bounding box
             self.handle_transform_single_object(ui, response, point, &active_layer_id, shared);
@@ -4368,9 +4515,7 @@ impl StagePane {
         use vello::kurbo::Affine;
 
         // Get the single selected object (either shape instance or clip instance)
-        let object_id = if let Some(&id) = shared.selection.shape_instances().iter().next() {
-            id
-        } else if let Some(&id) = shared.selection.clip_instances().iter().next() {
+        let object_id = if let Some(&id) = shared.selection.clip_instances().iter().next() {
             id
         } else {
             return; // No selection, shouldn't happen
@@ -5170,19 +5315,16 @@ impl StagePane {
                             if let Some(active_layer_id) = shared.active_layer_id {
                                 use std::collections::HashMap;
 
-                                let mut shape_instance_positions = HashMap::new();
                                 let mut clip_instance_transforms = HashMap::new();
 
-                                // Separate shape instances from clip instances
+                                // Process clip instances from drag
                                 for (object_id, original_pos) in original_positions {
                                     let new_pos = Point::new(
                                         original_pos.x + delta.x,
                                         original_pos.y + delta.y,
                                     );
 
-                                    if shared.selection.contains_shape_instance(&object_id) {
-                                        shape_instance_positions.insert(object_id, (original_pos, new_pos));
-                                    } else if shared.selection.contains_clip_instance(&object_id) {
+                                    if shared.selection.contains_clip_instance(&object_id) {
                                         // For clip instances, get the full transform
                                         if let Some(layer) = shared.action_executor.document().get_layer(active_layer_id) {
                                             if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
@@ -5200,13 +5342,6 @@ impl StagePane {
                                             }
                                         }
                                     }
-                                }
-
-                                // Create action for shape instances
-                                if !shape_instance_positions.is_empty() {
-                                    use lightningbeam_core::actions::MoveShapeInstancesAction;
-                                    let action = MoveShapeInstancesAction::new(*active_layer_id, *shared.playback_time, shape_instance_positions);
-                                    shared.pending_actions.push(Box::new(action));
                                 }
 
                                 // Create action for clip instances
@@ -5247,8 +5382,8 @@ impl StagePane {
                                 *shared.playback_time,
                             );
 
-                            // Hit test shape instances in rectangle
-                            let shape_hits = hit_test::hit_test_objects_in_rect(
+                            // Hit test DCEL elements in rectangle
+                            let dcel_hits = hit_test::hit_test_dcel_in_rect(
                                 vector_layer,
                                 *shared.playback_time,
                                 selection_rect,
@@ -5260,9 +5395,14 @@ impl StagePane {
                                 shared.selection.add_clip_instance(clip_id);
                             }
 
-                            // Add shape instances to selection
-                            for obj_id in shape_hits {
-                                shared.selection.add_shape_instance(obj_id);
+                            // Add DCEL elements to selection
+                            if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                                for edge_id in dcel_hits.edges {
+                                    shared.selection.select_edge(edge_id, dcel);
+                                }
+                                for face_id in dcel_hits.faces {
+                                    shared.selection.select_face(face_id, dcel);
+                                }
                             }
                         }
                     }
@@ -5473,20 +5613,26 @@ impl StagePane {
         let cp_color = egui::Color32::from_rgba_premultiplied(180, 180, 255, 200);
         let cp_hover_color = egui::Color32::from_rgb(100, 160, 255);
         let cp_line_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(120, 120, 200, 150));
-        let curve_hover_stroke = egui::Stroke::new(3.0 / self.zoom, egui::Color32::from_rgb(60, 140, 255));
 
-        // Determine what's hovered
-        let hover_vertex = match hit {
-            Some(VectorEditHit::Vertex { vertex_id }) => Some(vertex_id),
-            _ => None,
+        // Determine what's hovered (suppress during active editing to avoid flicker)
+        let is_editing = matches!(
+            *shared.tool_state,
+            lightningbeam_core::tool::ToolState::EditingCurve { .. }
+            | lightningbeam_core::tool::ToolState::EditingVertex { .. }
+            | lightningbeam_core::tool::ToolState::EditingControlPoint { .. }
+            | lightningbeam_core::tool::ToolState::PendingCurveInteraction { .. }
+        );
+        let hover_vertex = if is_editing { None } else {
+            match hit {
+                Some(VectorEditHit::Vertex { vertex_id }) => Some(vertex_id),
+                _ => None,
+            }
         };
-        let hover_edge = match hit {
-            Some(VectorEditHit::Curve { edge_id, .. }) => Some(edge_id),
-            _ => None,
-        };
-        let hover_cp = match hit {
-            Some(VectorEditHit::ControlPoint { edge_id, point_index }) => Some((edge_id, point_index)),
-            _ => None,
+        let hover_cp = if is_editing { None } else {
+            match hit {
+                Some(VectorEditHit::ControlPoint { edge_id, point_index }) => Some((edge_id, point_index)),
+                _ => None,
+            }
         };
 
         if is_bezier_edit_mode {
@@ -5544,23 +5690,7 @@ impl StagePane {
                 painter.circle(screen_pos, vertex_hover_radius, vertex_color, vertex_hover_stroke);
             }
 
-            if let Some(eid) = hover_edge {
-                // Highlight the hovered curve by drawing it thicker
-                let curve = &dcel.edge(eid).curve;
-                // Sample points along the curve for drawing
-                let segments = 20;
-                let points: Vec<egui::Pos2> = (0..=segments)
-                    .map(|i| {
-                        let t = i as f64 / segments as f64;
-                        use vello::kurbo::ParamCurve;
-                        let p = curve.eval(t);
-                        world_to_screen(p)
-                    })
-                    .collect();
-                for pair in points.windows(2) {
-                    painter.line_segment([pair[0], pair[1]], curve_hover_stroke);
-                }
-            }
+            // Note: curve hover highlight is now rendered via Vello stipple in the scene
 
             if let Some((eid, pidx)) = hover_cp {
                 let curve = &dcel.edge(eid).curve;
@@ -5911,6 +6041,16 @@ impl PaneRenderer for StagePane {
             None
         };
 
+        // Compute mouse world position for hover hit testing in the Vello callback
+        let mouse_world_pos = ui.input(|i| i.pointer.hover_pos())
+            .filter(|pos| rect.contains(*pos))
+            .map(|pos| {
+                let canvas_pos = pos - rect.min;
+                let doc_pos = (canvas_pos - self.pan_offset) / self.zoom;
+                let local = self.doc_to_clip_local(doc_pos, shared);
+                vello::kurbo::Point::new(local.x as f64, local.y as f64)
+            });
+
         // Use egui's custom painting callback for Vello
         // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback { ctx: VelloRenderContext {
@@ -5936,6 +6076,7 @@ impl PaneRenderer for StagePane {
             editing_instance_id: shared.editing_instance_id,
             editing_parent_layer_id: shared.editing_parent_layer_id,
             region_selection: shared.region_selection.clone(),
+            mouse_world_pos,
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(
