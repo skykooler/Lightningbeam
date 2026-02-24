@@ -1,7 +1,12 @@
 use std::env;
 
 fn main() {
-    let dst = cmake::Config::new("../vendor/NeuralAudio")
+    let mut cfg = cmake::Config::new("../vendor/NeuralAudio");
+    // Force single-config generator on Unix to avoid libraries landing in Release/ subdirs
+    if !cfg!(target_os = "windows") {
+        cfg.generator("Unix Makefiles");
+    }
+    let dst = cfg
         .define("CMAKE_BUILD_TYPE", "Release")
         .define("BUILD_NAMCORE", "OFF")
         .define("BUILD_STATIC_RTNEURAL", "OFF")
@@ -15,8 +20,11 @@ fn main() {
     let build_dir = dst.join("build");
 
     // Static libraries land in the build subdirectories
+    // Search both direct and Release/ paths for multi-config generator compatibility
     println!("cargo:rustc-link-search=native={}", build_dir.join("NeuralAudioCAPI").display());
+    println!("cargo:rustc-link-search=native={}", build_dir.join("NeuralAudioCAPI").join("Release").display());
     println!("cargo:rustc-link-search=native={}", build_dir.join("NeuralAudio").display());
+    println!("cargo:rustc-link-search=native={}", build_dir.join("NeuralAudio").join("Release").display());
 
     println!("cargo:rustc-link-lib=static=NeuralAudioCAPI");
     println!("cargo:rustc-link-lib=static=NeuralAudio");
