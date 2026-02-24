@@ -927,11 +927,35 @@ impl Dcel {
             );
         }
 
-        // 6. No unsplit crossings: every pair of non-deleted edges that
+        // 6. Curve endpoints match vertex positions: for every edge,
+        //    curve.p0 must equal the origin of half_edges[0] and
+        //    curve.p3 must equal the origin of half_edges[1].
+        for (i, e) in self.edges.iter().enumerate() {
+            if e.deleted { continue; }
+            let e_id = EdgeId(i as u32);
+            let v0 = self.half_edges[e.half_edges[0].idx()].origin;
+            let v1 = self.half_edges[e.half_edges[1].idx()].origin;
+            let p0 = self.vertices[v0.idx()].position;
+            let p3 = self.vertices[v1.idx()].position;
+            let d0 = (e.curve.p0 - p0).hypot();
+            let d3 = (e.curve.p3 - p3).hypot();
+            assert!(
+                d0 < 0.01,
+                "Edge {:?} curve.p0 ({:.2},{:.2}) doesn't match V{} ({:.2},{:.2}), dist={:.2}",
+                e_id, e.curve.p0.x, e.curve.p0.y, v0.0, p0.x, p0.y, d0
+            );
+            assert!(
+                d3 < 0.01,
+                "Edge {:?} curve.p3 ({:.2},{:.2}) doesn't match V{} ({:.2},{:.2}), dist={:.2}",
+                e_id, e.curve.p3.x, e.curve.p3.y, v1.0, p3.x, p3.y, d3
+            );
+        }
+
+        // 7. No unsplit crossings: every pair of non-deleted edges that
         //    geometrically cross must share a vertex at the crossing point.
         //    An interior crossing (away from endpoints) without a shared
         //    vertex means insert_stroke failed to split the edge.
-        {
+        if cfg!(debug_assertions) {
             use crate::curve_intersections::find_curve_intersections;
 
             // Collect live edges with their endpoint vertex IDs.
@@ -1220,24 +1244,21 @@ impl Dcel {
                     // new face. We detect this by computing the signed area of each
                     // cycle via the bezpath: positive area = CCW interior, negative
                     // or larger absolute = CW exterior.
-                    let (he_old, he_new) = if actual_face.0 == 0 {
-                        // Compute signed area of both cycles to determine which is
-                        // the exterior. The exterior has larger absolute area.
-                        let fwd_cycle = self.walk_cycle(he_fwd);
-                        let bwd_cycle = self.walk_cycle(he_bwd);
-                        let fwd_path = self.cycle_to_bezpath(&fwd_cycle);
-                        let bwd_path = self.cycle_to_bezpath(&bwd_cycle);
-                        let fwd_area = kurbo::Shape::area(&fwd_path);
-                        let bwd_area = kurbo::Shape::area(&bwd_path);
-                        if fwd_area.abs() < bwd_area.abs() {
-                            // he_fwd is the smaller (interior) → he_fwd gets new_face
-                            (he_bwd, he_fwd)
-                        } else {
-                            // he_fwd is the larger (exterior) → he_bwd gets new_face
-                            (he_fwd, he_bwd)
-                        }
+                    // Compute signed area of both cycles to determine which
+                    // keeps the old face. The larger cycle (by absolute area)
+                    // retains actual_face; the smaller one gets new_face.
+                    // This is essential for both the unbounded face (where the
+                    // exterior must stay as face 0) and bounded faces (where
+                    // the wrong assignment causes bloated face cycles).
+                    let fwd_cycle = self.walk_cycle(he_fwd);
+                    let bwd_cycle = self.walk_cycle(he_bwd);
+                    let fwd_path = self.cycle_to_bezpath(&fwd_cycle);
+                    let bwd_path = self.cycle_to_bezpath(&bwd_cycle);
+                    let fwd_area = kurbo::Shape::area(&fwd_path);
+                    let bwd_area = kurbo::Shape::area(&bwd_path);
+                    let (he_old, he_new) = if fwd_area.abs() < bwd_area.abs() {
+                        (he_bwd, he_fwd)
                     } else {
-                        // For bounded faces, convention: he_fwd → old, he_bwd → new
                         (he_fwd, he_bwd)
                     };
 
@@ -1406,12 +1427,21 @@ impl Dcel {
 
         let original_curve = self.edges[edge_id.idx()].curve;
         // De Casteljau subdivision
-        let (curve_a, curve_b) = subdivide_cubic(original_curve, t);
+        let (mut curve_a, mut curve_b) = subdivide_cubic(original_curve, t);
 
         let split_point = curve_a.p3; // == curve_b.p0
         let new_vertex = self
             .snap_vertex(split_point, DEFAULT_SNAP_EPSILON)
             .unwrap_or_else(|| self.alloc_vertex(split_point));
+
+        // If the vertex was snapped to a different position, adjust curve
+        // endpoints so they exactly match the vertex.  Without this, the
+        // SVG curves and the vertex circles drift apart and different curve
+        // pairs that cross at the same visual point produce vertices that
+        // never merge.
+        let vpos = self.vertices[new_vertex.idx()].position;
+        curve_a.p3 = vpos;
+        curve_b.p0 = vpos;
 
         // Get the original half-edges
         let [he_fwd, he_bwd] = self.edges[edge_id.idx()].half_edges;
@@ -1971,7 +2001,13 @@ impl Dcel {
                     continue;
                 }
 
-                let sub_curve = subsegment_cubic(*seg, prev_t, *t);
+                let mut sub_curve = subsegment_cubic(*seg, prev_t, *t);
+
+                // Adjust curve endpoints to exactly match vertex positions.
+                // Vertices may have been snapped to a nearby existing vertex,
+                // so the curve from subsegment_cubic can be a few pixels off.
+                sub_curve.p0 = self.vertices[prev_vertex.idx()].position;
+                sub_curve.p3 = self.vertices[vertex.idx()].position;
 
                 // Find the face containing this edge's midpoint for insertion
                 let mid = midpoint_of_cubic(&sub_curve);
@@ -2007,10 +2043,203 @@ impl Dcel {
             stroke_vertices.push(end_v);
         }
 
+        // Post-insertion repair: check newly inserted stroke edges against ALL
+        // other edges for crossings that the pre-insertion detection missed.
+        // This can happen when an existing edge is split during insertion,
+        // creating a new upper-portion edge (index >= existing_edge_count)
+        // that was never checked against later stroke segments.
+        self.repair_unsplit_crossings(&mut result);
+
         #[cfg(debug_assertions)]
         self.validate();
 
         result
+    }
+
+    // -----------------------------------------------------------------------
+    // repair_unsplit_crossings: post-insertion fix for missed intersections
+    // -----------------------------------------------------------------------
+
+    /// After inserting stroke edges, check each new edge against every other
+    /// edge for interior crossings that lack a shared vertex.  Split both
+    /// edges at each crossing and merge the resulting co-located vertices.
+    ///
+    /// This catches crossings missed by the pre-insertion detection, which
+    /// only checks segments against `0..existing_edge_count` and therefore
+    /// misses edges created by `split_edge` during the insertion process.
+    fn repair_unsplit_crossings(&mut self, result: &mut InsertStrokeResult) {
+        use crate::curve_intersections::find_curve_intersections;
+
+        // We need to check every new edge against every other edge (both
+        // new and pre-existing).  Collect new edge IDs into a set for
+        // fast membership lookup.
+        let new_edge_set: std::collections::HashSet<u32> = result
+            .new_edges
+            .iter()
+            .map(|e| e.0)
+            .collect();
+
+        // For each new edge, check against all other edges.
+        // We iterate by index because self is borrowed mutably during fixes.
+        let mut crossing_pairs: Vec<(EdgeId, f64, EdgeId, f64, Point)> = Vec::new();
+
+        // Snapshot: collect edge data so we don't borrow self during iteration.
+        let edge_infos: Vec<(EdgeId, CubicBez, [VertexId; 2], bool)> = self
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let eid = EdgeId(i as u32);
+                if e.deleted {
+                    return (eid, CubicBez::new((0., 0.), (0., 0.), (0., 0.), (0., 0.)), [VertexId::NONE; 2], true);
+                }
+                let v0 = self.half_edges[e.half_edges[0].idx()].origin;
+                let v1 = self.half_edges[e.half_edges[1].idx()].origin;
+                (eid, e.curve, [v0, v1], false)
+            })
+            .collect();
+
+        for &new_eid in &result.new_edges {
+            let (_, curve_a, verts_a, del_a) = &edge_infos[new_eid.idx()];
+            if *del_a {
+                continue;
+            }
+
+            for (eid_b, curve_b, verts_b, del_b) in &edge_infos {
+                if *del_b || *eid_b == new_eid {
+                    continue;
+                }
+                // Only check each pair once: if both are new edges, only
+                // check when new_eid < eid_b.
+                if new_edge_set.contains(&eid_b.0) && new_eid.0 >= eid_b.0 {
+                    continue;
+                }
+
+                // Shared endpoint vertices
+                let shared: Vec<VertexId> = verts_a
+                    .iter()
+                    .filter(|v| verts_b.contains(v))
+                    .copied()
+                    .collect();
+
+                let hits = find_curve_intersections(curve_a, curve_b);
+                for hit in &hits {
+                    let t1 = hit.t1;
+                    let t2 = hit.t2.unwrap_or(0.5);
+
+                    // Skip near-shared-vertex hits
+                    let close_to_shared = shared.iter().any(|&sv| {
+                        if sv.is_none() { return false; }
+                        let sv_pos = self.vertex(sv).position;
+                        (hit.point - sv_pos).hypot() < 2.0
+                    });
+                    if close_to_shared {
+                        continue;
+                    }
+
+                    // Skip near-endpoint on both
+                    if (t1 < 0.02 || t1 > 0.98) && (t2 < 0.02 || t2 > 0.98) {
+                        continue;
+                    }
+
+                    // Check if a vertex already exists at this crossing
+                    let has_vertex = self.vertices.iter().any(|v| {
+                        !v.deleted && (v.position - hit.point).hypot() < 2.0
+                    });
+                    if has_vertex {
+                        continue;
+                    }
+
+                    crossing_pairs.push((new_eid, t1, *eid_b, t2, hit.point));
+                }
+            }
+        }
+
+        if crossing_pairs.is_empty() {
+            return;
+        }
+
+        // Deduplicate near-identical crossings (same edge pair, close points)
+        crossing_pairs.sort_by(|a, b| {
+            a.0 .0.cmp(&b.0 .0)
+                .then(a.2 .0.cmp(&b.2 .0))
+                .then(a.1.partial_cmp(&b.1).unwrap())
+        });
+        crossing_pairs.dedup_by(|a, b| {
+            a.0 == b.0 && a.2 == b.2 && (a.4 - b.4).hypot() < 2.0
+        });
+
+        // Group crossings by edge so we can split from high-t to low-t.
+        // For each crossing, split both edges and record vertex pairs to merge.
+        let mut merge_pairs: Vec<(VertexId, VertexId)> = Vec::new();
+
+        // Process one crossing at a time since splits change edge geometry.
+        // After each split, the remaining crossings' t-values may be stale,
+        // so we re-detect.  In practice there are very few missed crossings.
+        for (eid_a, t_a, eid_b, t_b, _point) in &crossing_pairs {
+            // Edges may have been deleted/split by a prior iteration
+            if self.edges[eid_a.idx()].deleted || self.edges[eid_b.idx()].deleted {
+                continue;
+            }
+
+            // Re-verify the crossing still exists on these exact edges
+            let curve_a = self.edges[eid_a.idx()].curve;
+            let curve_b = self.edges[eid_b.idx()].curve;
+            let hits = find_curve_intersections(&curve_a, &curve_b);
+
+            // Find the hit closest to the original (t_a, t_b)
+            let mut best: Option<(f64, f64)> = None;
+            for hit in &hits {
+                let ht1 = hit.t1;
+                let ht2 = hit.t2.unwrap_or(0.5);
+                // Must be interior on both edges
+                if ht1 < 0.01 || ht1 > 0.99 || ht2 < 0.01 || ht2 > 0.99 {
+                    continue;
+                }
+                // Check it's near the expected point
+                let has_vertex = self.vertices.iter().any(|v| {
+                    !v.deleted && (v.position - hit.point).hypot() < 2.0
+                });
+                if has_vertex {
+                    continue;
+                }
+                if best.is_none()
+                    || (ht1 - t_a).abs() + (ht2 - t_b).abs()
+                        < (best.unwrap().0 - t_a).abs() + (best.unwrap().1 - t_b).abs()
+                {
+                    best = Some((ht1, ht2));
+                }
+            }
+
+            let Some((split_t_a, split_t_b)) = best else {
+                continue;
+            };
+
+            // Split both edges
+            let (v_a, new_edge_a) = self.split_edge(*eid_a, split_t_a);
+            result.split_edges.push((*eid_a, split_t_a, v_a, new_edge_a));
+
+            let (v_b, new_edge_b) = self.split_edge(*eid_b, split_t_b);
+            result.split_edges.push((*eid_b, split_t_b, v_b, new_edge_b));
+
+            // If snap_vertex already merged them, no need to merge again
+            if v_a != v_b {
+                merge_pairs.push((v_a, v_b));
+            }
+        }
+
+        // Merge co-located vertex pairs
+        let has_merges = !merge_pairs.is_empty();
+        for (va, vb) in &merge_pairs {
+            if self.vertices[va.idx()].deleted || self.vertices[vb.idx()].deleted {
+                continue;
+            }
+            self.merge_vertices_at_crossing(*va, *vb);
+        }
+
+        if has_merges {
+            self.reassign_faces_after_merges();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2138,18 +2367,41 @@ impl Dcel {
             let t1_tol = spatial_tol / edited_len;
             let t2_tol = spatial_tol / other_len;
 
+            // Get endpoint vertices for shared-vertex check
+            let edited_v0 = self.half_edges[self.edges[edge_id.idx()].half_edges[0].idx()].origin;
+            let edited_v1 = self.half_edges[self.edges[edge_id.idx()].half_edges[1].idx()].origin;
+            let other_v0 = self.half_edges[e.half_edges[0].idx()].origin;
+            let other_v1 = self.half_edges[e.half_edges[1].idx()].origin;
+            let shared: Vec<VertexId> = [edited_v0, edited_v1]
+                .iter()
+                .filter(|v| *v == &other_v0 || *v == &other_v1)
+                .copied()
+                .collect();
+
             let intersections = find_curve_intersections(&edited_curve, &e.curve);
             for inter in intersections {
                 if let Some(t2) = inter.t2 {
-                    // Skip intersections where either t is too close to an
-                    // endpoint to produce a usable split. The threshold is
-                    // scaled by arc length so it corresponds to a consistent
-                    // spatial tolerance. This filters:
-                    // - Shared-vertex hits (both t near endpoints)
-                    // - Spurious near-vertex bbox-overlap false positives
-                    // - Hits that would create one-sided splits
-                    if inter.t1 < t1_tol || inter.t1 > 1.0 - t1_tol
-                        || t2 < t2_tol || t2 > 1.0 - t2_tol
+                    // Skip intersections near a shared endpoint vertex
+                    let close_to_shared = shared.iter().any(|&sv| {
+                        let sv_pos = self.vertex(sv).position;
+                        (inter.point - sv_pos).hypot() < 2.0
+                    });
+                    if close_to_shared {
+                        continue;
+                    }
+
+                    // Skip intersections near endpoints on BOTH edges
+                    // (shared vertex or coincident endpoints).
+                    let near_endpoint_a = inter.t1 < t1_tol || inter.t1 > 1.0 - t1_tol;
+                    let near_endpoint_b = t2 < t2_tol || t2 > 1.0 - t2_tol;
+                    if near_endpoint_a && near_endpoint_b {
+                        continue;
+                    }
+
+                    // Skip if too close to an endpoint to produce a usable
+                    // split, but only with a tight spatial threshold.
+                    if (inter.t1 < 0.001 || inter.t1 > 0.999)
+                        && (t2 < 0.001 || t2 > 0.999)
                     {
                         continue;
                     }
@@ -2697,7 +2949,39 @@ mod tests {
             if face.fill_color.is_none() { continue; }
             if face.outer_half_edge.is_none() { continue; }
 
-            let bez = dcel.face_to_bezpath_stripped(FaceId(i as u32));
+            let fid = FaceId(i as u32);
+            let mut bez = dcel.face_to_bezpath_stripped(fid);
+
+            // Subtract any other face that is geometrically inside this face
+            // but topologically disconnected (no shared edges). These are
+            // concentric/nested cycles that should appear as holes.
+            let outer_path = dcel.face_to_bezpath_stripped(fid);
+            let outer_cycle = dcel.face_boundary(fid);
+            let outer_edges: std::collections::HashSet<EdgeId> = outer_cycle
+                .iter()
+                .map(|&he| dcel.half_edge(he).edge)
+                .collect();
+            for (j, other) in dcel.faces.iter().enumerate() {
+                if j == i || j == 0 || other.deleted || other.outer_half_edge.is_none() {
+                    continue;
+                }
+                let other_cycle = dcel.face_boundary(FaceId(j as u32));
+                if other_cycle.is_empty() { continue; }
+                // Skip if the two faces share any edge (they're adjacent, not nested)
+                let shares_edge = other_cycle.iter().any(|&he| {
+                    outer_edges.contains(&dcel.half_edge(he).edge)
+                });
+                if shares_edge { continue; }
+                // Check if a point on the other face's boundary is inside this face
+                let sample_he = other_cycle[0];
+                let sample_pt = dcel.edge(dcel.half_edge(sample_he).edge).curve.eval(0.5);
+                if kurbo::Shape::winding(&outer_path, sample_pt) != 0 {
+                    let hole = dcel.face_to_bezpath_stripped(FaceId(j as u32));
+                    for el in hole.elements() {
+                        bez.push(*el);
+                    }
+                }
+            }
 
             // Convert kurbo BezPath to tiny-skia PathBuilder
             let mut pb = tiny_skia::PathBuilder::new();
@@ -2730,7 +3014,7 @@ mod tests {
                 pixmap.fill_path(
                     &path,
                     &paint,
-                    tiny_skia::FillRule::Winding,
+                    tiny_skia::FillRule::EvenOdd,
                     tiny_skia::Transform::identity(),
                     None,
                 );
@@ -3600,6 +3884,34 @@ mod tests {
     }
 
     #[test]
+    fn test_concentric_ellipses() {
+        let mut dcel = Dcel::new();
+
+        // Stroke 0 — inner ellipse
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(547.7, 237.8), Point::new(547.7, 218.3), Point::new(518.1, 202.6), Point::new(481.4, 202.6)),
+            CubicBez::new(Point::new(481.4, 202.6), Point::new(444.8, 202.6), Point::new(415.1, 218.3), Point::new(415.1, 237.8)),
+            CubicBez::new(Point::new(415.1, 237.8), Point::new(415.1, 257.2), Point::new(444.8, 272.9), Point::new(481.4, 272.9)),
+            CubicBez::new(Point::new(481.4, 272.9), Point::new(518.1, 272.9), Point::new(547.7, 257.2), Point::new(547.7, 237.8)),
+        ], None, None, 5.0);
+
+        // Stroke 1 — outer ellipse
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(693.6, 255.9), Point::new(693.6, 197.6), Point::new(609.8, 150.3), Point::new(506.5, 150.3)),
+            CubicBez::new(Point::new(506.5, 150.3), Point::new(403.2, 150.3), Point::new(319.5, 197.6), Point::new(319.5, 255.9)),
+            CubicBez::new(Point::new(319.5, 255.9), Point::new(319.5, 314.2), Point::new(403.2, 361.5), Point::new(506.5, 361.5)),
+            CubicBez::new(Point::new(506.5, 361.5), Point::new(609.8, 361.5), Point::new(693.6, 314.2), Point::new(693.6, 255.9)),
+        ], None, None, 5.0);
+
+        // Test both orderings — outer first should also work
+        let paint_points = vec![
+            Point::new(400.5, 319.5),
+            Point::new(497.0, 251.4),
+        ];
+        assert_paint_sequence(&mut dcel, &paint_points, 800, 450);
+    }
+
+    #[test]
     fn test_recorded_eight_strokes() {
         let mut dcel = Dcel::new();
 
@@ -3714,6 +4026,129 @@ mod tests {
         }
 
         assert_paint_sequence(&mut dcel, &paint_points, 600, 400);
+    }
+
+    #[test]
+    fn test_recorded_six_strokes_four_fills() {
+        let mut dcel = Dcel::new();
+
+        // Stroke 0
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(279.5, 405.9), Point::new(342.3, 330.5), Point::new(404.0, 254.0), Point::new(478.1, 188.9)),
+            CubicBez::new(Point::new(478.1, 188.9), Point::new(505.1, 165.2), Point::new(539.1, 148.1), Point::new(564.2, 123.0)),
+        ], None, None, 5.0);
+
+        // Stroke 1
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(281.5, 209.9), Point::new(414.0, 241.1), Point::new(556.8, 218.5), Point::new(684.7, 269.7)),
+        ], None, None, 5.0);
+
+        // Stroke 2
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(465.3, 334.9), Point::new(410.9, 307.7), Point::new(370.5, 264.5), Point::new(343.4, 210.4)),
+            CubicBez::new(Point::new(343.4, 210.4), Point::new(337.5, 198.6), Point::new(321.9, 120.9), Point::new(303.9, 120.9)),
+        ], None, None, 5.0);
+
+        // Stroke 3
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(244.0, 290.7), Point::new(281.2, 279.8), Point::new(474.1, 242.2), Point::new(511.9, 237.8)),
+            CubicBez::new(Point::new(511.9, 237.8), Point::new(540.4, 234.5), Point::new(569.7, 236.9), Point::new(598.0, 231.7)),
+            CubicBez::new(Point::new(598.0, 231.7), Point::new(620.5, 227.5), Point::new(699.3, 190.4), Point::new(703.4, 190.4)),
+        ], None, None, 5.0);
+
+        // Stroke 4
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(303.2, 146.2), Point::new(442.0, 146.2), Point::new(598.7, 124.5), Point::new(674.9, 269.2)),
+            CubicBez::new(Point::new(674.9, 269.2), Point::new(684.7, 287.9), Point::new(699.5, 302.6), Point::new(699.5, 324.2)),
+        ], None, None, 5.0);
+
+        // Stroke 5
+        dcel.insert_stroke(&[
+            CubicBez::new(Point::new(409.7, 328.3), Point::new(389.8, 248.7), Point::new(409.7, 161.3), Point::new(409.7, 80.6)),
+        ], None, None, 5.0);
+
+        let paint_points = vec![
+            Point::new(403.0, 257.7),
+            Point::new(392.0, 263.6),
+            Point::new(381.1, 235.2),
+            Point::new(357.0, 167.1),
+        ];
+
+        // Dump all vertices
+        eprintln!("=== All vertices ===");
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            if v.deleted { continue; }
+            eprintln!("  V{i} ({:.1},{:.1}) outgoing=HE{}", v.position.x, v.position.y, v.outgoing.0);
+        }
+
+        // Debug: show what faces each point would hit and their areas
+        for (i, &pt) in paint_points.iter().enumerate() {
+            use kurbo::Shape as _;
+            let face = dcel.find_face_containing_point(pt);
+            if face.0 != 0 {
+                let cycle = dcel.face_boundary(face);
+                let stripped = dcel.strip_cycle(&cycle);
+                let path = dcel.face_to_bezpath_stripped(face);
+                let area = path.area().abs();
+                eprintln!("  point {i} ({:.1},{:.1}) → F{} cycle_len={} stripped_len={} area={:.1}",
+                    pt.x, pt.y, face.0, cycle.len(), stripped.len(), area);
+                // Show stripped cycle vertices
+                for (j, &he_id) in stripped.iter().enumerate() {
+                    let src = dcel.half_edge_source(he_id);
+                    let pos = dcel.vertex(src).position;
+                    eprintln!("    [{j}] HE{} V{} ({:.1},{:.1})", he_id.0, src.0, pos.x, pos.y);
+                }
+            } else {
+                eprintln!("  point {i} ({:.1},{:.1}) → UNBOUNDED", pt.x, pt.y);
+            }
+        }
+
+        // Dump SVG for debugging
+        {
+            let mut svg = String::new();
+            svg.push_str("<svg xmlns='http://www.w3.org/2000/svg' width='750' height='450'>\n");
+            svg.push_str("<rect width='750' height='450' fill='white'/>\n");
+            let colors = ["#e6194b","#3cb44b","#4363d8","#f58231","#911eb4",
+                "#42d4f4","#f032e6","#bfef45","#fabed4","#469990",
+                "#dcbeff","#9A6324","#800000","#aaffc3","#808000",
+                "#ffd8b1","#000075","#808080","#000000","#ffe119"];
+            for (i, e) in dcel.edges.iter().enumerate() {
+                if e.deleted { continue; }
+                let c = &e.curve;
+                let color = colors[i % colors.len()];
+                let v0 = dcel.half_edges[e.half_edges[0].idx()].origin;
+                let v1 = dcel.half_edges[e.half_edges[1].idx()].origin;
+                svg.push_str(&format!(
+                    "<path d='M{:.1},{:.1} C{:.1},{:.1} {:.1},{:.1} {:.1},{:.1}' fill='none' stroke='{}' stroke-width='1.5'/>\n",
+                    c.p0.x, c.p0.y, c.p1.x, c.p1.y, c.p2.x, c.p2.y, c.p3.x, c.p3.y, color
+                ));
+                let mid = c.eval(0.5);
+                svg.push_str(&format!(
+                    "<text x='{:.1}' y='{:.1}' font-size='7' fill='{}'>E{}(V{}→V{})</text>\n",
+                    mid.x, mid.y - 2.0, color, i, v0.0, v1.0
+                ));
+            }
+            for (i, v) in dcel.vertices.iter().enumerate() {
+                if v.deleted { continue; }
+                svg.push_str(&format!(
+                    "<circle cx='{:.1}' cy='{:.1}' r='2' fill='red'/>\n\
+                     <text x='{:.1}' y='{:.1}' font-size='7' fill='red'>V{}</text>\n",
+                    v.position.x, v.position.y, v.position.x + 3.0, v.position.y - 3.0, i
+                ));
+            }
+            for (i, &pt) in paint_points.iter().enumerate() {
+                svg.push_str(&format!(
+                    "<circle cx='{:.1}' cy='{:.1}' r='4' fill='none' stroke='magenta' stroke-width='1.5'/>\n\
+                     <text x='{:.1}' y='{:.1}' font-size='8' fill='magenta'>P{}</text>\n",
+                    pt.x, pt.y, pt.x + 5.0, pt.y - 5.0, i
+                ));
+            }
+            svg.push_str("</svg>\n");
+            std::fs::write("/tmp/dcel_six_strokes.svg", &svg).unwrap();
+            eprintln!("SVG written to /tmp/dcel_six_strokes.svg");
+        }
+
+        assert_paint_sequence(&mut dcel, &paint_points, 750, 450);
     }
 
     #[test]

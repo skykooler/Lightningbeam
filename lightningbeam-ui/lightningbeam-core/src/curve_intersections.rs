@@ -74,8 +74,9 @@ fn find_intersections_recursive(
     // Maximum recursion depth
     const MAX_DEPTH: usize = 20;
 
-    // Minimum parameter range (if smaller, we've found an intersection)
-    const MIN_RANGE: f64 = 0.001;
+    // Pixel-space convergence threshold: stop subdividing when both
+    // subsegments span less than this many pixels.
+    const PIXEL_TOL: f64 = 0.25;
 
     // Get bounding boxes of current subsegments
     let bbox1 = curve1.bounding_box();
@@ -90,25 +91,64 @@ fn find_intersections_recursive(
         return;
     }
 
-    // If we've recursed deep enough or ranges are small enough,
-    // refine with line-line intersection for sub-pixel accuracy.
-    if depth >= MAX_DEPTH ||
-       ((t1_end - t1_start) < MIN_RANGE && (t2_end - t2_start) < MIN_RANGE) {
-        // At this scale the curves are essentially straight lines.
-        // Evaluate endpoints of each subsegment and solve line-line.
-        let a0 = orig_curve1.eval(t1_start);
-        let a1 = orig_curve1.eval(t1_end);
-        let b0 = orig_curve2.eval(t2_start);
-        let b1 = orig_curve2.eval(t2_end);
+    // Evaluate subsegment endpoints for convergence check and line-line solve
+    let a0 = orig_curve1.eval(t1_start);
+    let a1 = orig_curve1.eval(t1_end);
+    let b0 = orig_curve2.eval(t2_start);
+    let b1 = orig_curve2.eval(t2_end);
+
+    // Check convergence in pixel space: both subsegment spans must be
+    // below the tolerance. This ensures the linear approximation error
+    // is always well within the vertex snap threshold regardless of
+    // curve length.
+    let a_span = (a1 - a0).hypot();
+    let b_span = (b1 - b0).hypot();
+
+    if depth >= MAX_DEPTH || (a_span < PIXEL_TOL && b_span < PIXEL_TOL) {
 
         let (t1, t2, point) = if let Some((s, u)) = line_line_intersect(a0, a1, b0, b1) {
             let s = s.clamp(0.0, 1.0);
             let u = u.clamp(0.0, 1.0);
-            let t1 = t1_start + s * (t1_end - t1_start);
-            let t2 = t2_start + u * (t2_end - t2_start);
-            // Average the two lines' estimates for the point
-            let p1 = Point::new(a0.x + s * (a1.x - a0.x), a0.y + s * (a1.y - a0.y));
-            let p2 = Point::new(b0.x + u * (b1.x - b0.x), b0.y + u * (b1.y - b0.y));
+            let mut t1 = t1_start + s * (t1_end - t1_start);
+            let mut t2 = t2_start + u * (t2_end - t2_start);
+
+            // Newton refinement: converge t1, t2 so that
+            // curve1.eval(t1) == curve2.eval(t2) to sub-pixel accuracy.
+            // We solve F(t1,t2) = curve1(t1) - curve2(t2) = 0 via the
+            // Jacobian [d1, -d2] where d1/d2 are the curve tangents.
+            let t1_orig = t1;
+            let t2_orig = t2;
+            for _ in 0..8 {
+                let p1 = orig_curve1.eval(t1);
+                let p2 = orig_curve2.eval(t2);
+                let err = Point::new(p1.x - p2.x, p1.y - p2.y);
+                if err.x * err.x + err.y * err.y < 1e-6 {
+                    break;
+                }
+                // Tangent vectors (derivative of cubic bezier)
+                let d1 = cubic_deriv(orig_curve1, t1);
+                let d2 = cubic_deriv(orig_curve2, t2);
+                // Solve [d1.x, -d2.x; d1.y, -d2.y] * [dt1; dt2] = -[err.x; err.y]
+                let det = d1.x * (-d2.y) - d1.y * (-d2.x);
+                if det.abs() < 1e-12 {
+                    break; // tangents parallel, can't refine
+                }
+                let dt1 = (-d2.y * (-err.x) - (-d2.x) * (-err.y)) / det;
+                let dt2 = (d1.x * (-err.y) - d1.y * (-err.x)) / det;
+                t1 = (t1 + dt1).clamp(0.0, 1.0);
+                t2 = (t2 + dt2).clamp(0.0, 1.0);
+            }
+            // If Newton diverged far from the initial estimate, it may have
+            // jumped to a different crossing. Reject and fall back.
+            if (t1 - t1_orig).abs() > (t1_end - t1_start) * 2.0
+                || (t2 - t2_orig).abs() > (t2_end - t2_start) * 2.0
+            {
+                t1 = t1_orig;
+                t2 = t2_orig;
+            }
+
+            let p1 = orig_curve1.eval(t1);
+            let p2 = orig_curve2.eval(t2);
             (t1, t2, Point::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5))
         } else {
             // Lines are parallel/degenerate — fall back to midpoint
@@ -327,6 +367,20 @@ fn dedup_intersections(intersections: &mut Vec<Intersection>, _tolerance: f64) {
     }
 
     *intersections = result;
+}
+
+/// Derivative (tangent vector) of a cubic Bezier at parameter t.
+///
+/// B'(t) = 3[(1-t)²(P1-P0) + 2(1-t)t(P2-P1) + t²(P3-P2)]
+fn cubic_deriv(c: &CubicBez, t: f64) -> Point {
+    let u = 1.0 - t;
+    let d0 = Point::new(c.p1.x - c.p0.x, c.p1.y - c.p0.y);
+    let d1 = Point::new(c.p2.x - c.p1.x, c.p2.y - c.p1.y);
+    let d2 = Point::new(c.p3.x - c.p2.x, c.p3.y - c.p2.y);
+    Point::new(
+        3.0 * (u * u * d0.x + 2.0 * u * t * d1.x + t * t * d2.x),
+        3.0 * (u * u * d0.y + 2.0 * u * t * d1.y + t * t * d2.y),
+    )
 }
 
 /// 2D line-line intersection.
