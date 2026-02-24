@@ -1,6 +1,7 @@
 // Lightningbeam Core Library
 // Shared data structures and types
 
+pub mod beat_time;
 pub mod gpu;
 pub mod layout;
 pub mod pane;
@@ -43,3 +44,4 @@ pub mod file_io;
 pub mod export;
 pub mod clipboard;
 pub mod region_select;
+pub mod dcel;

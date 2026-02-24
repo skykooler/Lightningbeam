@@ -1658,37 +1658,8 @@ impl EditorApp {
             };
 
             self.clipboard_manager.copy(content);
-        } else if !self.selection.shape_instances().is_empty() {
-            let active_layer_id = match self.active_layer_id {
-                Some(id) => id,
-                None => return,
-            };
-
-            let document = self.action_executor.document();
-            let layer = match document.get_layer(&active_layer_id) {
-                Some(l) => l,
-                None => return,
-            };
-
-            let vector_layer = match layer {
-                AnyLayer::Vector(vl) => vl,
-                _ => return,
-            };
-
-            // Gather selected shapes (they now contain their own transforms)
-            let selected_shapes: Vec<_> = self.selection.shapes().iter()
-                .filter_map(|id| vector_layer.shapes.get(id).cloned())
-                .collect();
-
-            if selected_shapes.is_empty() {
-                return;
-            }
-
-            let content = ClipboardContent::Shapes {
-                shapes: selected_shapes,
-            };
-
-            self.clipboard_manager.copy(content);
+        } else if self.selection.has_dcel_selection() {
+            // TODO: DCEL copy/paste deferred to Phase 2 (serialize subgraph)
         }
     }
 
@@ -1736,26 +1707,45 @@ impl EditorApp {
             }
 
             self.selection.clear_clip_instances();
-        } else if !self.selection.shapes().is_empty() {
+        } else if self.selection.has_dcel_selection() {
             let active_layer_id = match self.active_layer_id {
                 Some(id) => id,
                 None => return,
             };
 
-            let shape_ids: Vec<Uuid> = self.selection.shapes().to_vec();
+            // Delete selected edges via snapshot-based ModifyDcelAction
+            let edge_ids: Vec<lightningbeam_core::dcel::EdgeId> =
+                self.selection.selected_edges().iter().copied().collect();
 
-            let action = lightningbeam_core::actions::RemoveShapesAction::new(
-                active_layer_id,
-                shape_ids,
-                self.playback_time,
-            );
+            if !edge_ids.is_empty() {
+                let document = self.action_executor.document();
+                if let Some(layer) = document.get_layer(&active_layer_id) {
+                    if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
+                        if let Some(dcel_before) = vector_layer.dcel_at_time(self.playback_time) {
+                            let mut dcel_after = dcel_before.clone();
+                            for edge_id in &edge_ids {
+                                if !dcel_after.edge(*edge_id).deleted {
+                                    dcel_after.remove_edge(*edge_id);
+                                }
+                            }
 
-            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                eprintln!("Delete shapes failed: {}", e);
+                            let action = lightningbeam_core::actions::ModifyDcelAction::new(
+                                active_layer_id,
+                                self.playback_time,
+                                dcel_before.clone(),
+                                dcel_after,
+                                "Delete selected edges",
+                            );
+
+                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                eprintln!("Delete DCEL edges failed: {}", e);
+                            }
+                        }
+                    }
+                }
             }
 
-            self.selection.clear_shape_instances();
-            self.selection.clear_shapes();
+            self.selection.clear_dcel_selection();
         }
     }
 
@@ -1885,18 +1875,8 @@ impl EditorApp {
                     }
                 };
 
-                let new_shape_ids: Vec<Uuid> = shapes.iter().map(|s| s.id).collect();
-
-                let kf = vector_layer.ensure_keyframe_at(self.playback_time);
-                for shape in shapes {
-                    kf.shapes.push(shape);
-                }
-
-                // Select pasted shapes
-                self.selection.clear_shapes();
-                for id in new_shape_ids {
-                    self.selection.add_shape(id);
-                }
+                // TODO: DCEL - paste shapes not yet implemented
+                let _ = (vector_layer, shapes);
             }
             ClipboardContent::MidiNotes { .. } => {
                 // MIDI notes are pasted directly in the piano roll pane, not here
@@ -2098,11 +2078,9 @@ impl EditorApp {
             _ => return,
         };
 
-        for split in &region_sel.splits {
-            vector_layer.remove_shape_from_keyframe(&split.inside_shape_id, region_sel.time);
-            vector_layer.remove_shape_from_keyframe(&split.outside_shape_id, region_sel.time);
-            vector_layer.add_shape_to_keyframe(split.original_shape.clone(), region_sel.time);
-        }
+        // TODO: DCEL - region selection revert disabled during migration
+        // (was: remove/add_shape_from/to_keyframe for splits)
+        let _ = vector_layer;
 
         selection.clear();
     }
@@ -2429,44 +2407,51 @@ impl EditorApp {
             // Modify menu
             MenuAction::Group => {
                 if let Some(layer_id) = self.active_layer_id {
-                    let shape_ids: Vec<uuid::Uuid> = self.selection.shape_instances().to_vec();
-                    let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                    if shape_ids.len() + clip_ids.len() >= 2 {
-                        let instance_id = uuid::Uuid::new_v4();
-                        let action = lightningbeam_core::actions::GroupAction::new(
-                            layer_id,
-                            self.playback_time,
-                            shape_ids,
-                            clip_ids,
-                            instance_id,
-                        );
-                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                            eprintln!("Failed to group: {}", e);
-                        } else {
-                            self.selection.clear();
-                            self.selection.add_clip_instance(instance_id);
+                    if self.selection.has_dcel_selection() {
+                        // TODO: DCEL group deferred to Phase 2 (extract subgraph)
+                    } else {
+                        let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
+                        if clip_ids.len() >= 2 {
+                            let instance_id = uuid::Uuid::new_v4();
+                            let action = lightningbeam_core::actions::GroupAction::new(
+                                layer_id,
+                                self.playback_time,
+                                Vec::new(),
+                                clip_ids,
+                                instance_id,
+                            );
+                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                eprintln!("Failed to group: {}", e);
+                            } else {
+                                self.selection.clear();
+                                self.selection.add_clip_instance(instance_id);
+                            }
                         }
                     }
+                    let _ = layer_id;
                 }
             }
             MenuAction::ConvertToMovieClip => {
                 if let Some(layer_id) = self.active_layer_id {
-                    let shape_ids: Vec<uuid::Uuid> = self.selection.shape_instances().to_vec();
-                    let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                    if shape_ids.len() + clip_ids.len() >= 1 {
-                        let instance_id = uuid::Uuid::new_v4();
-                        let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
-                            layer_id,
-                            self.playback_time,
-                            shape_ids,
-                            clip_ids,
-                            instance_id,
-                        );
-                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                            eprintln!("Failed to convert to movie clip: {}", e);
-                        } else {
-                            self.selection.clear();
-                            self.selection.add_clip_instance(instance_id);
+                    if self.selection.has_dcel_selection() {
+                        // TODO: DCEL convert-to-movie-clip deferred to Phase 2
+                    } else {
+                        let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
+                        if clip_ids.len() >= 1 {
+                            let instance_id = uuid::Uuid::new_v4();
+                            let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
+                                layer_id,
+                                self.playback_time,
+                                Vec::new(),
+                                clip_ids,
+                                instance_id,
+                            );
+                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                eprintln!("Failed to convert to movie clip: {}", e);
+                            } else {
+                                self.selection.clear();
+                                self.selection.add_clip_instance(instance_id);
+                            }
                         }
                     }
                 }
@@ -2626,7 +2611,7 @@ impl EditorApp {
                 let mut test_clip = VectorClip::new(&clip_name, 400.0, 400.0, 5.0);
 
                 // Create a layer with some shapes
-                let mut layer = VectorLayer::new("Shapes");
+                let layer = VectorLayer::new("Shapes");
 
                 // Create a red circle shape
                 let circle_path = Circle::new((100.0, 100.0), 50.0).to_path(0.1);
@@ -2638,10 +2623,8 @@ impl EditorApp {
                 let mut rect_shape = Shape::new(rect_path);
                 rect_shape.fill_color = Some(ShapeColor::rgb(0, 0, 255));
 
-                // Add shapes to keyframe at time 0.0
-                let kf = layer.ensure_keyframe_at(0.0);
-                kf.shapes.push(circle_shape);
-                kf.shapes.push(rect_shape);
+                // TODO: DCEL - test shape creation not yet implemented
+                let _ = (circle_shape, rect_shape);
 
                 // Add the layer to the clip
                 test_clip.layers.add_root(AnyLayer::Vector(layer));
@@ -2664,14 +2647,11 @@ impl EditorApp {
                 if let Some(layer_id) = self.active_layer_id {
                     let document = self.action_executor.document();
                     // Determine which selected objects are shape instances vs clip instances
-                    let mut shape_ids = Vec::new();
+                    let _shape_ids: Vec<uuid::Uuid> = Vec::new();
                     let mut clip_ids = Vec::new();
                     if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-                        for &id in self.selection.shape_instances() {
-                            if vl.get_shape_in_keyframe(&id, self.playback_time).is_some() {
-                                shape_ids.push(id);
-                            }
-                        }
+                        // TODO: DCEL - shape instance lookup disabled during migration
+                        // (was: get_shape_in_keyframe to check which selected objects are shapes)
                         for &id in self.selection.clip_instances() {
                             if vl.clip_instances.iter().any(|ci| ci.id == id) {
                                 clip_ids.push(id);
@@ -2940,6 +2920,13 @@ impl EditorApp {
                 return;
             }
             eprintln!("📊 [APPLY] Step 4: Set audio project took {:.2}ms", step4_start.elapsed().as_secs_f64() * 1000.0);
+
+            // Sync BPM/time signature to metronome
+            let doc = self.action_executor.document();
+            controller.set_tempo(
+                doc.bpm as f32,
+                (doc.time_signature.numerator, doc.time_signature.denominator),
+            );
         }
 
         // Reset state and restore track mappings
@@ -3548,34 +3535,10 @@ impl EditorApp {
                 // Get image dimensions
                 let (width, height) = asset_info.dimensions.unwrap_or((100.0, 100.0));
 
-                // Get document center position
-                let doc = self.action_executor.document();
-                let center_x = doc.width / 2.0;
-                let center_y = doc.height / 2.0;
-
-                // Create a rectangle path at the origin (position handled by transform)
-                use kurbo::BezPath;
-                let mut path = BezPath::new();
-                path.move_to((0.0, 0.0));
-                path.line_to((width, 0.0));
-                path.line_to((width, height));
-                path.line_to((0.0, height));
-                path.close_path();
-
-                // Create shape with image fill (references the ImageAsset)
-                use lightningbeam_core::shape::Shape;
-                let shape = Shape::new(path).with_image_fill(asset_info.clip_id);
-
-                // Set position on shape directly
-                let shape = shape.with_position(center_x, center_y);
-
-                // Create and execute action
-                let action = lightningbeam_core::actions::AddShapeAction::new(
-                    layer_id,
-                    shape,
-                    self.playback_time,
-                );
-                let _ = self.action_executor.execute(Box::new(action));
+                // TODO: Image fills on DCEL faces are a separate feature.
+                // For now, just log a message.
+                let _ = (layer_id, width, height);
+                eprintln!("Image drop to canvas not yet supported with DCEL backend");
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)

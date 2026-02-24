@@ -130,6 +130,13 @@ enum ClipDragType {
     LoopExtendLeft,
 }
 
+/// How time is displayed in the ruler and header
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TimeDisplayFormat {
+    Seconds,
+    Measures,
+}
+
 pub struct TimelinePane {
     /// Horizontal zoom level (pixels per second)
     pixels_per_second: f32,
@@ -163,6 +170,9 @@ pub struct TimelinePane {
     /// Context menu state: Some((optional_clip_instance_id, position)) when a right-click menu is open
     /// clip_id is None when right-clicking on empty timeline space
     context_menu_clip: Option<(Option<uuid::Uuid>, egui::Pos2)>,
+
+    /// Whether to display time as seconds or measures
+    time_display_format: TimeDisplayFormat,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -231,6 +241,7 @@ impl TimelinePane {
             mousedown_pos: None,
             layer_control_clicked: false,
             context_menu_clip: None,
+            time_display_format: TimeDisplayFormat::Seconds,
         }
     }
 
@@ -548,72 +559,105 @@ impl TimelinePane {
     }
 
     /// Render the time ruler at the top
-    fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme) {
+    fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme,
+                    bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
         let painter = ui.painter();
 
         // Background
         let bg_style = theme.style(".timeline-background", ui.ctx());
         let bg_color = bg_style.background_color.unwrap_or(egui::Color32::from_rgb(34, 34, 34));
-        painter.rect_filled(
-            rect,
-            0.0,
-            bg_color,
-        );
+        painter.rect_filled(rect, 0.0, bg_color);
 
-        // Get text color from theme
         let text_style = theme.style(".text-primary", ui.ctx());
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
 
-        // Calculate interval for tick marks
-        let interval = self.calculate_ruler_interval();
+        match self.time_display_format {
+            TimeDisplayFormat::Seconds => {
+                let interval = self.calculate_ruler_interval();
+                let start_time = (self.viewport_start_time / interval).floor() * interval;
+                let end_time = self.x_to_time(rect.width());
 
-        // Draw tick marks and labels
-        let start_time = (self.viewport_start_time / interval).floor() * interval;
-        let end_time = self.x_to_time(rect.width());
-
-        let mut time = start_time;
-        while time <= end_time {
-            let x = self.time_to_x(time);
-
-            if x >= 0.0 && x <= rect.width() {
-                // Major tick mark
-                painter.line_segment(
-                    [
-                        rect.min + egui::vec2(x, rect.height() - 10.0),
-                        rect.min + egui::vec2(x, rect.height()),
-                    ],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
-                );
-
-                // Time label
-                let label = format!("{:.1}s", time);
-                painter.text(
-                    rect.min + egui::vec2(x + 2.0, 5.0),
-                    egui::Align2::LEFT_TOP,
-                    label,
-                    egui::FontId::proportional(12.0),
-                    text_color,
-                );
-            }
-
-            // Minor tick marks (subdivisions)
-            let minor_interval = interval / 5.0;
-            for i in 1..5 {
-                let minor_time = time + minor_interval * i as f64;
-                let minor_x = self.time_to_x(minor_time);
-
-                if minor_x >= 0.0 && minor_x <= rect.width() {
-                    painter.line_segment(
-                        [
-                            rect.min + egui::vec2(minor_x, rect.height() - 5.0),
-                            rect.min + egui::vec2(minor_x, rect.height()),
-                        ],
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
-                    );
+                let mut time = start_time;
+                while time <= end_time {
+                    let x = self.time_to_x(time);
+                    if x >= 0.0 && x <= rect.width() {
+                        painter.line_segment(
+                            [rect.min + egui::vec2(x, rect.height() - 10.0),
+                             rect.min + egui::vec2(x, rect.height())],
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                        );
+                        painter.text(
+                            rect.min + egui::vec2(x + 2.0, 5.0), egui::Align2::LEFT_TOP,
+                            format!("{:.1}s", time), egui::FontId::proportional(12.0), text_color,
+                        );
+                    }
+                    let minor_interval = interval / 5.0;
+                    for i in 1..5 {
+                        let minor_x = self.time_to_x(time + minor_interval * i as f64);
+                        if minor_x >= 0.0 && minor_x <= rect.width() {
+                            painter.line_segment(
+                                [rect.min + egui::vec2(minor_x, rect.height() - 5.0),
+                                 rect.min + egui::vec2(minor_x, rect.height())],
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
+                            );
+                        }
+                    }
+                    time += interval;
                 }
             }
+            TimeDisplayFormat::Measures => {
+                let beats_per_second = bpm / 60.0;
+                let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
+                let bpm_count = time_sig.numerator;
+                let px_per_beat = beat_dur as f32 * self.pixels_per_second;
 
-            time += interval;
+                let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
+                let end_beat = (self.x_to_time(rect.width()) * beats_per_second).ceil() as i64;
+
+                // Adaptive: how often to label measures
+                let measure_px = px_per_beat * bpm_count as f32;
+                let label_every = if measure_px > 60.0 { 1u32 } else if measure_px > 20.0 { 4 } else { 16 };
+
+                for beat_idx in start_beat..=end_beat {
+                    if beat_idx < 0 { continue; }
+                    let x = self.time_to_x(beat_idx as f64 / beats_per_second);
+                    if x < 0.0 || x > rect.width() { continue; }
+
+                    let beat_in_measure = (beat_idx as u32) % bpm_count;
+                    let measure = (beat_idx as u32) / bpm_count + 1;
+                    let is_measure_boundary = beat_in_measure == 0;
+
+                    // Tick height, stroke width, and brightness based on beat importance
+                    let (tick_h, stroke_w, gray) = if is_measure_boundary {
+                        (12.0, 2.0, 140u8)
+                    } else if beat_in_measure % 2 == 0 {
+                        (8.0, 1.0, 80)
+                    } else {
+                        (5.0, 1.0, 50)
+                    };
+
+                    painter.line_segment(
+                        [rect.min + egui::vec2(x, rect.height() - tick_h),
+                         rect.min + egui::vec2(x, rect.height())],
+                        egui::Stroke::new(stroke_w, egui::Color32::from_gray(gray)),
+                    );
+
+                    // Labels: measure numbers at boundaries, beat numbers when zoomed in
+                    if is_measure_boundary && (label_every == 1 || measure % label_every == 1) {
+                        painter.text(
+                            rect.min + egui::vec2(x + 3.0, 3.0), egui::Align2::LEFT_TOP,
+                            format!("{}", measure), egui::FontId::proportional(12.0), text_color,
+                        );
+                    } else if !is_measure_boundary && px_per_beat > 40.0 {
+                        let alpha = if beat_in_measure % 2 == 0 { 0.5 } else if px_per_beat > 80.0 { 0.25 } else { continue };
+                        painter.text(
+                            rect.min + egui::vec2(x + 2.0, 5.0), egui::Align2::LEFT_TOP,
+                            format!("{}.{}", measure, beat_in_measure + 1),
+                            egui::FontId::proportional(10.0), text_color.gamma_multiply(alpha),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1104,25 +1148,42 @@ impl TimelinePane {
             painter.rect_filled(layer_rect, 0.0, bg_color);
 
             // Grid lines matching ruler
-            let interval = self.calculate_ruler_interval();
-            let start_time = (self.viewport_start_time / interval).floor() * interval;
-            let end_time = self.x_to_time(rect.width());
-
-            let mut time = start_time;
-            while time <= end_time {
-                let x = self.time_to_x(time);
-
-                if x >= 0.0 && x <= rect.width() {
-                    painter.line_segment(
-                        [
-                            egui::pos2(rect.min.x + x, y),
-                            egui::pos2(rect.min.x + x, y + LAYER_HEIGHT),
-                        ],
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(30)),
-                    );
+            match self.time_display_format {
+                TimeDisplayFormat::Seconds => {
+                    let interval = self.calculate_ruler_interval();
+                    let start_time = (self.viewport_start_time / interval).floor() * interval;
+                    let end_time = self.x_to_time(rect.width());
+                    let mut time = start_time;
+                    while time <= end_time {
+                        let x = self.time_to_x(time);
+                        if x >= 0.0 && x <= rect.width() {
+                            painter.line_segment(
+                                [egui::pos2(rect.min.x + x, y),
+                                 egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(30)),
+                            );
+                        }
+                        time += interval;
+                    }
                 }
-
-                time += interval;
+                TimeDisplayFormat::Measures => {
+                    let beats_per_second = document.bpm / 60.0;
+                    let bpm_count = document.time_signature.numerator;
+                    let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
+                    let end_beat = (self.x_to_time(rect.width()) * beats_per_second).ceil() as i64;
+                    for beat_idx in start_beat..=end_beat {
+                        if beat_idx < 0 { continue; }
+                        let x = self.time_to_x(beat_idx as f64 / beats_per_second);
+                        if x < 0.0 || x > rect.width() { continue; }
+                        let is_measure_boundary = (beat_idx as u32) % bpm_count == 0;
+                        let gray = if is_measure_boundary { 45 } else { 25 };
+                        painter.line_segment(
+                            [egui::pos2(rect.min.x + x, y),
+                             egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
+                            egui::Stroke::new(if is_measure_boundary { 1.5 } else { 1.0 }, egui::Color32::from_gray(gray)),
+                        );
+                    }
+                }
             }
 
             // Draw clip instances for this layer
@@ -2647,13 +2708,95 @@ impl PaneRenderer for TimelinePane {
         let text_style = shared.theme.style(".text-primary", ui.ctx());
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
 
-        // Time display
-        ui.colored_label(text_color, format!("Time: {:.2}s / {:.2}s", *shared.playback_time, self.duration));
+        // Time display (format-dependent)
+        {
+            let (bpm, time_sig_num, time_sig_den) = {
+                let doc = shared.action_executor.document();
+                (doc.bpm, doc.time_signature.numerator, doc.time_signature.denominator)
+            };
 
-        ui.separator();
+            match self.time_display_format {
+                TimeDisplayFormat::Seconds => {
+                    ui.colored_label(text_color, format!("Time: {:.2}s / {:.2}s", *shared.playback_time, self.duration));
+                }
+                TimeDisplayFormat::Measures => {
+                    let time_sig = lightningbeam_core::document::TimeSignature { numerator: time_sig_num, denominator: time_sig_den };
+                    let pos = lightningbeam_core::beat_time::time_to_measure(
+                        *shared.playback_time, bpm, &time_sig,
+                    );
+                    ui.colored_label(text_color, format!(
+                        "BAR: {}.{}  |  BPM: {:.0}  |  {}/{}",
+                        pos.measure, pos.beat, bpm,
+                        time_sig_num, time_sig_den,
+                    ));
+                }
+            }
 
-        // Zoom display
-        ui.colored_label(text_color, format!("Zoom: {:.0}px/s", self.pixels_per_second));
+            ui.separator();
+
+            // Zoom display
+            ui.colored_label(text_color, format!("Zoom: {:.0}px/s", self.pixels_per_second));
+
+            ui.separator();
+
+            // Time display format toggle
+            egui::ComboBox::from_id_salt("time_format")
+                .selected_text(match self.time_display_format {
+                    TimeDisplayFormat::Seconds => "Seconds",
+                    TimeDisplayFormat::Measures => "Measures",
+                })
+                .width(80.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Seconds, "Seconds");
+                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Measures, "Measures");
+                });
+
+            ui.separator();
+
+            // BPM control
+            let mut bpm_val = bpm;
+            ui.label("BPM:");
+            let bpm_response = ui.add(egui::DragValue::new(&mut bpm_val)
+                .range(20.0..=300.0)
+                .speed(0.5)
+                .fixed_decimals(1));
+            if bpm_response.changed() {
+                shared.action_executor.document_mut().bpm = bpm_val;
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.set_tempo(bpm_val as f32, (time_sig_num, time_sig_den));
+                }
+            }
+
+            ui.separator();
+
+            // Time signature selector
+            let time_sig_presets: [(u32, u32); 8] = [
+                (2, 4), (3, 4), (4, 4), (5, 4),
+                (6, 8), (7, 8), (9, 8), (12, 8),
+            ];
+            let current_ts_label = format!("{}/{}", time_sig_num, time_sig_den);
+            egui::ComboBox::from_id_salt("time_sig")
+                .selected_text(&current_ts_label)
+                .width(60.0)
+                .show_ui(ui, |ui| {
+                    for (num, den) in &time_sig_presets {
+                        let label = format!("{}/{}", num, den);
+                        if ui.selectable_label(
+                            time_sig_num == *num && time_sig_den == *den,
+                            &label,
+                        ).clicked() {
+                            let doc = shared.action_executor.document_mut();
+                            doc.time_signature.numerator = *num;
+                            doc.time_signature.denominator = *den;
+                            if let Some(controller_arc) = shared.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                controller.set_tempo(doc.bpm as f32, (*num, *den));
+                            }
+                        }
+                    }
+                });
+        }
 
         true
     }
@@ -2750,7 +2893,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        self.render_ruler(ui, ruler_rect, shared.theme);
+        self.render_ruler(ui, ruler_rect, shared.theme, document.bpm, &document.time_signature);
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));

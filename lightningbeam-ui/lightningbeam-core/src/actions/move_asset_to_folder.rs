@@ -247,7 +247,7 @@ mod tests {
         let folder2_id = folder2_action.created_folder_id().unwrap();
 
         // Create a clip in folder 1
-        let mut clip = crate::clip::AudioClip::new_sampled("Test Audio", 5.0, 0);
+        let mut clip = crate::clip::AudioClip::new_sampled("Test Audio", 0, 5.0);
         clip.folder_id = Some(folder1_id);
         let clip_id = clip.id;
         document.audio_clips.insert(clip_id, clip);

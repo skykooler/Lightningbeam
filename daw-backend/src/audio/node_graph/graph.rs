@@ -96,6 +96,11 @@ pub struct AudioGraph {
     /// Current playback time (for automation nodes)
     playback_time: f64,
 
+    /// Project tempo (synced from Engine via SetTempo)
+    bpm: f32,
+    /// Beats per bar (time signature numerator)
+    beats_per_bar: u32,
+
     /// Cached topological sort order (invalidated on graph mutation)
     topo_cache: Option<Vec<NodeIndex>>,
 
@@ -119,9 +124,17 @@ impl AudioGraph {
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
             node_positions: std::collections::HashMap::new(),
             playback_time: 0.0,
+            bpm: 120.0,
+            beats_per_bar: 4,
             topo_cache: None,
             frontend_groups: Vec::new(),
         }
+    }
+
+    /// Set the project tempo and time signature for BeatNodes
+    pub fn set_tempo(&mut self, bpm: f32, beats_per_bar: u32) {
+        self.bpm = bpm;
+        self.beats_per_bar = beats_per_bar;
     }
 
     /// Add a node to the graph
@@ -452,6 +465,7 @@ impl AudioGraph {
                 auto_node.set_playback_time(playback_time);
             } else if let Some(beat_node) = node.node.as_any_mut().downcast_mut::<BeatNode>() {
                 beat_node.set_playback_time(playback_time);
+                beat_node.set_tempo(self.bpm, self.beats_per_bar);
             }
         }
 

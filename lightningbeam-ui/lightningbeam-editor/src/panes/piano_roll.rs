@@ -205,16 +205,23 @@ impl PianoRollPane {
 
     // ── Ruler interval calculation ───────────────────────────────────────
 
-    fn ruler_interval(&self) -> f64 {
+    fn ruler_interval(&self, bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) -> f64 {
         let min_pixel_gap = 80.0;
-        let min_seconds = min_pixel_gap / self.pixels_per_second;
-        let intervals = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
-        for &interval in &intervals {
-            if interval >= min_seconds as f64 {
+        let min_seconds = (min_pixel_gap / self.pixels_per_second) as f64;
+
+        // Use beat-aligned intervals
+        let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
+        let measure_dur = lightningbeam_core::beat_time::measure_duration(bpm, time_sig);
+        let beat_intervals = [
+            beat_dur / 4.0, beat_dur / 2.0, beat_dur, beat_dur * 2.0,
+            measure_dur, measure_dur * 2.0, measure_dur * 4.0,
+        ];
+        for &interval in &beat_intervals {
+            if interval >= min_seconds {
                 return interval;
             }
         }
-        60.0
+        measure_dur * 4.0
     }
 
     // ── MIDI mode rendering ──────────────────────────────────────────────
@@ -287,7 +294,11 @@ impl PianoRollPane {
 
         // Render grid (clipped to grid area)
         let grid_painter = ui.painter_at(grid_rect);
-        self.render_grid(&grid_painter, grid_rect);
+        let (grid_bpm, grid_time_sig) = {
+            let doc = shared.action_executor.document();
+            (doc.bpm, doc.time_signature.clone())
+        };
+        self.render_grid(&grid_painter, grid_rect, grid_bpm, &grid_time_sig);
 
         // Render clip boundaries and notes
         for &(midi_clip_id, timeline_start, trim_start, duration, _instance_id) in &clip_data {
@@ -419,7 +430,8 @@ impl PianoRollPane {
         );
     }
 
-    fn render_grid(&self, painter: &egui::Painter, grid_rect: Rect) {
+    fn render_grid(&self, painter: &egui::Painter, grid_rect: Rect,
+                   bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
         // Horizontal lines (note separators)
         for note in MIN_NOTE..=MAX_NOTE {
             let y = self.note_to_y(note, grid_rect);
@@ -445,8 +457,11 @@ impl PianoRollPane {
             );
         }
 
-        // Vertical lines (time grid)
-        let interval = self.ruler_interval();
+        // Vertical lines (beat-aligned time grid)
+        let interval = self.ruler_interval(bpm, time_sig);
+        let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
+        let measure_dur = lightningbeam_core::beat_time::measure_duration(bpm, time_sig);
+
         let start = (self.viewport_start_time / interval).floor() as i64;
         let end_time = self.viewport_start_time + (grid_rect.width() / self.pixels_per_second) as f64;
         let end = (end_time / interval).ceil() as i64;
@@ -458,26 +473,35 @@ impl PianoRollPane {
                 continue;
             }
 
-            let is_major = (i % 4 == 0) || interval >= 1.0;
-            let alpha = if is_major { 50 } else { 20 };
+            // Determine tick importance: measure boundary > beat > subdivision
+            let is_measure = (time / measure_dur).fract().abs() < 1e-9 || (time / measure_dur).fract() > 1.0 - 1e-9;
+            let is_beat = (time / beat_dur).fract().abs() < 1e-9 || (time / beat_dur).fract() > 1.0 - 1e-9;
+            let alpha = if is_measure { 60 } else if is_beat { 35 } else { 20 };
+
             painter.line_segment(
                 [pos2(x, grid_rect.min.y), pos2(x, grid_rect.max.y)],
                 Stroke::new(1.0, Color32::from_white_alpha(alpha)),
             );
 
-            // Time labels at major lines
-            if is_major && x > grid_rect.min.x + 20.0 {
-                let label = if time >= 60.0 {
-                    format!("{}:{:05.2}", (time / 60.0) as u32, time % 60.0)
-                } else {
-                    format!("{:.2}s", time)
-                };
+            // Labels at measure boundaries
+            if is_measure && x > grid_rect.min.x + 20.0 {
+                let pos = lightningbeam_core::beat_time::time_to_measure(time, bpm, time_sig);
                 painter.text(
                     pos2(x + 2.0, grid_rect.min.y + 2.0),
                     Align2::LEFT_TOP,
-                    label,
+                    format!("{}", pos.measure),
                     FontId::proportional(9.0),
                     Color32::from_white_alpha(80),
+                );
+            } else if is_beat && !is_measure && x > grid_rect.min.x + 20.0
+                && beat_dur as f32 * self.pixels_per_second > 40.0 {
+                let pos = lightningbeam_core::beat_time::time_to_measure(time, bpm, time_sig);
+                painter.text(
+                    pos2(x + 2.0, grid_rect.min.y + 2.0),
+                    Align2::LEFT_TOP,
+                    format!("{}.{}", pos.measure, pos.beat),
+                    FontId::proportional(9.0),
+                    Color32::from_white_alpha(50),
                 );
             }
         }
@@ -578,9 +602,10 @@ impl PianoRollPane {
         );
     }
 
-    fn render_dot_grid(&self, painter: &egui::Painter, grid_rect: Rect) {
+    fn render_dot_grid(&self, painter: &egui::Painter, grid_rect: Rect,
+                       bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
         // Collect visible time grid positions
-        let interval = self.ruler_interval();
+        let interval = self.ruler_interval(bpm, time_sig);
         let start = (self.viewport_start_time / interval).floor() as i64;
         let end_time = self.viewport_start_time + (grid_rect.width() / self.pixels_per_second) as f64;
         let end = (end_time / interval).ceil() as i64;
@@ -1414,7 +1439,13 @@ impl PianoRollPane {
 
         // Dot grid background (visible where the spectrogram doesn't draw)
         let grid_painter = ui.painter_at(view_rect);
-        self.render_dot_grid(&grid_painter, view_rect);
+        {
+            let (dot_bpm, dot_ts) = {
+                let doc = shared.action_executor.document();
+                (doc.bpm, doc.time_signature.clone())
+            };
+            self.render_dot_grid(&grid_painter, view_rect, dot_bpm, &dot_ts);
+        }
 
         // Find audio pool index for the active layer's clips
         let layer_id = match *shared.active_layer_id {

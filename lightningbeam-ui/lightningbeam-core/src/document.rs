@@ -70,6 +70,21 @@ impl Default for GraphicsObject {
     }
 }
 
+/// Musical time signature
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeSignature {
+    pub numerator: u32,   // beats per measure (e.g., 4)
+    pub denominator: u32, // beat unit (e.g., 4 = quarter note)
+}
+
+impl Default for TimeSignature {
+    fn default() -> Self {
+        Self { numerator: 4, denominator: 4 }
+    }
+}
+
+fn default_bpm() -> f64 { 120.0 }
+
 /// Asset category for folder tree access
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetCategory {
@@ -100,6 +115,14 @@ pub struct Document {
 
     /// Framerate (frames per second)
     pub framerate: f64,
+
+    /// Tempo in beats per minute
+    #[serde(default = "default_bpm")]
+    pub bpm: f64,
+
+    /// Time signature
+    #[serde(default)]
+    pub time_signature: TimeSignature,
 
     /// Duration in seconds
     pub duration: f64,
@@ -182,6 +205,8 @@ impl Default for Document {
             width: 1920.0,
             height: 1080.0,
             framerate: 60.0,
+            bpm: 120.0,
+            time_signature: TimeSignature::default(),
             duration: 10.0,
             root: GraphicsObject::default(),
             vector_clips: HashMap::new(),

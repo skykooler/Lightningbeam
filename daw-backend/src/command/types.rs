@@ -138,6 +138,8 @@ pub enum Command {
     // Metronome command
     /// Enable or disable the metronome click track
     SetMetronomeEnabled(bool),
+    /// Set project tempo and time signature (bpm, (numerator, denominator))
+    SetTempo(f32, (u32, u32)),
 
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)

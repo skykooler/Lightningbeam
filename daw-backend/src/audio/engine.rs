@@ -1136,6 +1136,11 @@ impl Engine {
                 self.metronome.set_enabled(enabled);
             }
 
+            Command::SetTempo(bpm, time_sig) => {
+                self.metronome.update_timing(bpm, time_sig);
+                self.project.set_tempo(bpm, time_sig.0);
+            }
+
             // Node graph commands
             Command::GraphAddNode(track_id, node_type, x, y) => {
                 eprintln!("[DEBUG] GraphAddNode received: track_id={}, node_type={}, x={}, y={}", track_id, node_type, x, y);
@@ -3195,6 +3200,11 @@ impl EngineController {
     /// Enable or disable the metronome click track
     pub fn set_metronome_enabled(&mut self, enabled: bool) {
         let _ = self.command_tx.push(Command::SetMetronomeEnabled(enabled));
+    }
+
+    /// Set project tempo (BPM) and time signature
+    pub fn set_tempo(&mut self, bpm: f32, time_signature: (u32, u32)) {
+        let _ = self.command_tx.push(Command::SetTempo(bpm, time_signature));
     }
 
     // Node graph operations

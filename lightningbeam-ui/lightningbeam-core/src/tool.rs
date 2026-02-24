@@ -116,22 +116,25 @@ pub enum ToolState {
         num_sides: u32,        // Number of sides (from properties, default 5)
     },
 
-    /// Editing a vertex (dragging it and connected curves)
+    /// Editing a vertex (dragging it and connected edges)
     EditingVertex {
-        shape_id: Uuid,                   // Which shape is being edited
-        vertex_index: usize,              // Which vertex in the vertices array
-        start_pos: Point,                 // Vertex position when drag started
-        start_mouse: Point,               // Mouse position when drag started
-        affected_curve_indices: Vec<usize>, // Which curves connect to this vertex
+        vertex_id: crate::dcel::VertexId,
+        connected_edges: Vec<crate::dcel::EdgeId>,  // edges to update when vertex moves
     },
 
     /// Editing a curve (reshaping with moldCurve algorithm)
     EditingCurve {
-        shape_id: Uuid,            // Which shape is being edited
-        curve_index: usize,        // Which curve in the curves array
-        original_curve: vello::kurbo::CubicBez, // The curve when drag started
-        start_mouse: Point,        // Mouse position when drag started
-        parameter_t: f64,          // Parameter where the drag started (0.0-1.0)
+        edge_id: crate::dcel::EdgeId,
+        original_curve: vello::kurbo::CubicBez,
+        start_mouse: Point,
+        parameter_t: f64,
+    },
+
+    /// Pending curve interaction: click selects edge, drag starts curve editing
+    PendingCurveInteraction {
+        edge_id: crate::dcel::EdgeId,
+        parameter_t: f64,
+        start_mouse: Point,
     },
 
     /// Drawing a region selection rectangle
@@ -147,11 +150,10 @@ pub enum ToolState {
 
     /// Editing a control point (BezierEdit tool only)
     EditingControlPoint {
-        shape_id: Uuid,            // Which shape is being edited
-        curve_index: usize,        // Which curve owns this control point
+        edge_id: crate::dcel::EdgeId,
         point_index: u8,           // 1 or 2 (p1 or p2 of the cubic bezier)
-        original_curve: vello::kurbo::CubicBez, // The curve when drag started
-        start_pos: Point,          // Control point position when drag started
+        original_curve: vello::kurbo::CubicBez,
+        start_pos: Point,
     },
 }
 

@@ -20,7 +20,7 @@ fn setup_test_document() -> (Document, Uuid, Uuid, Uuid) {
     let mut document = Document::new("Test Project");
 
     // Create a vector clip
-    let vector_clip = VectorClip::new("Test Clip", 10.0, 1920.0, 1080.0);
+    let vector_clip = VectorClip::new("Test Clip", 1920.0, 1080.0, 10.0);
     let clip_id = vector_clip.id;
     document.vector_clips.insert(clip_id, vector_clip);
 
@@ -126,7 +126,7 @@ fn test_transform_clip_instance_workflow() {
     let mut transforms = HashMap::new();
     transforms.insert(instance_id, (old_transform, new_transform));
 
-    let mut action = TransformClipInstancesAction::new(layer_id, transforms);
+    let mut action = TransformClipInstancesAction::new(layer_id, 0.0, transforms);
 
     // Execute
     action.execute(&mut document);
@@ -214,7 +214,7 @@ fn test_multiple_clip_instances_workflow() {
     let mut document = Document::new("Test Project");
 
     // Create a vector clip
-    let vector_clip = VectorClip::new("Test Clip", 10.0, 1920.0, 1080.0);
+    let vector_clip = VectorClip::new("Test Clip", 1920.0, 1080.0, 10.0);
     let clip_id = vector_clip.id;
     document.vector_clips.insert(clip_id, vector_clip);
 
@@ -294,7 +294,7 @@ fn test_clip_time_remapping() {
     let mut document = Document::new("Test Project");
 
     // Create a 10 second clip
-    let vector_clip = VectorClip::new("Test Clip", 10.0, 1920.0, 1080.0);
+    let vector_clip = VectorClip::new("Test Clip", 1920.0, 1080.0, 10.0);
     let clip_id = vector_clip.id;
     let clip_duration = vector_clip.duration;
     document.vector_clips.insert(clip_id, vector_clip);

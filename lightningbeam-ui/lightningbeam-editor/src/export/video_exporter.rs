@@ -747,7 +747,6 @@ pub fn render_frame_to_rgba_hdr(
         base_transform,
         image_cache,
         video_manager,
-        None, // No skipping during export
     );
 
     // Buffer specs for layer rendering
@@ -1133,7 +1132,6 @@ pub fn render_frame_to_gpu_rgba(
         base_transform,
         image_cache,
         video_manager,
-        None, // No skipping during export
     );
 
     // Buffer specs for layer rendering

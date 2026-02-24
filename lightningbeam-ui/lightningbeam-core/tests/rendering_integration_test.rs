@@ -80,7 +80,7 @@ fn test_render_with_transform() {
 
     // Render with zoom and pan
     let transform = Affine::translate((100.0, 50.0)) * Affine::scale(2.0);
-    render_document_with_transform(&document, &mut scene, transform, &mut image_cache, &video_manager, None);
+    render_document_with_transform(&document, &mut scene, transform, &mut image_cache, &video_manager);
 }
 
 #[test]

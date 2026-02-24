@@ -6,11 +6,8 @@
 /// - Shape properties (fill/stroke for selected shapes)
 /// - Document settings (when nothing is selected)
 
-use eframe::egui::{self, DragValue, Sense, Ui};
-use lightningbeam_core::actions::{
-    InstancePropertyChange, SetDocumentPropertiesAction, SetInstancePropertiesAction,
-    SetShapePropertiesAction,
-};
+use eframe::egui::{self, DragValue, Ui};
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction};
 use lightningbeam_core::layer::AnyLayer;
 use lightningbeam_core::shape::ShapeColor;
 use lightningbeam_core::tool::{SimplifyMode, Tool};
@@ -21,8 +18,6 @@ use uuid::Uuid;
 pub struct InfopanelPane {
     /// Whether the tool options section is expanded
     tool_section_open: bool,
-    /// Whether the transform section is expanded
-    transform_section_open: bool,
     /// Whether the shape properties section is expanded
     shape_section_open: bool,
 }
@@ -31,7 +26,6 @@ impl InfopanelPane {
     pub fn new() -> Self {
         Self {
             tool_section_open: true,
-            transform_section_open: true,
             shape_section_open: true,
         }
     }
@@ -41,24 +35,10 @@ impl InfopanelPane {
 struct SelectionInfo {
     /// True if nothing is selected
     is_empty: bool,
-    /// Number of selected shape instances
-    shape_count: usize,
-    /// Layer ID of selected shapes (assumes single layer selection for now)
+    /// Number of selected DCEL elements (edges + faces)
+    dcel_count: usize,
+    /// Layer ID of selected elements (assumes single layer selection for now)
     layer_id: Option<Uuid>,
-    /// Selected shape instance IDs
-    instance_ids: Vec<Uuid>,
-    /// Shape IDs referenced by selected instances
-    shape_ids: Vec<Uuid>,
-
-    // Transform values (None = mixed values across selection)
-    x: Option<f64>,
-    y: Option<f64>,
-    rotation: Option<f64>,
-    scale_x: Option<f64>,
-    scale_y: Option<f64>,
-    skew_x: Option<f64>,
-    skew_y: Option<f64>,
-    opacity: Option<f64>,
 
     // Shape property values (None = mixed)
     fill_color: Option<Option<ShapeColor>>,
@@ -70,18 +50,8 @@ impl Default for SelectionInfo {
     fn default() -> Self {
         Self {
             is_empty: true,
-            shape_count: 0,
+            dcel_count: 0,
             layer_id: None,
-            instance_ids: Vec::new(),
-            shape_ids: Vec::new(),
-            x: None,
-            y: None,
-            rotation: None,
-            scale_x: None,
-            scale_y: None,
-            skew_x: None,
-            skew_y: None,
-            opacity: None,
             fill_color: None,
             stroke_color: None,
             stroke_width: None,
@@ -94,17 +64,15 @@ impl InfopanelPane {
     fn gather_selection_info(&self, shared: &SharedPaneState) -> SelectionInfo {
         let mut info = SelectionInfo::default();
 
-        let selected_instances = shared.selection.shape_instances();
-        info.shape_count = selected_instances.len();
-        info.is_empty = info.shape_count == 0;
+        let edge_count = shared.selection.selected_edges().len();
+        let face_count = shared.selection.selected_faces().len();
+        info.dcel_count = edge_count + face_count;
+        info.is_empty = info.dcel_count == 0;
 
         if info.is_empty {
             return info;
         }
 
-        info.instance_ids = selected_instances.to_vec();
-
-        // Find the layer containing the selected instances
         let document = shared.action_executor.document();
         let active_layer_id = *shared.active_layer_id;
 
@@ -113,83 +81,54 @@ impl InfopanelPane {
 
             if let Some(layer) = document.get_layer(&layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
-                    // Gather values from all selected instances
-                    let mut first = true;
+                    if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                        // Gather stroke properties from selected edges
+                        let mut first_stroke_color: Option<Option<ShapeColor>> = None;
+                        let mut first_stroke_width: Option<f64> = None;
+                        let mut stroke_color_mixed = false;
+                        let mut stroke_width_mixed = false;
 
-                    for instance_id in &info.instance_ids {
-                        if let Some(shape) = vector_layer.get_shape_in_keyframe(instance_id, *shared.playback_time) {
-                            info.shape_ids.push(*instance_id);
+                        for &eid in shared.selection.selected_edges() {
+                            let edge = dcel.edge(eid);
+                            let sc = edge.stroke_color;
+                            let sw = edge.stroke_style.as_ref().map(|s| s.width);
 
-                            if first {
-                                // First shape - set initial values
-                                info.x = Some(shape.transform.x);
-                                info.y = Some(shape.transform.y);
-                                info.rotation = Some(shape.transform.rotation);
-                                info.scale_x = Some(shape.transform.scale_x);
-                                info.scale_y = Some(shape.transform.scale_y);
-                                info.skew_x = Some(shape.transform.skew_x);
-                                info.skew_y = Some(shape.transform.skew_y);
-                                info.opacity = Some(shape.opacity);
-
-                                // Get shape properties
-                                info.fill_color = Some(shape.fill_color);
-                                info.stroke_color = Some(shape.stroke_color);
-                                info.stroke_width = shape
-                                    .stroke_style
-                                    .as_ref()
-                                    .map(|s| Some(s.width))
-                                    .unwrap_or(Some(1.0));
-
-                                first = false;
-                            } else {
-                                // Check if values differ (set to None if mixed)
-                                if info.x != Some(shape.transform.x) {
-                                    info.x = None;
-                                }
-                                if info.y != Some(shape.transform.y) {
-                                    info.y = None;
-                                }
-                                if info.rotation != Some(shape.transform.rotation) {
-                                    info.rotation = None;
-                                }
-                                if info.scale_x != Some(shape.transform.scale_x) {
-                                    info.scale_x = None;
-                                }
-                                if info.scale_y != Some(shape.transform.scale_y) {
-                                    info.scale_y = None;
-                                }
-                                if info.skew_x != Some(shape.transform.skew_x) {
-                                    info.skew_x = None;
-                                }
-                                if info.skew_y != Some(shape.transform.skew_y) {
-                                    info.skew_y = None;
-                                }
-                                if info.opacity != Some(shape.opacity) {
-                                    info.opacity = None;
-                                }
-
-                                // Check shape properties
-                                // Compare fill colors - set to None if mixed
-                                if let Some(current_fill) = &info.fill_color {
-                                    if *current_fill != shape.fill_color {
-                                        info.fill_color = None;
-                                    }
-                                }
-                                // Compare stroke colors - set to None if mixed
-                                if let Some(current_stroke) = &info.stroke_color {
-                                    if *current_stroke != shape.stroke_color {
-                                        info.stroke_color = None;
-                                    }
-                                }
-                                let stroke_w = shape
-                                    .stroke_style
-                                    .as_ref()
-                                    .map(|s| s.width)
-                                    .unwrap_or(1.0);
-                                if info.stroke_width != Some(stroke_w) {
-                                    info.stroke_width = None;
-                                }
+                            match first_stroke_color {
+                                None => first_stroke_color = Some(sc),
+                                Some(prev) if prev != sc => stroke_color_mixed = true,
+                                _ => {}
                             }
+                            match (first_stroke_width, sw) {
+                                (None, _) => first_stroke_width = sw,
+                                (Some(prev), Some(cur)) if (prev - cur).abs() > 0.01 => stroke_width_mixed = true,
+                                _ => {}
+                            }
+                        }
+
+                        if !stroke_color_mixed {
+                            info.stroke_color = first_stroke_color;
+                        }
+                        if !stroke_width_mixed {
+                            info.stroke_width = first_stroke_width;
+                        }
+
+                        // Gather fill properties from selected faces
+                        let mut first_fill_color: Option<Option<ShapeColor>> = None;
+                        let mut fill_color_mixed = false;
+
+                        for &fid in shared.selection.selected_faces() {
+                            let face = dcel.face(fid);
+                            let fc = face.fill_color;
+
+                            match first_fill_color {
+                                None => first_fill_color = Some(fc),
+                                Some(prev) if prev != fc => fill_color_mixed = true,
+                                _ => {}
+                            }
+                        }
+
+                        if !fill_color_mixed {
+                            info.fill_color = first_fill_color;
                         }
                     }
                 }
@@ -337,207 +276,7 @@ impl InfopanelPane {
             });
     }
 
-    /// Render transform properties section
-    fn render_transform_section(
-        &mut self,
-        ui: &mut Ui,
-        path: &NodePath,
-        shared: &mut SharedPaneState,
-        info: &SelectionInfo,
-    ) {
-        egui::CollapsingHeader::new("Transform")
-            .id_salt(("transform", path))
-            .default_open(self.transform_section_open)
-            .show(ui, |ui| {
-                self.transform_section_open = true;
-                ui.add_space(4.0);
-
-                let layer_id = match info.layer_id {
-                    Some(id) => id,
-                    None => return,
-                };
-
-                // Position X
-                self.render_transform_field(
-                    ui,
-                    "X:",
-                    info.x,
-                    1.0,
-                    f64::NEG_INFINITY..=f64::INFINITY,
-                    |value| InstancePropertyChange::X(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                // Position Y
-                self.render_transform_field(
-                    ui,
-                    "Y:",
-                    info.y,
-                    1.0,
-                    f64::NEG_INFINITY..=f64::INFINITY,
-                    |value| InstancePropertyChange::Y(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                ui.add_space(4.0);
-
-                // Rotation
-                self.render_transform_field(
-                    ui,
-                    "Rotation:",
-                    info.rotation,
-                    1.0,
-                    -360.0..=360.0,
-                    |value| InstancePropertyChange::Rotation(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                ui.add_space(4.0);
-
-                // Scale X
-                self.render_transform_field(
-                    ui,
-                    "Scale X:",
-                    info.scale_x,
-                    0.01,
-                    0.01..=100.0,
-                    |value| InstancePropertyChange::ScaleX(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                // Scale Y
-                self.render_transform_field(
-                    ui,
-                    "Scale Y:",
-                    info.scale_y,
-                    0.01,
-                    0.01..=100.0,
-                    |value| InstancePropertyChange::ScaleY(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                ui.add_space(4.0);
-
-                // Skew X
-                self.render_transform_field(
-                    ui,
-                    "Skew X:",
-                    info.skew_x,
-                    1.0,
-                    -89.0..=89.0,
-                    |value| InstancePropertyChange::SkewX(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                // Skew Y
-                self.render_transform_field(
-                    ui,
-                    "Skew Y:",
-                    info.skew_y,
-                    1.0,
-                    -89.0..=89.0,
-                    |value| InstancePropertyChange::SkewY(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                ui.add_space(4.0);
-
-                // Opacity
-                self.render_transform_field(
-                    ui,
-                    "Opacity:",
-                    info.opacity,
-                    0.01,
-                    0.0..=1.0,
-                    |value| InstancePropertyChange::Opacity(value),
-                    layer_id,
-                    &info.instance_ids,
-                    shared,
-                );
-
-                ui.add_space(4.0);
-            });
-    }
-
-    /// Render a single transform property field with drag-to-adjust
-    fn render_transform_field<F>(
-        &self,
-        ui: &mut Ui,
-        label: &str,
-        value: Option<f64>,
-        speed: f64,
-        range: std::ops::RangeInclusive<f64>,
-        make_change: F,
-        layer_id: Uuid,
-        instance_ids: &[Uuid],
-        shared: &mut SharedPaneState,
-    ) where
-        F: Fn(f64) -> InstancePropertyChange,
-    {
-        ui.horizontal(|ui| {
-            // Label with drag sense for drag-to-adjust
-            let label_response = ui.add(egui::Label::new(label).sense(Sense::drag()));
-
-            match value {
-                Some(mut v) => {
-                    // Handle drag on label
-                    if label_response.dragged() {
-                        let delta = label_response.drag_delta().x as f64 * speed;
-                        v = (v + delta).clamp(*range.start(), *range.end());
-
-                        // Create action for each selected instance
-                        for instance_id in instance_ids {
-                            let action = SetInstancePropertiesAction::new(
-                                layer_id,
-                                *shared.playback_time,
-                                *instance_id,
-                                make_change(v),
-                            );
-                            shared.pending_actions.push(Box::new(action));
-                        }
-                    }
-
-                    // DragValue widget
-                    let response = ui.add(
-                        DragValue::new(&mut v)
-                            .speed(speed)
-                            .range(range.clone()),
-                    );
-
-                    if response.changed() {
-                        // Create action for each selected instance
-                        for instance_id in instance_ids {
-                            let action = SetInstancePropertiesAction::new(
-                                layer_id,
-                                *shared.playback_time,
-                                *instance_id,
-                                make_change(v),
-                            );
-                            shared.pending_actions.push(Box::new(action));
-                        }
-                    }
-                }
-                None => {
-                    // Mixed values - show placeholder
-                    ui.label("--");
-                }
-            }
-        });
-    }
+    // Transform section: deferred to Phase 2 (DCEL elements don't have instance transforms)
 
     /// Render shape properties section (fill/stroke)
     fn render_shape_section(
@@ -547,17 +286,21 @@ impl InfopanelPane {
         shared: &mut SharedPaneState,
         info: &SelectionInfo,
     ) {
+        // Clone IDs and values we need before borrowing shared mutably
+        let layer_id = match info.layer_id {
+            Some(id) => id,
+            None => return,
+        };
+        let time = *shared.playback_time;
+        let face_ids: Vec<_> = shared.selection.selected_faces().iter().copied().collect();
+        let edge_ids: Vec<_> = shared.selection.selected_edges().iter().copied().collect();
+
         egui::CollapsingHeader::new("Shape")
             .id_salt(("shape", path))
             .default_open(self.shape_section_open)
             .show(ui, |ui| {
                 self.shape_section_open = true;
                 ui.add_space(4.0);
-
-                let layer_id = match info.layer_id {
-                    Some(id) => id,
-                    None => return,
-                };
 
                 // Fill color
                 ui.horizontal(|ui| {
@@ -567,41 +310,25 @@ impl InfopanelPane {
                             let mut egui_color = egui::Color32::from_rgba_unmultiplied(
                                 color.r, color.g, color.b, color.a,
                             );
-
-                            if ui.color_edit_button_srgba(&mut egui_color).changed() {
-                                let new_color = Some(ShapeColor::new(
-                                    egui_color.r(),
-                                    egui_color.g(),
-                                    egui_color.b(),
-                                    egui_color.a(),
-                                ));
-
-                                // Create action for each selected shape
-                                for shape_id in &info.shape_ids {
-                                    let action = SetShapePropertiesAction::set_fill_color(
-                                        layer_id,
-                                        *shape_id,
-                                        *shared.playback_time,
-                                        new_color,
-                                    );
-                                    shared.pending_actions.push(Box::new(action));
-                                }
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            ).changed() {
+                                let new_color = ShapeColor {
+                                    r: egui_color.r(),
+                                    g: egui_color.g(),
+                                    b: egui_color.b(),
+                                    a: egui_color.a(),
+                                };
+                                let action = SetShapePropertiesAction::set_fill_color(
+                                    layer_id, time, face_ids.clone(), Some(new_color),
+                                );
+                                shared.pending_actions.push(Box::new(action));
                             }
                         }
                         Some(None) => {
-                            if ui.button("Add Fill").clicked() {
-                                // Add default black fill
-                                let default_fill = Some(ShapeColor::rgb(0, 0, 0));
-                                for shape_id in &info.shape_ids {
-                                    let action = SetShapePropertiesAction::set_fill_color(
-                                        layer_id,
-                                        *shape_id,
-                                        *shared.playback_time,
-                                        default_fill,
-                                    );
-                                    shared.pending_actions.push(Box::new(action));
-                                }
-                            }
+                            ui.label("None");
                         }
                         None => {
                             ui.label("--");
@@ -617,41 +344,25 @@ impl InfopanelPane {
                             let mut egui_color = egui::Color32::from_rgba_unmultiplied(
                                 color.r, color.g, color.b, color.a,
                             );
-
-                            if ui.color_edit_button_srgba(&mut egui_color).changed() {
-                                let new_color = Some(ShapeColor::new(
-                                    egui_color.r(),
-                                    egui_color.g(),
-                                    egui_color.b(),
-                                    egui_color.a(),
-                                ));
-
-                                // Create action for each selected shape
-                                for shape_id in &info.shape_ids {
-                                    let action = SetShapePropertiesAction::set_stroke_color(
-                                        layer_id,
-                                        *shape_id,
-                                        *shared.playback_time,
-                                        new_color,
-                                    );
-                                    shared.pending_actions.push(Box::new(action));
-                                }
+                            if egui::color_picker::color_edit_button_srgba(
+                                ui,
+                                &mut egui_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            ).changed() {
+                                let new_color = ShapeColor {
+                                    r: egui_color.r(),
+                                    g: egui_color.g(),
+                                    b: egui_color.b(),
+                                    a: egui_color.a(),
+                                };
+                                let action = SetShapePropertiesAction::set_stroke_color(
+                                    layer_id, time, edge_ids.clone(), Some(new_color),
+                                );
+                                shared.pending_actions.push(Box::new(action));
                             }
                         }
                         Some(None) => {
-                            if ui.button("Add Stroke").clicked() {
-                                // Add default black stroke
-                                let default_stroke = Some(ShapeColor::rgb(0, 0, 0));
-                                for shape_id in &info.shape_ids {
-                                    let action = SetShapePropertiesAction::set_stroke_color(
-                                        layer_id,
-                                        *shape_id,
-                                        *shared.playback_time,
-                                        default_stroke,
-                                    );
-                                    shared.pending_actions.push(Box::new(action));
-                                }
-                            }
+                            ui.label("None");
                         }
                         None => {
                             ui.label("--");
@@ -664,22 +375,15 @@ impl InfopanelPane {
                     ui.label("Stroke Width:");
                     match info.stroke_width {
                         Some(mut width) => {
-                            let response = ui.add(
+                            if ui.add(
                                 DragValue::new(&mut width)
                                     .speed(0.1)
                                     .range(0.1..=100.0),
-                            );
-
-                            if response.changed() {
-                                for shape_id in &info.shape_ids {
-                                    let action = SetShapePropertiesAction::set_stroke_width(
-                                        layer_id,
-                                        *shape_id,
-                                        *shared.playback_time,
-                                        width,
-                                    );
-                                    shared.pending_actions.push(Box::new(action));
-                                }
+                            ).changed() {
+                                let action = SetShapePropertiesAction::set_stroke_width(
+                                    layer_id, time, edge_ids.clone(), width,
+                                );
+                                shared.pending_actions.push(Box::new(action));
                             }
                         }
                         None => {
@@ -812,13 +516,8 @@ impl PaneRenderer for InfopanelPane {
                 // 2. Gather selection info
                 let info = self.gather_selection_info(shared);
 
-                // 3. Transform section (if shapes selected)
-                if info.shape_count > 0 {
-                    self.render_transform_section(ui, path, shared, &info);
-                }
-
-                // 4. Shape properties section (if shapes selected)
-                if info.shape_count > 0 {
+                // 3. Shape properties section (if DCEL elements selected)
+                if info.dcel_count > 0 {
                     self.render_shape_section(ui, path, shared, &info);
                 }
 
@@ -828,14 +527,14 @@ impl PaneRenderer for InfopanelPane {
                 }
 
                 // Show selection count at bottom
-                if info.shape_count > 0 {
+                if info.dcel_count > 0 {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
                     ui.label(format!(
                         "{} object{} selected",
-                        info.shape_count,
-                        if info.shape_count == 1 { "" } else { "s" }
+                        info.dcel_count,
+                        if info.dcel_count == 1 { "" } else { "s" }
                     ));
                 }
             });

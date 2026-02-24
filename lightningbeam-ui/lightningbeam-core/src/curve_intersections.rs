@@ -74,8 +74,9 @@ fn find_intersections_recursive(
     // Maximum recursion depth
     const MAX_DEPTH: usize = 20;
 
-    // Minimum parameter range (if smaller, we've found an intersection)
-    const MIN_RANGE: f64 = 0.001;
+    // Pixel-space convergence threshold: stop subdividing when both
+    // subsegments span less than this many pixels.
+    const PIXEL_TOL: f64 = 0.25;
 
     // Get bounding boxes of current subsegments
     let bbox1 = curve1.bounding_box();
@@ -90,16 +91,76 @@ fn find_intersections_recursive(
         return;
     }
 
-    // If we've recursed deep enough or ranges are small enough, record intersection
-    if depth >= MAX_DEPTH ||
-       ((t1_end - t1_start) < MIN_RANGE && (t2_end - t2_start) < MIN_RANGE) {
-        let t1 = (t1_start + t1_end) / 2.0;
-        let t2 = (t2_start + t2_end) / 2.0;
+    // Evaluate subsegment endpoints for convergence check and line-line solve
+    let a0 = orig_curve1.eval(t1_start);
+    let a1 = orig_curve1.eval(t1_end);
+    let b0 = orig_curve2.eval(t2_start);
+    let b1 = orig_curve2.eval(t2_end);
+
+    // Check convergence in pixel space: both subsegment spans must be
+    // below the tolerance. This ensures the linear approximation error
+    // is always well within the vertex snap threshold regardless of
+    // curve length.
+    let a_span = (a1 - a0).hypot();
+    let b_span = (b1 - b0).hypot();
+
+    if depth >= MAX_DEPTH || (a_span < PIXEL_TOL && b_span < PIXEL_TOL) {
+
+        let (t1, t2, point) = if let Some((s, u)) = line_line_intersect(a0, a1, b0, b1) {
+            let s = s.clamp(0.0, 1.0);
+            let u = u.clamp(0.0, 1.0);
+            let mut t1 = t1_start + s * (t1_end - t1_start);
+            let mut t2 = t2_start + u * (t2_end - t2_start);
+
+            // Newton refinement: converge t1, t2 so that
+            // curve1.eval(t1) == curve2.eval(t2) to sub-pixel accuracy.
+            // We solve F(t1,t2) = curve1(t1) - curve2(t2) = 0 via the
+            // Jacobian [d1, -d2] where d1/d2 are the curve tangents.
+            let t1_orig = t1;
+            let t2_orig = t2;
+            for _ in 0..8 {
+                let p1 = orig_curve1.eval(t1);
+                let p2 = orig_curve2.eval(t2);
+                let err = Point::new(p1.x - p2.x, p1.y - p2.y);
+                if err.x * err.x + err.y * err.y < 1e-6 {
+                    break;
+                }
+                // Tangent vectors (derivative of cubic bezier)
+                let d1 = cubic_deriv(orig_curve1, t1);
+                let d2 = cubic_deriv(orig_curve2, t2);
+                // Solve [d1.x, -d2.x; d1.y, -d2.y] * [dt1; dt2] = -[err.x; err.y]
+                let det = d1.x * (-d2.y) - d1.y * (-d2.x);
+                if det.abs() < 1e-12 {
+                    break; // tangents parallel, can't refine
+                }
+                let dt1 = (-d2.y * (-err.x) - (-d2.x) * (-err.y)) / det;
+                let dt2 = (d1.x * (-err.y) - d1.y * (-err.x)) / det;
+                t1 = (t1 + dt1).clamp(0.0, 1.0);
+                t2 = (t2 + dt2).clamp(0.0, 1.0);
+            }
+            // If Newton diverged far from the initial estimate, it may have
+            // jumped to a different crossing. Reject and fall back.
+            if (t1 - t1_orig).abs() > (t1_end - t1_start) * 2.0
+                || (t2 - t2_orig).abs() > (t2_end - t2_start) * 2.0
+            {
+                t1 = t1_orig;
+                t2 = t2_orig;
+            }
+
+            let p1 = orig_curve1.eval(t1);
+            let p2 = orig_curve2.eval(t2);
+            (t1, t2, Point::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5))
+        } else {
+            // Lines are parallel/degenerate — fall back to midpoint
+            let t1 = (t1_start + t1_end) / 2.0;
+            let t2 = (t2_start + t2_end) / 2.0;
+            (t1, t2, orig_curve1.eval(t1))
+        };
 
         intersections.push(Intersection {
             t1,
             t2: Some(t2),
-            point: orig_curve1.eval(t1),
+            point,
         });
         return;
     }
@@ -252,21 +313,100 @@ fn refine_self_intersection(curve: &CubicBez, mut t1: f64, mut t2: f64) -> (f64,
     (t1.clamp(0.0, 1.0), t2.clamp(0.0, 1.0))
 }
 
-/// Remove duplicate intersections within a tolerance
-fn dedup_intersections(intersections: &mut Vec<Intersection>, tolerance: f64) {
-    let mut i = 0;
-    while i < intersections.len() {
-        let mut j = i + 1;
-        while j < intersections.len() {
-            let dist = (intersections[i].point - intersections[j].point).hypot();
-            if dist < tolerance {
-                intersections.remove(j);
-            } else {
-                j += 1;
-            }
-        }
-        i += 1;
+/// Remove duplicate intersections by clustering on parameter proximity.
+///
+/// Raw hits from subdivision can produce chains of near-duplicates spaced
+/// just over the spatial tolerance (e.g. 4 hits at 1.02 px apart for a
+/// single crossing of shallow-angle curves). Pairwise spatial dedup fails
+/// on these chains. Instead, we sort by t1, cluster consecutive hits whose
+/// t1 values are within `param_tol`, and keep the median of each cluster.
+fn dedup_intersections(intersections: &mut Vec<Intersection>, _tolerance: f64) {
+    if intersections.is_empty() {
+        return;
     }
+
+    const PARAM_TOL: f64 = 0.05;
+
+    // Sort by t1 (primary) then t2 (secondary)
+    intersections.sort_by(|a, b| {
+        a.t1.partial_cmp(&b.t1)
+            .unwrap()
+            .then_with(|| {
+                let at2 = a.t2.unwrap_or(0.0);
+                let bt2 = b.t2.unwrap_or(0.0);
+                at2.partial_cmp(&bt2).unwrap()
+            })
+    });
+
+    // Cluster consecutive intersections that are close in both t1 and t2
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    let mut current_cluster = vec![0usize];
+
+    for i in 1..intersections.len() {
+        let prev = &intersections[*current_cluster.last().unwrap()];
+        let curr = &intersections[i];
+        let t1_close = (curr.t1 - prev.t1).abs() < PARAM_TOL;
+        let t2_close = match (curr.t2, prev.t2) {
+            (Some(a), Some(b)) => (a - b).abs() < PARAM_TOL,
+            _ => true,
+        };
+        if t1_close && t2_close {
+            current_cluster.push(i);
+        } else {
+            clusters.push(std::mem::take(&mut current_cluster));
+            current_cluster = vec![i];
+        }
+    }
+    clusters.push(current_cluster);
+
+    // Keep the median of each cluster
+    let mut result = Vec::with_capacity(clusters.len());
+    for cluster in &clusters {
+        let median_idx = cluster[cluster.len() / 2];
+        result.push(intersections[median_idx].clone());
+    }
+
+    *intersections = result;
+}
+
+/// Derivative (tangent vector) of a cubic Bezier at parameter t.
+///
+/// B'(t) = 3[(1-t)²(P1-P0) + 2(1-t)t(P2-P1) + t²(P3-P2)]
+fn cubic_deriv(c: &CubicBez, t: f64) -> Point {
+    let u = 1.0 - t;
+    let d0 = Point::new(c.p1.x - c.p0.x, c.p1.y - c.p0.y);
+    let d1 = Point::new(c.p2.x - c.p1.x, c.p2.y - c.p1.y);
+    let d2 = Point::new(c.p3.x - c.p2.x, c.p3.y - c.p2.y);
+    Point::new(
+        3.0 * (u * u * d0.x + 2.0 * u * t * d1.x + t * t * d2.x),
+        3.0 * (u * u * d0.y + 2.0 * u * t * d1.y + t * t * d2.y),
+    )
+}
+
+/// 2D line-line intersection.
+///
+/// Given line segment A (a0→a1) and line segment B (b0→b1),
+/// returns `Some((s, u))` where `s` is the parameter on A and
+/// `u` is the parameter on B at the intersection point.
+/// Returns `None` if the lines are parallel or degenerate.
+fn line_line_intersect(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<(f64, f64)> {
+    let dx_a = a1.x - a0.x;
+    let dy_a = a1.y - a0.y;
+    let dx_b = b1.x - b0.x;
+    let dy_b = b1.y - b0.y;
+
+    let denom = dx_a * dy_b - dy_a * dx_b;
+    if denom.abs() < 1e-12 {
+        return None; // parallel or degenerate
+    }
+
+    let dx_ab = b0.x - a0.x;
+    let dy_ab = b0.y - a0.y;
+
+    let s = (dx_ab * dy_b - dy_ab * dx_b) / denom;
+    let u = (dx_ab * dy_a - dy_ab * dx_a) / denom;
+
+    Some((s, u))
 }
 
 #[cfg(test)]
