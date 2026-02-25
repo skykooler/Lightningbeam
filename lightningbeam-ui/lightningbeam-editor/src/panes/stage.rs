@@ -6033,7 +6033,7 @@ impl StagePane {
         { self.replay_override = None; }
 
         // Delete/Backspace: remove selected DCEL elements
-        if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        if ui.input(|i| shared.keymap.action_pressed_with_backspace(crate::keymap::AppAction::StageDelete, i)) {
             if shared.selection.has_dcel_selection() {
                 if let Some(active_layer_id) = *shared.active_layer_id {
                     let time = *shared.playback_time;

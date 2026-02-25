@@ -1,15 +1,29 @@
 //! Preferences dialog UI
 //!
-//! Provides a user interface for configuring application preferences
+//! Provides a user interface for configuring application preferences,
+//! including a Keyboard Shortcuts tab with click-to-rebind support.
 
+use std::collections::HashMap;
 use eframe::egui;
 use crate::config::AppConfig;
+use crate::keymap::{self, AppAction, KeymapManager};
+use crate::menu::{MenuSystem, Shortcut, ShortcutKey};
 use crate::theme::{Theme, ThemeMode};
+
+/// Which tab is selected in the preferences dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreferencesTab {
+    General,
+    Shortcuts,
+}
 
 /// Preferences dialog state
 pub struct PreferencesDialog {
     /// Is the dialog open?
     pub open: bool,
+
+    /// Currently selected tab
+    tab: PreferencesTab,
 
     /// Working copy of preferences (allows cancel to discard changes)
     working_prefs: PreferencesState,
@@ -19,6 +33,16 @@ pub struct PreferencesDialog {
 
     /// Error message (if validation fails)
     error_message: Option<String>,
+
+    // --- Shortcuts tab state ---
+    /// Working copy of keybindings (for live editing before save)
+    working_keybindings: HashMap<AppAction, Option<Shortcut>>,
+
+    /// Which action is currently being rebound (waiting for key press)
+    rebinding: Option<AppAction>,
+
+    /// Search/filter text for shortcuts list
+    shortcut_filter: String,
 }
 
 /// Editable preferences state (working copy)
@@ -74,19 +98,24 @@ impl Default for PreferencesState {
 }
 
 /// Result returned when preferences are saved
-#[derive(Debug, Clone)]
 pub struct PreferencesSaveResult {
     /// Whether audio buffer size changed (requires restart)
     pub buffer_size_changed: bool,
+    /// New keymap manager if keybindings changed (caller must replace their keymap and call apply_keybindings)
+    pub new_keymap: Option<KeymapManager>,
 }
 
 impl Default for PreferencesDialog {
     fn default() -> Self {
         Self {
             open: false,
+            tab: PreferencesTab::General,
             working_prefs: PreferencesState::default(),
             original_buffer_size: 256,
             error_message: None,
+            working_keybindings: HashMap::new(),
+            rebinding: None,
+            shortcut_filter: String::new(),
         }
     }
 }
@@ -98,12 +127,16 @@ impl PreferencesDialog {
         self.working_prefs = PreferencesState::from((config, theme));
         self.original_buffer_size = config.audio_buffer_size;
         self.error_message = None;
+        self.working_keybindings = config.keybindings.effective_bindings();
+        self.rebinding = None;
+        self.shortcut_filter.clear();
     }
 
     /// Close the dialog
     pub fn close(&mut self) {
         self.open = false;
         self.error_message = None;
+        self.rebinding = None;
     }
 
     /// Render the preferences dialog
@@ -129,7 +162,7 @@ impl PreferencesDialog {
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ctx, |ui| {
-                ui.set_width(500.0);
+                ui.set_width(550.0);
 
                 // Error message
                 if let Some(error) = &self.error_message {
@@ -137,20 +170,34 @@ impl PreferencesDialog {
                     ui.add_space(8.0);
                 }
 
-                // Scrollable area for preferences sections
-                egui::ScrollArea::vertical()
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        self.render_general_section(ui);
-                        ui.add_space(8.0);
-                        self.render_audio_section(ui);
-                        ui.add_space(8.0);
-                        self.render_appearance_section(ui);
-                        ui.add_space(8.0);
-                        self.render_startup_section(ui);
-                        ui.add_space(8.0);
-                        self.render_advanced_section(ui);
-                    });
+                // Tab bar
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tab, PreferencesTab::General, "General");
+                    ui.selectable_value(&mut self.tab, PreferencesTab::Shortcuts, "Keyboard Shortcuts");
+                });
+                ui.separator();
+
+                // Tab content
+                match self.tab {
+                    PreferencesTab::General => {
+                        egui::ScrollArea::vertical()
+                            .max_height(400.0)
+                            .show(ui, |ui| {
+                                self.render_general_section(ui);
+                                ui.add_space(8.0);
+                                self.render_audio_section(ui);
+                                ui.add_space(8.0);
+                                self.render_appearance_section(ui);
+                                ui.add_space(8.0);
+                                self.render_startup_section(ui);
+                                ui.add_space(8.0);
+                                self.render_advanced_section(ui);
+                            });
+                    }
+                    PreferencesTab::Shortcuts => {
+                        self.render_shortcuts_tab(ui);
+                    }
+                }
 
                 ui.add_space(16.0);
 
@@ -185,6 +232,184 @@ impl PreferencesDialog {
         }
 
         None
+    }
+
+    fn render_shortcuts_tab(&mut self, ui: &mut egui::Ui) {
+        // Capture key events for rebinding BEFORE rendering the rest
+        if let Some(rebind_action) = self.rebinding {
+            // Intercept key presses for rebinding
+            let captured = ui.input(|i| {
+                for event in &i.events {
+                    if let egui::Event::Key { key, pressed: true, modifiers, .. } = event {
+                        // Escape clears the binding
+                        if *key == egui::Key::Escape && !modifiers.ctrl && !modifiers.shift && !modifiers.alt {
+                            return Some(None); // Clear binding
+                        }
+                        // Any other key: set as new binding
+                        if let Some(shortcut_key) = ShortcutKey::from_egui_key(*key) {
+                            return Some(Some(Shortcut::new(
+                                shortcut_key,
+                                modifiers.ctrl || modifiers.command,
+                                modifiers.shift,
+                                modifiers.alt,
+                            )));
+                        }
+                    }
+                }
+                None
+            });
+
+            if let Some(new_binding) = captured {
+                self.working_keybindings.insert(rebind_action, new_binding);
+                self.rebinding = None;
+            }
+        }
+
+        // Search/filter
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            ui.text_edit_singleline(&mut self.shortcut_filter);
+        });
+        ui.add_space(4.0);
+
+        // Conflict detection
+        let conflicts = self.detect_conflicts();
+        if !conflicts.is_empty() {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(255, 180, 50),
+                    format!("{} conflict(s) detected", conflicts.len()));
+            });
+            ui.add_space(4.0);
+        }
+
+        // Scrollable list of actions grouped by category
+        egui::ScrollArea::vertical()
+            .max_height(350.0)
+            .show(ui, |ui| {
+                let filter_lower = self.shortcut_filter.to_lowercase();
+
+                // Collect categories in display order
+                let category_order = [
+                    "File", "Edit", "Modify", "Layer", "Timeline", "View",
+                    "Help", "Window", "Tools", "Global", "Pane",
+                ];
+
+                for category in &category_order {
+                    let actions_in_category: Vec<AppAction> = AppAction::all().iter()
+                        .filter(|a| a.category() == *category)
+                        .filter(|a| {
+                            if filter_lower.is_empty() {
+                                true
+                            } else {
+                                a.display_name().to_lowercase().contains(&filter_lower)
+                                    || a.category().to_lowercase().contains(&filter_lower)
+                            }
+                        })
+                        .copied()
+                        .collect();
+
+                    if actions_in_category.is_empty() {
+                        continue;
+                    }
+
+                    egui::CollapsingHeader::new(*category)
+                        .default_open(!filter_lower.is_empty() || *category == "Tools" || *category == "Global")
+                        .show(ui, |ui| {
+                            for action in &actions_in_category {
+                                self.render_shortcut_row(ui, *action, &conflicts);
+                            }
+                        });
+                }
+            });
+    }
+
+    fn render_shortcut_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        action: AppAction,
+        conflicts: &HashMap<Shortcut, Vec<AppAction>>,
+    ) {
+        let binding = self.working_keybindings.get(&action).copied().flatten();
+        let is_rebinding = self.rebinding == Some(action);
+        let has_conflict = binding
+            .as_ref()
+            .and_then(|s| conflicts.get(s))
+            .map(|actions| actions.len() > 1)
+            .unwrap_or(false);
+
+        ui.horizontal(|ui| {
+            // Action name (fixed width)
+            ui.add_sized([200.0, 20.0], egui::Label::new(action.display_name()));
+
+            // Binding button (click to rebind)
+            let button_text = if is_rebinding {
+                "Press a key...".to_string()
+            } else if let Some(s) = &binding {
+                MenuSystem::format_shortcut(s)
+            } else {
+                "None".to_string()
+            };
+
+            let button_color = if is_rebinding {
+                egui::Color32::from_rgb(100, 150, 255)
+            } else if has_conflict {
+                egui::Color32::from_rgb(255, 180, 50)
+            } else {
+                ui.visuals().widgets.inactive.text_color()
+            };
+
+            let response = ui.add_sized(
+                [140.0, 20.0],
+                egui::Button::new(egui::RichText::new(&button_text).color(button_color)),
+            );
+
+            if response.clicked() && !is_rebinding {
+                self.rebinding = Some(action);
+            }
+
+            // Show conflict tooltip
+            if has_conflict {
+                if let Some(s) = &binding {
+                    if let Some(conflicting) = conflicts.get(s) {
+                        let others: Vec<&str> = conflicting.iter()
+                            .filter(|a| **a != action)
+                            .map(|a| a.display_name())
+                            .collect();
+                        response.on_hover_text(format!("Conflicts with: {}", others.join(", ")));
+                    }
+                }
+            }
+
+            // Clear button
+            if ui.small_button("x").clicked() {
+                self.working_keybindings.insert(action, None);
+                if self.rebinding == Some(action) {
+                    self.rebinding = None;
+                }
+            }
+        });
+    }
+
+    /// Detect all shortcut conflicts (shortcut -> list of actions sharing it).
+    /// Only actions within the same conflict scope can conflict — pane-local actions
+    /// are isolated to their pane and never conflict with each other or global actions.
+    fn detect_conflicts(&self) -> HashMap<Shortcut, Vec<AppAction>> {
+        // Group by (shortcut, conflict_scope)
+        let mut by_scope: HashMap<(&str, Shortcut), Vec<AppAction>> = HashMap::new();
+        for (&action, &shortcut) in &self.working_keybindings {
+            if let Some(s) = shortcut {
+                by_scope.entry((action.conflict_scope(), s)).or_default().push(action);
+            }
+        }
+
+        // Flatten into shortcut -> conflicting actions (only where there are actual conflicts)
+        let mut result: HashMap<Shortcut, Vec<AppAction>> = HashMap::new();
+        for ((_, shortcut), actions) in by_scope {
+            if actions.len() > 1 {
+                result.entry(shortcut).or_default().extend(actions);
+            }
+        }
+        result
     }
 
     fn render_general_section(&mut self, ui: &mut egui::Ui) {
@@ -284,7 +509,7 @@ impl PreferencesDialog {
                         });
                 });
 
-                ui.label("⚠ Requires app restart to take effect");
+                ui.label("Requires app restart to take effect");
             });
     }
 
@@ -347,6 +572,8 @@ impl PreferencesDialog {
 
     fn reset_to_defaults(&mut self) {
         self.working_prefs = PreferencesState::default();
+        self.working_keybindings = keymap::all_defaults();
+        self.rebinding = None;
         self.error_message = None;
     }
 
@@ -378,6 +605,18 @@ impl PreferencesDialog {
         // Check if buffer size changed
         let buffer_size_changed = self.working_prefs.audio_buffer_size != self.original_buffer_size;
 
+        // Build new keymap from working keybindings to compute sparse overrides
+        let defaults = keymap::all_defaults();
+        let mut overrides = HashMap::new();
+        for (&action, &shortcut) in &self.working_keybindings {
+            let default = defaults.get(&action).copied().flatten();
+            if shortcut != default {
+                overrides.insert(action, shortcut);
+            }
+        }
+        let keybinding_config = keymap::KeybindingConfig { overrides };
+        let new_keymap = KeymapManager::new(&keybinding_config);
+
         // Apply changes to config
         config.bpm = self.working_prefs.bpm;
         config.framerate = self.working_prefs.framerate;
@@ -390,6 +629,7 @@ impl PreferencesDialog {
         config.debug = self.working_prefs.debug;
         config.waveform_stereo = self.working_prefs.waveform_stereo;
         config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
+        config.keybindings = keybinding_config;
 
         // Apply theme immediately
         theme.set_mode(self.working_prefs.theme_mode);
@@ -402,6 +642,7 @@ impl PreferencesDialog {
 
         Some(PreferencesSaveResult {
             buffer_size_changed,
+            new_keymap: Some(new_keymap),
         })
     }
 }

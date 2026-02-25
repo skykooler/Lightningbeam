@@ -725,7 +725,7 @@ impl PianoRollPane {
         }
 
         // Delete key
-        let delete_pressed = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        let delete_pressed = ui.input(|i| shared.keymap.action_pressed_with_backspace(crate::keymap::AppAction::PianoRollDelete, i));
         if delete_pressed && !self.selected_note_indices.is_empty() {
             if let Some(clip_id) = self.selected_clip_id {
                 self.delete_selected_notes(clip_id, shared, clip_data);

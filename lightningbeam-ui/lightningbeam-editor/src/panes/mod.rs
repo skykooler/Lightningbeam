@@ -246,6 +246,8 @@ pub struct SharedPaneState<'a> {
     /// Set by panes (e.g. piano roll) when they handle Ctrl+C/X/V internally,
     /// so main.rs skips its own clipboard handling for the current frame
     pub clipboard_consumed: &'a mut bool,
+    /// Remappable keyboard shortcut manager
+    pub keymap: &'a crate::keymap::KeymapManager,
     /// Test mode state for event recording (debug builds only)
     #[cfg(debug_assertions)]
     pub test_mode: &'a mut crate::test_mode::TestModeState,

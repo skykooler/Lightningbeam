@@ -27,6 +27,9 @@ mod cqt_gpu;
 mod config;
 use config::AppConfig;
 
+mod keymap;
+use keymap::KeymapManager;
+
 mod default_instrument;
 
 mod export;
@@ -820,6 +823,8 @@ struct EditorApp {
     current_file_path: Option<std::path::PathBuf>,
     /// Application configuration (recent files, etc.)
     config: AppConfig,
+    /// Remappable keyboard shortcut manager
+    keymap: KeymapManager,
 
     /// File operations worker command sender
     file_command_tx: std::sync::mpsc::Sender<FileCommand>,
@@ -1042,6 +1047,7 @@ impl EditorApp {
             waveform_gpu_dirty: HashSet::new(),
             recording_mirror_rx,
             current_file_path: None, // No file loaded initially
+            keymap: KeymapManager::new(&config.keybindings),
             config,
             file_command_tx,
             file_operation: None, // No file operation in progress initially
@@ -4571,6 +4577,14 @@ impl eframe::App for EditorApp {
             if result.buffer_size_changed {
                 println!("⚠️  Audio buffer size will be applied on next app restart");
             }
+            // Apply new keybindings if changed
+            if let Some(new_keymap) = result.new_keymap {
+                self.keymap = new_keymap;
+                // Update native menu accelerator labels
+                if let Some(menu_system) = &self.menu_system {
+                    menu_system.apply_keybindings(&self.keymap);
+                }
+            }
         }
 
         // Render video frames incrementally (if video export in progress)
@@ -4698,7 +4712,7 @@ impl eframe::App for EditorApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
-                if let Some(action) = menu_system.render_egui_menu_bar(ui, &recent_files) {
+                if let Some(action) = menu_system.render_egui_menu_bar(ui, &recent_files, Some(&self.keymap)) {
                     self.handle_menu_action(action);
                 }
             }
@@ -4859,6 +4873,7 @@ impl eframe::App for EditorApp {
                 region_select_mode: &mut self.region_select_mode,
                 pending_graph_loads: &self.pending_graph_loads,
                 clipboard_consumed: &mut clipboard_consumed,
+                keymap: &self.keymap,
                 #[cfg(debug_assertions)]
                 test_mode: &mut self.test_mode,
                 #[cfg(debug_assertions)]
@@ -5013,7 +5028,7 @@ impl eframe::App for EditorApp {
         let wants_keyboard = ctx.wants_keyboard_input();
 
         // Space bar toggles play/pause (only when no text input is focused)
-        if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        if !wants_keyboard && ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::TogglePlayPause, i)) {
             self.is_playing = !self.is_playing;
             if let Some(ref controller_arc) = self.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
@@ -5049,41 +5064,38 @@ impl eframe::App for EditorApp {
 
             // Check menu shortcuts that use modifiers (Cmd+S, etc.) - allow even when typing
             // But skip shortcuts without modifiers when keyboard input is claimed (e.g., virtual piano)
-            if let Some(action) = MenuSystem::check_shortcuts(i) {
+            if let Some(action) = MenuSystem::check_shortcuts(i, Some(&self.keymap)) {
                 // Only trigger if keyboard isn't claimed OR the shortcut uses modifiers
                 if !wants_keyboard || i.modifiers.ctrl || i.modifiers.command || i.modifiers.alt || i.modifiers.shift {
                     self.handle_menu_action(action);
                 }
             }
 
-            // Check tool shortcuts (only if no modifiers are held AND no text input is focused)
-            if !wants_keyboard && !i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt && !i.modifiers.command {
+            // Check tool shortcuts (only if no text input is focused;
+            // modifier guard is encoded in the bindings themselves — default tool bindings have no modifiers)
+            if !wants_keyboard {
                 use lightningbeam_core::tool::Tool;
+                use crate::keymap::AppAction;
 
-                if i.key_pressed(egui::Key::V) {
-                    self.selected_tool = Tool::Select;
-                } else if i.key_pressed(egui::Key::P) {
-                    self.selected_tool = Tool::Draw;
-                } else if i.key_pressed(egui::Key::Q) {
-                    self.selected_tool = Tool::Transform;
-                } else if i.key_pressed(egui::Key::R) {
-                    self.selected_tool = Tool::Rectangle;
-                } else if i.key_pressed(egui::Key::E) {
-                    self.selected_tool = Tool::Ellipse;
-                } else if i.key_pressed(egui::Key::B) {
-                    self.selected_tool = Tool::PaintBucket;
-                } else if i.key_pressed(egui::Key::I) {
-                    self.selected_tool = Tool::Eyedropper;
-                } else if i.key_pressed(egui::Key::L) {
-                    self.selected_tool = Tool::Line;
-                } else if i.key_pressed(egui::Key::G) {
-                    self.selected_tool = Tool::Polygon;
-                } else if i.key_pressed(egui::Key::A) {
-                    self.selected_tool = Tool::BezierEdit;
-                } else if i.key_pressed(egui::Key::T) {
-                    self.selected_tool = Tool::Text;
-                } else if i.key_pressed(egui::Key::S) {
-                    self.selected_tool = Tool::RegionSelect;
+                let tool_map: &[(AppAction, Tool)] = &[
+                    (AppAction::ToolSelect, Tool::Select),
+                    (AppAction::ToolDraw, Tool::Draw),
+                    (AppAction::ToolTransform, Tool::Transform),
+                    (AppAction::ToolRectangle, Tool::Rectangle),
+                    (AppAction::ToolEllipse, Tool::Ellipse),
+                    (AppAction::ToolPaintBucket, Tool::PaintBucket),
+                    (AppAction::ToolEyedropper, Tool::Eyedropper),
+                    (AppAction::ToolLine, Tool::Line),
+                    (AppAction::ToolPolygon, Tool::Polygon),
+                    (AppAction::ToolBezierEdit, Tool::BezierEdit),
+                    (AppAction::ToolText, Tool::Text),
+                    (AppAction::ToolRegionSelect, Tool::RegionSelect),
+                ];
+                for &(action, tool) in tool_map {
+                    if self.keymap.action_pressed(action, i) {
+                        self.selected_tool = tool;
+                        break;
+                    }
                 }
             }
         });
@@ -5106,7 +5118,7 @@ impl eframe::App for EditorApp {
         }
 
         // Escape key: revert uncommitted region selection
-        if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if !wants_keyboard && ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::CancelAction, i)) {
             if self.region_selection.is_some() {
                 Self::revert_region_selection(
                     &mut self.region_selection,
@@ -5117,13 +5129,13 @@ impl eframe::App for EditorApp {
         }
 
         // F3 debug overlay toggle (works even when text input is active)
-        if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
+        if ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::ToggleDebugOverlay, i)) {
             self.debug_overlay_visible = !self.debug_overlay_visible;
         }
 
         // F5 test mode toggle (debug builds only)
         #[cfg(debug_assertions)]
-        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+        if ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::ToggleTestMode, i)) {
             self.test_mode.active = !self.test_mode.active;
             if self.test_mode.active {
                 self.test_mode.refresh_test_list();
@@ -5242,6 +5254,8 @@ struct RenderContext<'a> {
     pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Set by panes when they handle Ctrl+C/X/V internally
     clipboard_consumed: &'a mut bool,
+    /// Remappable keyboard shortcut manager
+    keymap: &'a KeymapManager,
     /// Test mode state for event recording (debug builds only)
     #[cfg(debug_assertions)]
     test_mode: &'a mut test_mode::TestModeState,
@@ -5737,6 +5751,7 @@ fn render_pane(
                 region_select_mode: ctx.region_select_mode,
                 pending_graph_loads: ctx.pending_graph_loads,
                 clipboard_consumed: ctx.clipboard_consumed,
+                keymap: ctx.keymap,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
@@ -5824,6 +5839,7 @@ fn render_pane(
                 region_select_mode: ctx.region_select_mode,
                 pending_graph_loads: ctx.pending_graph_loads,
                 clipboard_consumed: ctx.clipboard_consumed,
+                keymap: ctx.keymap,
                 editing_clip_id: ctx.editing_clip_id,
                 editing_instance_id: ctx.editing_instance_id,
                 editing_parent_layer_id: ctx.editing_parent_layer_id,

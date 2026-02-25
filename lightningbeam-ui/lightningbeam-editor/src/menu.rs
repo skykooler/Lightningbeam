@@ -13,7 +13,7 @@ use muda::{
 };
 
 /// Keyboard shortcut definition
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Shortcut {
     pub key: ShortcutKey,
     pub ctrl: bool,
@@ -22,19 +22,67 @@ pub struct Shortcut {
 }
 
 /// Keys that can be used in shortcuts
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ShortcutKey {
     // Letters
-    A, C, D, E, G, I, K, L, N, O, Q, S, V, W, X, Z,
-    // Numbers
-    Num0,
+    A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    // Digits
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+    // Function keys
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+    // Arrow keys
+    ArrowUp, ArrowDown, ArrowLeft, ArrowRight,
     // Symbols
     Comma, Minus, Equals,
     #[allow(dead_code)] // Completes keyboard mapping set
     Plus,
     BracketLeft, BracketRight,
+    Semicolon, Quote, Period, Slash, Backtick,
     // Special
-    Delete,
+    Space, Escape, Enter, Tab, Backspace, Delete,
+    Home, End, PageUp, PageDown,
+}
+
+impl ShortcutKey {
+    /// Try to convert an egui Key to a ShortcutKey
+    pub fn from_egui_key(key: egui::Key) -> Option<Self> {
+        Some(match key {
+            egui::Key::A => Self::A, egui::Key::B => Self::B, egui::Key::C => Self::C,
+            egui::Key::D => Self::D, egui::Key::E => Self::E, egui::Key::F => Self::F,
+            egui::Key::G => Self::G, egui::Key::H => Self::H, egui::Key::I => Self::I,
+            egui::Key::J => Self::J, egui::Key::K => Self::K, egui::Key::L => Self::L,
+            egui::Key::M => Self::M, egui::Key::N => Self::N, egui::Key::O => Self::O,
+            egui::Key::P => Self::P, egui::Key::Q => Self::Q, egui::Key::R => Self::R,
+            egui::Key::S => Self::S, egui::Key::T => Self::T, egui::Key::U => Self::U,
+            egui::Key::V => Self::V, egui::Key::W => Self::W, egui::Key::X => Self::X,
+            egui::Key::Y => Self::Y, egui::Key::Z => Self::Z,
+            egui::Key::Num0 => Self::Num0, egui::Key::Num1 => Self::Num1,
+            egui::Key::Num2 => Self::Num2, egui::Key::Num3 => Self::Num3,
+            egui::Key::Num4 => Self::Num4, egui::Key::Num5 => Self::Num5,
+            egui::Key::Num6 => Self::Num6, egui::Key::Num7 => Self::Num7,
+            egui::Key::Num8 => Self::Num8, egui::Key::Num9 => Self::Num9,
+            egui::Key::F1 => Self::F1, egui::Key::F2 => Self::F2,
+            egui::Key::F3 => Self::F3, egui::Key::F4 => Self::F4,
+            egui::Key::F5 => Self::F5, egui::Key::F6 => Self::F6,
+            egui::Key::F7 => Self::F7, egui::Key::F8 => Self::F8,
+            egui::Key::F9 => Self::F9, egui::Key::F10 => Self::F10,
+            egui::Key::F11 => Self::F11, egui::Key::F12 => Self::F12,
+            egui::Key::ArrowUp => Self::ArrowUp, egui::Key::ArrowDown => Self::ArrowDown,
+            egui::Key::ArrowLeft => Self::ArrowLeft, egui::Key::ArrowRight => Self::ArrowRight,
+            egui::Key::Comma => Self::Comma, egui::Key::Minus => Self::Minus,
+            egui::Key::Equals => Self::Equals, egui::Key::Plus => Self::Plus,
+            egui::Key::OpenBracket => Self::BracketLeft, egui::Key::CloseBracket => Self::BracketRight,
+            egui::Key::Semicolon => Self::Semicolon, egui::Key::Quote => Self::Quote,
+            egui::Key::Period => Self::Period, egui::Key::Slash => Self::Slash,
+            egui::Key::Backtick => Self::Backtick,
+            egui::Key::Space => Self::Space, egui::Key::Escape => Self::Escape,
+            egui::Key::Enter => Self::Enter, egui::Key::Tab => Self::Tab,
+            egui::Key::Backspace => Self::Backspace, egui::Key::Delete => Self::Delete,
+            egui::Key::Home => Self::Home, egui::Key::End => Self::End,
+            egui::Key::PageUp => Self::PageUp, egui::Key::PageDown => Self::PageDown,
+            _ => return None,
+        })
+    }
 }
 
 impl Shortcut {
@@ -60,29 +108,78 @@ impl Shortcut {
 
         let code = match self.key {
             ShortcutKey::A => Code::KeyA,
+            ShortcutKey::B => Code::KeyB,
             ShortcutKey::C => Code::KeyC,
             ShortcutKey::D => Code::KeyD,
             ShortcutKey::E => Code::KeyE,
+            ShortcutKey::F => Code::KeyF,
             ShortcutKey::G => Code::KeyG,
+            ShortcutKey::H => Code::KeyH,
             ShortcutKey::I => Code::KeyI,
+            ShortcutKey::J => Code::KeyJ,
             ShortcutKey::K => Code::KeyK,
             ShortcutKey::L => Code::KeyL,
+            ShortcutKey::M => Code::KeyM,
             ShortcutKey::N => Code::KeyN,
             ShortcutKey::O => Code::KeyO,
+            ShortcutKey::P => Code::KeyP,
             ShortcutKey::Q => Code::KeyQ,
+            ShortcutKey::R => Code::KeyR,
             ShortcutKey::S => Code::KeyS,
+            ShortcutKey::T => Code::KeyT,
+            ShortcutKey::U => Code::KeyU,
             ShortcutKey::V => Code::KeyV,
             ShortcutKey::W => Code::KeyW,
             ShortcutKey::X => Code::KeyX,
+            ShortcutKey::Y => Code::KeyY,
             ShortcutKey::Z => Code::KeyZ,
             ShortcutKey::Num0 => Code::Digit0,
+            ShortcutKey::Num1 => Code::Digit1,
+            ShortcutKey::Num2 => Code::Digit2,
+            ShortcutKey::Num3 => Code::Digit3,
+            ShortcutKey::Num4 => Code::Digit4,
+            ShortcutKey::Num5 => Code::Digit5,
+            ShortcutKey::Num6 => Code::Digit6,
+            ShortcutKey::Num7 => Code::Digit7,
+            ShortcutKey::Num8 => Code::Digit8,
+            ShortcutKey::Num9 => Code::Digit9,
+            ShortcutKey::F1 => Code::F1,
+            ShortcutKey::F2 => Code::F2,
+            ShortcutKey::F3 => Code::F3,
+            ShortcutKey::F4 => Code::F4,
+            ShortcutKey::F5 => Code::F5,
+            ShortcutKey::F6 => Code::F6,
+            ShortcutKey::F7 => Code::F7,
+            ShortcutKey::F8 => Code::F8,
+            ShortcutKey::F9 => Code::F9,
+            ShortcutKey::F10 => Code::F10,
+            ShortcutKey::F11 => Code::F11,
+            ShortcutKey::F12 => Code::F12,
+            ShortcutKey::ArrowUp => Code::ArrowUp,
+            ShortcutKey::ArrowDown => Code::ArrowDown,
+            ShortcutKey::ArrowLeft => Code::ArrowLeft,
+            ShortcutKey::ArrowRight => Code::ArrowRight,
             ShortcutKey::Comma => Code::Comma,
             ShortcutKey::Minus => Code::Minus,
             ShortcutKey::Equals => Code::Equal,
             ShortcutKey::Plus => Code::Equal, // Same key as equals
             ShortcutKey::BracketLeft => Code::BracketLeft,
             ShortcutKey::BracketRight => Code::BracketRight,
+            ShortcutKey::Semicolon => Code::Semicolon,
+            ShortcutKey::Quote => Code::Quote,
+            ShortcutKey::Period => Code::Period,
+            ShortcutKey::Slash => Code::Slash,
+            ShortcutKey::Backtick => Code::Backquote,
+            ShortcutKey::Space => Code::Space,
+            ShortcutKey::Escape => Code::Escape,
+            ShortcutKey::Enter => Code::Enter,
+            ShortcutKey::Tab => Code::Tab,
+            ShortcutKey::Backspace => Code::Backspace,
             ShortcutKey::Delete => Code::Delete,
+            ShortcutKey::Home => Code::Home,
+            ShortcutKey::End => Code::End,
+            ShortcutKey::PageUp => Code::PageUp,
+            ShortcutKey::PageDown => Code::PageDown,
         };
 
         Accelerator::new(if modifiers.is_empty() { None } else { Some(modifiers) }, code)
@@ -104,29 +201,78 @@ impl Shortcut {
         // Check key
         let key = match self.key {
             ShortcutKey::A => egui::Key::A,
+            ShortcutKey::B => egui::Key::B,
             ShortcutKey::C => egui::Key::C,
             ShortcutKey::D => egui::Key::D,
             ShortcutKey::E => egui::Key::E,
+            ShortcutKey::F => egui::Key::F,
             ShortcutKey::G => egui::Key::G,
+            ShortcutKey::H => egui::Key::H,
             ShortcutKey::I => egui::Key::I,
+            ShortcutKey::J => egui::Key::J,
             ShortcutKey::K => egui::Key::K,
             ShortcutKey::L => egui::Key::L,
+            ShortcutKey::M => egui::Key::M,
             ShortcutKey::N => egui::Key::N,
             ShortcutKey::O => egui::Key::O,
+            ShortcutKey::P => egui::Key::P,
             ShortcutKey::Q => egui::Key::Q,
+            ShortcutKey::R => egui::Key::R,
             ShortcutKey::S => egui::Key::S,
+            ShortcutKey::T => egui::Key::T,
+            ShortcutKey::U => egui::Key::U,
             ShortcutKey::V => egui::Key::V,
             ShortcutKey::W => egui::Key::W,
             ShortcutKey::X => egui::Key::X,
+            ShortcutKey::Y => egui::Key::Y,
             ShortcutKey::Z => egui::Key::Z,
             ShortcutKey::Num0 => egui::Key::Num0,
+            ShortcutKey::Num1 => egui::Key::Num1,
+            ShortcutKey::Num2 => egui::Key::Num2,
+            ShortcutKey::Num3 => egui::Key::Num3,
+            ShortcutKey::Num4 => egui::Key::Num4,
+            ShortcutKey::Num5 => egui::Key::Num5,
+            ShortcutKey::Num6 => egui::Key::Num6,
+            ShortcutKey::Num7 => egui::Key::Num7,
+            ShortcutKey::Num8 => egui::Key::Num8,
+            ShortcutKey::Num9 => egui::Key::Num9,
+            ShortcutKey::F1 => egui::Key::F1,
+            ShortcutKey::F2 => egui::Key::F2,
+            ShortcutKey::F3 => egui::Key::F3,
+            ShortcutKey::F4 => egui::Key::F4,
+            ShortcutKey::F5 => egui::Key::F5,
+            ShortcutKey::F6 => egui::Key::F6,
+            ShortcutKey::F7 => egui::Key::F7,
+            ShortcutKey::F8 => egui::Key::F8,
+            ShortcutKey::F9 => egui::Key::F9,
+            ShortcutKey::F10 => egui::Key::F10,
+            ShortcutKey::F11 => egui::Key::F11,
+            ShortcutKey::F12 => egui::Key::F12,
+            ShortcutKey::ArrowUp => egui::Key::ArrowUp,
+            ShortcutKey::ArrowDown => egui::Key::ArrowDown,
+            ShortcutKey::ArrowLeft => egui::Key::ArrowLeft,
+            ShortcutKey::ArrowRight => egui::Key::ArrowRight,
             ShortcutKey::Comma => egui::Key::Comma,
             ShortcutKey::Minus => egui::Key::Minus,
             ShortcutKey::Equals => egui::Key::Equals,
             ShortcutKey::Plus => egui::Key::Plus,
             ShortcutKey::BracketLeft => egui::Key::OpenBracket,
             ShortcutKey::BracketRight => egui::Key::CloseBracket,
+            ShortcutKey::Semicolon => egui::Key::Semicolon,
+            ShortcutKey::Quote => egui::Key::Quote,
+            ShortcutKey::Period => egui::Key::Period,
+            ShortcutKey::Slash => egui::Key::Slash,
+            ShortcutKey::Backtick => egui::Key::Backtick,
+            ShortcutKey::Space => egui::Key::Space,
+            ShortcutKey::Escape => egui::Key::Escape,
+            ShortcutKey::Enter => egui::Key::Enter,
+            ShortcutKey::Tab => egui::Key::Tab,
+            ShortcutKey::Backspace => egui::Key::Backspace,
             ShortcutKey::Delete => egui::Key::Delete,
+            ShortcutKey::Home => egui::Key::Home,
+            ShortcutKey::End => egui::Key::End,
+            ShortcutKey::PageUp => egui::Key::PageUp,
+            ShortcutKey::PageDown => egui::Key::PageDown,
         };
 
         input.key_pressed(key)
@@ -594,26 +740,38 @@ impl MenuSystem {
         None
     }
 
-    /// Check keyboard shortcuts from egui input and return the action
-    /// This works cross-platform and complements native menus
-    pub fn check_shortcuts(input: &egui::InputState) -> Option<MenuAction> {
-        for def in MenuItemDef::all_with_shortcuts() {
-            if let Some(shortcut) = &def.shortcut {
-                if shortcut.matches_egui_input(input) {
-                    return Some(def.action);
+    /// Check keyboard shortcuts from egui input and return the action.
+    /// If a KeymapManager is provided, uses remapped bindings; otherwise falls back to static defaults.
+    pub fn check_shortcuts(input: &egui::InputState, keymap: Option<&crate::keymap::KeymapManager>) -> Option<MenuAction> {
+        if let Some(km) = keymap {
+            // Check all menu actions through the keymap
+            for def in MenuItemDef::all_with_shortcuts() {
+                if let Ok(app_action) = crate::keymap::AppAction::try_from(def.action) {
+                    if km.action_pressed(app_action, input) {
+                        return Some(def.action);
+                    }
                 }
             }
+            None
+        } else {
+            for def in MenuItemDef::all_with_shortcuts() {
+                if let Some(shortcut) = &def.shortcut {
+                    if shortcut.matches_egui_input(input) {
+                        return Some(def.action);
+                    }
+                }
+            }
+            None
         }
-        None
     }
 
     /// Render egui menu bar from the same menu structure (for Linux/Windows)
-    pub fn render_egui_menu_bar(&self, ui: &mut egui::Ui, recent_files: &[std::path::PathBuf]) -> Option<MenuAction> {
+    pub fn render_egui_menu_bar(&self, ui: &mut egui::Ui, recent_files: &[std::path::PathBuf], keymap: Option<&crate::keymap::KeymapManager>) -> Option<MenuAction> {
         let mut action = None;
 
         egui::MenuBar::new().ui(ui, |ui| {
             for menu_def in MenuItemDef::menu_structure() {
-                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files) {
+                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap) {
                     action = Some(a);
                 }
             }
@@ -623,10 +781,10 @@ impl MenuSystem {
     }
 
     /// Recursively render a MenuDef as egui UI
-    fn render_menu_def(&self, ui: &mut egui::Ui, def: &MenuDef, recent_files: &[std::path::PathBuf]) -> Option<MenuAction> {
+    fn render_menu_def(&self, ui: &mut egui::Ui, def: &MenuDef, recent_files: &[std::path::PathBuf], keymap: Option<&crate::keymap::KeymapManager>) -> Option<MenuAction> {
         match def {
             MenuDef::Item(item_def) => {
-                if Self::render_menu_item(ui, item_def) {
+                if Self::render_menu_item(ui, item_def, keymap) {
                     Some(item_def.action)
                 } else {
                     None
@@ -666,7 +824,7 @@ impl MenuSystem {
                     } else {
                         // Normal submenu rendering
                         for child in *children {
-                            if let Some(a) = self.render_menu_def(ui, child, recent_files) {
+                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap) {
                                 action = Some(a);
                                 ui.close();
                             }
@@ -679,8 +837,18 @@ impl MenuSystem {
     }
 
     /// Render a single menu item with label and shortcut
-    fn render_menu_item(ui: &mut egui::Ui, def: &MenuItemDef) -> bool {
-        let shortcut_text = if let Some(shortcut) = &def.shortcut {
+    fn render_menu_item(ui: &mut egui::Ui, def: &MenuItemDef, keymap: Option<&crate::keymap::KeymapManager>) -> bool {
+        // Look up shortcut from keymap if available, otherwise use static default
+        let effective_shortcut = if let Some(km) = keymap {
+            if let Ok(app_action) = crate::keymap::AppAction::try_from(def.action) {
+                km.get(app_action)
+            } else {
+                def.shortcut
+            }
+        } else {
+            def.shortcut
+        };
+        let shortcut_text = if let Some(shortcut) = &effective_shortcut {
             Self::format_shortcut(shortcut)
         } else {
             String::new()
@@ -733,7 +901,7 @@ impl MenuSystem {
     }
 
     /// Format shortcut for display (e.g., "Ctrl+S")
-    fn format_shortcut(shortcut: &Shortcut) -> String {
+    pub fn format_shortcut(shortcut: &Shortcut) -> String {
         let mut parts = Vec::new();
 
         if shortcut.ctrl {
@@ -747,34 +915,51 @@ impl MenuSystem {
         }
 
         let key_name = match shortcut.key {
-            ShortcutKey::A => "A",
-            ShortcutKey::C => "C",
-            ShortcutKey::D => "D",
-            ShortcutKey::E => "E",
-            ShortcutKey::G => "G",
-            ShortcutKey::I => "I",
-            ShortcutKey::K => "K",
-            ShortcutKey::L => "L",
-            ShortcutKey::N => "N",
-            ShortcutKey::O => "O",
-            ShortcutKey::Q => "Q",
-            ShortcutKey::S => "S",
-            ShortcutKey::V => "V",
-            ShortcutKey::W => "W",
-            ShortcutKey::X => "X",
-            ShortcutKey::Z => "Z",
-            ShortcutKey::Num0 => "0",
-            ShortcutKey::Comma => ",",
-            ShortcutKey::Minus => "-",
-            ShortcutKey::Equals => "=",
-            ShortcutKey::Plus => "+",
-            ShortcutKey::BracketLeft => "[",
-            ShortcutKey::BracketRight => "]",
-            ShortcutKey::Delete => "Del",
+            ShortcutKey::A => "A", ShortcutKey::B => "B", ShortcutKey::C => "C",
+            ShortcutKey::D => "D", ShortcutKey::E => "E", ShortcutKey::F => "F",
+            ShortcutKey::G => "G", ShortcutKey::H => "H", ShortcutKey::I => "I",
+            ShortcutKey::J => "J", ShortcutKey::K => "K", ShortcutKey::L => "L",
+            ShortcutKey::M => "M", ShortcutKey::N => "N", ShortcutKey::O => "O",
+            ShortcutKey::P => "P", ShortcutKey::Q => "Q", ShortcutKey::R => "R",
+            ShortcutKey::S => "S", ShortcutKey::T => "T", ShortcutKey::U => "U",
+            ShortcutKey::V => "V", ShortcutKey::W => "W", ShortcutKey::X => "X",
+            ShortcutKey::Y => "Y", ShortcutKey::Z => "Z",
+            ShortcutKey::Num0 => "0", ShortcutKey::Num1 => "1", ShortcutKey::Num2 => "2",
+            ShortcutKey::Num3 => "3", ShortcutKey::Num4 => "4", ShortcutKey::Num5 => "5",
+            ShortcutKey::Num6 => "6", ShortcutKey::Num7 => "7", ShortcutKey::Num8 => "8",
+            ShortcutKey::Num9 => "9",
+            ShortcutKey::F1 => "F1", ShortcutKey::F2 => "F2", ShortcutKey::F3 => "F3",
+            ShortcutKey::F4 => "F4", ShortcutKey::F5 => "F5", ShortcutKey::F6 => "F6",
+            ShortcutKey::F7 => "F7", ShortcutKey::F8 => "F8", ShortcutKey::F9 => "F9",
+            ShortcutKey::F10 => "F10", ShortcutKey::F11 => "F11", ShortcutKey::F12 => "F12",
+            ShortcutKey::ArrowUp => "Up", ShortcutKey::ArrowDown => "Down",
+            ShortcutKey::ArrowLeft => "Left", ShortcutKey::ArrowRight => "Right",
+            ShortcutKey::Comma => ",", ShortcutKey::Minus => "-",
+            ShortcutKey::Equals => "=", ShortcutKey::Plus => "+",
+            ShortcutKey::BracketLeft => "[", ShortcutKey::BracketRight => "]",
+            ShortcutKey::Semicolon => ";", ShortcutKey::Quote => "'",
+            ShortcutKey::Period => ".", ShortcutKey::Slash => "/",
+            ShortcutKey::Backtick => "`",
+            ShortcutKey::Space => "Space", ShortcutKey::Escape => "Esc",
+            ShortcutKey::Enter => "Enter", ShortcutKey::Tab => "Tab",
+            ShortcutKey::Backspace => "Backspace", ShortcutKey::Delete => "Del",
+            ShortcutKey::Home => "Home", ShortcutKey::End => "End",
+            ShortcutKey::PageUp => "PgUp", ShortcutKey::PageDown => "PgDn",
         };
         parts.push(key_name);
 
         parts.join("+")
+    }
+
+    /// Update native menu accelerator labels to match the current keymap
+    pub fn apply_keybindings(&self, keymap: &crate::keymap::KeymapManager) {
+        for (item, menu_action) in &self.items {
+            if let Ok(app_action) = crate::keymap::AppAction::try_from(*menu_action) {
+                let accelerator = keymap.get(app_action)
+                    .map(|s| s.to_muda_accelerator());
+                let _ = item.set_accelerator(accelerator);
+            }
+        }
     }
 
     /// Update menu item text dynamically (e.g., for Undo/Redo with action names)

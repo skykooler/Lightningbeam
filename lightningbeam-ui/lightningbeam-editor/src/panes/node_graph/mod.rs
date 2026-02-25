@@ -3087,7 +3087,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             // Handle pane-local keyboard shortcuts (only when pointer is over this pane)
             if ui.rect_contains_pointer(rect) {
                 let ctrl_g = ui.input(|i| {
-                    i.key_pressed(egui::Key::G) && (i.modifiers.ctrl || i.modifiers.command)
+                    shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphGroup, i)
                 });
                 if ctrl_g && !self.state.selected_nodes.is_empty() {
                     self.group_selected_nodes(shared);
@@ -3095,7 +3095,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
 
                 // Ctrl+Shift+G to ungroup
                 let ctrl_shift_g = ui.input(|i| {
-                    i.key_pressed(egui::Key::G) && (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift
+                    shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphUngroup, i)
                 });
                 if ctrl_shift_g {
                     // Ungroup any selected group placeholders
@@ -3108,7 +3108,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 }
 
                 // F2 to rename selected group
-                let f2 = ui.input(|i| i.key_pressed(egui::Key::F2));
+                let f2 = ui.input(|i| shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphRename, i));
                 if f2 && self.renaming_group.is_none() {
                     // Find the first selected group placeholder
                     if let Some(group_id) = self.state.selected_nodes.iter()

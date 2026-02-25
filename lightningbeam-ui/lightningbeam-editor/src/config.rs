@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::keymap::KeybindingConfig;
 
 /// Application configuration (persistent)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,10 @@ pub struct AppConfig {
     /// Theme mode ("light", "dark", or "system")
     #[serde(default = "defaults::theme_mode")]
     pub theme_mode: String,
+
+    /// Custom keyboard shortcut overrides (sparse — only non-default bindings stored)
+    #[serde(default)]
+    pub keybindings: KeybindingConfig,
 }
 
 impl Default for AppConfig {
@@ -69,6 +74,7 @@ impl Default for AppConfig {
             debug: defaults::debug(),
             waveform_stereo: defaults::waveform_stereo(),
             theme_mode: defaults::theme_mode(),
+            keybindings: KeybindingConfig::default(),
         }
     }
 }
