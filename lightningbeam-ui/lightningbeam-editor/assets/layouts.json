@@ -32,7 +32,7 @@
       "type": "vertical-grid",
       "percent": 10,
       "children": [
-        { "type": "pane", "name": "toolbar" },
+        { "type": "pane", "name": "infopanel" },
         {
           "type": "vertical-grid",
           "percent": 65,
@@ -42,7 +42,7 @@
               "percent": 50,
               "children": [
                 { "type": "pane", "name": "stage" },
-                { "type": "pane", "name": "infopanel" }
+                { "type": "pane", "name": "assetLibrary" }
               ]
             },
             { "type": "pane", "name": "timelineV2" }
@@ -53,17 +53,17 @@
   },
   {
     "name": "Audio/DAW",
-    "description": "Audio tracks prominent with mixer, node editor, and preset browser",
+    "description": "Audio tracks prominent with mixer, virtual piano, and preset browser",
     "layout": {
       "type": "horizontal-grid",
       "percent": 75,
       "children": [
         {
           "type": "vertical-grid",
-          "percent": 50,
+          "percent": 60,
           "children": [
             { "type": "pane", "name": "timelineV2" },
-            { "type": "pane", "name": "nodeEditor" }
+            { "type": "pane", "name": "virtualPiano" }
           ]
         },
         { "type": "pane", "name": "presetBrowser" }
@@ -72,34 +72,20 @@
   },
   {
     "name": "Scripting",
-    "description": "Code editor, object hierarchy, and console",
+    "description": "Script editor with stage preview and timeline",
     "layout": {
-      "type": "vertical-grid",
-      "percent": 10,
+      "type": "horizontal-grid",
+      "percent": 50,
       "children": [
-        { "type": "pane", "name": "toolbar" },
         {
-          "type": "horizontal-grid",
-          "percent": 70,
+          "type": "vertical-grid",
+          "percent": 60,
           "children": [
-            {
-              "type": "vertical-grid",
-              "percent": 50,
-              "children": [
-                { "type": "pane", "name": "stage" },
-                { "type": "pane", "name": "timelineV2" }
-              ]
-            },
-            {
-              "type": "vertical-grid",
-              "percent": 50,
-              "children": [
-                { "type": "pane", "name": "infopanel" },
-                { "type": "pane", "name": "outlineer" }
-              ]
-            }
+            { "type": "pane", "name": "stage" },
+            { "type": "pane", "name": "timelineV2" }
           ]
-        }
+        },
+        { "type": "pane", "name": "scriptEditor" }
       ]
     }
   },
@@ -130,32 +116,6 @@
     }
   },
   {
-    "name": "3D",
-    "description": "3D viewport, camera controls, and lighting panel",
-    "layout": {
-      "type": "vertical-grid",
-      "percent": 10,
-      "children": [
-        { "type": "pane", "name": "toolbar" },
-        {
-          "type": "horizontal-grid",
-          "percent": 70,
-          "children": [
-            {
-              "type": "vertical-grid",
-              "percent": 70,
-              "children": [
-                { "type": "pane", "name": "stage" },
-                { "type": "pane", "name": "timelineV2" }
-              ]
-            },
-            { "type": "pane", "name": "infopanel" }
-          ]
-        }
-      ]
-    }
-  },
-  {
     "name": "Drawing/Painting",
     "description": "Minimal UI - just canvas and drawing tools",
     "layout": {
@@ -171,32 +131,6 @@
             {
               "type": "vertical-grid",
               "percent": 70,
-              "children": [
-                { "type": "pane", "name": "infopanel" },
-                { "type": "pane", "name": "timelineV2" }
-              ]
-            }
-          ]
-        }
-      ]
-    }
-  },
-  {
-    "name": "Shader Editor",
-    "description": "Split between viewport preview and code editor",
-    "layout": {
-      "type": "vertical-grid",
-      "percent": 10,
-      "children": [
-        { "type": "pane", "name": "toolbar" },
-        {
-          "type": "horizontal-grid",
-          "percent": 50,
-          "children": [
-            { "type": "pane", "name": "stage" },
-            {
-              "type": "vertical-grid",
-              "percent": 60,
               "children": [
                 { "type": "pane", "name": "infopanel" },
                 { "type": "pane", "name": "timelineV2" }

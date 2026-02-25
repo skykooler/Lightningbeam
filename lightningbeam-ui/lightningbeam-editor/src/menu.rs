@@ -766,12 +766,19 @@ impl MenuSystem {
     }
 
     /// Render egui menu bar from the same menu structure (for Linux/Windows)
-    pub fn render_egui_menu_bar(&self, ui: &mut egui::Ui, recent_files: &[std::path::PathBuf], keymap: Option<&crate::keymap::KeymapManager>) -> Option<MenuAction> {
+    pub fn render_egui_menu_bar(
+        &self,
+        ui: &mut egui::Ui,
+        recent_files: &[std::path::PathBuf],
+        keymap: Option<&crate::keymap::KeymapManager>,
+        layout_names: &[String],
+        current_layout_index: usize,
+    ) -> Option<MenuAction> {
         let mut action = None;
 
         egui::MenuBar::new().ui(ui, |ui| {
             for menu_def in MenuItemDef::menu_structure() {
-                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap) {
+                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap, layout_names, current_layout_index) {
                     action = Some(a);
                 }
             }
@@ -781,7 +788,15 @@ impl MenuSystem {
     }
 
     /// Recursively render a MenuDef as egui UI
-    fn render_menu_def(&self, ui: &mut egui::Ui, def: &MenuDef, recent_files: &[std::path::PathBuf], keymap: Option<&crate::keymap::KeymapManager>) -> Option<MenuAction> {
+    fn render_menu_def(
+        &self,
+        ui: &mut egui::Ui,
+        def: &MenuDef,
+        recent_files: &[std::path::PathBuf],
+        keymap: Option<&crate::keymap::KeymapManager>,
+        layout_names: &[String],
+        current_layout_index: usize,
+    ) -> Option<MenuAction> {
         match def {
             MenuDef::Item(item_def) => {
                 if Self::render_menu_item(ui, item_def, keymap) {
@@ -797,9 +812,8 @@ impl MenuSystem {
             MenuDef::Submenu { label, children } => {
                 let mut action = None;
                 ui.menu_button(*label, |ui| {
-                    // Special handling for "Open Recent" submenu
                     if *label == "Open Recent" {
-                        // Render dynamic recent files
+                        // Special handling for "Open Recent" submenu
                         for (index, path) in recent_files.iter().enumerate() {
                             let display_name = path
                                 .file_name()
@@ -812,7 +826,6 @@ impl MenuSystem {
                             }
                         }
 
-                        // Add separator and clear option if we have items
                         if !recent_files.is_empty() {
                             ui.separator();
                         }
@@ -821,10 +834,34 @@ impl MenuSystem {
                             action = Some(MenuAction::ClearRecentFiles);
                             ui.close();
                         }
+                    } else if *label == "Layout" {
+                        // Render static items first (Next/Previous Layout)
+                        for child in *children {
+                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                action = Some(a);
+                                ui.close();
+                            }
+                        }
+
+                        // Dynamic layout list
+                        if !layout_names.is_empty() {
+                            ui.separator();
+                            for (index, name) in layout_names.iter().enumerate() {
+                                let label = if index == current_layout_index {
+                                    format!("* {}", name)
+                                } else {
+                                    name.clone()
+                                };
+                                if ui.button(label).clicked() {
+                                    action = Some(MenuAction::SwitchLayout(index));
+                                    ui.close();
+                                }
+                            }
+                        }
                     } else {
                         // Normal submenu rendering
                         for child in *children {
-                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap) {
+                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
                                 action = Some(a);
                                 ui.close();
                             }

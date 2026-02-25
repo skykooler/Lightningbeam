@@ -4707,7 +4707,11 @@ impl eframe::App for EditorApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
-                if let Some(action) = menu_system.render_egui_menu_bar(ui, &recent_files, Some(&self.keymap)) {
+                let layout_names: Vec<String> = self.layouts.iter().map(|l| l.name.clone()).collect();
+                if let Some(action) = menu_system.render_egui_menu_bar(
+                    ui, &recent_files, Some(&self.keymap),
+                    &layout_names, self.current_layout_index,
+                ) {
                     self.handle_menu_action(action);
                 }
             }
