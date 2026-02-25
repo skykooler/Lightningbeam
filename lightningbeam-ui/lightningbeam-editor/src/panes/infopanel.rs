@@ -143,9 +143,14 @@ impl InfopanelPane {
         let tool = *shared.selected_tool;
 
         // Only show tool options for tools that have options
-        let has_options = matches!(
+        let is_vector_tool = matches!(
             tool,
-            Tool::Draw | Tool::Rectangle | Tool::Ellipse | Tool::PaintBucket | Tool::Polygon | Tool::Line | Tool::RegionSelect
+            Tool::Select | Tool::BezierEdit | Tool::Draw | Tool::Rectangle
+            | Tool::Ellipse | Tool::Line | Tool::Polygon
+        );
+        let has_options = is_vector_tool || matches!(
+            tool,
+            Tool::PaintBucket | Tool::RegionSelect
         );
 
         if !has_options {
@@ -158,6 +163,11 @@ impl InfopanelPane {
             .show(ui, |ui| {
                 self.tool_section_open = true;
                 ui.add_space(4.0);
+
+                if is_vector_tool {
+                    ui.checkbox(shared.snap_enabled, "Snap to Geometry");
+                    ui.add_space(2.0);
+                }
 
                 match tool {
                     Tool::Draw => {

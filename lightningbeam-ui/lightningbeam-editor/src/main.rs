@@ -743,6 +743,7 @@ struct EditorApp {
     // Tool-specific options (displayed in infopanel)
     stroke_width: f64,               // Stroke width for drawing tools (default: 3.0)
     fill_enabled: bool,              // Whether to fill shapes (default: true)
+    snap_enabled: bool,              // Whether to snap to geometry (default: true)
     paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
     polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
     // Region select state
@@ -968,6 +969,7 @@ impl EditorApp {
             last_import_filter: ImportFilter::default(), // Default to "All Supported"
             stroke_width: 3.0,               // Default stroke width
             fill_enabled: true,              // Default to filling shapes
+            snap_enabled: true,              // Default to snapping
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
             region_selection: None,
@@ -4752,6 +4754,7 @@ impl eframe::App for EditorApp {
                 dragging_asset: &mut self.dragging_asset,
                 stroke_width: &mut self.stroke_width,
                 fill_enabled: &mut self.fill_enabled,
+                snap_enabled: &mut self.snap_enabled,
                 paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
                 polygon_sides: &mut self.polygon_sides,
                 layer_to_track_map: &self.layer_to_track_map,
@@ -5075,6 +5078,7 @@ struct RenderContext<'a> {
     // Tool-specific options for infopanel
     stroke_width: &'a mut f64,
     fill_enabled: &'a mut bool,
+    snap_enabled: &'a mut bool,
     paint_bucket_gap_tolerance: &'a mut f64,
     polygon_sides: &'a mut u32,
     /// Mapping from Document layer UUIDs to daw-backend TrackIds
@@ -5584,6 +5588,7 @@ fn render_pane(
                 dragging_asset: ctx.dragging_asset,
                 stroke_width: ctx.stroke_width,
                 fill_enabled: ctx.fill_enabled,
+                snap_enabled: ctx.snap_enabled,
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,
@@ -5666,6 +5671,7 @@ fn render_pane(
                 dragging_asset: ctx.dragging_asset,
                 stroke_width: ctx.stroke_width,
                 fill_enabled: ctx.fill_enabled,
+                snap_enabled: ctx.snap_enabled,
                 paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
                 polygon_sides: ctx.polygon_sides,
                 midi_event_cache: ctx.midi_event_cache,

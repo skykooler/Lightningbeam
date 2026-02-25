@@ -2072,6 +2072,8 @@ pub struct StagePane {
     last_viewport_rect: Option<egui::Rect>,
     // Vector editing cache
     dcel_editing_cache: Option<DcelEditingCache>,
+    // Current snap result (for visual feedback rendering)
+    current_snap: Option<lightningbeam_core::snap::SnapResult>,
 }
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
@@ -2133,6 +2135,7 @@ impl StagePane {
             pending_eyedropper_sample: None,
             last_viewport_rect: None,
             dcel_editing_cache: None,
+            current_snap: None,
         }
     }
 
@@ -2725,6 +2728,7 @@ impl StagePane {
     ) {
         use lightningbeam_core::bezpath_editing::mold_curve;
         use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::snap::{self, SnapConfig, SnapExclusion, SNAP_SCREEN_RADIUS};
         use lightningbeam_core::tool::ToolState;
         use vello::kurbo::Vec2;
 
@@ -2737,8 +2741,41 @@ impl StagePane {
 
         // Clone tool state to avoid borrow conflict
         let tool_state = shared.tool_state.clone();
+        let snap_enabled = *shared.snap_enabled;
 
-        // Get mutable DCEL access
+        // Phase 1: Compute snap target with immutable DCEL borrow.
+        // Don't snap during curve molding — the mouse is a relative guide for
+        // adjusting control points, not an absolute target.
+        let skip_snap = matches!(tool_state, ToolState::EditingCurve { .. });
+        let snap_result = if snap_enabled && !skip_snap {
+            let document = shared.action_executor.document();
+            let dcel = match document.get_layer(&layer_id) {
+                Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time),
+                _ => None,
+            };
+            dcel.and_then(|dcel| {
+                let config = SnapConfig::from_screen_radius(SNAP_SCREEN_RADIUS, self.zoom as f64);
+                let exclusion = match &tool_state {
+                    ToolState::EditingVertex { vertex_id, connected_edges } => SnapExclusion {
+                        vertices: vec![*vertex_id],
+                        edges: connected_edges.clone(),
+                    },
+                    ToolState::EditingControlPoint { edge_id, .. } => SnapExclusion {
+                        edges: vec![*edge_id],
+                        ..Default::default()
+                    },
+                    _ => SnapExclusion::default(),
+                };
+                snap::find_snap_target(dcel, mouse_pos, &config, &exclusion)
+            })
+        } else {
+            None
+        };
+
+        self.current_snap = snap_result;
+        let effective_pos = snap_result.map(|r| r.position).unwrap_or(mouse_pos);
+
+        // Phase 2: Mutate DCEL with the (possibly snapped) position
         let document = shared.action_executor.document_mut();
         let dcel = match document.get_layer_mut(&layer_id) {
             Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time_mut(time) {
@@ -2750,10 +2787,9 @@ impl StagePane {
 
         match tool_state {
             ToolState::EditingVertex { vertex_id, connected_edges } => {
-                // Snap vertex directly to cursor position
                 let old_pos = dcel.vertex(vertex_id).position;
-                let delta = Vec2::new(mouse_pos.x - old_pos.x, mouse_pos.y - old_pos.y);
-                dcel.vertex_mut(vertex_id).position = mouse_pos;
+                let delta = Vec2::new(effective_pos.x - old_pos.x, effective_pos.y - old_pos.y);
+                dcel.vertex_mut(vertex_id).position = effective_pos;
 
                 // Update connected edges: shift the adjacent control point by the same delta
                 for &edge_id in &connected_edges {
@@ -2763,26 +2799,24 @@ impl StagePane {
                     let mut curve = dcel.edge(edge_id).curve;
 
                     if fwd_origin == vertex_id {
-                        // This vertex is p0 of the curve
-                        curve.p0 = mouse_pos;
+                        curve.p0 = effective_pos;
                         curve.p1 = curve.p1 + delta;
                     } else {
-                        // This vertex is p3 of the curve
-                        curve.p3 = mouse_pos;
+                        curve.p3 = effective_pos;
                         curve.p2 = curve.p2 + delta;
                     }
                     dcel.edge_mut(edge_id).curve = curve;
                 }
             }
             ToolState::EditingCurve { edge_id, original_curve, start_mouse, .. } => {
-                let molded_curve = mold_curve(&original_curve, &mouse_pos, &start_mouse);
+                let molded_curve = mold_curve(&original_curve, &effective_pos, &start_mouse);
                 dcel.edge_mut(edge_id).curve = molded_curve;
             }
             ToolState::EditingControlPoint { edge_id, point_index, .. } => {
                 let curve = &mut dcel.edge_mut(edge_id).curve;
                 match point_index {
-                    1 => curve.p1 = mouse_pos,
-                    2 => curve.p2 = mouse_pos,
+                    1 => curve.p1 = effective_pos,
+                    2 => curve.p2 = effective_pos,
                     _ => {}
                 }
             }
@@ -2857,8 +2891,9 @@ impl StagePane {
         // the action in the undo stack with dcel_before for rollback)
         let _ = shared.action_executor.execute(Box::new(action));
 
-        // Reset tool state
+        // Reset tool state and clear snap indicator
         *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
+        self.current_snap = None;
     }
 
     /// Handle BezierEdit tool - similar to Select but with control point editing
@@ -3001,6 +3036,42 @@ impl StagePane {
         };
     }
 
+    /// Compute snap for shape/draw tools (no exclusions).
+    /// Derives active layer and time from `shared`. Updates `self.current_snap`
+    /// and returns the (possibly snapped) position.
+    fn snap_point(
+        &mut self,
+        point: vello::kurbo::Point,
+        shared: &SharedPaneState,
+    ) -> vello::kurbo::Point {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::snap::{self, SnapConfig, SnapExclusion, SNAP_SCREEN_RADIUS};
+
+        if !*shared.snap_enabled {
+            self.current_snap = None;
+            return point;
+        }
+
+        let layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => { self.current_snap = None; return point; }
+        };
+        let time = *shared.playback_time;
+
+        let dcel = match shared.action_executor.document().get_layer(&layer_id) {
+            Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time),
+            _ => None,
+        };
+
+        let result = dcel.and_then(|dcel| {
+            let config = SnapConfig::from_screen_radius(SNAP_SCREEN_RADIUS, self.zoom as f64);
+            snap::find_snap_target(dcel, point, &config, &SnapExclusion::default())
+        });
+
+        self.current_snap = result;
+        result.map(|r| r.position).unwrap_or(point)
+    }
+
     fn handle_rectangle_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -3030,7 +3101,7 @@ impl StagePane {
             return;
         }
 
-        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating rectangle (clears any previous preview)
         if response.drag_started() || response.clicked() {
@@ -3163,7 +3234,7 @@ impl StagePane {
             return;
         }
 
-        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating ellipse (clears any previous preview)
         if response.drag_started() || response.clicked() {
@@ -3287,7 +3358,7 @@ impl StagePane {
             return;
         }
 
-        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating line
         if response.drag_started() || response.clicked() {
@@ -3369,7 +3440,7 @@ impl StagePane {
             return;
         }
 
-        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating polygon (center point)
         if response.drag_started() || response.clicked() {
@@ -3745,16 +3816,18 @@ impl StagePane {
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
-        // Mouse down: start drawing path
+        // Mouse down: start drawing path (snap the first point)
         if response.drag_started() || response.clicked() {
+            let snapped_start = self.snap_point(point, shared);
             *shared.tool_state = ToolState::DrawingPath {
-                points: vec![point],
+                points: vec![snapped_start],
                 simplify_mode: *shared.draw_simplify_mode,
             };
         }
 
-        // Mouse drag: add points to path
+        // Mouse drag: add points to path (no snapping for intermediate freehand points)
         if response.dragged() {
+            self.current_snap = None;
             if let ToolState::DrawingPath { points, simplify_mode: _ } = &mut *shared.tool_state {
                 // Only add point if it's far enough from the last point (reduce noise)
                 const MIN_POINT_DISTANCE: f64 = 2.0;
@@ -3770,8 +3843,21 @@ impl StagePane {
             }
         }
 
-        // Mouse up: complete the path and create shape
+        // Mouse up: snap the last point, then complete the path and create shape
         if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::DrawingPath { .. })) {
+            // Snap the final point (extract last point first to avoid borrow conflict)
+            let last_point = if let ToolState::DrawingPath { points, .. } = &*shared.tool_state {
+                if points.len() >= 2 { Some(*points.last().unwrap()) } else { None }
+            } else {
+                None
+            };
+            if let Some(last) = last_point {
+                let snapped_end = self.snap_point(last, shared);
+                if let ToolState::DrawingPath { points, .. } = &mut *shared.tool_state {
+                    *points.last_mut().unwrap() = snapped_end;
+                }
+            }
+            self.current_snap = None;
             if let ToolState::DrawingPath { points, simplify_mode } = shared.tool_state.clone() {
                 // Only create shape if we have enough points
                 if points.len() >= 2 {
@@ -6061,6 +6147,103 @@ impl StagePane {
             }
         }
     }
+
+    /// Render snap indicator when snap is active (works for all vector-editing tools).
+    /// Also computes hover snap when idle (no active drag snap) so the user can
+    /// preview snap targets before clicking.
+    fn render_snap_indicator(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        shared: &SharedPaneState,
+    ) {
+        use lightningbeam_core::snap::SnapTarget;
+        use lightningbeam_core::tool::Tool;
+
+        if !*shared.snap_enabled {
+            return;
+        }
+
+        let is_vector_tool = matches!(
+            *shared.selected_tool,
+            Tool::Select | Tool::BezierEdit | Tool::Draw | Tool::Rectangle
+            | Tool::Ellipse | Tool::Line | Tool::Polygon
+        );
+
+        // Recompute hover snap every frame when idle (not actively editing/drawing)
+        let is_idle = matches!(*shared.tool_state, lightningbeam_core::tool::ToolState::Idle);
+        if is_vector_tool && is_idle {
+            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                if rect.contains(pos) {
+                    let canvas_pos = pos - rect.min;
+                    let doc_pos = egui::vec2(
+                        (canvas_pos.x - self.pan_offset.x) / self.zoom,
+                        (canvas_pos.y - self.pan_offset.y) / self.zoom,
+                    );
+                    let local = self.doc_to_clip_local(doc_pos, shared);
+                    let point = vello::kurbo::Point::new(local.x as f64, local.y as f64);
+                    self.snap_point(point, shared);
+                } else {
+                    self.current_snap = None;
+                }
+            } else {
+                self.current_snap = None;
+            }
+        }
+
+        let snap_result = match &self.current_snap {
+            Some(r) => r,
+            None => return,
+        };
+
+        let world_to_screen = |world_pos: vello::kurbo::Point| -> egui::Pos2 {
+            let doc_pos = self.clip_local_to_doc(world_pos, shared);
+            let screen_x = (doc_pos.x as f32 * self.zoom) + self.pan_offset.x + rect.min.x;
+            let screen_y = (doc_pos.y as f32 * self.zoom) + self.pan_offset.y + rect.min.y;
+            egui::pos2(screen_x, screen_y)
+        };
+
+        let painter = ui.painter_at(rect);
+        let screen_pos = world_to_screen(snap_result.position);
+
+        // Reuse existing vertex visual constants
+        let vertex_hover_radius = 6.0_f32;
+        let vertex_color = egui::Color32::WHITE;
+        let vertex_hover_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(60, 140, 255));
+
+        match snap_result.target {
+            SnapTarget::Vertex { .. } => {
+                // Same circle as the existing vertex hover indicator
+                painter.circle(screen_pos, vertex_hover_radius, vertex_color, vertex_hover_stroke);
+            }
+            SnapTarget::Midpoint { .. } => {
+                // Square indicator, same style as vertex but square
+                let s = vertex_hover_radius;
+                painter.rect(
+                    egui::Rect::from_center_size(screen_pos, egui::vec2(s * 2.0, s * 2.0)),
+                    0.0,
+                    vertex_color,
+                    vertex_hover_stroke,
+                    egui::StrokeKind::Middle,
+                );
+            }
+            SnapTarget::Curve { edge_id, .. } => {
+                // Stipple highlight on the snapped edge (matching existing curve hover)
+                use lightningbeam_core::layer::AnyLayer;
+                if let Some(layer_id) = *shared.active_layer_id {
+                    if let Some(AnyLayer::Vector(vl)) = shared.action_executor.document().get_layer(&layer_id) {
+                        if let Some(dcel) = vl.dcel_at_time(*shared.playback_time) {
+                            let edge = dcel.edge(edge_id);
+                            if !edge.deleted {
+                                // Draw a small circle at the snap point on the curve
+                                painter.circle(screen_pos, 4.0, egui::Color32::TRANSPARENT, vertex_hover_stroke);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 
@@ -6516,6 +6699,9 @@ impl PaneRenderer for StagePane {
 
         // Render vector editing overlays (vertices, control points, etc.)
         self.render_vector_editing_overlays(ui, rect, shared);
+
+        // Render snap indicator (works for all tools, not just Select/BezierEdit)
+        self.render_snap_indicator(ui, rect, shared);
 
         // Set custom tool cursor when pointer is over the stage canvas
         // (system cursors from transform handles take priority via render_overlay check)

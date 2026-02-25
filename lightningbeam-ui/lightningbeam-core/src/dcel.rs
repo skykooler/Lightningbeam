@@ -2557,13 +2557,28 @@ impl Dcel {
         v_keep: VertexId,
         v_remove: VertexId,
     ) {
-        // Re-home half-edges from v_remove → v_keep
+        let keep_pos = self.vertices[v_keep.idx()].position;
+
+        // Re-home half-edges from v_remove → v_keep, and fix curve endpoints
         for i in 0..self.half_edges.len() {
             if self.half_edges[i].deleted {
                 continue;
             }
             if self.half_edges[i].origin == v_remove {
                 self.half_edges[i].origin = v_keep;
+
+                // Fix the curve endpoint so it matches v_keep's position.
+                // A half-edge's origin is the start of that half-edge.
+                // The forward half-edge (index 0) of an edge starts at p0.
+                // The backward half-edge (index 1) starts at p3.
+                let edge_id = self.half_edges[i].edge;
+                let edge = &self.edges[edge_id.idx()];
+                let he_id = HalfEdgeId(i as u32);
+                if edge.half_edges[0] == he_id {
+                    self.edges[edge_id.idx()].curve.p0 = keep_pos;
+                } else if edge.half_edges[1] == he_id {
+                    self.edges[edge_id.idx()].curve.p3 = keep_pos;
+                }
             }
         }
 

@@ -195,6 +195,8 @@ pub struct SharedPaneState<'a> {
     pub stroke_width: &'a mut f64,
     /// Whether to fill shapes when drawing (Rectangle, Ellipse, Polygon)
     pub fill_enabled: &'a mut bool,
+    /// Whether to snap to geometry when editing vectors
+    pub snap_enabled: &'a mut bool,
     /// Fill gap tolerance for paint bucket tool
     pub paint_bucket_gap_tolerance: &'a mut f64,
     /// Number of sides for polygon tool

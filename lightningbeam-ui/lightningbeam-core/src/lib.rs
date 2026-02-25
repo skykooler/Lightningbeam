@@ -45,3 +45,4 @@ pub mod export;
 pub mod clipboard;
 pub mod region_select;
 pub mod dcel;
+pub mod snap;
