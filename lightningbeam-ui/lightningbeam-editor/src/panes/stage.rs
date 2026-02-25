@@ -2061,6 +2061,8 @@ pub struct StagePane {
     // Camera state
     pan_offset: egui::Vec2,
     zoom: f32,
+    // Whether the initial view has been centered (on first render with a known rect)
+    needs_initial_center: bool,
     // Interaction state
     is_panning: bool,
     last_pan_pos: Option<egui::Pos2>,
@@ -2141,6 +2143,7 @@ impl StagePane {
         Self {
             pan_offset: egui::Vec2::ZERO,
             zoom: 1.0,
+            needs_initial_center: true,
             is_panning: false,
             last_pan_pos: None,
             instance_id,
@@ -6450,6 +6453,18 @@ impl PaneRenderer for StagePane {
     ) {
         // Store viewport rect for zoom-to-fit calculation
         self.last_viewport_rect = Some(rect);
+
+        // Center the document in the viewport on first render
+        if self.needs_initial_center {
+            self.needs_initial_center = false;
+            let document = shared.action_executor.document();
+            let doc_width = document.width as f32;
+            let doc_height = document.height as f32;
+            let viewport_size = rect.size();
+            let canvas_center = egui::vec2(doc_width / 2.0, doc_height / 2.0) * self.zoom;
+            let viewport_center = viewport_size / 2.0;
+            self.pan_offset = viewport_center - canvas_center;
+        }
 
         // Check for completed eyedropper samples from GPU readback and apply them
         if let Ok(mut results) = EYEDROPPER_RESULTS
