@@ -989,10 +989,33 @@ impl Dcel {
                         let t1 = hit.t1;
                         let t2 = hit.t2.unwrap_or(0.5);
 
-                        // Check if intersection is close to a shared endpoint vertex.
-                        // This handles edges that share a vertex and run nearly
-                        // parallel near the junction — the intersection finder can
-                        // report a hit a few pixels from the shared vertex.
+                        // Skip crossings near a shared endpoint vertex.  After
+                        // splitting at a crossing, the sub-curves can still graze
+                        // each other near the shared vertex.  Detect this by
+                        // checking whether the t-value on each edge places the
+                        // hit near the endpoint that IS the shared vertex.
+                        // Requires both edges to be near the shared vertex —
+                        // a T-junction has the hit near the stem's endpoint but
+                        // interior on the bar, so it won't be skipped.
+                        let near_shared = shared.iter().any(|&sv| {
+                            let a_near = if verts_a[0] == sv {
+                                t1 < 0.05
+                            } else {
+                                t1 > 0.95
+                            };
+                            let b_near = if verts_b[0] == sv {
+                                t2 < 0.05
+                            } else {
+                                t2 > 0.95
+                            };
+                            a_near && b_near
+                        });
+                        if near_shared {
+                            continue;
+                        }
+
+                        // Also skip if spatially close to a shared vertex
+                        // (catches cases where t-based check is borderline).
                         let close_to_shared = shared.iter().any(|&sv| {
                             let sv_pos = self.vertex(sv).position;
                             (hit.point - sv_pos).hypot() < 2.0
@@ -2557,6 +2580,13 @@ impl Dcel {
         v_keep: VertexId,
         v_remove: VertexId,
     ) {
+        // If snap_vertex already merged these during split_edge, they're the
+        // same vertex.  Proceeding would call free_vertex on a live vertex,
+        // putting it on the free list while edges still reference it.
+        if v_keep == v_remove {
+            return;
+        }
+
         let keep_pos = self.vertices[v_keep.idx()].position;
 
         // Re-home half-edges from v_remove → v_keep, and fix curve endpoints

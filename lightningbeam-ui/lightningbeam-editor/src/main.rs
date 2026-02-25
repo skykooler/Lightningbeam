@@ -41,6 +41,9 @@ use effect_thumbnails::EffectThumbnailGenerator;
 mod custom_cursor;
 mod debug_overlay;
 
+#[cfg(debug_assertions)]
+mod test_mode;
+
 mod sample_import;
 mod sample_import_dialog;
 
@@ -175,10 +178,57 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    // Test mode: install panic hook for crash capture (debug builds only)
+    #[cfg(debug_assertions)]
+    let test_mode_panic_snapshot: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestCase>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(debug_assertions)]
+    let test_mode_pending_event: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestEvent>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(debug_assertions)]
+    let test_mode_is_replaying: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(debug_assertions)]
+    let test_mode_panic_snapshot_for_app = test_mode_panic_snapshot.clone();
+    #[cfg(debug_assertions)]
+    let test_mode_pending_event_for_app = test_mode_pending_event.clone();
+    #[cfg(debug_assertions)]
+    let test_mode_is_replaying_for_app = test_mode_is_replaying.clone();
+
+    #[cfg(debug_assertions)]
+    {
+        let panic_snapshot = test_mode_panic_snapshot.clone();
+        let pending_event = test_mode_pending_event.clone();
+        let is_replaying = test_mode_is_replaying.clone();
+        let test_dir = directories::ProjectDirs::from("", "", "lightningbeam")
+            .map(|dirs| dirs.data_dir().join("test_cases"))
+            .unwrap_or_else(|| std::path::PathBuf::from("test_cases"));
+
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                format!("{}", info)
+            };
+            let backtrace = format!("{}", std::backtrace::Backtrace::force_capture());
+            test_mode::TestModeState::record_panic(&panic_snapshot, &pending_event, &is_replaying, msg, backtrace, &test_dir);
+            default_hook(info);
+        }));
+    }
+
     eframe::run_native(
         "Lightningbeam Editor",
         options,
-        Box::new(move |cc| Ok(Box::new(EditorApp::new(cc, layouts, theme)))),
+        Box::new(move |cc| {
+            #[cfg(debug_assertions)]
+            let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app);
+            #[cfg(not(debug_assertions))]
+            let app = EditorApp::new(cc, layouts, theme);
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -793,6 +843,10 @@ struct EditorApp {
 
     /// Custom cursor cache for SVG cursors
     cursor_cache: custom_cursor::CursorCache,
+    /// Debug test mode (F5) — input recording, panic capture & visual replay
+    #[cfg(debug_assertions)]
+    test_mode: test_mode::TestModeState,
+
     /// Debug overlay (F3) state
     debug_overlay_visible: bool,
     debug_stats_collector: debug_overlay::DebugStatsCollector,
@@ -817,7 +871,14 @@ enum ImportFilter {
 }
 
 impl EditorApp {
-    fn new(cc: &eframe::CreationContext, layouts: Vec<LayoutDefinition>, theme: Theme) -> Self {
+    fn new(
+        cc: &eframe::CreationContext,
+        layouts: Vec<LayoutDefinition>,
+        theme: Theme,
+        #[cfg(debug_assertions)] panic_snapshot: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestCase>>>,
+        #[cfg(debug_assertions)] pending_event: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestEvent>>>,
+        #[cfg(debug_assertions)] is_replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         let current_layout = layouts[0].layout.clone();
 
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
@@ -991,6 +1052,10 @@ impl EditorApp {
             preferences_dialog: preferences::dialog::PreferencesDialog::default(),
             export_orchestrator: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
+
+            // Debug test mode (F5)
+            #[cfg(debug_assertions)]
+            test_mode: test_mode::TestModeState::new(panic_snapshot, pending_event, is_replaying),
 
             // Debug overlay (F3)
             cursor_cache: custom_cursor::CursorCache::new(),
@@ -4653,6 +4718,17 @@ impl eframe::App for EditorApp {
             return;
         }
 
+        // Test mode sidebar (debug builds only) — must be before CentralPanel
+        #[cfg(debug_assertions)]
+        let test_mode_replay = test_mode::render_sidebar(ctx, &mut self.test_mode);
+        // Apply tool changes from replay
+        #[cfg(debug_assertions)]
+        if let Some(ref tool_name) = test_mode_replay.tool_change {
+            if let Some(tool) = test_mode::parse_tool(tool_name) {
+                self.selected_tool = tool;
+            }
+        }
+
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
         let mut clipboard_consumed = false;
@@ -4677,6 +4753,10 @@ impl eframe::App for EditorApp {
             // Editing context navigation requests from stage pane
             let mut pending_enter_clip: Option<(Uuid, Uuid, Uuid)> = None;
             let mut pending_exit_clip = false;
+
+            // Synthetic input from test mode replay (debug builds only)
+            #[cfg(debug_assertions)]
+            let mut synthetic_input_storage: Option<test_mode::SyntheticInput> = test_mode_replay.synthetic_input;
 
             // Queue for effect thumbnail requests (collected during rendering)
             let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
@@ -4779,6 +4859,10 @@ impl eframe::App for EditorApp {
                 region_select_mode: &mut self.region_select_mode,
                 pending_graph_loads: &self.pending_graph_loads,
                 clipboard_consumed: &mut clipboard_consumed,
+                #[cfg(debug_assertions)]
+                test_mode: &mut self.test_mode,
+                #[cfg(debug_assertions)]
+                synthetic_input: &mut synthetic_input_storage,
             };
 
             render_layout_node(
@@ -4826,6 +4910,10 @@ impl eframe::App for EditorApp {
 
             // Execute all pending actions (two-phase dispatch)
             for action in pending_actions {
+                // Record action for test mode (debug builds only)
+                #[cfg(debug_assertions)]
+                let action_desc = action.description();
+
                 // Create backend context for actions that need backend sync
                 if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
@@ -4844,6 +4932,13 @@ impl eframe::App for EditorApp {
                     // No audio system available, execute without backend
                     let _ = self.action_executor.execute(action);
                 }
+
+                #[cfg(debug_assertions)]
+                self.test_mode.record_event(
+                    lightningbeam_core::test_mode::TestEventKind::ActionExecuted {
+                        description: action_desc,
+                    },
+                );
             }
 
             // Process menu actions queued by pane context menus
@@ -4993,6 +5088,23 @@ impl eframe::App for EditorApp {
             }
         });
 
+        // Record tool changes for test mode (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            // Use a simple static to track previous tool for change detection
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static PREV_TOOL: AtomicU8 = AtomicU8::new(255);
+            let tool_byte = self.selected_tool as u8;
+            let prev = PREV_TOOL.swap(tool_byte, Ordering::Relaxed);
+            if prev != tool_byte && prev != 255 {
+                self.test_mode.record_event(
+                    lightningbeam_core::test_mode::TestEventKind::ToolChanged {
+                        tool: format!("{:?}", self.selected_tool),
+                    },
+                );
+            }
+        }
+
         // Escape key: revert uncommitted region selection
         if !wants_keyboard && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.region_selection.is_some() {
@@ -5007,6 +5119,15 @@ impl eframe::App for EditorApp {
         // F3 debug overlay toggle (works even when text input is active)
         if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
             self.debug_overlay_visible = !self.debug_overlay_visible;
+        }
+
+        // F5 test mode toggle (debug builds only)
+        #[cfg(debug_assertions)]
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.test_mode.active = !self.test_mode.active;
+            if self.test_mode.active {
+                self.test_mode.refresh_test_list();
+            }
         }
 
         // Clear the set of audio pools with new waveforms at the end of the frame
@@ -5121,6 +5242,12 @@ struct RenderContext<'a> {
     pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Set by panes when they handle Ctrl+C/X/V internally
     clipboard_consumed: &'a mut bool,
+    /// Test mode state for event recording (debug builds only)
+    #[cfg(debug_assertions)]
+    test_mode: &'a mut test_mode::TestModeState,
+    /// Synthetic input from test mode replay (debug builds only)
+    #[cfg(debug_assertions)]
+    synthetic_input: &'a mut Option<test_mode::SyntheticInput>,
 }
 
 /// Recursively render a layout node with drag support
@@ -5615,6 +5742,10 @@ fn render_pane(
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
                 pending_enter_clip: ctx.pending_enter_clip,
                 pending_exit_clip: ctx.pending_exit_clip,
+                #[cfg(debug_assertions)]
+                test_mode: ctx.test_mode,
+                #[cfg(debug_assertions)]
+                synthetic_input: ctx.synthetic_input,
             };
             pane_instance.render_header(&mut header_ui, &mut shared);
         }
@@ -5698,6 +5829,10 @@ fn render_pane(
                 editing_parent_layer_id: ctx.editing_parent_layer_id,
                 pending_enter_clip: ctx.pending_enter_clip,
                 pending_exit_clip: ctx.pending_exit_clip,
+                #[cfg(debug_assertions)]
+                test_mode: ctx.test_mode,
+                #[cfg(debug_assertions)]
+                synthetic_input: ctx.synthetic_input,
             };
 
             // Render pane content (header was already rendered above)

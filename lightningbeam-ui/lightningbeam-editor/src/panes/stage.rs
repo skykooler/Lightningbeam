@@ -2074,6 +2074,18 @@ pub struct StagePane {
     dcel_editing_cache: Option<DcelEditingCache>,
     // Current snap result (for visual feedback rendering)
     current_snap: Option<lightningbeam_core::snap::SnapResult>,
+    /// Synthetic drag/click override for test mode replay (debug builds only)
+    #[cfg(debug_assertions)]
+    replay_override: Option<ReplayDragState>,
+}
+
+/// Synthetic drag/click state injected during test mode replay
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+pub struct ReplayDragState {
+    pub drag_started: bool,
+    pub dragged: bool,
+    pub drag_stopped: bool,
 }
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
@@ -2136,7 +2148,62 @@ impl StagePane {
             last_viewport_rect: None,
             dcel_editing_cache: None,
             current_snap: None,
+            #[cfg(debug_assertions)]
+            replay_override: None,
         }
+    }
+
+    /// Check if a drag started, respecting replay override
+    fn rsp_drag_started(&self, response: &egui::Response) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.drag_started; }
+        response.drag_started()
+    }
+
+    /// Check if dragging, respecting replay override
+    fn rsp_dragged(&self, response: &egui::Response) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.dragged; }
+        response.dragged()
+    }
+
+    /// Check if drag stopped, respecting replay override
+    fn rsp_drag_stopped(&self, response: &egui::Response) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.drag_stopped; }
+        response.drag_stopped()
+    }
+
+    /// Check if clicked (a click is a drag_started + drag_stopped in the same spot),
+    /// respecting replay override
+    fn rsp_clicked(&self, response: &egui::Response) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.drag_started; }
+        response.clicked()
+    }
+
+    /// Check if primary mouse button was just pressed this frame,
+    /// respecting replay override
+    fn rsp_primary_pressed(&self, ui: &egui::Ui) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.drag_started; }
+        ui.input(|i| i.pointer.primary_pressed())
+    }
+
+    /// Check if any pointer button was released this frame,
+    /// respecting replay override (returns the synthetic drag_stopped during replay)
+    fn rsp_any_released(&self, ui: &egui::Ui) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.drag_stopped; }
+        ui.input(|i| i.pointer.any_released())
+    }
+
+    /// Check if primary pointer button is currently held down,
+    /// respecting replay override
+    fn rsp_primary_down(&self, ui: &egui::Ui) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(ref o) = self.replay_override { return o.dragged || o.drag_started; }
+        ui.input(|i| i.pointer.primary_down())
     }
 
     /// Convert a document-space position to clip-local coordinates when editing inside a clip.
@@ -2330,7 +2397,7 @@ impl StagePane {
 
         // Mouse down: start interaction (check on initial press, not after drag starts)
         // Scope this section to drop vector_layer borrow before drag handling
-        let mouse_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let mouse_pressed = self.rsp_primary_pressed(ui);
         if mouse_pressed {
             // VECTOR EDITING: Check for vertex/curve editing first (higher priority than selection)
             let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
@@ -2462,7 +2529,7 @@ impl StagePane {
         }
 
         // Mouse drag: update tool state
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             match shared.tool_state {
                 ToolState::PendingCurveInteraction { edge_id, parameter_t, start_mouse } => {
                     // Drag detected — transition to curve editing
@@ -2492,8 +2559,8 @@ impl StagePane {
         }
 
         // Mouse up: finish interaction
-        let drag_stopped = response.drag_stopped();
-        let pointer_released = ui.input(|i| i.pointer.any_released());
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let pointer_released = self.rsp_any_released(ui);
         let is_pending_curve = matches!(shared.tool_state, ToolState::PendingCurveInteraction { .. });
         let is_drag_or_marquee = matches!(shared.tool_state, ToolState::DraggingSelection { .. } | ToolState::MarqueeSelecting { .. });
         let is_vector_editing = matches!(shared.tool_state, ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. });
@@ -2941,7 +3008,7 @@ impl StagePane {
         );
 
         // Mouse down: start interaction (check on initial press, not after drag starts)
-        let mouse_pressed = ui.input(|i| i.pointer.primary_pressed());
+        let mouse_pressed = self.rsp_primary_pressed(ui);
         if mouse_pressed {
             // Priority 1: Vector editing (control points, vertices, and curves)
             if let Some(hit) = vector_hit {
@@ -2966,7 +3033,7 @@ impl StagePane {
         }
 
         // Mouse drag: update tool state
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             match shared.tool_state {
                 ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. } => {
                     // Vector editing - update happens in helper method
@@ -2977,8 +3044,8 @@ impl StagePane {
         }
 
         // Mouse up: finish interaction
-        let drag_stopped = response.drag_stopped();
-        let pointer_released = ui.input(|i| i.pointer.any_released());
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let pointer_released = self.rsp_any_released(ui);
         let is_vector_editing = matches!(shared.tool_state, ToolState::EditingVertex { .. } | ToolState::EditingCurve { .. } | ToolState::EditingControlPoint { .. });
 
         if drag_stopped || (pointer_released && is_vector_editing) {
@@ -3104,7 +3171,7 @@ impl StagePane {
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating rectangle (clears any previous preview)
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             *shared.tool_state = ToolState::CreatingRectangle {
                 start_point: point,
                 current_point: point,
@@ -3114,7 +3181,7 @@ impl StagePane {
         }
 
         // Mouse drag: update rectangle
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             if let ToolState::CreatingRectangle { start_point, .. } = shared.tool_state {
                 *shared.tool_state = ToolState::CreatingRectangle {
                     start_point: *start_point,
@@ -3126,7 +3193,7 @@ impl StagePane {
         }
 
         // Mouse up: create the rectangle shape
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingRectangle { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingRectangle { .. })) {
             if let ToolState::CreatingRectangle { start_point, current_point, centered, constrain_square } = shared.tool_state.clone() {
                 // Calculate rectangle bounds in world space
                 let (min_x, min_y, max_x, max_y) = if centered {
@@ -3237,7 +3304,7 @@ impl StagePane {
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating ellipse (clears any previous preview)
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             *shared.tool_state = ToolState::CreatingEllipse {
                 start_point: point,
                 current_point: point,
@@ -3247,7 +3314,7 @@ impl StagePane {
         }
 
         // Mouse drag: update ellipse
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             if let ToolState::CreatingEllipse { start_point, .. } = shared.tool_state {
                 *shared.tool_state = ToolState::CreatingEllipse {
                     start_point: *start_point,
@@ -3259,7 +3326,7 @@ impl StagePane {
         }
 
         // Mouse up: create the ellipse shape
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingEllipse { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingEllipse { .. })) {
             if let ToolState::CreatingEllipse { start_point, current_point, corner_mode, constrain_circle } = shared.tool_state.clone() {
                 // Calculate ellipse parameters based on mode
                 // Note: corner_mode is true when Ctrl is NOT held (inverted for consistency with rectangle)
@@ -3361,7 +3428,7 @@ impl StagePane {
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating line
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             *shared.tool_state = ToolState::CreatingLine {
                 start_point: point,
                 current_point: point,
@@ -3369,7 +3436,7 @@ impl StagePane {
         }
 
         // Mouse drag: update line
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             if let ToolState::CreatingLine { start_point, .. } = shared.tool_state {
                 *shared.tool_state = ToolState::CreatingLine {
                     start_point: *start_point,
@@ -3379,7 +3446,7 @@ impl StagePane {
         }
 
         // Mouse up: create the line shape
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingLine { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingLine { .. })) {
             if let ToolState::CreatingLine { start_point, current_point } = shared.tool_state.clone() {
                 // Calculate line length to ensure it's not too small
                 let dx = current_point.x - start_point.x;
@@ -3443,7 +3510,7 @@ impl StagePane {
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating polygon (center point)
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             *shared.tool_state = ToolState::CreatingPolygon {
                 center: point,
                 current_point: point,
@@ -3452,7 +3519,7 @@ impl StagePane {
         }
 
         // Mouse drag: update polygon radius
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             if let ToolState::CreatingPolygon { center, num_sides, .. } = shared.tool_state {
                 *shared.tool_state = ToolState::CreatingPolygon {
                     center: *center,
@@ -3463,7 +3530,7 @@ impl StagePane {
         }
 
         // Mouse up: create the polygon shape
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::CreatingPolygon { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingPolygon { .. })) {
             if let ToolState::CreatingPolygon { center, current_point, num_sides } = shared.tool_state.clone() {
                 // Calculate radius
                 let dx = current_point.x - center.x;
@@ -3509,7 +3576,7 @@ impl StagePane {
         shared: &mut SharedPaneState,
     ) {
         // On click, store the screen position and color mode for sampling
-        if response.clicked() {
+        if self.rsp_clicked(response) {
             self.pending_eyedropper_sample = Some((screen_pos, *shared.active_color_mode));
         }
     }
@@ -3533,7 +3600,7 @@ impl StagePane {
         };
 
         // Mouse down: start region selection
-        if response.drag_started() {
+        if self.rsp_drag_started(response) {
             // Revert any existing uncommitted region selection
             Self::revert_region_selection_static(shared);
 
@@ -3553,7 +3620,7 @@ impl StagePane {
         }
 
         // Mouse drag: update region
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             match shared.tool_state {
                 ToolState::RegionSelectingRect { ref start, .. } => {
                     let start = *start;
@@ -3574,7 +3641,7 @@ impl StagePane {
         }
 
         // Mouse up: execute region selection
-        if response.drag_stopped() {
+        if self.rsp_drag_stopped(response) {
             let region_path = match &*shared.tool_state {
                 ToolState::RegionSelectingRect { start, current } => {
                     let min_x = start.x.min(current.x);
@@ -3817,7 +3884,7 @@ impl StagePane {
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
         // Mouse down: start drawing path (snap the first point)
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             let snapped_start = self.snap_point(point, shared);
             *shared.tool_state = ToolState::DrawingPath {
                 points: vec![snapped_start],
@@ -3826,7 +3893,7 @@ impl StagePane {
         }
 
         // Mouse drag: add points to path (no snapping for intermediate freehand points)
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             self.current_snap = None;
             if let ToolState::DrawingPath { points, simplify_mode: _ } = &mut *shared.tool_state {
                 // Only add point if it's far enough from the last point (reduce noise)
@@ -3844,7 +3911,7 @@ impl StagePane {
         }
 
         // Mouse up: snap the last point, then complete the path and create shape
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::DrawingPath { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::DrawingPath { .. })) {
             // Snap the final point (extract last point first to avoid borrow conflict)
             let last_point = if let ToolState::DrawingPath { points, .. } = &*shared.tool_state {
                 if points.len() >= 2 { Some(*points.last().unwrap()) } else { None }
@@ -3958,7 +4025,7 @@ impl StagePane {
             return;
         }
 
-        if response.clicked() {
+        if self.rsp_clicked(response) {
             let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
             let fill_color = ShapeColor::from_egui(*shared.fill_color);
 
@@ -4448,7 +4515,7 @@ impl StagePane {
         match shared.tool_state.clone() {
             ToolState::Transforming { mode, start_mouse, original_bbox, .. } => {
                 // Drag: apply transform preview to DCEL
-                if response.dragged() {
+                if self.rsp_dragged(response) {
                     *shared.tool_state = ToolState::Transforming {
                         mode: mode.clone(),
                         original_transforms: std::collections::HashMap::new(),
@@ -4481,7 +4548,7 @@ impl StagePane {
                 }
 
                 // Release: finalize
-                if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(*shared.tool_state, ToolState::Transforming { .. })) {
+                if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(*shared.tool_state, ToolState::Transforming { .. })) {
                     if let Some(cache) = self.dcel_editing_cache.take() {
                         let dcel_after = {
                             let document = shared.action_executor.document();
@@ -4507,7 +4574,7 @@ impl StagePane {
         }
 
         // Idle: check for handle clicks to start a transform
-        if response.drag_started() || response.clicked() {
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
             let tolerance = 10.0;
             if let Some(mode) = Self::hit_test_transform_handle(point, bbox, tolerance) {
                 // Snapshot DCEL for undo
@@ -4796,7 +4863,7 @@ impl StagePane {
             }
 
             // Mouse down: check if clicking on a handle
-            if response.drag_started() || response.clicked() {
+            if self.rsp_drag_started(response) || self.rsp_clicked(response) {
                 let tolerance = 10.0; // Click tolerance in world space
 
                 if let Some(mode) = Self::hit_test_transform_handle(point, bbox, tolerance) {
@@ -4833,7 +4900,7 @@ impl StagePane {
         }
 
             // Mouse drag: update current mouse position and apply transforms
-            if response.dragged() {
+            if self.rsp_dragged(response) {
                 if let ToolState::Transforming { mode, original_transforms, pivot, start_mouse, original_bbox, .. } = shared.tool_state.clone() {
                     // Update current mouse position
                     *shared.tool_state = ToolState::Transforming {
@@ -4864,7 +4931,7 @@ impl StagePane {
             }
 
             // Mouse up: finalize transform
-            if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
+            if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
                 if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                     use std::collections::HashMap;
                     use lightningbeam_core::actions::TransformClipInstancesAction;
@@ -5098,8 +5165,8 @@ impl StagePane {
         }
 
         // === Mouse down: hit test handles (using the same handle positions and order as cursor logic) ===
-        let should_start_transform = (response.drag_started() || response.clicked())
-            || (matches!(*shared.tool_state, ToolState::Idle) && ui.input(|i| i.pointer.primary_down()) && response.hovered());
+        let should_start_transform = (self.rsp_drag_started(response) || self.rsp_clicked(response))
+            || (matches!(*shared.tool_state, ToolState::Idle) && self.rsp_primary_down(ui) && response.hovered());
 
         if should_start_transform && matches!(*shared.tool_state, ToolState::Idle) {
             // Check rotation handle (same as cursor logic)
@@ -5245,7 +5312,7 @@ impl StagePane {
         }
 
         // Mouse drag: apply transform in local space
-        if response.dragged() {
+        if self.rsp_dragged(response) {
             if let ToolState::Transforming { mode, original_transforms, start_mouse, current_mouse: _, .. } = shared.tool_state.clone() {
                 // Update current mouse
                 if let ToolState::Transforming { mode, original_transforms, pivot, start_mouse, original_bbox, current_mouse: _ } = shared.tool_state.clone() {
@@ -5599,7 +5666,7 @@ impl StagePane {
         }
 
         // Mouse up: finalize
-        if response.drag_stopped() || (ui.input(|i| i.pointer.any_released()) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
+        if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::Transforming { .. })) {
             if let ToolState::Transforming { original_transforms, .. } = shared.tool_state.clone() {
                 use std::collections::HashMap;
                 use lightningbeam_core::actions::TransformClipInstancesAction;
@@ -5681,7 +5748,36 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use vello::kurbo::Point;
 
-        if ui.input(|i| i.pointer.any_released()) {
+        // When replaying, skip ALL real mouse/scroll input — only synthetic events drive state
+        #[cfg(debug_assertions)]
+        let is_replaying = matches!(shared.test_mode.mode, crate::test_mode::TestModeOp::Playing(_));
+        #[cfg(not(debug_assertions))]
+        let is_replaying = false;
+
+        // Store current input as a pending event for panic capture.
+        // If processing panics, the panic hook appends this to the saved test case.
+        #[cfg(debug_assertions)]
+        if !is_replaying {
+            if let Some(mouse_pos) = ui.input(|i| i.pointer.latest_pos()) {
+                use lightningbeam_core::test_mode::{SerPoint, TestEventKind};
+                let mouse_canvas_pos = mouse_pos - rect.min;
+                let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+                let wp = self.doc_to_clip_local(world_pos_doc, shared);
+                let pos = SerPoint { x: wp.x as f64, y: wp.y as f64 };
+                let kind = if ui.input(|i| i.pointer.any_released()) {
+                    TestEventKind::MouseUp { pos }
+                } else if ui.input(|i| i.pointer.primary_pressed()) && response.hovered() {
+                    TestEventKind::MouseDown { pos }
+                } else if response.dragged() || response.drag_started() {
+                    TestEventKind::MouseDrag { pos }
+                } else {
+                    TestEventKind::MouseMove { pos }
+                };
+                shared.test_mode.set_pending_event(kind);
+            }
+        }
+
+        if !is_replaying && ui.input(|i| i.pointer.any_released()) {
             match shared.tool_state.clone() {
                 ToolState::DraggingSelection { start_mouse, original_positions, .. } => {
                     // Get last known mouse position (will be at edge if offscreen)
@@ -5795,26 +5891,98 @@ impl StagePane {
             }
         }
 
-        // Only process input if mouse is over the stage pane
-        if !response.hovered() {
+        // Check for synthetic input from test mode replay (debug builds only)
+        #[cfg(debug_assertions)]
+        let synthetic_input = shared.synthetic_input.take();
+
+        // Only process input if mouse is over the stage pane (or synthetic input is active)
+        #[cfg(debug_assertions)]
+        let has_synthetic = synthetic_input.is_some();
+        #[cfg(not(debug_assertions))]
+        let has_synthetic = false;
+
+        if !response.hovered() && !has_synthetic {
             self.is_panning = false;
             self.last_pan_pos = None;
             return;
         }
 
-        let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
-        let alt_held = ui.input(|i| i.modifiers.alt);
-        let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-        let shift_held = ui.input(|i| i.modifiers.shift);
+        // During replay with no synthetic event this frame, skip all input processing
+        #[cfg(debug_assertions)]
+        if is_replaying && !has_synthetic {
+            return;
+        }
 
-        // Get mouse position for zoom-to-cursor
+        let scroll_delta = ui.input(|i| i.smooth_scroll_delta);
+
+        // Source input from synthetic (replay) or real UI
+        #[cfg(debug_assertions)]
+        let (world_pos, alt_held, ctrl_held, shift_held, drag_started, dragged, drag_stopped) = if let Some(syn) = &synthetic_input {
+            let wp = egui::Vec2::new(syn.world_pos.x as f32, syn.world_pos.y as f32);
+            (wp, syn.alt, syn.ctrl, syn.shift, syn.drag_started, syn.dragged, syn.drag_stopped)
+        } else {
+            let alt_held = ui.input(|i| i.modifiers.alt);
+            let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            let shift_held = ui.input(|i| i.modifiers.shift);
+            let mouse_pos = response.hover_pos().unwrap_or(rect.center());
+            let mouse_canvas_pos = mouse_pos - rect.min;
+            let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+            let wp = self.doc_to_clip_local(world_pos_doc, shared);
+            (wp, alt_held, ctrl_held, shift_held, response.drag_started(), response.dragged(), response.drag_stopped())
+        };
+
+        #[cfg(not(debug_assertions))]
+        let (world_pos, alt_held, ctrl_held, shift_held, _drag_started, _dragged, _drag_stopped) = {
+            let alt_held = ui.input(|i| i.modifiers.alt);
+            let ctrl_held = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            let shift_held = ui.input(|i| i.modifiers.shift);
+            let mouse_pos = response.hover_pos().unwrap_or(rect.center());
+            let mouse_canvas_pos = mouse_pos - rect.min;
+            let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
+            let wp = self.doc_to_clip_local(world_pos_doc, shared);
+            (wp, alt_held, ctrl_held, shift_held, response.drag_started(), response.dragged(), response.drag_stopped())
+        };
+
+        // Record mouse events for test mode (debug builds only) — skip during replay
+        //
+        // IMPORTANT: We use `primary_pressed` (fires immediately on button down) for MouseDown
+        // instead of `drag_started` (fires after egui's drag threshold, ~6-10px of movement).
+        // The select tool hit-tests on `primary_pressed`, so we must record the position at
+        // that moment. The `drag_started` frame is recorded as MouseDrag since the press
+        // was already captured.
+        #[cfg(debug_assertions)]
+        if !is_replaying {
+            use lightningbeam_core::test_mode::{SerPoint, TestEventKind};
+            let pos = SerPoint { x: world_pos.x as f64, y: world_pos.y as f64 };
+            let primary_just_pressed = response.hovered() && ui.input(|i| i.pointer.primary_pressed());
+            if primary_just_pressed {
+                shared.test_mode.record_event(TestEventKind::MouseDown { pos });
+            } else if drag_stopped {
+                // Emit a final MouseDrag at the release position to close the gap
+                // between the last drag frame and the release (the mouse moves between frames)
+                shared.test_mode.record_event(TestEventKind::MouseDrag { pos });
+                shared.test_mode.record_event(TestEventKind::MouseUp { pos });
+            } else if drag_started || dragged {
+                // drag_started after primary_pressed is just the first drag motion
+                shared.test_mode.record_event(TestEventKind::MouseDrag { pos });
+            } else if response.hovered() {
+                shared.test_mode.record_event(TestEventKind::MouseMove { pos });
+            }
+        }
+
+        // Get mouse position for zoom-to-cursor (needed for pan/zoom handling below)
         let mouse_pos = response.hover_pos().unwrap_or(rect.center());
         let mouse_canvas_pos = mouse_pos - rect.min;
 
-        // Convert screen position to world position (accounting for pan and zoom)
-        // When inside a clip, further transform to clip-local coordinates
-        let world_pos_doc = (mouse_canvas_pos - self.pan_offset) / self.zoom;
-        let world_pos = self.doc_to_clip_local(world_pos_doc, shared);
+        // Set replay override so wrapper methods return synthetic drag state
+        #[cfg(debug_assertions)]
+        if synthetic_input.is_some() {
+            self.replay_override = Some(ReplayDragState {
+                drag_started,
+                dragged,
+                drag_stopped,
+            });
+        }
 
         // Handle tool input (only if not using Alt modifier for panning)
         if !alt_held {
@@ -5859,6 +6027,10 @@ impl StagePane {
                 }
             }
         }
+
+        // Clear replay override after tool dispatch
+        #[cfg(debug_assertions)]
+        { self.replay_override = None; }
 
         // Delete/Backspace: remove selected DCEL elements
         if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
@@ -5925,57 +6097,60 @@ impl StagePane {
             }
         }
 
-        // Distinguish between mouse wheel (discrete) and trackpad (smooth)
-        let mut handled = false;
-        ui.input(|i| {
-            for event in &i.raw.events {
-                if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
-                    match unit {
-                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
-                            // Real mouse wheel (discrete clicks) -> always zoom
-                            let zoom_delta = if ctrl_held || modifiers.ctrl {
-                                delta.y * 0.01 // Ctrl+wheel: faster zoom
-                            } else {
-                                delta.y * 0.005 // Normal zoom
-                            };
-                            self.apply_zoom_at_point(zoom_delta, mouse_canvas_pos);
-                            handled = true;
-                        }
-                        egui::MouseWheelUnit::Point => {
-                            // Trackpad (smooth scrolling) -> only zoom if Ctrl held
-                            if ctrl_held || modifiers.ctrl {
-                                let zoom_delta = delta.y * 0.005;
+        // Skip real scroll/zoom/pan input during replay
+        if !is_replaying {
+            // Distinguish between mouse wheel (discrete) and trackpad (smooth)
+            let mut handled = false;
+            ui.input(|i| {
+                for event in &i.raw.events {
+                    if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
+                        match unit {
+                            egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                                // Real mouse wheel (discrete clicks) -> always zoom
+                                let zoom_delta = if ctrl_held || modifiers.ctrl {
+                                    delta.y * 0.01 // Ctrl+wheel: faster zoom
+                                } else {
+                                    delta.y * 0.005 // Normal zoom
+                                };
                                 self.apply_zoom_at_point(zoom_delta, mouse_canvas_pos);
                                 handled = true;
                             }
-                            // Otherwise let scroll_delta handle panning
+                            egui::MouseWheelUnit::Point => {
+                                // Trackpad (smooth scrolling) -> only zoom if Ctrl held
+                                if ctrl_held || modifiers.ctrl {
+                                    let zoom_delta = delta.y * 0.005;
+                                    self.apply_zoom_at_point(zoom_delta, mouse_canvas_pos);
+                                    handled = true;
+                                }
+                                // Otherwise let scroll_delta handle panning
+                            }
                         }
                     }
                 }
+            });
+
+            // Handle scroll_delta for trackpad panning (when Ctrl not held)
+            if !handled && (scroll_delta.x.abs() > 0.0 || scroll_delta.y.abs() > 0.0) {
+                self.pan_offset.x += scroll_delta.x;
+                self.pan_offset.y += scroll_delta.y;
             }
-        });
 
-        // Handle scroll_delta for trackpad panning (when Ctrl not held)
-        if !handled && (scroll_delta.x.abs() > 0.0 || scroll_delta.y.abs() > 0.0) {
-            self.pan_offset.x += scroll_delta.x;
-            self.pan_offset.y += scroll_delta.y;
-        }
-
-        // Handle panning with Alt+Drag
-        if alt_held && response.dragged() {
-            // Alt+Click+Drag panning
-            if let Some(last_pos) = self.last_pan_pos {
-                if let Some(current_pos) = response.interact_pointer_pos() {
-                    let delta = current_pos - last_pos;
-                    self.pan_offset += delta;
+            // Handle panning with Alt+Drag
+            if alt_held && response.dragged() {
+                // Alt+Click+Drag panning
+                if let Some(last_pos) = self.last_pan_pos {
+                    if let Some(current_pos) = response.interact_pointer_pos() {
+                        let delta = current_pos - last_pos;
+                        self.pan_offset += delta;
+                    }
                 }
-            }
-            self.last_pan_pos = response.interact_pointer_pos();
-            self.is_panning = true;
-        } else {
-            if !response.dragged() {
-                self.is_panning = false;
-                self.last_pan_pos = None;
+                self.last_pan_pos = response.interact_pointer_pos();
+                self.is_panning = true;
+            } else {
+                if !response.dragged() {
+                    self.is_panning = false;
+                    self.last_pan_pos = None;
+                }
             }
         }
     }
@@ -6326,7 +6501,7 @@ impl PaneRenderer for StagePane {
                     );
 
                     // Handle drop on mouse release
-                    if ui.input(|i| i.pointer.any_released()) {
+                    if self.rsp_any_released(ui) {
                         eprintln!("DEBUG STAGE DROP: Dropping clip type {:?}, linked_audio: {:?}",
                             dragging.clip_type, dragging.linked_audio_clip_id);
 
@@ -6702,6 +6877,31 @@ impl PaneRenderer for StagePane {
 
         // Render snap indicator (works for all tools, not just Select/BezierEdit)
         self.render_snap_indicator(ui, rect, shared);
+
+        // Draw ghost cursor during test mode replay
+        #[cfg(debug_assertions)]
+        if let Some((wx, wy)) = shared.test_mode.replay_cursor_pos {
+            // Convert world-space position to screen-space
+            let screen_pos = rect.min + self.pan_offset + egui::vec2(wx as f32, wy as f32) * self.zoom;
+            let painter = ui.painter_at(rect);
+            // Crosshair
+            let arm = 10.0;
+            let stroke = egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 100, 100, 200));
+            painter.line_segment(
+                [screen_pos - egui::vec2(arm, 0.0), screen_pos + egui::vec2(arm, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [screen_pos - egui::vec2(0.0, arm), screen_pos + egui::vec2(0.0, arm)],
+                stroke,
+            );
+            // Circle
+            painter.circle_stroke(
+                screen_pos,
+                6.0,
+                egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 100, 100, 200)),
+            );
+        }
 
         // Set custom tool cursor when pointer is over the stage canvas
         // (system cursors from transform handles take priority via render_overlay check)

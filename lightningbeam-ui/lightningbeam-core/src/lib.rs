@@ -46,3 +46,6 @@ pub mod clipboard;
 pub mod region_select;
 pub mod dcel;
 pub mod snap;
+
+#[cfg(debug_assertions)]
+pub mod test_mode;
