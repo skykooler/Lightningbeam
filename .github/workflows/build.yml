@@ -258,14 +258,29 @@ jobs:
             > "Lightningbeam_Editor-${VERSION}-x86_64.AppImage"
           chmod +x "Lightningbeam_Editor-${VERSION}-x86_64.AppImage"
 
-      - name: Collect Linux artifacts
+      - name: Upload .deb
         if: matrix.platform == 'ubuntu-22.04'
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          cp lightningbeam-ui/target/debian/*.deb artifacts/
-          cp lightningbeam-ui/target/generate-rpm/*.rpm artifacts/
-          cp lightningbeam-ui/Lightningbeam_Editor-*.AppImage artifacts/
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: lightningbeam-ui/target/debian/*.deb
+          if-no-files-found: error
+
+      - name: Upload .rpm
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: lightningbeam-ui/target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+      - name: Upload AppImage
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: lightningbeam-ui/Lightningbeam_Editor-*.AppImage
+          if-no-files-found: error
 
       # ══════════════════════════════════════════════
       #  macOS Packaging
@@ -331,12 +346,13 @@ jobs:
             "Lightningbeam Editor.app" || true
           # create-dmg returns non-zero if codesigning is skipped, but the .dmg is still valid
 
-      - name: Collect macOS artifacts
+      - name: Upload .dmg
         if: startsWith(matrix.platform, 'macos')
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          cp Lightningbeam_Editor-*.dmg artifacts/
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.artifact-name }}
+          path: Lightningbeam_Editor-*.dmg
+          if-no-files-found: error
 
       # ══════════════════════════════════════════════
       #  Windows Packaging
@@ -354,19 +370,12 @@ jobs:
           Copy-Item "$env:FFMPEG_DIR\bin\*.dll" "$DIST/"
           Compress-Archive -Path $DIST -DestinationPath "${DIST}.zip"
 
-      - name: Collect Windows artifacts
+      - name: Upload .zip
         if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path artifacts
-          Copy-Item "Lightningbeam_Editor-*.zip" "artifacts/"
-
-      # ── Upload ──
-      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact-name }}
-          path: artifacts/*
+          name: windows-zip
+          path: Lightningbeam_Editor-*.zip
           if-no-files-found: error
 
   release:
