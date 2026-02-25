@@ -124,9 +124,4 @@ source = "assets/icons/256x256.png"
 dest = "/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
 mode = "644"
 
-# Factory instrument presets and samples (built by build.rs into target dir)
-[[package.metadata.generate-rpm.assets]]
-source = "target/release/presets/"
-dest = "/usr/share/lightningbeam-editor/presets/"
-mode = "644"
-doc = false
+# Factory preset entries are injected by CI (see build.yml "Inject preset entries" step)
