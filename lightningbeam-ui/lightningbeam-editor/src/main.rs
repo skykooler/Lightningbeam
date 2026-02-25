@@ -2165,29 +2165,24 @@ impl EditorApp {
                 println!("Menu: New File");
                 // TODO: Prompt to save current file if modified
 
-                // Create new document
-                let mut document = lightningbeam_core::document::Document::with_size("Untitled Animation", 1920.0, 1080.0)
-                    .with_duration(10.0)
-                    .with_framerate(60.0);
-
-                // Add default layer
-                use lightningbeam_core::layer::{AnyLayer, VectorLayer};
-                let vector_layer = VectorLayer::new("Layer 1");
-                let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
-
-                // Replace action executor with new document
-                self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
-                self.active_layer_id = Some(layer_id);
-
-                // Reset audio project (send command to create new empty project)
-                // TODO: Add ResetProject command to EngineController
+                // Reset state and return to start screen
                 self.layer_to_track_map.clear();
                 self.track_to_layer_map.clear();
                 self.clip_to_metatrack_map.clear();
-
-                // Clear file path
+                self.clip_instance_to_backend_map.clear();
                 self.current_file_path = None;
-                println!("Created new file");
+                self.selection.clear();
+                self.editing_context = EditingContext::default();
+                self.active_layer_id = None;
+                self.playback_time = 0.0;
+                self.is_playing = false;
+                self.midi_event_cache.clear();
+                self.audio_duration_cache.clear();
+                self.raw_audio_cache.clear();
+                self.waveform_gpu_dirty.clear();
+                self.pane_instances.clear();
+                self.project_generation += 1;
+                self.app_mode = AppMode::StartScreen;
             }
             MenuAction::NewWindow => {
                 println!("Menu: New Window");
