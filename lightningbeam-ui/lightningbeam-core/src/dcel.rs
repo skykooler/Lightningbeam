@@ -5,7 +5,7 @@
 //! maintained such that wherever two strokes intersect there is a vertex.
 
 use crate::shape::{FillRule, ShapeColor, StrokeStyle};
-use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveArclen, Point};
+use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveArclen, ParamCurveNearest, Point, Shape as KurboShape};
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -772,6 +772,274 @@ impl Dcel {
             }
         }
         path
+    }
+
+    // -----------------------------------------------------------------------
+    // Region queries
+    // -----------------------------------------------------------------------
+
+    /// Return all non-deleted, non-unbounded faces whose interior lies inside `region`.
+    ///
+    /// For each face, a representative interior point is found by offsetting from
+    /// a boundary edge midpoint along the inward-facing normal (the face lies to
+    /// the left of its boundary half-edges). This works for concave/crescent faces
+    /// where a simple centroid could land outside the face.
+    // -----------------------------------------------------------------------
+    // Region extraction (split DCEL by vertex classification)
+    // -----------------------------------------------------------------------
+
+    /// Extract the portion of the DCEL inside a closed region path.
+    ///
+    /// After inserting the region boundary via `insert_stroke()`, all crossing
+    /// edges have been split at intersection points. This method classifies
+    /// every vertex as INSIDE, OUTSIDE, or BOUNDARY (on the region path),
+    /// then:
+    /// - In a clone (`extracted`): removes edges with any OUTSIDE endpoint
+    /// - In `self`: removes edges with any INSIDE endpoint
+    ///
+    /// Boundary edges (both endpoints on the boundary) are kept in **both**.
+    /// Returns the extracted (inside) DCEL.
+    pub fn extract_region(&mut self, region: &BezPath, epsilon: f64) -> Dcel {
+        // Step 1: Classify every non-deleted vertex
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum VClass { Inside, Outside, Boundary }
+
+        let classifications: Vec<VClass> = self.vertices.iter().map(|v| {
+            if v.deleted {
+                return VClass::Outside; // doesn't matter, won't be referenced
+            }
+            // Check distance to region path
+            let pos = v.position;
+            if Self::point_distance_to_path(pos, region) < epsilon {
+                VClass::Boundary
+            } else if region.winding(pos) != 0 {
+                VClass::Inside
+            } else {
+                VClass::Outside
+            }
+        }).collect();
+
+        // Step 2: Clone self → extracted
+        let mut extracted = self.clone();
+
+        // Step 3: In extracted, remove edges where either endpoint is OUTSIDE
+        let edges_to_remove_from_extracted: Vec<EdgeId> = extracted.edges.iter().enumerate()
+            .filter_map(|(i, edge)| {
+                if edge.deleted { return None; }
+                let edge_id = EdgeId(i as u32);
+                let [he_fwd, he_bwd] = edge.half_edges;
+                let v1 = extracted.half_edges[he_fwd.idx()].origin;
+                let v2 = extracted.half_edges[he_bwd.idx()].origin;
+                if classifications[v1.idx()] == VClass::Outside
+                    || classifications[v2.idx()] == VClass::Outside
+                {
+                    Some(edge_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for edge_id in edges_to_remove_from_extracted {
+            if !extracted.edges[edge_id.idx()].deleted {
+                extracted.remove_edge(edge_id);
+            }
+        }
+
+        // Step 4: In self, remove edges where either endpoint is INSIDE
+        let edges_to_remove_from_self: Vec<EdgeId> = self.edges.iter().enumerate()
+            .filter_map(|(i, edge)| {
+                if edge.deleted { return None; }
+                let edge_id = EdgeId(i as u32);
+                let [he_fwd, he_bwd] = edge.half_edges;
+                let v1 = self.half_edges[he_fwd.idx()].origin;
+                let v2 = self.half_edges[he_bwd.idx()].origin;
+                if classifications[v1.idx()] == VClass::Inside
+                    || classifications[v2.idx()] == VClass::Inside
+                {
+                    Some(edge_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for edge_id in edges_to_remove_from_self {
+            if !self.edges[edge_id.idx()].deleted {
+                self.remove_edge(edge_id);
+            }
+        }
+
+        extracted
+    }
+
+    /// Propagate fill properties from a snapshot DCEL to faces that lost them
+    /// during `insert_stroke` (e.g., when region boundary edges split a filled face
+    /// but the new sub-face didn't inherit the fill).
+    ///
+    /// For each unfilled face, finds a robust interior sample point (centroid with
+    /// winding-check, or inward-normal offset fallback), then looks it up in the
+    /// snapshot to determine what fill it should have.
+    pub fn propagate_fills(&mut self, snapshot: &Dcel) {
+        use kurbo::ParamCurveDeriv;
+
+        for i in 1..self.faces.len() {
+            let face = &self.faces[i];
+            if face.deleted || face.outer_half_edge.is_none() {
+                continue;
+            }
+            // Skip faces that already have fill
+            if face.fill_color.is_some() || face.image_fill.is_some() {
+                continue;
+            }
+
+            let face_id = FaceId(i as u32);
+            let boundary = self.face_boundary(face_id);
+            if boundary.is_empty() {
+                continue;
+            }
+
+            let face_path = self.halfedges_to_bezpath(&boundary);
+
+            // Strategy 1: Use the centroid of boundary vertices. For convex faces
+            // (common after region splitting), this is guaranteed to be interior.
+            let mut cx = 0.0;
+            let mut cy = 0.0;
+            let mut n_verts = 0;
+            for &he_id in &boundary {
+                let he = &self.half_edges[he_id.idx()];
+                let v = &self.vertices[he.origin.idx()];
+                cx += v.position.x;
+                cy += v.position.y;
+                n_verts += 1;
+            }
+            let mut sample_point = None;
+            if n_verts > 0 {
+                let centroid = Point::new(cx / n_verts as f64, cy / n_verts as f64);
+                if face_path.winding(centroid) != 0 {
+                    sample_point = Some(centroid);
+                }
+            }
+
+            // Strategy 2: Inward-normal offset from edge midpoints (fallback for
+            // non-convex faces where the centroid falls outside).
+            if sample_point.is_none() {
+                let epsilon = 0.5;
+                for &he_id in &boundary {
+                    let he = &self.half_edges[he_id.idx()];
+                    let edge = &self.edges[he.edge.idx()];
+                    let is_forward = edge.half_edges[0] == he_id;
+                    let curve = if is_forward {
+                        edge.curve
+                    } else {
+                        CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+                    };
+
+                    let mid = curve.eval(0.5);
+                    let tangent = curve.deriv().eval(0.5);
+                    let len = (tangent.x * tangent.x + tangent.y * tangent.y).sqrt();
+                    if len < 1e-12 {
+                        continue;
+                    }
+                    let nx = tangent.y / len;
+                    let ny = -tangent.x / len;
+                    let candidate = Point::new(mid.x + nx * epsilon, mid.y + ny * epsilon);
+                    if face_path.winding(candidate) != 0 {
+                        sample_point = Some(candidate);
+                        break;
+                    }
+                }
+            }
+
+            let sample = match sample_point {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Look up which face this interior point was in the snapshot
+            let snap_face_id = snapshot.find_face_containing_point(sample);
+            if snap_face_id.0 == 0 {
+                continue;
+            }
+            let snap_face = &snapshot.faces[snap_face_id.idx()];
+            if snap_face.fill_color.is_some() || snap_face.image_fill.is_some() {
+                self.faces[i].fill_color = snap_face.fill_color.clone();
+                self.faces[i].image_fill = snap_face.image_fill;
+                self.faces[i].fill_rule = snap_face.fill_rule;
+            }
+        }
+    }
+
+    /// Compute the minimum distance from a point to a BezPath (treated as a polyline/curve).
+    fn point_distance_to_path(point: Point, path: &BezPath) -> f64 {
+        use kurbo::PathEl;
+
+        let mut min_dist = f64::MAX;
+        let mut current = Point::ZERO;
+        let mut subpath_start = Point::ZERO;
+
+        for el in path.elements() {
+            match *el {
+                PathEl::MoveTo(p) => {
+                    current = p;
+                    subpath_start = p;
+                }
+                PathEl::LineTo(p) => {
+                    let d = Self::point_to_line_segment_dist(point, current, p);
+                    if d < min_dist { min_dist = d; }
+                    current = p;
+                }
+                PathEl::QuadTo(cp, p) => {
+                    // Approximate as cubic
+                    let cp1 = Point::new(
+                        current.x + 2.0 / 3.0 * (cp.x - current.x),
+                        current.y + 2.0 / 3.0 * (cp.y - current.y),
+                    );
+                    let cp2 = Point::new(
+                        p.x + 2.0 / 3.0 * (cp.x - p.x),
+                        p.y + 2.0 / 3.0 * (cp.y - p.y),
+                    );
+                    let cubic = CubicBez::new(current, cp1, cp2, p);
+                    let nearest = cubic.nearest(point, 0.5);
+                    let d = nearest.distance_sq.sqrt();
+                    if d < min_dist { min_dist = d; }
+                    current = p;
+                }
+                PathEl::CurveTo(cp1, cp2, p) => {
+                    let cubic = CubicBez::new(current, cp1, cp2, p);
+                    let nearest = cubic.nearest(point, 0.5);
+                    let d = nearest.distance_sq.sqrt();
+                    if d < min_dist { min_dist = d; }
+                    current = p;
+                }
+                PathEl::ClosePath => {
+                    if (current.x - subpath_start.x).abs() > 1e-10
+                        || (current.y - subpath_start.y).abs() > 1e-10
+                    {
+                        let d = Self::point_to_line_segment_dist(point, current, subpath_start);
+                        if d < min_dist { min_dist = d; }
+                    }
+                    current = subpath_start;
+                }
+            }
+        }
+
+        min_dist
+    }
+
+    /// Distance from a point to a line segment.
+    fn point_to_line_segment_dist(point: Point, a: Point, b: Point) -> f64 {
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let len_sq = dx * dx + dy * dy;
+        if len_sq < 1e-20 {
+            return ((point.x - a.x).powi(2) + (point.y - a.y).powi(2)).sqrt();
+        }
+        let t = ((point.x - a.x) * dx + (point.y - a.y) * dy) / len_sq;
+        let t = t.clamp(0.0, 1.0);
+        let proj_x = a.x + t * dx;
+        let proj_y = a.y + t * dy;
+        ((point.x - proj_x).powi(2) + (point.y - proj_y).powi(2)).sqrt()
     }
 
     // -----------------------------------------------------------------------
@@ -4663,5 +4931,86 @@ mod tests {
         }
 
         dump_all_faces(&d, "After stroke 4");
+    }
+
+    /// Reproduce the user's test case: rectangle (100,100)-(200,200),
+    /// region select (0,0)-(150,150). The overlap corner face should be
+    /// detected as inside the region.
+    #[test]
+    fn test_extract_region_rectangle_corner() {
+        use crate::region_select::line_to_cubic;
+        use kurbo::{Line, Shape as _};
+
+        let mut dcel = Dcel::new();
+
+        // Draw a rectangle from (100,100) to (200,200) as 4 line strokes
+        let rect_sides = [
+            Line::new(Point::new(100.0, 100.0), Point::new(200.0, 100.0)),
+            Line::new(Point::new(200.0, 100.0), Point::new(200.0, 200.0)),
+            Line::new(Point::new(200.0, 200.0), Point::new(100.0, 200.0)),
+            Line::new(Point::new(100.0, 200.0), Point::new(100.0, 100.0)),
+        ];
+        for side in &rect_sides {
+            let seg = line_to_cubic(side);
+            dcel.insert_stroke(&[seg], None, None, 1.0);
+        }
+
+        // Set fill on the rectangle face (simulating paint bucket)
+        let rect_face = dcel.find_face_containing_point(Point::new(150.0, 150.0));
+        assert!(rect_face.0 != 0, "rectangle face should be bounded");
+        dcel.face_mut(rect_face).fill_color = Some(ShapeColor::new(255, 0, 0, 255));
+
+        // Region select rectangle from (0,0) to (150,150) — overlaps top-left corner
+        let region_sides = [
+            Line::new(Point::new(0.0, 0.0), Point::new(150.0, 0.0)),
+            Line::new(Point::new(150.0, 0.0), Point::new(150.0, 150.0)),
+            Line::new(Point::new(150.0, 150.0), Point::new(0.0, 150.0)),
+            Line::new(Point::new(0.0, 150.0), Point::new(0.0, 0.0)),
+        ];
+        let region_segments: Vec<CubicBez> = region_sides.iter().map(|l| line_to_cubic(l)).collect();
+        let snapshot = dcel.clone();
+        dcel.insert_stroke(&region_segments, None, None, 1.0);
+
+        // Build the region path for extract_region
+        let mut region_path = BezPath::new();
+        region_path.move_to(Point::new(0.0, 0.0));
+        region_path.line_to(Point::new(150.0, 0.0));
+        region_path.line_to(Point::new(150.0, 150.0));
+        region_path.line_to(Point::new(0.0, 150.0));
+        region_path.close_path();
+
+        // Extract, then propagate fills on extracted only (remainder keeps
+        // its fills from the original data — no propagation needed there).
+        let mut extracted = dcel.extract_region(&region_path, 1.0);
+        extracted.propagate_fills(&snapshot);
+
+        // The extracted DCEL should have at least one face with fill (the corner overlap)
+        let extracted_filled_faces: Vec<_> = extracted.faces.iter().enumerate()
+            .filter(|(i, f)| !f.deleted && *i > 0 && f.fill_color.is_some())
+            .collect();
+        assert!(
+            !extracted_filled_faces.is_empty(),
+            "Extracted DCEL should have at least one filled face (the corner overlap)"
+        );
+
+        // The original DCEL (remainder) should still have filled faces (the L-shaped remainder)
+        let remainder_filled_faces: Vec<_> = dcel.faces.iter().enumerate()
+            .filter(|(i, f)| !f.deleted && *i > 0 && f.fill_color.is_some())
+            .collect();
+        assert!(
+            !remainder_filled_faces.is_empty(),
+            "Remainder DCEL should have at least one filled face (L-shaped remainder)"
+        );
+
+        // The empty-space face in the remainder (outside the original rectangle)
+        // should NOT have fill — verify no spurious fill propagation
+        let point_outside_rect = Point::new(50.0, 50.0);
+        let face_at_outside = dcel.find_face_containing_point(point_outside_rect);
+        if face_at_outside.0 != 0 && !dcel.face(face_at_outside).deleted {
+            assert!(
+                dcel.face(face_at_outside).fill_color.is_none(),
+                "Face at (50,50) should NOT have fill — it's outside the original rectangle"
+            );
+        }
     }
 }

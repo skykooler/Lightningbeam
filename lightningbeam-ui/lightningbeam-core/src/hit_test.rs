@@ -9,7 +9,7 @@ use crate::layer::VectorLayer;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vello::kurbo::{Affine, BezPath, Point, Rect, Shape as KurboShape};
+use vello::kurbo::{Affine, Point, Rect, Shape as KurboShape};
 
 /// Result of a hit test operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,40 +216,6 @@ pub fn hit_test_dcel_in_rect(
     result
 }
 
-/// Classification of shapes relative to a clipping region
-#[derive(Debug, Clone)]
-pub struct ShapeRegionClassification {
-    /// Shapes entirely inside the region
-    pub fully_inside: Vec<Uuid>,
-    /// Shapes whose paths cross the region boundary
-    pub intersecting: Vec<Uuid>,
-    /// Shapes with no overlap with the region
-    pub fully_outside: Vec<Uuid>,
-}
-
-/// Classify shapes in a layer relative to a clipping region.
-///
-/// Uses bounding box fast-rejection, then checks path-region intersection
-/// and containment for accurate classification.
-pub fn classify_shapes_by_region(
-    layer: &VectorLayer,
-    time: f64,
-    region: &BezPath,
-    parent_transform: Affine,
-) -> ShapeRegionClassification {
-    let result = ShapeRegionClassification {
-        fully_inside: Vec::new(),
-        intersecting: Vec::new(),
-        fully_outside: Vec::new(),
-    };
-
-    let region_bbox = region.bounding_box();
-
-    // TODO: Implement DCEL-based region classification
-    let _ = (layer, time, parent_transform, region_bbox);
-
-    result
-}
 
 /// Get the bounding box of a shape in screen space
 pub fn get_shape_bounds(

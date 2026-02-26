@@ -44,7 +44,8 @@ pub mod file_io;
 pub mod export;
 pub mod clipboard;
 pub mod region_select;
-pub mod dcel;
+pub mod dcel2;
+pub use dcel2 as dcel;
 pub mod snap;
 
 #[cfg(debug_assertions)]

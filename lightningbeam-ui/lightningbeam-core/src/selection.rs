@@ -6,7 +6,7 @@ use crate::dcel::{Dcel, EdgeId, FaceId, VertexId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
-use vello::kurbo::BezPath;
+use vello::kurbo::{Affine, BezPath};
 
 /// Selection state for the editor
 ///
@@ -271,9 +271,11 @@ impl Selection {
 
 /// Represents a temporary region-based selection.
 ///
-/// When a region select is active, elements that cross the region boundary
-/// are tracked. If the user performs an operation, the selection is
-/// committed; if they deselect, the original state is restored.
+/// When a region select is active, the region boundary is inserted into the
+/// DCEL as invisible edges, splitting existing geometry. Faces inside the
+/// region are added to the normal `Selection`. If the user performs an
+/// operation, the selection is committed; if they deselect, the DCEL is
+/// restored from the snapshot.
 #[derive(Clone, Debug)]
 pub struct RegionSelection {
     /// The clipping region as a closed BezPath (polygon or rect)
@@ -282,10 +284,12 @@ pub struct RegionSelection {
     pub layer_id: Uuid,
     /// Keyframe time
     pub time: f64,
-    /// Per-shape split results (legacy, kept for compatibility)
-    pub splits: Vec<()>,
-    /// IDs that were fully inside the region
-    pub fully_inside_ids: Vec<Uuid>,
+    /// Snapshot of the DCEL before region boundary insertion, for revert
+    pub dcel_snapshot: Dcel,
+    /// The extracted DCEL containing geometry inside the region
+    pub selected_dcel: Dcel,
+    /// Transform applied to the selected DCEL (e.g. from dragging)
+    pub transform: Affine,
     /// Whether the selection has been committed (via an operation on the selection)
     pub committed: bool,
 }

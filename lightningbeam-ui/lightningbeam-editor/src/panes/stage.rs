@@ -824,6 +824,19 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 );
             }
 
+            // Render selected DCEL from active region selection (with transform)
+            if let Some(ref region_sel) = self.ctx.region_selection {
+                let sel_transform = camera_transform * region_sel.transform;
+                lightningbeam_core::renderer::render_dcel(
+                    &region_sel.selected_dcel,
+                    &mut scene,
+                    sel_transform,
+                    1.0,
+                    &self.ctx.document,
+                    &mut image_cache,
+                );
+            }
+
             drop(image_cache);
             scene
         };
@@ -1004,6 +1017,50 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     );
                                 }
                             }
+                        }
+                    }
+
+                    // 1a. Draw stipple overlay on region-selected DCEL
+                    if let Some(ref region_sel) = self.ctx.region_selection {
+                        use lightningbeam_core::dcel::FaceId as DcelFaceId;
+                        let sel_dcel = &region_sel.selected_dcel;
+                        let sel_transform = overlay_transform * region_sel.transform;
+                        let stipple_brush = selection_stipple_brush();
+                        let inv_zoom = 1.0 / self.ctx.zoom as f64;
+                        let brush_xform = Some(Affine::scale(inv_zoom));
+
+                        // Stipple faces with visible fill
+                        for (i, face) in sel_dcel.faces.iter().enumerate() {
+                            if face.deleted || i == 0 { continue; }
+                            if face.fill_color.is_none() && face.image_fill.is_none() { continue; }
+                            let face_id = DcelFaceId(i as u32);
+                            let path = sel_dcel.face_to_bezpath_with_holes(face_id);
+                            scene.fill(
+                                vello::peniko::Fill::NonZero,
+                                sel_transform,
+                                stipple_brush,
+                                brush_xform,
+                                &path,
+                            );
+                        }
+
+                        // Stipple edges with visible stroke
+                        for edge in &sel_dcel.edges {
+                            if edge.deleted { continue; }
+                            if edge.stroke_style.is_none() && edge.stroke_color.is_none() { continue; }
+                            let width = edge.stroke_style.as_ref()
+                                .map(|s| s.width)
+                                .unwrap_or(2.0);
+                            let mut path = vello::kurbo::BezPath::new();
+                            path.move_to(edge.curve.p0);
+                            path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
+                            scene.stroke(
+                                &vello::kurbo::Stroke::new(width),
+                                sel_transform,
+                                stipple_brush,
+                                brush_xform,
+                                &path,
+                            );
                         }
                     }
 
@@ -3676,59 +3733,107 @@ impl StagePane {
         }
     }
 
-    /// Execute region selection: classify shapes, clip intersecting ones, create temporary split
+    /// Execute region selection: snapshot DCEL, insert region boundary, extract inside geometry
     fn execute_region_select(
         shared: &mut SharedPaneState,
         region_path: vello::kurbo::BezPath,
         layer_id: uuid::Uuid,
     ) {
-        use lightningbeam_core::hit_test;
         use lightningbeam_core::layer::AnyLayer;
-        use vello::kurbo::Affine;
+        use lightningbeam_core::region_select::line_to_cubic;
+        use vello::kurbo::Line;
 
         let time = *shared.playback_time;
 
-        // Classify shapes
-        let classification = {
-            let document = shared.action_executor.document();
-            let layer = match document.get_layer(&layer_id) {
-                Some(l) => l,
+        // Get mutable DCEL and snapshot it before insertion
+        let document = shared.action_executor.document_mut();
+        let dcel = match document.get_layer_mut(&layer_id) {
+            Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time_mut(time) {
+                Some(d) => d,
                 None => return,
-            };
-            let vector_layer = match layer {
-                AnyLayer::Vector(vl) => vl,
-                _ => return,
-            };
-            hit_test::classify_shapes_by_region(vector_layer, time, &region_path, Affine::IDENTITY)
+            },
+            _ => return,
         };
 
-        // If nothing is inside or intersecting, do nothing
-        if classification.fully_inside.is_empty() && classification.intersecting.is_empty() {
+        let snapshot = dcel.clone();
+
+        // Convert region path line segments to CubicBez for insert_stroke
+        let segments: Vec<_> = {
+            let mut segs = Vec::new();
+            let mut current = vello::kurbo::Point::ZERO;
+            let mut subpath_start = vello::kurbo::Point::ZERO;
+            for el in region_path.elements() {
+                match *el {
+                    vello::kurbo::PathEl::MoveTo(p) => {
+                        current = p;
+                        subpath_start = p;
+                    }
+                    vello::kurbo::PathEl::LineTo(p) => {
+                        segs.push(line_to_cubic(&Line::new(current, p)));
+                        current = p;
+                    }
+                    vello::kurbo::PathEl::ClosePath => {
+                        if current.distance(subpath_start) > 1e-10 {
+                            segs.push(line_to_cubic(&Line::new(current, subpath_start)));
+                        }
+                        current = subpath_start;
+                    }
+                    vello::kurbo::PathEl::CurveTo(p1, p2, p3) => {
+                        segs.push(vello::kurbo::CubicBez::new(current, p1, p2, p3));
+                        current = p3;
+                    }
+                    vello::kurbo::PathEl::QuadTo(_p1, p2) => {
+                        segs.push(line_to_cubic(&Line::new(current, p2)));
+                        current = p2;
+                    }
+                }
+            }
+            segs
+        };
+
+        if segments.is_empty() {
+            return;
+        }
+
+        // Insert region boundary as invisible edges (no stroke style/color)
+        let stroke_result = dcel.insert_stroke(&segments, None, None, 1.0);
+        let boundary_verts = stroke_result.new_vertices;
+
+        // Extract the inside portion; self (dcel) keeps the outside + boundary.
+        let mut selected_dcel = dcel.extract_region(&region_path, &boundary_verts);
+
+        // Propagate fills ONLY on the extracted DCEL. The remainder (dcel) already
+        // has correct fills from the original data — its filled faces (e.g., the
+        // L-shaped remainder) keep their fill, and merged faces from edge removal
+        // correctly have no fill. Running propagate_fills on the remainder would
+        // incorrectly add fill to merged faces that span filled and unfilled areas.
+        selected_dcel.propagate_fills(&snapshot, &region_path, &boundary_verts);
+
+        // Check if the extracted DCEL has any visible content
+        let has_visible = selected_dcel.edges.iter().any(|e| !e.deleted && (e.stroke_style.is_some() || e.stroke_color.is_some()))
+            || selected_dcel.faces.iter().enumerate().any(|(i, f)| !f.deleted && i > 0 && (f.fill_color.is_some() || f.image_fill.is_some()));
+
+        if !has_visible {
+            // Nothing visible inside — restore snapshot and bail
+            *dcel = snapshot;
             return;
         }
 
         shared.selection.clear();
 
-        // TODO: DCEL - region selection element selection deferred to Phase 2
-
-        // For intersecting shapes: compute clip and create temporary splits
-        let splits = Vec::new();
-
-        // TODO: DCEL - region selection shape splitting disabled during migration
-        // (was: get_shape_in_keyframe for intersecting shapes, clip paths, add/remove_shape_from_keyframe)
-
-        // Store region selection state
+        // Store region selection state with extracted DCEL
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
             region_path,
             layer_id,
             time,
-            splits,
-            fully_inside_ids: classification.fully_inside,
+            dcel_snapshot: snapshot,
+            selected_dcel,
+            transform: vello::kurbo::Affine::IDENTITY,
             committed: false,
         });
     }
 
-    /// Revert an uncommitted region selection, restoring original shapes
+    /// Revert an uncommitted region selection, restoring the DCEL from snapshot
     fn revert_region_selection_static(shared: &mut SharedPaneState) {
         use lightningbeam_core::layer::AnyLayer;
 
@@ -3742,21 +3847,15 @@ impl StagePane {
             return;
         }
 
+        // Restore the DCEL from the snapshot taken before boundary insertion
         let doc = shared.action_executor.document_mut();
-        let layer = match doc.get_layer_mut(&region_sel.layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
-            _ => return,
-        };
+        if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
+            if let Some(dcel) = vl.dcel_at_time_mut(region_sel.time) {
+                *dcel = region_sel.dcel_snapshot;
+            }
+        }
 
-        // TODO: DCEL - region selection revert disabled during migration
-        // (was: remove_shape_from_keyframe for splits, add_shape_to_keyframe to restore originals)
-        let _ = vector_layer;
-
-        shared.selection.clear();
+        shared.selection.clear_dcel_selection();
     }
 
     /// Create a rectangle path centered at origin (easier for curve editing later)

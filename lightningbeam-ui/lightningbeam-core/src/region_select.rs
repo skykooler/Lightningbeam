@@ -287,7 +287,7 @@ struct Crossing {
 // ── Core clipping ────────────────────────────────────────────────────────
 
 /// Convert a line segment to a CubicBez
-fn line_to_cubic(line: &Line) -> CubicBez {
+pub fn line_to_cubic(line: &Line) -> CubicBez {
     let p0 = line.p0;
     let p1 = line.p1;
     let cp1 = Point::new(
