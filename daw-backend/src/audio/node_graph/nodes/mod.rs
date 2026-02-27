@@ -42,6 +42,7 @@ mod slew_limiter;
 mod splitter;
 mod svf;
 mod template_io;
+mod vibrato;
 mod vocoder;
 mod voice_allocator;
 mod wavetable_oscillator;
@@ -90,6 +91,7 @@ pub use slew_limiter::SlewLimiterNode;
 pub use splitter::SplitterNode;
 pub use svf::SVFNode;
 pub use template_io::{TemplateInputNode, TemplateOutputNode};
+pub use vibrato::VibratoNode;
 pub use vocoder::VocoderNode;
 pub use voice_allocator::VoiceAllocatorNode;
 pub use wavetable_oscillator::WavetableOscillatorNode;
@@ -146,6 +148,7 @@ pub fn create_node(node_type: &str, sample_rate: u32, buffer_size: usize) -> Opt
         "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
         "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),
         "VoiceAllocator" => Box::new(VoiceAllocatorNode::new("VoiceAllocator", sample_rate, buffer_size)),
+        "Vibrato" => Box::new(VibratoNode::new("Vibrato")),
         "AmpSim" => Box::new(AmpSimNode::new("Amp Sim")),
         "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
         _ => return None,

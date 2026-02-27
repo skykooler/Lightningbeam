@@ -122,6 +122,7 @@ node_templates! {
     Pan,                "Pan",                "Pan",                 "Effects",      true;
     RingModulator,      "RingModulator",      "Ring Modulator",      "Effects",      true;
     Vocoder,            "Vocoder",            "Vocoder",             "Effects",      true;
+    Vibrato,            "Vibrato",            "Vibrato",             "Effects",      true;
     // Utilities
     Adsr,               "ADSR",               "ADSR Envelope",       "Utilities",    true;
     Lfo,                "LFO",                "LFO",                 "Utilities",    true;
@@ -471,10 +472,10 @@ impl NodeTemplateTrait for NodeTemplate {
             }
             NodeTemplate::Filter => {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
-                graph.add_input_param(node_id, "Cutoff CV".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Cutoff CV".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOrConstant, true);
                 // Parameters
                 graph.add_input_param(node_id, "Cutoff".into(), DataType::CV,
-                    ValueType::float_param(1000.0, 20.0, 20000.0, " Hz", 0, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(1000.0, 20.0, 20000.0, " Hz", 0, None), InputParamKind::ConnectionOrConstant, true);
                 graph.add_input_param(node_id, "Resonance".into(), DataType::CV,
                     ValueType::float_param(0.0, 0.0, 1.0, "", 1, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Type".into(), DataType::CV,
@@ -784,6 +785,15 @@ impl NodeTemplateTrait for NodeTemplate {
                     ValueType::float_param(0.05, 0.001, 1.0, " s", 2, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Mix".into(), DataType::CV,
                     ValueType::float_param(1.0, 0.0, 1.0, "", 3, None), InputParamKind::ConstantOnly, true);
+                graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::Vibrato => {
+                graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Mod CV".into(), DataType::CV, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
+                graph.add_input_param(node_id, "Rate".into(), DataType::CV,
+                    ValueType::float_param(5.0, 0.1, 14.0, " Hz", 0, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Depth".into(), DataType::CV,
+                    ValueType::float_param(0.5, 0.0, 1.0, "", 1, None), InputParamKind::ConnectionOrConstant, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::AudioToCv => {
