@@ -528,6 +528,19 @@ impl Dcel {
         HalfEdgeId::NONE
     }
 
+    /// Create a face from an existing cycle of half-edges in F0.
+    ///
+    /// Use this when a closed boundary exists but no face was created
+    /// (e.g. paint bucket on a region that hasn't been filled yet).
+    /// The cycle's half-edges are assigned to the new face.
+    /// Returns the new FaceId.
+    pub fn create_face_at_cycle(&mut self, cycle_he: HalfEdgeId) -> FaceId {
+        let face = self.alloc_face();
+        self.faces[face.idx()].outer_half_edge = cycle_he;
+        self.assign_cycle_face(cycle_he, face);
+        face
+    }
+
     /// Re-sort all outgoing half-edges at a vertex by angle and fix the
     /// fan linkage (`twin.next` / `prev`). Call this after operations that
     /// add outgoing half-edges to an existing vertex without maintaining

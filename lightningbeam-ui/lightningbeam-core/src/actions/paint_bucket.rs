@@ -55,21 +55,27 @@ impl Action for PaintBucketAction {
         // Record for debug test generation (if recording is active)
         dcel.record_paint_point(self.click_point);
 
-        // Hit-test to find which face was clicked
-        let face_id = dcel.find_face_containing_point(self.click_point);
+        // Find the enclosing cycle for the click point
+        let query = dcel.find_face_at_point(self.click_point);
 
         // Dump cumulative test to stderr after every paint click (if recording)
-        // Do this before the early return so failed clicks are captured too.
         if dcel.is_recording() {
-            eprintln!("\n--- DCEL debug test (cumulative, face={:?}) ---", face_id);
+            eprintln!("\n--- DCEL debug test (cumulative, face={:?}) ---", query.face);
             dcel.debug_recorder.as_ref().unwrap().dump_test("test_recorded");
             eprintln!("--- end test ---\n");
         }
 
-        if face_id.0 == 0 {
-            // FaceId(0) is the unbounded exterior face — nothing to fill
+        if query.cycle_he.is_none() {
+            // No edges at all — nothing to fill
             return Err("No face at click point".to_string());
         }
+
+        // If the cycle is in F0 (no face created yet), create one now
+        let face_id = if query.face.0 == 0 {
+            dcel.create_face_at_cycle(query.cycle_he)
+        } else {
+            query.face
+        };
 
         // Store for undo
         self.hit_face = Some(face_id);
