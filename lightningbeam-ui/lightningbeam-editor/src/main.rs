@@ -5943,13 +5943,128 @@ fn render_pane(
             }
         });
 
+    // Secondary tab selector for music/instrument panes
+    let secondary_tab_types = [
+        PaneType::VirtualPiano,
+        PaneType::PianoRoll,
+        PaneType::NodeEditor,
+    ];
+    let show_secondary_tabs = pane_type
+        .map(|pt| secondary_tab_types.contains(&pt))
+        .unwrap_or(false);
+
+    let tab_size = 24.0;
+    let secondary_selector_extra_width = if show_secondary_tabs {
+        8.0 + 3.0 * tab_size + 8.0
+    } else {
+        0.0
+    };
+
+    if show_secondary_tabs {
+        let n = secondary_tab_types.len();
+        let selector_start_x = icon_button_rect.max.x + 8.0;
+        let corner_r = 4.0_f32;
+        let selector_rect = egui::Rect::from_min_size(
+            egui::pos2(selector_start_x, header_rect.min.y + icon_padding),
+            egui::vec2(n as f32 * tab_size, tab_size),
+        );
+
+        // Shared background
+        ui.painter().rect_filled(
+            selector_rect,
+            corner_r,
+            egui::Color32::from_rgba_premultiplied(50, 50, 50, 200),
+        );
+
+        for (i, &tab_type) in secondary_tab_types.iter().enumerate() {
+            let tab_x = selector_start_x + i as f32 * tab_size;
+            let tab_rect = egui::Rect::from_min_size(
+                egui::pos2(tab_x, header_rect.min.y + icon_padding),
+                egui::vec2(tab_size, tab_size),
+            );
+
+            let is_active = pane_type == Some(tab_type);
+
+            // Active tab highlight with per-corner rounding
+            if is_active {
+                let cr = corner_r as u8;
+                let rounding = egui::Rounding {
+                    nw: if i == 0 { cr } else { 0 },
+                    sw: if i == 0 { cr } else { 0 },
+                    ne: if i == n - 1 { cr } else { 0 },
+                    se: if i == n - 1 { cr } else { 0 },
+                };
+                ui.painter().rect_filled(
+                    tab_rect,
+                    rounding,
+                    egui::Color32::from_rgba_premultiplied(60, 90, 150, 230),
+                );
+            }
+
+            // Divider lines between tabs
+            if i > 0 {
+                let divider_color = if is_active || pane_type == Some(secondary_tab_types[i - 1]) {
+                    egui::Color32::from_rgba_premultiplied(80, 110, 170, 180)
+                } else {
+                    egui::Color32::from_gray(70)
+                };
+                ui.painter().vline(
+                    tab_x,
+                    tab_rect.y_range(),
+                    egui::Stroke::new(1.0, divider_color),
+                );
+            }
+
+            // Icon
+            if let Some(icon) = ctx.icon_cache.get_or_load(tab_type, ui.ctx()) {
+                let icon_texture_id = icon.id();
+                ui.painter().image(
+                    icon_texture_id,
+                    tab_rect.shrink(3.0),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+
+            // Interaction
+            let tab_id = ui.id().with(("secondary_tab", path, i));
+            let tab_response = ui.interact(tab_rect, tab_id, egui::Sense::click());
+
+            if tab_response.hovered() && !is_active {
+                ui.painter().rect_filled(
+                    tab_rect,
+                    egui::Rounding {
+                        nw: if i == 0 { corner_r as u8 } else { 0 },
+                        sw: if i == 0 { corner_r as u8 } else { 0 },
+                        ne: if i == n - 1 { corner_r as u8 } else { 0 },
+                        se: if i == n - 1 { corner_r as u8 } else { 0 },
+                    },
+                    egui::Color32::from_rgba_premultiplied(70, 70, 70, 180),
+                );
+            }
+
+            if tab_response.clicked() {
+                *pane_name = tab_type.to_name().to_string();
+            }
+        }
+
+        // Outer border
+        ui.painter().rect_stroke(
+            selector_rect,
+            corner_r,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+            egui::StrokeKind::Middle,
+        );
+    }
+
     // Draw pane title in header
     let title_text = if let Some(pane_type) = pane_type {
         pane_type.display_name()
     } else {
         pane_name.as_str()
     };
-    let title_pos = header_rect.min + egui::vec2(icon_padding * 2.0 + icon_size + 8.0, header_height / 2.0);
+    let title_x_start = icon_padding * 2.0 + icon_size + 8.0 + secondary_selector_extra_width;
+    let title_pos = header_rect.min + egui::vec2(title_x_start, header_height / 2.0);
     ui.painter().text(
         title_pos,
         egui::Align2::LEFT_CENTER,
@@ -5961,8 +6076,8 @@ fn render_pane(
     // Create header controls area (positioned after title)
     let title_width = 150.0; // Approximate width for title
     let header_controls_rect = egui::Rect::from_min_size(
-        header_rect.min + egui::vec2(icon_padding * 2.0 + icon_size + 8.0 + title_width, 0.0),
-        egui::vec2(header_rect.width() - (icon_padding * 2.0 + icon_size + 8.0 + title_width), header_height),
+        header_rect.min + egui::vec2(title_x_start + title_width, 0.0),
+        egui::vec2(header_rect.width() - (title_x_start + title_width), header_height),
     );
 
     // Render pane-specific header controls (if pane has them)
