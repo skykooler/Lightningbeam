@@ -864,6 +864,7 @@ impl PianoRollPane {
                 self.selected_note_indices.clear();
             }
             self.selected_note_indices.insert(note_idx);
+            self.update_focus(shared);
 
             self.drag_mode = Some(DragMode::MoveNotes {
                 start_time_offset: 0.0,
@@ -915,6 +916,7 @@ impl PianoRollPane {
         } else {
             // Start selection rectangle
             self.selected_note_indices.clear();
+            self.update_focus(shared);
             self.selection_rect = Some((pos, pos));
             self.drag_mode = Some(DragMode::SelectRect);
         }
@@ -1007,6 +1009,7 @@ impl PianoRollPane {
             }
             Some(DragMode::SelectRect) => {
                 self.selection_rect = None;
+                self.update_focus(shared);
             }
             None => {}
         }
@@ -1084,6 +1087,18 @@ impl PianoRollPane {
             }
         }
         None
+    }
+
+    fn update_focus(&self, shared: &mut SharedPaneState) {
+        if self.selected_note_indices.is_empty() {
+            *shared.focus = lightningbeam_core::selection::FocusSelection::None;
+        } else if let (Some(layer_id), Some(midi_clip_id)) = (*shared.active_layer_id, self.selected_clip_id) {
+            *shared.focus = lightningbeam_core::selection::FocusSelection::Notes {
+                layer_id,
+                midi_clip_id,
+                indices: self.selected_note_indices.iter().copied().collect(),
+            };
+        }
     }
 
     fn update_selection_from_rect(

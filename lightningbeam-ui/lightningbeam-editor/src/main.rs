@@ -739,6 +739,7 @@ struct EditorApp {
     action_executor: lightningbeam_core::action::ActionExecutor, // Action system for undo/redo
     active_layer_id: Option<Uuid>, // Currently active layer for editing
     selection: lightningbeam_core::selection::Selection, // Current selection state
+    focus: lightningbeam_core::selection::FocusSelection, // Document-level focus tracking
     editing_context: EditingContext, // Which clip (or root) we're editing
     tool_state: lightningbeam_core::tool::ToolState, // Current tool interaction state
     // Draw tool configuration
@@ -1006,6 +1007,7 @@ impl EditorApp {
             action_executor,
             active_layer_id: Some(layer_id),
             selection: lightningbeam_core::selection::Selection::new(),
+            focus: lightningbeam_core::selection::FocusSelection::None,
             editing_context: EditingContext::default(),
             tool_state: lightningbeam_core::tool::ToolState::default(),
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
@@ -1385,6 +1387,7 @@ impl EditorApp {
 
         // Reset selection and set active layer to the newly created one
         self.selection = lightningbeam_core::selection::Selection::new();
+        self.focus = lightningbeam_core::selection::FocusSelection::None;
         self.active_layer_id = Some(layer_id);
 
         // For Music focus, sync the MIDI layer with daw-backend
@@ -4986,6 +4989,7 @@ impl eframe::App for EditorApp {
                 theme: &self.theme,
                 action_executor: &mut self.action_executor,
                 selection: &mut self.selection,
+                focus: &mut self.focus,
                 editing_clip_id: self.editing_context.current_clip_id(),
                 editing_instance_id: self.editing_context.current_instance_id(),
                 editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
@@ -5500,6 +5504,7 @@ struct RenderContext<'a> {
     theme: &'a Theme,
     action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
     selection: &'a mut lightningbeam_core::selection::Selection,
+    focus: &'a mut lightningbeam_core::selection::FocusSelection,
     editing_clip_id: Option<Uuid>,
     editing_instance_id: Option<Uuid>,
     editing_parent_layer_id: Option<Uuid>,
@@ -6028,6 +6033,7 @@ fn render_pane(
                 pending_handlers: ctx.pending_handlers,
                 action_executor: ctx.action_executor,
                 selection: ctx.selection,
+                focus: ctx.focus,
                 active_layer_id: ctx.active_layer_id,
                 tool_state: ctx.tool_state,
                 pending_actions: ctx.pending_actions,
@@ -6118,6 +6124,7 @@ fn render_pane(
                 pending_handlers: ctx.pending_handlers,
                 action_executor: ctx.action_executor,
                 selection: ctx.selection,
+                focus: ctx.focus,
                 active_layer_id: ctx.active_layer_id,
                 tool_state: ctx.tool_state,
                 pending_actions: ctx.pending_actions,

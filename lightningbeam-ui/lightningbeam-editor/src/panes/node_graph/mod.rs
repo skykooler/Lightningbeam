@@ -2580,6 +2580,17 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             self.last_node_rects = graph_response.node_rects.clone();
             self.handle_graph_response(graph_response, shared, graph_rect);
 
+            // Sync document-level focus with node graph selection
+            if !self.state.selected_nodes.is_empty() {
+                let node_indices: Vec<u32> = self.state.selected_nodes.iter()
+                    .filter_map(|nid| self.node_id_map.get(nid))
+                    .map(|bid| bid.index())
+                    .collect();
+                if !node_indices.is_empty() {
+                    *shared.focus = lightningbeam_core::selection::FocusSelection::Nodes(node_indices);
+                }
+            }
+
             // Handle pending sampler load requests from bottom_ui()
             if let Some(load) = self.user_state.pending_sampler_load.take() {
                 self.handle_pending_sampler_load(load, shared);

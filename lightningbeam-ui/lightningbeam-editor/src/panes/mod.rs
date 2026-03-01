@@ -163,6 +163,8 @@ pub struct SharedPaneState<'a> {
     pub action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
     /// Current selection state (mutable for tools to modify)
     pub selection: &'a mut lightningbeam_core::selection::Selection,
+    /// Document-level focus: tracks the most recently selected thing(s) of any type
+    pub focus: &'a mut lightningbeam_core::selection::FocusSelection,
     /// Which VectorClip is being edited (None = document root)
     pub editing_clip_id: Option<uuid::Uuid>,
     /// The clip instance ID being edited

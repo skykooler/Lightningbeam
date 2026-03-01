@@ -2529,6 +2529,9 @@ impl StagePane {
                                 shared.selection.select_edge(edge_id, dcel);
                             }
                         }
+                        if let Some(layer_id) = *shared.active_layer_id {
+                            *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
+                        }
                         // DCEL element dragging deferred to Phase 3
                     }
                     hit_test::HitResult::Face(face_id) => {
@@ -2540,6 +2543,9 @@ impl StagePane {
                                 shared.selection.clear_dcel_selection();
                                 shared.selection.select_face(face_id, dcel);
                             }
+                        }
+                        if let Some(layer_id) = *shared.active_layer_id {
+                            *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                         }
                         // DCEL element dragging deferred to Phase 3
                     }
@@ -2554,6 +2560,7 @@ impl StagePane {
                                 shared.selection.select_only_clip_instance(clip_id);
                             }
                         }
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
 
                         // If clip instance is now selected, prepare for dragging
                         if shared.selection.contains_clip_instance(&clip_id) {
@@ -2582,6 +2589,7 @@ impl StagePane {
                 // Nothing hit - start marquee selection
                 if !shift_held {
                     shared.selection.clear();
+                    *shared.focus = lightningbeam_core::selection::FocusSelection::None;
                 }
 
                 *shared.tool_state = ToolState::MarqueeSelecting {
@@ -2643,6 +2651,9 @@ impl StagePane {
                                 shared.selection.select_edge(edge_id, dcel);
                             }
                         }
+                    }
+                    if let Some(layer_id) = *shared.active_layer_id {
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                     }
                     *shared.tool_state = ToolState::Idle;
                 }
@@ -2755,6 +2766,15 @@ impl StagePane {
                         for face_id in dcel_hits.faces {
                             shared.selection.select_face(face_id, dcel);
                         }
+                    }
+
+                    // Update focus based on what was selected
+                    if shared.selection.has_dcel_selection() {
+                        if let Some(layer_id) = *shared.active_layer_id {
+                            *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
+                        }
+                    } else if !shared.selection.clip_instances().is_empty() {
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
                     }
 
                     // Reset tool state
@@ -6039,6 +6059,15 @@ impl StagePane {
                                 }
                             }
                         }
+                    }
+
+                    // Update focus based on what was selected
+                    if shared.selection.has_dcel_selection() {
+                        if let Some(layer_id) = *shared.active_layer_id {
+                            *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
+                        }
+                    } else if !shared.selection.clip_instances().is_empty() {
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
                     }
 
                     *shared.tool_state = ToolState::Idle;

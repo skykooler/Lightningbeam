@@ -8,6 +8,49 @@ use std::collections::HashSet;
 use uuid::Uuid;
 use vello::kurbo::{Affine, BezPath};
 
+/// Tracks the most recently selected thing(s) across the entire document.
+///
+/// Lightweight overlay on top of per-domain selection state. Tells consumers
+/// "the user's attention is on this kind of thing" — for properties panels,
+/// delete/copy/paste dispatch, group commands, etc.
+#[derive(Clone, Debug, Default)]
+pub enum FocusSelection {
+    #[default]
+    None,
+    /// One or more layers selected (by UUID)
+    Layers(Vec<Uuid>),
+    /// One or more clip instances selected (by UUID)
+    ClipInstances(Vec<Uuid>),
+    /// DCEL geometry selected on a specific layer at a specific time
+    Geometry { layer_id: Uuid, time: f64 },
+    /// MIDI notes selected in piano roll
+    Notes { layer_id: Uuid, midi_clip_id: u32, indices: Vec<usize> },
+    /// Node graph nodes selected (backend node indices)
+    Nodes(Vec<u32>),
+    /// Assets selected in asset library (by UUID)
+    Assets(Vec<Uuid>),
+}
+
+impl FocusSelection {
+    pub fn is_none(&self) -> bool {
+        matches!(self, FocusSelection::None)
+    }
+
+    pub fn layer_ids(&self) -> Option<&[Uuid]> {
+        match self {
+            FocusSelection::Layers(ids) => Some(ids),
+            _ => Option::None,
+        }
+    }
+
+    pub fn clip_instance_ids(&self) -> Option<&[Uuid]> {
+        match self {
+            FocusSelection::ClipInstances(ids) => Some(ids),
+            _ => Option::None,
+        }
+    }
+}
+
 /// Selection state for the editor
 ///
 /// Maintains sets of selected DCEL elements and clip instances.

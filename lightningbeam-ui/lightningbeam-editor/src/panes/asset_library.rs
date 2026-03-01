@@ -1858,6 +1858,7 @@ impl AssetLibraryPane {
             // Handle interactions
             if response.clicked() {
                 self.selected_asset = Some(asset.id);
+                *shared.focus = lightningbeam_core::selection::FocusSelection::Assets(vec![asset.id]);
             }
 
             if response.secondary_clicked() {

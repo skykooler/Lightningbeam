@@ -2724,6 +2724,7 @@ impl TimelinePane {
         document: &lightningbeam_core::document::Document,
         active_layer_id: &mut Option<uuid::Uuid>,
         selection: &mut lightningbeam_core::selection::Selection,
+        focus: &mut lightningbeam_core::selection::FocusSelection,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         playback_time: &mut f64,
         _is_playing: &mut bool,
@@ -2791,6 +2792,7 @@ impl TimelinePane {
                                         }
                                     }
                                     *active_layer_id = Some(click_row.layer_id());
+                                    *focus = lightningbeam_core::selection::FocusSelection::ClipInstances(selection.clip_instances().to_vec());
                                     clicked_clip_instance = true;
                                 }
                             }
@@ -2838,6 +2840,7 @@ impl TimelinePane {
                                         }
                                         // Also set this layer as the active layer
                                         *active_layer_id = Some(layer.id());
+                                        *focus = lightningbeam_core::selection::FocusSelection::ClipInstances(selection.clip_instances().to_vec());
                                         clicked_clip_instance = true;
                                         break;
                                     }
@@ -2864,7 +2867,9 @@ impl TimelinePane {
                 // Get the layer at this index (using virtual rows for group support)
                 let header_rows = build_timeline_rows(context_layers);
                 if clicked_layer_index < header_rows.len() {
-                    *active_layer_id = Some(header_rows[clicked_layer_index].layer_id());
+                    let layer_id = header_rows[clicked_layer_index].layer_id();
+                    *active_layer_id = Some(layer_id);
+                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
                 }
             }
         }
@@ -2895,6 +2900,7 @@ impl TimelinePane {
                             } else {
                                 selection.select_only_clip_instance(clip_id);
                             }
+                            *focus = lightningbeam_core::selection::FocusSelection::ClipInstances(selection.clip_instances().to_vec());
                         }
 
                         // Start dragging with the detected drag type
@@ -2915,6 +2921,7 @@ impl TimelinePane {
                             for id in &child_ids {
                                 selection.add_clip_instance(*id);
                             }
+                            *focus = lightningbeam_core::selection::FocusSelection::ClipInstances(selection.clip_instances().to_vec());
                             self.clip_drag_state = Some(ClipDragType::Move);
                             self.drag_offset = 0.0;
                         }
@@ -3258,11 +3265,13 @@ impl TimelinePane {
                     // Get the layer at this index (using virtual rows for group support)
                     let empty_click_rows = build_timeline_rows(context_layers);
                     if clicked_layer_index < empty_click_rows.len() {
-                        *active_layer_id = Some(empty_click_rows[clicked_layer_index].layer_id());
+                        let layer_id = empty_click_rows[clicked_layer_index].layer_id();
+                        *active_layer_id = Some(layer_id);
                         // Clear clip instance selection when clicking on empty layer area
                         if !shift_held {
                             selection.clear_clip_instances();
                         }
+                        *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
                     }
                 }
             }
@@ -3734,6 +3743,7 @@ impl PaneRenderer for TimelinePane {
             document,
             shared.active_layer_id,
             shared.selection,
+            shared.focus,
             shared.pending_actions,
             shared.playback_time,
             shared.is_playing,
@@ -3753,6 +3763,7 @@ impl PaneRenderer for TimelinePane {
                         if !shared.selection.contains_clip_instance(&clip_id) {
                             shared.selection.select_only_clip_instance(clip_id);
                         }
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
                         self.context_menu_clip = Some((Some(clip_id), pos));
                     } else {
                         // Right-clicked on empty timeline space
