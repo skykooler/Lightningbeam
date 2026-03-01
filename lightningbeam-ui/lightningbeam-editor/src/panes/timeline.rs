@@ -327,6 +327,43 @@ fn flatten_layer<'a>(
     }
 }
 
+/// Paint a soft drop shadow around a rect using gradient meshes (bottom + right + corner).
+/// Three non-overlapping quads so alpha doesn't double up.
+fn paint_drop_shadow(painter: &egui::Painter, rect: egui::Rect, shadow_size: f32, alpha: u8) {
+    let c = egui::Color32::from_black_alpha(alpha);
+    let t = egui::Color32::TRANSPARENT;
+    let mut mesh = egui::Mesh::default();
+
+    // Bottom edge: straight down, stops at right edge
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.left_bottom(), c);                                      // 0
+    mesh.colored_vertex(rect.right_bottom(), c);                                     // 1
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom() + shadow_size), t);   // 2
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom() + shadow_size), t);    // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    // Right edge: rightward, stops at bottom edge
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.right_top(), c);                                        // 0
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.top()), t);      // 1
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom()), t);   // 2
+    mesh.colored_vertex(rect.right_bottom(), c);                                     // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    // Bottom-right corner: dark at inner corner, transparent at other three
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.right_bottom(), c);                                                  // 0
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom()), t);                // 1
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom() + shadow_size), t); // 2
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom() + shadow_size), t);                // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// Shift+click layer selection: toggle a layer in/out of the focus selection,
 /// enforcing the sibling constraint (all selected layers must share the same parent).
 fn shift_toggle_layer(
@@ -1604,9 +1641,8 @@ impl TimelinePane {
                     egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
                 );
 
-                // Drop shadow (offset down-right, semi-transparent black)
-                let shadow_rect = float_rect.translate(egui::vec2(3.0, 4.0));
-                ui.painter().rect_filled(shadow_rect, 2.0, egui::Color32::from_black_alpha(80));
+                // Gradient drop shadow
+                paint_drop_shadow(ui.painter(), float_rect, 8.0, 60);
 
                 // Background (active/selected color)
                 ui.painter().rect_filled(float_rect, 0.0, active_color);
@@ -1737,23 +1773,62 @@ impl TimelinePane {
         // Build virtual row list (accounts for group expansion)
         let all_rows = build_timeline_rows(context_layers);
 
-        // When dragging layers, filter them out and compute gap-adjusted positions
+        // When dragging layers, compute remapped Y positions:
+        // - Dragged rows render at the gap position
+        // - Non-dragged rows shift around the gap
         let drag_layer_ids_content: Vec<uuid::Uuid> = self.layer_drag.as_ref()
             .map(|d| d.layer_ids.clone()).unwrap_or_default();
         let drag_count_content = drag_layer_ids_content.len();
         let gap_row_index_content = self.layer_drag.as_ref().map(|d| d.gap_row_index);
 
-        let rows: Vec<&TimelineRow> = all_rows.iter()
-            .filter(|r| !drag_layer_ids_content.contains(&r.layer_id()))
-            .collect();
+        // Pre-compute Y position for each row.
+        // Dragged rows follow the mouse continuously (matching the floating header);
+        // non-dragged rows snap to discrete positions shifted around the gap.
+        let drag_float_top_y: Option<f32> = self.layer_drag.as_ref()
+            .map(|d| d.current_mouse_y - d.grab_offset_y);
 
-        // Draw layer rows from virtual row list
-        for (filtered_i, row) in rows.iter().enumerate() {
-            let visual_i = match gap_row_index_content {
-                Some(gap) if filtered_i >= gap => filtered_i + drag_count_content,
-                _ => filtered_i,
-            };
-            let y = rect.min.y + visual_i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+        let row_y_positions: Vec<f32> = {
+            let mut positions = Vec::with_capacity(all_rows.len());
+            let mut filtered_i = 0usize;
+            let mut drag_offset = 0usize;
+            for row in all_rows.iter() {
+                if drag_layer_ids_content.contains(&row.layer_id()) {
+                    // Dragged row: continuous Y from mouse position
+                    let base_y = drag_float_top_y.unwrap_or(0.0);
+                    positions.push(base_y + drag_offset as f32 * LAYER_HEIGHT);
+                    drag_offset += 1;
+                } else {
+                    // Non-dragged row: discrete position, shifted around gap
+                    let visual = match gap_row_index_content {
+                        Some(gap) if filtered_i >= gap => filtered_i + drag_count_content,
+                        _ => filtered_i,
+                    };
+                    positions.push(rect.min.y + visual as f32 * LAYER_HEIGHT - self.viewport_scroll_y);
+                    filtered_i += 1;
+                }
+            }
+            positions
+        };
+
+        // Draw non-dragged rows first, then dragged rows on top (so shadow/content overlaps correctly)
+        let draw_order: Vec<usize> = {
+            let mut non_dragged: Vec<usize> = Vec::new();
+            let mut dragged: Vec<usize> = Vec::new();
+            for (i, row) in all_rows.iter().enumerate() {
+                if drag_layer_ids_content.contains(&row.layer_id()) {
+                    dragged.push(i);
+                } else {
+                    non_dragged.push(i);
+                }
+            }
+            non_dragged.extend(dragged);
+            non_dragged
+        };
+
+        for &i in &draw_order {
+            let row = &all_rows[i];
+            let y = row_y_positions[i];
+            let is_being_dragged = drag_layer_ids_content.contains(&row.layer_id());
 
             // Skip if layer is outside visible area
             if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
@@ -1764,6 +1839,11 @@ impl TimelinePane {
                 egui::pos2(rect.min.x, y),
                 egui::vec2(rect.width(), LAYER_HEIGHT),
             );
+
+            // Drop shadow for dragged rows
+            if is_being_dragged {
+                paint_drop_shadow(painter, layer_rect, 8.0, 60);
+            }
 
             let row_layer_id = row.layer_id();
 
@@ -2913,18 +2993,6 @@ impl TimelinePane {
             );
         }
 
-        // Draw gap slots in content area for layer drag (matching active row style)
-        if let Some(gap) = gap_row_index_content {
-            for di in 0..drag_count_content {
-                let gap_y = rect.min.y + (gap + di) as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
-                let gap_rect = egui::Rect::from_min_size(
-                    egui::pos2(rect.min.x, gap_y),
-                    egui::vec2(rect.width(), LAYER_HEIGHT),
-                );
-                painter.rect_filled(gap_rect, 0.0, active_color);
-            }
-        }
-
         // Clean up stale video thumbnail textures for clips no longer visible
         self.video_thumbnail_textures.retain(|&(clip_id, _), _| visible_video_clip_ids.contains(&clip_id));
 
@@ -3175,7 +3243,7 @@ impl TimelinePane {
             if primary_down {
                 if let Some(pos) = pointer_pos {
                     drag.current_mouse_y = pos.y;
-                    let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let relative_y = pos.y - drag.grab_offset_y - header_rect.min.y + self.viewport_scroll_y + LAYER_HEIGHT * 0.5;
                     let all_rows = build_timeline_rows(context_layers);
                     let filtered_count = all_rows.iter()
                         .filter(|r| !drag.layer_ids.contains(&r.layer_id()))
