@@ -4234,6 +4234,42 @@ impl PaneRenderer for TimelinePane {
 
             ui.separator();
 
+            // Stereo mix output VU meter (two stacked bars: L on top, R on bottom)
+            {
+                let meter_width = 80.0;
+                let meter_height = 14.0; // total height for both bars + gap
+                let bar_height = 6.0;
+                let gap = 2.0;
+                let (meter_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(meter_width, meter_height),
+                    egui::Sense::hover(),
+                );
+                // Background
+                ui.painter().rect_filled(meter_rect, 2.0, egui::Color32::from_gray(30));
+
+                let levels = [shared.output_level.0.min(1.0), shared.output_level.1.min(1.0)];
+                for (i, &level) in levels.iter().enumerate() {
+                    let bar_y = meter_rect.min.y + i as f32 * (bar_height + gap);
+                    if level > 0.001 {
+                        let filled_width = meter_rect.width() * level;
+                        let color = if level > 0.9 {
+                            egui::Color32::from_rgb(220, 50, 50)
+                        } else if level > 0.7 {
+                            egui::Color32::from_rgb(220, 200, 50)
+                        } else {
+                            egui::Color32::from_rgb(50, 200, 80)
+                        };
+                        let filled_rect = egui::Rect::from_min_size(
+                            egui::pos2(meter_rect.min.x, bar_y),
+                            egui::vec2(filled_width, bar_height),
+                        );
+                        ui.painter().rect_filled(filled_rect, 1.0, color);
+                    }
+                }
+            }
+
+            ui.separator();
+
             // BPM control
             let mut bpm_val = bpm;
             ui.label("BPM:");

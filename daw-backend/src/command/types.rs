@@ -341,8 +341,8 @@ pub enum AudioEvent {
 
     /// Peak amplitude of mic input (for input monitoring meter)
     InputLevel(f32),
-    /// Peak amplitude of mix output (for master meter)
-    OutputLevel(f32),
+    /// Peak amplitude of mix output (for master meter), stereo (left, right)
+    OutputLevel(f32, f32),
     /// Per-track playback peak levels
     TrackLevels(Vec<(TrackId, f32)>),
 

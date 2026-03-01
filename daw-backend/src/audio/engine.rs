@@ -76,7 +76,8 @@ pub struct Engine {
     input_gain: f32,
     input_level_peak: f32,
     input_level_counter: usize,
-    output_level_peak: f32,
+    output_level_peak_l: f32,
+    output_level_peak_r: f32,
     output_level_counter: usize,
     track_level_counter: usize,
 
@@ -151,7 +152,8 @@ impl Engine {
             input_gain: 1.0,
             input_level_peak: 0.0,
             input_level_counter: 0,
-            output_level_peak: 0.0,
+            output_level_peak_l: 0.0,
+            output_level_peak_r: 0.0,
             output_level_counter: 0,
             track_level_counter: 0,
             debug_audio: std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1"),
@@ -361,25 +363,6 @@ impl Engine {
                 self.channels,
             );
 
-            // Compute output peak for master VU meter
-            let output_peak = output.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-            self.output_level_peak = self.output_level_peak.max(output_peak);
-            self.output_level_counter += output.len();
-            let meter_interval = self.sample_rate as usize / 20; // ~50ms
-            if self.output_level_counter >= meter_interval {
-                let _ = self.event_tx.push(AudioEvent::OutputLevel(self.output_level_peak));
-                self.output_level_peak = 0.0;
-                self.output_level_counter = 0;
-            }
-
-            // Send per-track peak levels periodically (~50ms)
-            self.track_level_counter += output.len();
-            if self.track_level_counter >= meter_interval {
-                let levels = self.project.collect_track_peaks();
-                let _ = self.event_tx.push(AudioEvent::TrackLevels(levels));
-                self.track_level_counter = 0;
-            }
-
             // Update playhead (convert total samples to frames)
             self.playhead += (output.len() / self.channels as usize) as u64;
 
@@ -413,6 +396,37 @@ impl Engine {
         } else {
             // Not playing, but process live MIDI input
             self.process_live_midi(output);
+        }
+
+        // Compute stereo output peaks for master VU meter (independent of playback state)
+        {
+            let channels = self.channels as usize;
+            for frame in output.chunks(channels) {
+                if channels >= 2 {
+                    self.output_level_peak_l = self.output_level_peak_l.max(frame[0].abs());
+                    self.output_level_peak_r = self.output_level_peak_r.max(frame[1].abs());
+                } else {
+                    let v = frame[0].abs();
+                    self.output_level_peak_l = self.output_level_peak_l.max(v);
+                    self.output_level_peak_r = self.output_level_peak_r.max(v);
+                }
+            }
+            self.output_level_counter += output.len();
+            let meter_interval = self.sample_rate as usize / 20; // ~50ms
+            if self.output_level_counter >= meter_interval {
+                let _ = self.event_tx.push(AudioEvent::OutputLevel(self.output_level_peak_l, self.output_level_peak_r));
+                self.output_level_peak_l = 0.0;
+                self.output_level_peak_r = 0.0;
+                self.output_level_counter = 0;
+            }
+
+            // Send per-track peak levels periodically
+            self.track_level_counter += output.len();
+            if self.track_level_counter >= meter_interval {
+                let levels = self.project.collect_track_peaks();
+                let _ = self.event_tx.push(AudioEvent::TrackLevels(levels));
+                self.track_level_counter = 0;
+            }
         }
 
         // Process input monitoring and/or recording (independent of playback state)

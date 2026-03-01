@@ -816,7 +816,7 @@ struct EditorApp {
 
     // VU meter levels
     input_level: f32,
-    output_level: f32,
+    output_level: (f32, f32),
     track_levels: HashMap<daw_backend::TrackId, f32>,
 
     /// Cache for MIDI event data (keyed by backend midi_clip_id)
@@ -1063,7 +1063,7 @@ impl EditorApp {
             region_selection: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
             input_level: 0.0,
-            output_level: 0.0,
+            output_level: (0.0, 0.0),
             track_levels: HashMap::new(),
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
             audio_duration_cache: HashMap::new(), // Initialize empty audio duration cache
@@ -4683,8 +4683,9 @@ impl eframe::App for EditorApp {
                         AudioEvent::InputLevel(peak) => {
                             self.input_level = self.input_level.max(peak);
                         }
-                        AudioEvent::OutputLevel(peak) => {
-                            self.output_level = self.output_level.max(peak);
+                        AudioEvent::OutputLevel(peak_l, peak_r) => {
+                            self.output_level.0 = self.output_level.0.max(peak_l);
+                            self.output_level.1 = self.output_level.1.max(peak_r);
                         }
                         AudioEvent::TrackLevels(levels) => {
                             for (track_id, peak) in levels {
@@ -4725,13 +4726,14 @@ impl eframe::App for EditorApp {
         {
             let decay = 0.97f32;
             self.input_level *= decay;
-            self.output_level *= decay;
+            self.output_level.0 *= decay;
+            self.output_level.1 *= decay;
             for level in self.track_levels.values_mut() {
                 *level *= decay;
             }
             // Request repaint while any level is visible
             let any_active = self.input_level > 0.001
-                || self.output_level > 0.001
+                || self.output_level.0 > 0.001 || self.output_level.1 > 0.001
                 || self.track_levels.values().any(|&v| v > 0.001);
             if any_active {
                 ctx.request_repaint();
@@ -4976,27 +4978,6 @@ impl eframe::App for EditorApp {
                 }
             }
         });
-
-        // Mix output VU meter (thin bar below menu)
-        if self.app_mode != AppMode::StartScreen && self.output_level > 0.001 {
-            egui::TopBottomPanel::top("mix_meter").exact_height(4.0).show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                let level = self.output_level.min(1.0);
-                let filled_width = rect.width() * level;
-                let color = if level > 0.9 {
-                    egui::Color32::from_rgb(220, 50, 50)
-                } else if level > 0.7 {
-                    egui::Color32::from_rgb(220, 200, 50)
-                } else {
-                    egui::Color32::from_rgb(50, 200, 80)
-                };
-                let filled_rect = egui::Rect::from_min_size(
-                    rect.left_top(),
-                    egui::vec2(filled_width, rect.height()),
-                );
-                ui.painter().rect_filled(filled_rect, 0.0, color);
-            });
-        }
 
         // Render start screen or editor based on app mode
         if self.app_mode == AppMode::StartScreen {
