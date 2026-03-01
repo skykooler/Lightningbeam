@@ -49,6 +49,59 @@ impl Dcel {
         area * 0.5
     }
 
+    /// Compute the signed area of the cycle using the actual Bézier curves,
+    /// not just vertex positions. Uses Green's theorem: A = ½ ∫(x dy - y dx).
+    /// For a cubic B(t) = (x(t), y(t)), the integral is evaluated numerically.
+    pub fn cycle_curve_signed_area(&self, start: HalfEdgeId) -> f64 {
+        let mut area = 0.0;
+        let mut cur = start;
+        loop {
+            let edge_id = self.half_edges[cur.idx()].edge;
+            let edge = &self.edges[edge_id.idx()];
+            let [fwd, _bwd] = edge.half_edges;
+            let curve = if cur == fwd {
+                edge.curve
+            } else {
+                // Reverse the curve for backward half-edge
+                kurbo::CubicBez::new(edge.curve.p3, edge.curve.p2, edge.curve.p1, edge.curve.p0)
+            };
+
+            // Numerical integration of ½(x dy - y dx) using Simpson's rule
+            let n = 16;
+            let dt = 1.0 / n as f64;
+            for i in 0..n {
+                let t0 = i as f64 * dt;
+                let t1 = (i as f64 + 0.5) * dt;
+                let t2 = (i as f64 + 1.0) * dt;
+
+                let p0 = curve.eval(t0);
+                let p1 = curve.eval(t1);
+                let p2 = curve.eval(t2);
+
+                // Simpson's rule for the integrand x*dy/dt - y*dx/dt
+                // Approximate dx, dy from finite differences
+                let dx0 = (p1.x - p0.x) / (dt * 0.5);
+                let dy0 = (p1.y - p0.y) / (dt * 0.5);
+                let dx1 = (p2.x - p0.x) / dt;
+                let dy1 = (p2.y - p0.y) / dt;
+                let dx2 = (p2.x - p1.x) / (dt * 0.5);
+                let dy2 = (p2.y - p1.y) / (dt * 0.5);
+
+                let f0 = p0.x * dy0 - p0.y * dx0;
+                let f1 = p1.x * dy1 - p1.y * dx1;
+                let f2 = p2.x * dy2 - p2.y * dx2;
+
+                area += (f0 + 4.0 * f1 + f2) * dt / 6.0;
+            }
+
+            cur = self.half_edges[cur.idx()].next;
+            if cur == start {
+                break;
+            }
+        }
+        area * 0.5
+    }
+
     /// Get all half-edges on a face's outer boundary.
     pub fn face_boundary(&self, face_id: FaceId) -> Vec<HalfEdgeId> {
         let ohe = self.faces[face_id.idx()].outer_half_edge;

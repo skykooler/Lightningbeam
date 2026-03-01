@@ -8,9 +8,9 @@
 //! different intersection positions for the same crossing.
 
 use super::{
-    subsegment_cubic, Dcel, EdgeId, FaceId, HalfEdgeId, VertexId, DEFAULT_SNAP_EPSILON,
+    subsegment_cubic, Dcel, EdgeId, FaceId, HalfEdgeId, VertexId,
 };
-use crate::curve_intersections::{find_curve_intersections, Intersection};
+use crate::curve_intersections::find_curve_intersections;
 use crate::shape::{ShapeColor, StrokeStyle};
 use kurbo::{CubicBez, ParamCurve, Point};
 
@@ -375,6 +375,7 @@ impl Dcel {
 
             // Splits inserted cv twice without maintaining the CCW fan — fix it
             self.rebuild_vertex_fan(cv);
+            self.repair_face_cycles_at_vertex(cv);
         }
 
         // 2. Check against all other edges
@@ -543,7 +544,7 @@ mod tests {
             // Actually for a simple chain (degree-2 vertices), there are exactly
             // 2 outgoing half-edges; pick the one that isn't the twin of how we arrived
             if outgoing.len() == 2 {
-                let arriving_twin = dcel.half_edges[cur_he.idx()].twin;
+                let _arriving_twin = dcel.half_edges[cur_he.idx()].twin;
                 // We want the outgoing that is NOT the reverse of our arrival
                 cur_he = if outgoing[0] == dcel.half_edges[twin.idx()].next {
                     // twin.next is the next outgoing in the fan — that's continuing back
@@ -559,7 +560,7 @@ mod tests {
         // Simpler approach: just verify that all 4 split vertices appear as
         // endpoints of non-deleted edges, and that v1 and v2 are still endpoints.
         let mut u_edge_vertices: Vec<VertexId> = Vec::new();
-        for (i, edge) in dcel.edges.iter().enumerate() {
+        for (_i, edge) in dcel.edges.iter().enumerate() {
             if edge.deleted { continue; }
             let [fwd, bwd] = edge.half_edges;
             let a = dcel.half_edges[fwd.idx()].origin;
@@ -955,6 +956,198 @@ mod tests {
         // Expanded to 4 sub-segments: [0,t1], [t1,mid], [mid,t2], [t2,1]
         // The loop is split in half to avoid a same-vertex edge.
         assert_eq!(result.new_edges.len(), 4);
+
+        dcel.validate();
+    }
+
+    /// After moving a vertex (simulating EditingVertex), the CCW fan ordering
+    /// must be rebuilt before inserting new strokes. Without rebuild_vertex_fan,
+    /// the stale angular ordering causes face/cycle mismatches.
+    #[test]
+    fn stroke_after_vertex_move() {
+        let mut dcel = Dcel::new();
+
+        // Build a rectangle and create a face
+        let r = 100.0;
+        let segs = [
+            CubicBez::new(
+                Point::new(0.0, 0.0), Point::new(r / 3.0, 0.0),
+                Point::new(2.0 * r / 3.0, 0.0), Point::new(r, 0.0),
+            ),
+            CubicBez::new(
+                Point::new(r, 0.0), Point::new(r, r / 3.0),
+                Point::new(r, 2.0 * r / 3.0), Point::new(r, r),
+            ),
+            CubicBez::new(
+                Point::new(r, r), Point::new(2.0 * r / 3.0, r),
+                Point::new(r / 3.0, r), Point::new(0.0, r),
+            ),
+            CubicBez::new(
+                Point::new(0.0, r), Point::new(0.0, 2.0 * r / 3.0),
+                Point::new(0.0, r / 3.0), Point::new(0.0, 0.0),
+            ),
+        ];
+
+        let rect_result = dcel.insert_stroke(&segs, None, None, 1.0);
+
+        let first_edge = rect_result.new_edges[0];
+        let [he_a, he_b] = dcel.edge(first_edge).half_edges;
+        let interior_he = if dcel.cycle_signed_area(he_a) > 0.0 { he_a } else { he_b };
+        let _face = dcel.create_face_at_cycle(interior_he);
+
+        dcel.validate();
+
+        // Simulate dragging the top-right vertex (r, r) → (r + 30, r + 20).
+        // This is what finish_vector_editing does for EditingVertex:
+        // 1. Update vertex position
+        // 2. Update adjacent edge curves
+        // 3. Rebuild fans at affected vertices
+        let moved_vertex = {
+            // Find the vertex at (r, r)
+            let vid = dcel.snap_vertex(Point::new(r, r), 1.0).unwrap();
+            let new_pos = Point::new(r + 30.0, r + 20.0);
+
+            // Move the vertex
+            dcel.vertex_mut(vid).position = new_pos;
+
+            // Update the curves of connected edges to match the new position.
+            // Collect edge info first to avoid borrow issues.
+            let outgoing: Vec<_> = dcel.vertex_outgoing(vid)
+                .iter()
+                .map(|&he_id| {
+                    let edge_id = dcel.half_edge(he_id).edge;
+                    let [fwd, _bwd] = dcel.edge(edge_id).half_edges;
+                    let is_fwd = fwd == he_id;
+                    (edge_id, is_fwd)
+                })
+                .collect();
+
+            for (edge_id, is_fwd) in outgoing {
+                let curve = &mut dcel.edge_mut(edge_id).curve;
+                if is_fwd {
+                    // This vertex is the origin of the forward half-edge (p0)
+                    let old_p0 = curve.p0;
+                    let delta = new_pos - old_p0;
+                    curve.p0 = new_pos;
+                    curve.p1 = curve.p1 + delta;
+                } else {
+                    // This vertex is the origin of the backward half-edge (p3)
+                    let old_p3 = curve.p3;
+                    let delta = new_pos - old_p3;
+                    curve.p3 = new_pos;
+                    curve.p2 = curve.p2 + delta;
+                }
+            }
+
+            vid
+        };
+
+        // Rebuild fans at the moved vertex and its neighbors — the fix under test
+        dcel.rebuild_vertex_fan(moved_vertex);
+        for &he_id in &dcel.vertex_outgoing(moved_vertex) {
+            let edge_id = dcel.half_edge(he_id).edge;
+            let [fwd, bwd] = dcel.edge(edge_id).half_edges;
+            let neighbor = if dcel.half_edge(fwd).origin == moved_vertex {
+                dcel.half_edge(bwd).origin
+            } else {
+                dcel.half_edge(fwd).origin
+            };
+            dcel.rebuild_vertex_fan(neighbor);
+        }
+
+        // Recompute intersections on connected edges
+        let connected_edges: Vec<_> = dcel.vertex_outgoing(moved_vertex)
+            .iter()
+            .map(|&he_id| dcel.half_edge(he_id).edge)
+            .collect();
+        for eid in connected_edges {
+            dcel.recompute_edge_intersections(eid);
+        }
+
+        dcel.validate();
+
+        // Now insert a stroke across — this would crash with stale fan ordering
+        let stroke = CubicBez::new(
+            Point::new(-50.0, 50.0), Point::new(16.0, 50.0),
+            Point::new(83.0, 50.0), Point::new(200.0, 50.0),
+        );
+        let _stroke_result = dcel.insert_stroke(&[stroke], None, None, 1.0);
+
+        dcel.validate();
+    }
+
+    #[test]
+    fn self_intersection_splits_face() {
+        use crate::shape::ShapeColor;
+
+        let mut dcel = Dcel::new();
+
+        // Build a rectangle and create a filled face
+        let r = 100.0;
+        let segs = [
+            CubicBez::new(
+                Point::new(0.0, 0.0), Point::new(r / 3.0, 0.0),
+                Point::new(2.0 * r / 3.0, 0.0), Point::new(r, 0.0),
+            ),
+            CubicBez::new(
+                Point::new(r, 0.0), Point::new(r, r / 3.0),
+                Point::new(r, 2.0 * r / 3.0), Point::new(r, r),
+            ),
+            CubicBez::new(
+                Point::new(r, r), Point::new(2.0 * r / 3.0, r),
+                Point::new(r / 3.0, r), Point::new(0.0, r),
+            ),
+            CubicBez::new(
+                Point::new(0.0, r), Point::new(0.0, 2.0 * r / 3.0),
+                Point::new(0.0, r / 3.0), Point::new(0.0, 0.0),
+            ),
+        ];
+
+        let rect_result = dcel.insert_stroke(&segs, None, None, 1.0);
+
+        let first_edge = rect_result.new_edges[0];
+        let [he_a, he_b] = dcel.edge(first_edge).half_edges;
+        let interior_he = if dcel.cycle_signed_area(he_a) > 0.0 { he_a } else { he_b };
+        let face = dcel.create_face_at_cycle(interior_he);
+        dcel.faces[face.idx()].fill_color = Some(ShapeColor::rgb(0, 0, 255));
+
+        dcel.validate();
+
+        // Replace the bottom edge curve with one that self-intersects.
+        // The known-working loop: p0=(0,0), p1=(200,100), p2=(-100,100), p3=(100,0)
+        // Bottom edge goes (0,0)→(100,0), same x-range, both y=0.
+        let bottom_edge = rect_result.new_edges[0];
+        dcel.edges[bottom_edge.idx()].curve = CubicBez::new(
+            Point::new(0.0, 0.0),
+            Point::new(200.0, 100.0),
+            Point::new(-100.0, 100.0),
+            Point::new(r, 0.0),
+        );
+        // Verify the curve actually self-intersects
+        assert!(
+            Dcel::find_cubic_self_intersection(&dcel.edges[bottom_edge.idx()].curve).is_some(),
+            "test curve should self-intersect",
+        );
+
+        // Recompute intersections — should detect self-intersection and split
+        let _created = dcel.recompute_edge_intersections(bottom_edge);
+
+        // Should now have more faces because the self-intersection created a loop
+        let non_f0_faces: Vec<_> = dcel
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != 0 && !f.deleted)
+            .collect();
+
+        // The loop should have been detected and either:
+        // - Created as a new face (if positive area in F0)
+        // - Split the existing face (if same face had 2 cycles)
+        assert!(
+            non_f0_faces.len() >= 2,
+            "expected at least 2 non-F0 faces after self-intersection split, got {}",
+            non_f0_faces.len()
+        );
 
         dcel.validate();
     }

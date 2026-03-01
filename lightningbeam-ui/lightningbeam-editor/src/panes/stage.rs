@@ -2969,19 +2969,70 @@ impl StagePane {
             }
         };
 
-        // If we were editing a curve, recompute intersections before snapshotting.
-        // This detects new crossings between the edited edge and other edges,
-        // splitting them to maintain valid DCEL topology.
-        let editing_edge_id = match &*shared.tool_state {
-            lightningbeam_core::tool::ToolState::EditingCurve { edge_id, .. } => Some(*edge_id),
+        // After editing vertices/curves/control points, rebuild CCW fan ordering
+        // at affected vertices and recompute edge intersections before snapshotting.
+        // Without this, stale fan ordering causes topology corruption on subsequent
+        // stroke insertions (e.g. face/cycle mismatches).
+        let editing_info = match &*shared.tool_state {
+            lightningbeam_core::tool::ToolState::EditingCurve { edge_id, .. } => {
+                Some((vec![*edge_id], vec![]))
+            }
+            lightningbeam_core::tool::ToolState::EditingVertex { vertex_id, connected_edges } => {
+                Some((connected_edges.clone(), vec![*vertex_id]))
+            }
+            lightningbeam_core::tool::ToolState::EditingControlPoint { edge_id, .. } => {
+                Some((vec![*edge_id], vec![]))
+            }
             _ => None,
         };
 
-        if let Some(edge_id) = editing_edge_id {
+        if let Some((edge_ids, vertex_ids)) = editing_info {
             let document = shared.action_executor.document_mut();
             if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
                 if let Some(dcel) = vl.dcel_at_time_mut(cache.time) {
-                    dcel.recompute_edge_intersections(edge_id);
+                    // Rebuild fans at the directly edited vertices
+                    for &vid in &vertex_ids {
+                        dcel.rebuild_vertex_fan(vid);
+                    }
+                    // Also rebuild fans at endpoints of connected edges
+                    // (their edge angles changed due to the edit)
+                    for &eid in &edge_ids {
+                        let [fwd, bwd] = dcel.edge(eid).half_edges;
+                        let v1 = dcel.half_edge(fwd).origin;
+                        let v2 = dcel.half_edge(bwd).origin;
+                        if !vertex_ids.contains(&v1) {
+                            dcel.rebuild_vertex_fan(v1);
+                        }
+                        if !vertex_ids.contains(&v2) {
+                            dcel.rebuild_vertex_fan(v2);
+                        }
+                    }
+                    // Repair face cycles at all affected vertices
+                    // (rebuild_vertex_fan may have split cycles without updating faces)
+                    let mut repaired: Vec<lightningbeam_core::dcel2::VertexId> = Vec::new();
+                    for &vid in &vertex_ids {
+                        if !repaired.contains(&vid) {
+                            dcel.repair_face_cycles_at_vertex(vid);
+                            repaired.push(vid);
+                        }
+                    }
+                    for &eid in &edge_ids {
+                        let [fwd, bwd] = dcel.edge(eid).half_edges;
+                        let v1 = dcel.half_edge(fwd).origin;
+                        let v2 = dcel.half_edge(bwd).origin;
+                        if !repaired.contains(&v1) {
+                            dcel.repair_face_cycles_at_vertex(v1);
+                            repaired.push(v1);
+                        }
+                        if !repaired.contains(&v2) {
+                            dcel.repair_face_cycles_at_vertex(v2);
+                            repaired.push(v2);
+                        }
+                    }
+                    // Recompute intersections for all moved edges
+                    for &eid in &edge_ids {
+                        dcel.recompute_edge_intersections(eid);
+                    }
                 }
             }
         }

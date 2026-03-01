@@ -119,7 +119,7 @@ impl Dcel {
                 self.insert_edge_both_isolated(he_fwd, he_bwd, v1, v2, edge_id, face)
             }
             (false, false) => {
-                self.insert_edge_both_connected(he_fwd, he_bwd, v1, v2, edge_id, &curve)
+                self.insert_edge_both_connected(he_fwd, he_bwd, v1, v2, edge_id, &curve, face)
             }
             _ => {
                 self.insert_edge_one_isolated(he_fwd, he_bwd, v1, v2, edge_id, &curve, v1_isolated)
@@ -206,6 +206,10 @@ impl Dcel {
     }
 
     /// Both vertices connected: may split a face.
+    ///
+    /// `face_hint` is the face the caller expects the edge to be in.
+    /// If the angular ordering places the edge in F0 but `face_hint` is
+    /// a non-F0 face, the opposite angular sector is tried.
     fn insert_edge_both_connected(
         &mut self,
         he_fwd: HalfEdgeId,
@@ -214,6 +218,7 @@ impl Dcel {
         v2: VertexId,
         edge_id: EdgeId,
         curve: &CubicBez,
+        face_hint: FaceId,
     ) -> (EdgeId, FaceId) {
         let fwd_angle = Self::curve_start_angle(curve);
         let bwd_angle = Self::curve_end_angle(curve);
@@ -226,12 +231,31 @@ impl Dcel {
 
         let face_v1 = self.half_edges[into_v1.idx()].face;
         let face_v2 = self.half_edges[into_v2.idx()].face;
-        debug_assert_eq!(
-            face_v1, face_v2,
-            "insert_edge_both_connected: into_v1 (HE{}) on {:?} but into_v2 (HE{}) on {:?}",
-            into_v1.0, face_v1, into_v2.0, face_v2
-        );
-        let actual_face = face_v1;
+
+        // If the angular ordering places both predecessors in F0 but the
+        // caller expects a non-F0 face, try the opposite sector: use
+        // `ccw_v1` and `ccw_v2`'s twins to find the other sector at each vertex.
+        let (into_v1, into_v2, ccw_v1, ccw_v2, actual_face) =
+            if face_v1 == face_v2 && face_v1.0 == 0 && face_hint.0 != 0 {
+                // Try the opposite sector: at each vertex, the predecessor
+                // of the OTHER outgoing edge in the face_hint cycle.
+                let alt = self.find_predecessor_on_face(v1, fwd_angle, face_hint)
+                    .zip(self.find_predecessor_on_face(v2, bwd_angle, face_hint));
+                if let Some(((alt_into_v1, alt_ccw_v1), (alt_into_v2, alt_ccw_v2))) = alt {
+                    (alt_into_v1, alt_into_v2, alt_ccw_v1, alt_ccw_v2, face_hint)
+                } else {
+                    debug_assert_eq!(face_v1, face_v2);
+                    (into_v1, into_v2, ccw_v1, ccw_v2, face_v1)
+                }
+            } else {
+                debug_assert_eq!(
+                    face_v1, face_v2,
+                    "insert_edge_both_connected: into_v1 (HE{}) on {:?} but into_v2 (HE{}) on {:?}",
+                    into_v1.0, face_v1, into_v2.0, face_v2
+                );
+                (into_v1, into_v2, ccw_v1, ccw_v2, face_v1)
+            };
+        let actual_face = actual_face;
 
         // Splice:
         //   into_v1 → he_fwd → ccw_v2 → ...
@@ -293,6 +317,49 @@ impl Dcel {
         self.assign_cycle_face(he_new_cycle, new_face);
 
         (edge_id, new_face)
+    }
+
+    /// Find the predecessor and CCW-successor half-edges in the fan at `vertex`
+    /// that belong to a specific face. Returns `(into_he, ccw_successor)` or
+    /// `None` if no sector at `vertex` belongs to the given face.
+    ///
+    /// `into_he` is the HE arriving at `vertex` on the target face's cycle.
+    /// `ccw_successor` is the next outgoing HE from `vertex` in the same face's cycle.
+    fn find_predecessor_on_face(
+        &self,
+        vertex: VertexId,
+        _angle: f64,
+        face: FaceId,
+    ) -> Option<(HalfEdgeId, HalfEdgeId)> {
+        let start = self.vertices[vertex.idx()].outgoing;
+        if start.is_none() {
+            return None;
+        }
+
+        // Walk the fan at this vertex. For each outgoing HE `cur`, its twin
+        // arrives at vertex. twin.next is the next outgoing HE in CCW order.
+        // The sector between `cur` (outgoing) and the previous outgoing
+        // (i.e., twin of the previous HE) has the face of `prev_twin`.
+        // Equivalently: twin of `cur` is on the same face as the sector
+        // between `cur` and the next outgoing.
+        let mut cur = start;
+        loop {
+            let twin = self.half_edges[cur.idx()].twin;
+            // The face of `twin` is the face of the sector between `cur`
+            // (this outgoing) and the next outgoing (twin.next).
+            if self.half_edges[twin.idx()].face == face {
+                // Found it: `twin` arrives at vertex on the target face,
+                // and `twin.next` (= next outgoing) leaves on the target face.
+                let next_outgoing = self.half_edges[twin.idx()].next;
+                return Some((twin, next_outgoing));
+            }
+            let next = self.half_edges[twin.idx()].next;
+            if next == start {
+                break;
+            }
+            cur = next;
+        }
+        None
     }
 
     /// Check if walking the cycle from `start` encounters `target`.
@@ -594,6 +661,200 @@ impl Dcel {
         self.vertices[vertex.idx()].outgoing = fan[0].1;
     }
 
+    /// After `rebuild_vertex_fan` re-links `next`/`prev` pointers at a vertex,
+    /// face assignments may be wrong in two ways:
+    ///
+    /// 1. **Multiple cycles per face**: A face's single boundary was split
+    ///    into two separate cycles. Each extra cycle gets a new face.
+    ///
+    /// 2. **Pinched cycle**: A face's boundary visits a vertex more than
+    ///    once ("figure-8" or "lollipop" shape). The cycle is split at the
+    ///    repeated vertex into sub-cycles, each becoming its own face.
+    ///
+    /// Returns the list of newly created faces.
+    pub fn repair_face_cycles_at_vertex(&mut self, vertex: VertexId) -> Vec<FaceId> {
+        let outgoing = self.vertex_outgoing(vertex);
+        if outgoing.is_empty() {
+            return Vec::new();
+        }
+
+        use std::collections::HashMap;
+        let mut new_faces = Vec::new();
+
+        // --- Phase 1: Detect and split pinched cycles ---
+        //
+        // Walk ALL cycles touching this vertex. When a cycle visits a vertex
+        // twice (pinch), extract the loop sub-path as a new cycle.
+        // If the loop has positive area, create a new face (inheriting fill
+        // from an adjacent non-F0 face if the parent cycle is F0).
+
+        // Collect unique cycle start HEs touching this vertex
+        let mut cycle_starts: Vec<HalfEdgeId> = Vec::new();
+        let mut seen_cycle_reps: Vec<HalfEdgeId> = Vec::new();
+        for &he in &outgoing {
+            for start in [he, self.half_edges[he.idx()].twin] {
+                let cycle = self.walk_cycle(start);
+                let rep = cycle.iter().copied().min_by_key(|h| h.0).unwrap();
+                if !seen_cycle_reps.contains(&rep) {
+                    seen_cycle_reps.push(rep);
+                    cycle_starts.push(start);
+                }
+            }
+        }
+
+        for cycle_start in cycle_starts {
+            // Walk the cycle vertex-by-vertex, including one extra step
+            // to re-check the start vertex for a closing pinch.
+            let mut vertex_first_he: HashMap<VertexId, HalfEdgeId> = HashMap::new();
+            let mut cur = cycle_start;
+            let cycle_len = self.walk_cycle(cycle_start).len();
+            let mut steps = 0;
+            let mut finished = false;
+
+            loop {
+                let v = self.half_edges[cur.idx()].origin;
+
+                if let Some(&first_he) = vertex_first_he.get(&v) {
+                    // Pinch detected! Extract the loop (first_he..last_of_loop).
+                    let prev_of_first = self.half_edges[first_he.idx()].prev;
+                    let last_of_loop = self.half_edges[cur.idx()].prev;
+
+                    // Relink: close the loop and bridge the main cycle
+                    self.half_edges[last_of_loop.idx()].next = first_he;
+                    self.half_edges[first_he.idx()].prev = last_of_loop;
+                    self.half_edges[prev_of_first.idx()].next = cur;
+                    self.half_edges[cur.idx()].prev = prev_of_first;
+
+                    // Determine area of the extracted loop
+                    let mut area = self.cycle_signed_area(first_he);
+                    if area.abs() < 1e-6 {
+                        area = self.cycle_curve_signed_area(first_he);
+                    }
+
+                    // Find a non-F0 donor face at the pinch vertex
+                    let donor_face = if area > 0.0 {
+                        let mut df = FaceId(0);
+                        for he_rec in self.half_edges.iter() {
+                            if he_rec.deleted { continue; }
+                            if he_rec.origin == v {
+                                if he_rec.face.0 != 0 {
+                                    df = he_rec.face;
+                                    break;
+                                }
+                                let tf = self.half_edges[he_rec.twin.idx()].face;
+                                if tf.0 != 0 {
+                                    df = tf;
+                                    break;
+                                }
+                            }
+                        }
+                        df
+                    } else {
+                        FaceId(0)
+                    };
+
+                    if area > 0.0 && donor_face.0 != 0 {
+                        let nf = self.alloc_face();
+                        self.faces[nf.idx()].fill_color =
+                            self.faces[donor_face.idx()].fill_color;
+                        self.faces[nf.idx()].image_fill =
+                            self.faces[donor_face.idx()].image_fill;
+                        self.faces[nf.idx()].fill_rule =
+                            self.faces[donor_face.idx()].fill_rule;
+                        self.faces[nf.idx()].outer_half_edge = first_he;
+                        self.assign_cycle_face(first_he, nf);
+                        new_faces.push(nf);
+                    } else {
+                        // Undo the relink
+                        self.half_edges[last_of_loop.idx()].next = cur;
+                        self.half_edges[cur.idx()].prev = last_of_loop;
+                        self.half_edges[prev_of_first.idx()].next = first_he;
+                        self.half_edges[first_he.idx()].prev = prev_of_first;
+                    }
+
+                    vertex_first_he.insert(v, cur);
+                } else {
+                    vertex_first_he.insert(v, cur);
+                }
+
+                if finished {
+                    break;
+                }
+
+                cur = self.half_edges[cur.idx()].next;
+                steps += 1;
+                if steps > cycle_len + 2 {
+                    break;
+                }
+                // When we've come full circle, process cycle_start once
+                // more (to detect a closing pinch) then stop.
+                if cur == cycle_start {
+                    finished = true;
+                }
+            }
+        }
+
+        // --- Phase 2: Handle multiple separate cycles per face ---
+        // (This handles case 1: rebuild_vertex_fan split one cycle into two
+        //  distinct cycles, without a pinch.)
+        let outgoing = self.vertex_outgoing(vertex);
+        let mut cycle_reps: Vec<(HalfEdgeId, FaceId)> = Vec::new();
+        let mut seen_reps: Vec<HalfEdgeId> = Vec::new();
+
+        for &he in &outgoing {
+            for start in [he, self.half_edges[he.idx()].twin] {
+                let cycle = self.walk_cycle(start);
+                let rep = cycle.iter().copied().min_by_key(|h| h.0).unwrap();
+                if !seen_reps.contains(&rep) {
+                    let face = self.half_edges[start.idx()].face;
+                    cycle_reps.push((rep, face));
+                    seen_reps.push(rep);
+                }
+            }
+        }
+
+        let mut face_cycles: HashMap<FaceId, Vec<HalfEdgeId>> = HashMap::new();
+        for &(rep, face) in &cycle_reps {
+            face_cycles.entry(face).or_default().push(rep);
+        }
+
+        for (&face, cycles) in &face_cycles {
+            if face.0 == 0 || cycles.len() <= 1 {
+                continue;
+            }
+
+            let old_ohe = self.faces[face.idx()].outer_half_edge;
+
+            for &cycle_rep in cycles {
+                let has_old_ohe = !old_ohe.is_none()
+                    && (cycle_rep == old_ohe || self.cycle_contains(cycle_rep, old_ohe));
+                if has_old_ohe {
+                    self.assign_cycle_face(cycle_rep, face);
+                    continue;
+                }
+
+                let area = self.cycle_signed_area(cycle_rep);
+
+                if area > 0.0 {
+                    let nf = self.alloc_face();
+                    self.faces[nf.idx()].fill_color = self.faces[face.idx()].fill_color;
+                    self.faces[nf.idx()].image_fill = self.faces[face.idx()].image_fill;
+                    self.faces[nf.idx()].fill_rule = self.faces[face.idx()].fill_rule;
+                    self.faces[nf.idx()].outer_half_edge = cycle_rep;
+                    self.assign_cycle_face(cycle_rep, nf);
+                    new_faces.push(nf);
+                } else {
+                    self.assign_cycle_face(cycle_rep, face);
+                    if !self.faces[face.idx()].inner_half_edges.contains(&cycle_rep) {
+                        self.faces[face.idx()].inner_half_edges.push(cycle_rep);
+                    }
+                }
+            }
+        }
+
+        new_faces
+    }
+
     /// Merge vertex `v_remove` into `v_keep`. Both must be at the same position
     /// (or close enough). All half-edges originating from `v_remove` are re-homed
     /// to `v_keep`, and the combined fan is re-sorted by angle.
@@ -731,5 +992,76 @@ mod tests {
         assert!(dcel.vertices[v1.idx()].outgoing.is_none());
         assert!(dcel.vertices[v2.idx()].outgoing.is_none());
         assert!(dcel.edges[edge_id.idx()].deleted);
+    }
+
+    /// Test that `repair_face_cycles_at_vertex` correctly splits a face
+    /// when `rebuild_vertex_fan` has broken one cycle into two.
+    #[test]
+    fn repair_face_cycles_splits_face() {
+        use crate::shape::ShapeColor;
+
+        let mut dcel = Dcel::new();
+
+        // Build a rectangle manually: 6 vertices, 6 edges
+        // The rectangle has split points on the left and right sides
+        // to simulate the result of splitting edges at intersection points.
+        //
+        //  v3 ---- v2
+        //  |        |
+        // vL       vR
+        //  |        |
+        //  v0 ---- v1
+        let v0 = dcel.alloc_vertex(Point::new(0.0, 0.0));
+        let v1 = dcel.alloc_vertex(Point::new(100.0, 0.0));
+        let v2 = dcel.alloc_vertex(Point::new(100.0, 100.0));
+        let v3 = dcel.alloc_vertex(Point::new(0.0, 100.0));
+        let vl = dcel.alloc_vertex(Point::new(0.0, 50.0));
+        let vr = dcel.alloc_vertex(Point::new(100.0, 50.0));
+
+        // Insert edges forming the rectangle boundary (with split points)
+        // Bottom: v0 → v1
+        dcel.insert_edge(v0, v1, FaceId(0), line_curve(Point::new(0.0, 0.0), Point::new(100.0, 0.0)));
+        // Right-bottom: v1 → vR
+        dcel.insert_edge(v1, vr, FaceId(0), line_curve(Point::new(100.0, 0.0), Point::new(100.0, 50.0)));
+        // Right-top: vR → v2
+        dcel.insert_edge(vr, v2, FaceId(0), line_curve(Point::new(100.0, 50.0), Point::new(100.0, 100.0)));
+        // Top: v2 → v3
+        dcel.insert_edge(v2, v3, FaceId(0), line_curve(Point::new(100.0, 100.0), Point::new(0.0, 100.0)));
+        // Left-top: v3 → vL
+        dcel.insert_edge(v3, vl, FaceId(0), line_curve(Point::new(0.0, 100.0), Point::new(0.0, 50.0)));
+        // Left-bottom: vL → v0
+        dcel.insert_edge(vl, v0, FaceId(0), line_curve(Point::new(0.0, 50.0), Point::new(0.0, 0.0)));
+
+        // Create a face on the CCW interior cycle
+        let he_opts = dcel.vertex_outgoing(v0);
+        let interior_he = he_opts
+            .iter()
+            .copied()
+            .find(|&he| dcel.cycle_signed_area(he) > 0.0)
+            .expect("should have a CCW cycle");
+        let face = dcel.create_face_at_cycle(interior_he);
+        dcel.faces[face.idx()].fill_color = Some(ShapeColor::rgb(255, 0, 0));
+
+        dcel.validate();
+
+        // Now insert the cross edge vL → vR (splitting the face)
+        let cross_curve = line_curve(Point::new(0.0, 50.0), Point::new(100.0, 50.0));
+        let (_, _returned_face) = dcel.insert_edge(vl, vr, face, cross_curve);
+
+        // insert_edge_both_connected should have split the face
+        let filled_faces: Vec<_> = dcel
+            .faces
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| *i != 0 && !f.deleted && f.fill_color.is_some())
+            .collect();
+
+        assert!(
+            filled_faces.len() >= 2,
+            "expected at least 2 filled faces after cross edge, got {}",
+            filled_faces.len(),
+        );
+
+        dcel.validate();
     }
 }
