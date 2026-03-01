@@ -118,6 +118,7 @@ fn effective_clip_duration(
         AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| c.duration),
         AnyLayer::Effect(_) => Some(lightningbeam_core::effect::EFFECT_DURATION),
         AnyLayer::Group(_) => None,
+        AnyLayer::Raster(_) => None,
     }
 }
 
@@ -372,6 +373,7 @@ fn collect_clip_instances<'a>(layer: &'a AnyLayer, result: &mut Vec<(&'a AnyLaye
                 collect_clip_instances(child, result);
             }
         }
+        AnyLayer::Raster(_) => {}
     }
 }
 
@@ -684,6 +686,7 @@ impl TimelinePane {
             lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
             lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
             lightningbeam_core::layer::AnyLayer::Group(_) => &[],
+            lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
         };
 
         // Check each clip instance
@@ -1196,6 +1199,7 @@ impl TimelinePane {
                         AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
                         AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
                         AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                        AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
                     };
                     (layer.id(), data.name.clone(), lt, tc)
                 }
@@ -1213,6 +1217,7 @@ impl TimelinePane {
                         AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
                         AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
                         AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                        AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
                     };
                     (child.id(), data.name.clone(), lt, tc)
                 }
@@ -1972,6 +1977,7 @@ impl TimelinePane {
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Group(_) => &[],
+                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
             };
 
             // For moves, precompute the clamped offset so all selected clips move uniformly
@@ -2277,6 +2283,10 @@ impl TimelinePane {
                             lightningbeam_core::layer::AnyLayer::Group(_) => (
                                 egui::Color32::from_rgb(0, 150, 150), // Teal
                                 egui::Color32::from_rgb(100, 220, 220), // Bright teal
+                            ),
+                            lightningbeam_core::layer::AnyLayer::Raster(_) => (
+                                egui::Color32::from_rgb(160, 100, 200), // Purple/violet
+                                egui::Color32::from_rgb(200, 160, 240), // Bright purple/violet
                             ),
                         };
 
@@ -2868,6 +2878,7 @@ impl TimelinePane {
                                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Group(_) => &[],
+                                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
                             };
 
                             // Check if click is within any clip instance
@@ -3722,6 +3733,7 @@ impl PaneRenderer for TimelinePane {
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Group(_) => &[],
+                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
             };
 
             for clip_instance in clip_instances {
@@ -3860,6 +3872,7 @@ impl PaneRenderer for TimelinePane {
                             AnyLayer::Video(vl) => &vl.clip_instances,
                             AnyLayer::Effect(el) => &el.clip_instances,
                             AnyLayer::Group(_) => &[],
+                            AnyLayer::Raster(_) => &[],
                         };
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
@@ -3890,6 +3903,7 @@ impl PaneRenderer for TimelinePane {
                             AnyLayer::Video(vl) => &vl.clip_instances,
                             AnyLayer::Effect(el) => &el.clip_instances,
                             AnyLayer::Group(_) => &[],
+                            AnyLayer::Raster(_) => &[],
                         };
                         // Check each selected clip
                         enabled = instances.iter()

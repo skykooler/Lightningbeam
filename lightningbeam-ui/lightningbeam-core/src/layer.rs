@@ -7,6 +7,7 @@ use crate::clip::ClipInstance;
 use crate::dcel::Dcel;
 use crate::effect_layer::EffectLayer;
 use crate::object::ShapeInstance;
+use crate::raster_layer::RasterLayer;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,6 +28,8 @@ pub enum LayerType {
     Effect,
     /// Group layer containing child layers (e.g. video + audio)
     Group,
+    /// Raster pixel-buffer painting layer
+    Raster,
 }
 
 /// Common trait for all layer types
@@ -761,6 +764,7 @@ impl GroupLayer {
                 AnyLayer::Vector(l) => &l.clip_instances,
                 AnyLayer::Effect(l) => &l.clip_instances,
                 AnyLayer::Group(_) => &[], // no nested groups
+                AnyLayer::Raster(_) => &[], // raster layers have no clip instances
             };
             for ci in instances {
                 result.push((child_id, ci));
@@ -778,6 +782,7 @@ pub enum AnyLayer {
     Video(VideoLayer),
     Effect(EffectLayer),
     Group(GroupLayer),
+    Raster(RasterLayer),
 }
 
 impl LayerTrait for AnyLayer {
@@ -788,6 +793,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.id(),
             AnyLayer::Effect(l) => l.id(),
             AnyLayer::Group(l) => l.id(),
+            AnyLayer::Raster(l) => l.id(),
         }
     }
 
@@ -798,6 +804,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.name(),
             AnyLayer::Effect(l) => l.name(),
             AnyLayer::Group(l) => l.name(),
+            AnyLayer::Raster(l) => l.name(),
         }
     }
 
@@ -808,6 +815,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_name(name),
             AnyLayer::Effect(l) => l.set_name(name),
             AnyLayer::Group(l) => l.set_name(name),
+            AnyLayer::Raster(l) => l.set_name(name),
         }
     }
 
@@ -818,6 +826,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.has_custom_name(),
             AnyLayer::Effect(l) => l.has_custom_name(),
             AnyLayer::Group(l) => l.has_custom_name(),
+            AnyLayer::Raster(l) => l.has_custom_name(),
         }
     }
 
@@ -828,6 +837,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_has_custom_name(custom),
             AnyLayer::Effect(l) => l.set_has_custom_name(custom),
             AnyLayer::Group(l) => l.set_has_custom_name(custom),
+            AnyLayer::Raster(l) => l.set_has_custom_name(custom),
         }
     }
 
@@ -838,6 +848,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.visible(),
             AnyLayer::Effect(l) => l.visible(),
             AnyLayer::Group(l) => l.visible(),
+            AnyLayer::Raster(l) => l.visible(),
         }
     }
 
@@ -848,6 +859,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_visible(visible),
             AnyLayer::Effect(l) => l.set_visible(visible),
             AnyLayer::Group(l) => l.set_visible(visible),
+            AnyLayer::Raster(l) => l.set_visible(visible),
         }
     }
 
@@ -858,6 +870,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.opacity(),
             AnyLayer::Effect(l) => l.opacity(),
             AnyLayer::Group(l) => l.opacity(),
+            AnyLayer::Raster(l) => l.opacity(),
         }
     }
 
@@ -868,6 +881,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_opacity(opacity),
             AnyLayer::Effect(l) => l.set_opacity(opacity),
             AnyLayer::Group(l) => l.set_opacity(opacity),
+            AnyLayer::Raster(l) => l.set_opacity(opacity),
         }
     }
 
@@ -878,6 +892,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.volume(),
             AnyLayer::Effect(l) => l.volume(),
             AnyLayer::Group(l) => l.volume(),
+            AnyLayer::Raster(l) => l.volume(),
         }
     }
 
@@ -888,6 +903,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_volume(volume),
             AnyLayer::Effect(l) => l.set_volume(volume),
             AnyLayer::Group(l) => l.set_volume(volume),
+            AnyLayer::Raster(l) => l.set_volume(volume),
         }
     }
 
@@ -898,6 +914,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.muted(),
             AnyLayer::Effect(l) => l.muted(),
             AnyLayer::Group(l) => l.muted(),
+            AnyLayer::Raster(l) => l.muted(),
         }
     }
 
@@ -908,6 +925,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_muted(muted),
             AnyLayer::Effect(l) => l.set_muted(muted),
             AnyLayer::Group(l) => l.set_muted(muted),
+            AnyLayer::Raster(l) => l.set_muted(muted),
         }
     }
 
@@ -918,6 +936,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.soloed(),
             AnyLayer::Effect(l) => l.soloed(),
             AnyLayer::Group(l) => l.soloed(),
+            AnyLayer::Raster(l) => l.soloed(),
         }
     }
 
@@ -928,6 +947,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_soloed(soloed),
             AnyLayer::Effect(l) => l.set_soloed(soloed),
             AnyLayer::Group(l) => l.set_soloed(soloed),
+            AnyLayer::Raster(l) => l.set_soloed(soloed),
         }
     }
 
@@ -938,6 +958,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.locked(),
             AnyLayer::Effect(l) => l.locked(),
             AnyLayer::Group(l) => l.locked(),
+            AnyLayer::Raster(l) => l.locked(),
         }
     }
 
@@ -948,6 +969,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Video(l) => l.set_locked(locked),
             AnyLayer::Effect(l) => l.set_locked(locked),
             AnyLayer::Group(l) => l.set_locked(locked),
+            AnyLayer::Raster(l) => l.set_locked(locked),
         }
     }
 }
@@ -961,6 +983,7 @@ impl AnyLayer {
             AnyLayer::Video(l) => &l.layer,
             AnyLayer::Effect(l) => &l.layer,
             AnyLayer::Group(l) => &l.layer,
+            AnyLayer::Raster(l) => &l.layer,
         }
     }
 
@@ -972,6 +995,7 @@ impl AnyLayer {
             AnyLayer::Video(l) => &mut l.layer,
             AnyLayer::Effect(l) => &mut l.layer,
             AnyLayer::Group(l) => &mut l.layer,
+            AnyLayer::Raster(l) => &mut l.layer,
         }
     }
 

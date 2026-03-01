@@ -45,6 +45,7 @@ impl Action for RemoveClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             // Find and remove the instance, saving it for rollback
@@ -70,6 +71,7 @@ impl Action for RemoveClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             clip_instances.push(instance);

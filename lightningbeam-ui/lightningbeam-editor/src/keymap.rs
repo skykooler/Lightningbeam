@@ -50,6 +50,7 @@ pub enum AppAction {
     AddVideoLayer,
     AddAudioTrack,
     AddMidiTrack,
+    AddRasterLayer,
     AddTestClip,
     DeleteLayer,
     ToggleLayerVisibility,
@@ -124,7 +125,7 @@ impl AppAction {
             Self::BringToFront | Self::SplitClip | Self::DuplicateClip => "Modify",
 
             Self::AddLayer | Self::AddVideoLayer | Self::AddAudioTrack |
-            Self::AddMidiTrack | Self::AddTestClip | Self::DeleteLayer |
+            Self::AddMidiTrack | Self::AddRasterLayer | Self::AddTestClip | Self::DeleteLayer |
             Self::ToggleLayerVisibility => "Layer",
 
             Self::NewKeyframe | Self::NewBlankKeyframe | Self::DeleteFrame |
@@ -199,6 +200,7 @@ impl AppAction {
             Self::AddVideoLayer => "Add Video Layer",
             Self::AddAudioTrack => "Add Audio Track",
             Self::AddMidiTrack => "Add MIDI Track",
+            Self::AddRasterLayer => "Add Raster Layer",
             Self::AddTestClip => "Add Test Clip",
             Self::DeleteLayer => "Delete Layer",
             Self::ToggleLayerVisibility => "Toggle Layer Visibility",
@@ -314,6 +316,7 @@ impl From<MenuAction> for AppAction {
             MenuAction::AddVideoLayer => Self::AddVideoLayer,
             MenuAction::AddAudioTrack => Self::AddAudioTrack,
             MenuAction::AddMidiTrack => Self::AddMidiTrack,
+            MenuAction::AddRasterLayer => Self::AddRasterLayer,
             MenuAction::AddTestClip => Self::AddTestClip,
             MenuAction::DeleteLayer => Self::DeleteLayer,
             MenuAction::ToggleLayerVisibility => Self::ToggleLayerVisibility,
@@ -373,6 +376,7 @@ impl TryFrom<AppAction> for MenuAction {
             AppAction::AddVideoLayer => MenuAction::AddVideoLayer,
             AppAction::AddAudioTrack => MenuAction::AddAudioTrack,
             AppAction::AddMidiTrack => MenuAction::AddMidiTrack,
+            AppAction::AddRasterLayer => MenuAction::AddRasterLayer,
             AppAction::AddTestClip => MenuAction::AddTestClip,
             AppAction::DeleteLayer => MenuAction::DeleteLayer,
             AppAction::ToggleLayerVisibility => MenuAction::ToggleLayerVisibility,

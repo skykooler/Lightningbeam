@@ -37,6 +37,10 @@ pub enum Tool {
     RegionSelect,
     /// Split tool - split audio/video clips at a point
     Split,
+    /// Erase tool - erase raster pixels
+    Erase,
+    /// Smudge tool - smudge/blend raster pixels
+    Smudge,
 }
 
 /// Region select mode
@@ -64,6 +68,11 @@ pub enum ToolState {
     DrawingPath {
         points: Vec<Point>,
         simplify_mode: SimplifyMode,
+    },
+
+    /// Drawing a raster paint stroke
+    DrawingRasterStroke {
+        points: Vec<crate::raster_layer::StrokePoint>,
     },
 
     /// Dragging selected objects
@@ -213,6 +222,8 @@ impl Tool {
             Tool::Text => "Text",
             Tool::RegionSelect => "Region Select",
             Tool::Split => "Split",
+            Tool::Erase => "Erase",
+            Tool::Smudge => "Smudge",
         }
     }
 
@@ -232,6 +243,8 @@ impl Tool {
             Tool::Text => "text.svg",
             Tool::RegionSelect => "region_select.svg",
             Tool::Split => "split.svg",
+            Tool::Erase => "erase.svg",
+            Tool::Smudge => "smudge.svg",
         }
     }
 
@@ -259,6 +272,7 @@ impl Tool {
         match layer_type {
             None | Some(LayerType::Vector) => Tool::all(),
             Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split],
+            Some(LayerType::Raster) => &[Tool::Select, Tool::Draw, Tool::Erase, Tool::Smudge, Tool::Eyedropper],
             _ => &[Tool::Select],
         }
     }
@@ -279,6 +293,8 @@ impl Tool {
             Tool::Text => "T",
             Tool::RegionSelect => "S",
             Tool::Split => "C",
+            Tool::Erase => "X",
+            Tool::Smudge => "U",
         }
     }
 }

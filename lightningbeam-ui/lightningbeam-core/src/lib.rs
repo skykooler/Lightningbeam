@@ -48,6 +48,9 @@ pub mod dcel2;
 pub use dcel2 as dcel;
 pub mod snap;
 pub mod webcam;
+pub mod raster_layer;
+pub mod brush_settings;
+pub mod brush_engine;
 
 #[cfg(debug_assertions)]
 pub mod test_mode;

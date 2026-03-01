@@ -104,6 +104,9 @@ impl Action for AddClipInstanceAction {
             AnyLayer::Group(_) => {
                 return Err("Cannot add clip instances directly to group layers".to_string());
             }
+            AnyLayer::Raster(_) => {
+                return Err("Cannot add clip instances directly to group layers".to_string());
+            }
         }
         self.executed = true;
 
@@ -141,6 +144,9 @@ impl Action for AddClipInstanceAction {
             }
             AnyLayer::Group(_) => {
                 // Group layers don't have clip instances, nothing to rollback
+            }
+            AnyLayer::Raster(_) => {
+                // Raster layers don't have clip instances, nothing to rollback
             }
         }
         self.executed = false;

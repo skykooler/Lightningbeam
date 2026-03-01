@@ -36,6 +36,7 @@ impl Action for LoopClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             for (instance_id, _old_dur, new_dur, _old_lb, new_lb) in loops {
@@ -59,6 +60,7 @@ impl Action for LoopClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             for (instance_id, old_dur, _new_dur, old_lb, _new_lb) in loops {

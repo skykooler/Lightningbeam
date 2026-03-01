@@ -370,6 +370,37 @@ pub fn save_beam(
         eprintln!("📊 [SAVE_BEAM]   - ZIP writing: {:.2}ms", zip_write_time);
     }
 
+    // 4b. Write raster layer PNG buffers to ZIP (media/raster/<keyframe-uuid>.png)
+    let step4b_start = std::time::Instant::now();
+    let raster_file_options = FileOptions::default()
+        .compression_method(CompressionMethod::Stored); // PNG is already compressed
+    let mut raster_count = 0usize;
+    for layer in &document.root.children {
+        if let crate::layer::AnyLayer::Raster(rl) = layer {
+            for kf in &rl.keyframes {
+                if !kf.raw_pixels.is_empty() {
+                    // Encode raw RGBA to PNG for storage
+                    let img = crate::brush_engine::image_from_raw(
+                        kf.raw_pixels.clone(), kf.width, kf.height,
+                    );
+                    match crate::brush_engine::encode_png(&img) {
+                        Ok(png_bytes) => {
+                            let zip_path = kf.media_path.clone();
+                            zip.start_file(&zip_path, raster_file_options)
+                                .map_err(|e| format!("Failed to create {} in ZIP: {}", zip_path, e))?;
+                            zip.write_all(&png_bytes)
+                                .map_err(|e| format!("Failed to write {}: {}", zip_path, e))?;
+                            raster_count += 1;
+                        }
+                        Err(e) => eprintln!("⚠️ [SAVE_BEAM] Failed to encode raster PNG {}: {}", kf.media_path, e),
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("📊 [SAVE_BEAM] Step 4b: Write {} raster PNG buffers took {:.2}ms",
+              raster_count, step4b_start.elapsed().as_secs_f64() * 1000.0);
+
     // 5. Build BeamProject structure with modified entries
     let step5_start = std::time::Instant::now();
     let now = chrono::Utc::now().to_rfc3339();
@@ -467,7 +498,7 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
 
     // 5. Extract document and audio backend state
     let step5_start = std::time::Instant::now();
-    let document = beam_project.ui_state;
+    let mut document = beam_project.ui_state;
     let mut audio_project = beam_project.audio_backend.project;
     let audio_pool_entries = beam_project.audio_backend.audio_pool_entries;
     let layer_to_track_map = beam_project.audio_backend.layer_to_track_map;
@@ -583,6 +614,37 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
     if flac_decode_time > 0.0 {
         eprintln!("📊 [LOAD_BEAM]   - FLAC decoding: {:.2}ms", flac_decode_time);
     }
+
+    // 7b. Load raster layer PNG buffers from ZIP
+    let step7b_start = std::time::Instant::now();
+    let mut raster_load_count = 0usize;
+    for layer in document.root.children.iter_mut() {
+        if let crate::layer::AnyLayer::Raster(rl) = layer {
+            for kf in &mut rl.keyframes {
+                if !kf.media_path.is_empty() {
+                    match zip.by_name(&kf.media_path) {
+                        Ok(mut png_file) => {
+                            let mut png_bytes = Vec::new();
+                            let _ = png_file.read_to_end(&mut png_bytes);
+                            // Decode PNG into raw RGBA pixels for fast in-memory access
+                            match crate::brush_engine::decode_png(&png_bytes) {
+                                Ok(rgba) => {
+                                    kf.raw_pixels = rgba.into_raw();
+                                    raster_load_count += 1;
+                                }
+                                Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster PNG {}: {}", kf.media_path, e),
+                            }
+                        }
+                        Err(_) => {
+                            // Keyframe PNG not in ZIP yet (new keyframe); leave raw_pixels empty
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("📊 [LOAD_BEAM] Step 7b: Load {} raster PNG buffers took {:.2}ms",
+              raster_load_count, step7b_start.elapsed().as_secs_f64() * 1000.0);
 
     // 8. Check for missing external files
     // An entry is missing if it has a relative_path (external reference)

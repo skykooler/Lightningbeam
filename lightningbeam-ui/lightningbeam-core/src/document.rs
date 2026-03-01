@@ -419,6 +419,9 @@ impl Document {
                         }
                     }
                 }
+                crate::layer::AnyLayer::Raster(_) => {
+                    // Raster layers don't have clip instances
+                }
                 crate::layer::AnyLayer::Group(group) => {
                     // Recurse into group children to find their clip instance endpoints
                     fn process_group_children(
@@ -456,6 +459,9 @@ impl Document {
                                             *max_end = max_end.max(calc_end(inst, dur));
                                         }
                                     }
+                                }
+                                crate::layer::AnyLayer::Raster(_) => {
+                                    // Raster layers don't have clip instances
                                 }
                                 crate::layer::AnyLayer::Group(g) => {
                                     process_group_children(&g.children, doc, max_end, calc_end);
@@ -822,6 +828,7 @@ impl Document {
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
@@ -861,6 +868,7 @@ impl Document {
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         for instance in instances {
@@ -922,6 +930,7 @@ impl Document {
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(_) => return Some(desired_start), // Shouldn't reach here
             AnyLayer::Group(_) => return Some(desired_start), // Groups don't have own clips
+            AnyLayer::Raster(_) => return Some(desired_start), // Raster layers don't have own clips
         };
 
         let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
@@ -1016,6 +1025,7 @@ impl Document {
             AnyLayer::Effect(e) => &e.clip_instances,
             AnyLayer::Vector(v) => &v.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         // Collect non-group clip ranges
@@ -1086,6 +1096,7 @@ impl Document {
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         for other in instances {
@@ -1133,6 +1144,7 @@ impl Document {
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         let mut nearest_start = f64::MAX;
@@ -1179,6 +1191,7 @@ impl Document {
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Group(_) => &[],
+            AnyLayer::Raster(_) => &[],
         };
 
         let mut nearest_end = 0.0;

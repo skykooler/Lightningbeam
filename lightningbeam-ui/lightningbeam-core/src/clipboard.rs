@@ -32,6 +32,7 @@ impl ClipboardLayerType {
             },
             AnyLayer::Effect(_) => ClipboardLayerType::Effect,
             AnyLayer::Group(_) => ClipboardLayerType::Vector, // Groups don't have a direct clipboard type; treat as vector
+            AnyLayer::Raster(_) => ClipboardLayerType::Vector, // Raster layers treated as vector for clipboard purposes
         }
     }
 

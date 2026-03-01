@@ -2136,6 +2136,10 @@ pub struct StagePane {
     dcel_editing_cache: Option<DcelEditingCache>,
     // Current snap result (for visual feedback rendering)
     current_snap: Option<lightningbeam_core::snap::SnapResult>,
+    // Raster stroke in progress: (layer_id, time, brush_state, buffer_before)
+    raster_stroke_state: Option<(uuid::Uuid, f64, lightningbeam_core::brush_engine::StrokeState, Vec<u8>)>,
+    // Last raster stroke point (for incremental segment painting)
+    raster_last_point: Option<lightningbeam_core::raster_layer::StrokePoint>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2211,6 +2215,8 @@ impl StagePane {
             last_viewport_rect: None,
             dcel_editing_cache: None,
             current_snap: None,
+            raster_stroke_state: None,
+            raster_last_point: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -4172,6 +4178,155 @@ impl StagePane {
                 // Clear tool state to stop preview rendering
                 *shared.tool_state = ToolState::Idle;
             }
+        }
+    }
+
+    /// Handle raster stroke tool input (Draw/Erase/Smudge on a raster layer).
+    ///
+    /// Paints incrementally into `document_mut()` on every drag event so the
+    /// result is visible immediately.  On mouse-up the pre/post raw-pixel
+    /// buffers are wrapped in a `RasterStrokeAction` for undo/redo.
+    fn handle_raster_stroke_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        blend_mode: lightningbeam_core::raster_layer::RasterBlendMode,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::raster_layer::StrokePoint;
+        use lightningbeam_core::brush_engine::{BrushEngine, StrokeState, image_from_raw};
+        use lightningbeam_core::raster_layer::StrokeRecord;
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Only operate on raster layers
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        if !is_raster {
+            return;
+        }
+
+        let brush = lightningbeam_core::brush_settings::BrushSettings::default_round_soft();
+
+        let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
+            [1.0f32, 1.0, 1.0, 1.0]
+        } else {
+            let c = *shared.stroke_color;
+            [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, c.a() as f32 / 255.0]
+        };
+
+        // Mouse down: snapshot buffer_before, init stroke state, paint first dab
+        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
+            let (doc_width, doc_height, buffer_before) = {
+                let doc = shared.action_executor.document();
+                let buf = doc.get_layer(&active_layer_id)
+                    .and_then(|l| if let AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(*shared.playback_time).map(|kf| kf.raw_pixels.clone())
+                    } else { None })
+                    .unwrap_or_default();
+                (doc.width as u32, doc.height as u32, buf)
+            };
+
+            // Start a fresh stroke state; MAX distance ensures first point gets a dab
+            let mut stroke_state = StrokeState::new();
+            stroke_state.distance_since_last_dab = f32::MAX;
+
+            let first_pt = StrokePoint { x: world_pos.x, y: world_pos.y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 };
+
+            // Paint the first dab directly into the document
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&active_layer_id) {
+                    let kf = rl.ensure_keyframe_at(*shared.playback_time, doc_width, doc_height);
+                    let mut img = image_from_raw(std::mem::take(&mut kf.raw_pixels), kf.width, kf.height);
+                    let single = StrokeRecord {
+                        brush_settings: brush.clone(),
+                        color,
+                        blend_mode,
+                        points: vec![first_pt.clone()],
+                    };
+                    BrushEngine::apply_stroke_with_state(&mut img, &single, &mut stroke_state);
+                    kf.raw_pixels = img.into_raw();
+                }
+            }
+
+            self.raster_stroke_state = Some((active_layer_id, *shared.playback_time, stroke_state, buffer_before));
+            self.raster_last_point = Some(first_pt);
+            *shared.tool_state = ToolState::DrawingRasterStroke { points: vec![] };
+        }
+
+        // Mouse drag: paint each new segment immediately
+        if self.rsp_dragged(response) {
+            if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
+                if let Some(prev_pt) = self.raster_last_point.take() {
+                    let curr_pt = StrokePoint { x: world_pos.x, y: world_pos.y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 };
+
+                    // Skip if not moved enough
+                    const MIN_DIST_SQ: f32 = 1.5 * 1.5;
+                    let dx = curr_pt.x - prev_pt.x;
+                    let dy = curr_pt.y - prev_pt.y;
+                    let moved_pt = if dx * dx + dy * dy >= MIN_DIST_SQ { curr_pt.clone() } else { prev_pt.clone() };
+
+                    if dx * dx + dy * dy >= MIN_DIST_SQ {
+                        let doc = shared.action_executor.document_mut();
+                        if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                            if let Some(kf) = rl.keyframe_at_mut(time) {
+                                let mut img = image_from_raw(std::mem::take(&mut kf.raw_pixels), kf.width, kf.height);
+                                let seg = StrokeRecord {
+                                    brush_settings: brush.clone(),
+                                    color,
+                                    blend_mode,
+                                    points: vec![prev_pt, curr_pt],
+                                };
+                                BrushEngine::apply_stroke_with_state(&mut img, &seg, stroke_state);
+                                kf.raw_pixels = img.into_raw();
+                            }
+                        }
+                    }
+
+                    self.raster_last_point = Some(moved_pt);
+                }
+            }
+        }
+
+        // Mouse up: wrap the pre/post buffers in an undo action
+        if self.rsp_drag_stopped(response)
+            || (self.rsp_any_released(ui) && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }))
+        {
+            if let Some((layer_id, time, _, buffer_before)) = self.raster_stroke_state.take() {
+                use lightningbeam_core::actions::RasterStrokeAction;
+
+                let (doc_width, doc_height, buffer_after) = {
+                    let doc = shared.action_executor.document();
+                    let buf = doc.get_layer(&layer_id)
+                        .and_then(|l| if let AnyLayer::Raster(rl) = l {
+                            rl.keyframe_at(time).map(|kf| kf.raw_pixels.clone())
+                        } else { None })
+                        .unwrap_or_default();
+                    (doc.width as u32, doc.height as u32, buf)
+                };
+
+                let action = RasterStrokeAction::new(
+                    layer_id,
+                    time,
+                    buffer_before,
+                    buffer_after,
+                    doc_width,
+                    doc_height,
+                );
+                // execute is a no-op for the first call (pixels already in document),
+                // but registers the action in the undo stack
+                let _ = shared.action_executor.execute(Box::new(action));
+            }
+            self.raster_last_point = None;
+            *shared.tool_state = ToolState::Idle;
         }
     }
 
@@ -6187,7 +6342,21 @@ impl StagePane {
                     self.handle_ellipse_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 Tool::Draw => {
-                    self.handle_draw_tool(ui, &response, world_pos, shared);
+                    // Dispatch to raster or vector draw handler based on active layer type
+                    let is_raster = shared.active_layer_id.and_then(|id| {
+                        shared.action_executor.document().get_layer(&id)
+                    }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+                    if is_raster {
+                        self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Normal, shared);
+                    } else {
+                        self.handle_draw_tool(ui, &response, world_pos, shared);
+                    }
+                }
+                Tool::Erase => {
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Erase, shared);
+                }
+                Tool::Smudge => {
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Smudge, shared);
                 }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);

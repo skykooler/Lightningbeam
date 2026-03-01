@@ -321,6 +321,8 @@ mod tool_icons {
     pub static BEZIER_EDIT: &[u8] = include_bytes!("../../../src/assets/bezier_edit.svg");
     pub static TEXT: &[u8] = include_bytes!("../../../src/assets/text.svg");
     pub static SPLIT: &[u8] = include_bytes!("../../../src/assets/split.svg");
+    pub static ERASE: &[u8] = include_bytes!("../../../src/assets/erase.svg");
+    pub static SMUDGE: &[u8] = include_bytes!("../../../src/assets/smudge.svg");
 }
 
 /// Embedded focus icon SVGs
@@ -328,6 +330,7 @@ mod focus_icons {
     pub static ANIMATION: &[u8] = include_bytes!("../../../src/assets/focus-animation.svg");
     pub static MUSIC: &[u8] = include_bytes!("../../../src/assets/focus-music.svg");
     pub static VIDEO: &[u8] = include_bytes!("../../../src/assets/focus-video.svg");
+    pub static PAINTING: &[u8] = include_bytes!("../../../src/assets/focus-painting.svg");
 }
 
 /// Icon cache for pane type icons
@@ -389,6 +392,8 @@ impl ToolIconCache {
                 Tool::Text => tool_icons::TEXT,
                 Tool::RegionSelect => tool_icons::SELECT, // Reuse select icon for now
                 Tool::Split => tool_icons::SPLIT,
+                Tool::Erase => tool_icons::ERASE,
+                Tool::Smudge => tool_icons::SMUDGE,
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -416,6 +421,7 @@ impl FocusIconCache {
                 FocusIcon::Animation => (focus_icons::ANIMATION, "focus-animation.svg"),
                 FocusIcon::Music => (focus_icons::MUSIC, "focus-music.svg"),
                 FocusIcon::Video => (focus_icons::VIDEO, "focus-video.svg"),
+                FocusIcon::Painting => (focus_icons::PAINTING, "focus-painting.svg"),
             };
 
             // Replace currentColor with the actual color
@@ -661,6 +667,7 @@ enum FocusIcon {
     Animation,
     Music,
     Video,
+    Painting,
 }
 
 /// Recording arm mode - determines how tracks are armed for recording
@@ -1218,6 +1225,18 @@ impl EditorApp {
                                 if response.clicked() {
                                     self.create_new_project_with_focus(1);
                                 }
+
+                                ui.add_space(card_spacing);
+
+                                // Painting
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::vec2(card_size, card_size + 40.0),
+                                    egui::Sense::click(),
+                                );
+                                self.render_focus_card_with_icon(ui, rect, response.hovered(), "Painting", FocusIcon::Painting);
+                                if response.clicked() {
+                                    self.create_new_project_with_focus(5);
+                                }
                             });
                         });
                     });
@@ -1355,7 +1374,7 @@ impl EditorApp {
         .with_framerate(self.config.framerate as f64);
 
         // Add default layer based on focus type
-        // Layout indices: 0 = Animation, 1 = Video editing, 2 = Music
+        // Layout indices: 0 = Animation, 1 = Video editing, 2 = Music, 5 = Drawing/Painting
         let layer_id = match layout_index {
             0 => {
                 // Animation focus -> VectorLayer
@@ -1372,6 +1391,12 @@ impl EditorApp {
                 // Music focus -> MIDI AudioLayer
                 let layer = AudioLayer::new_midi("MIDI 1");
                 document.root.add_child(AnyLayer::Audio(layer))
+            }
+            5 => {
+                // Painting focus -> RasterLayer
+                use lightningbeam_core::raster_layer::RasterLayer;
+                let layer = RasterLayer::new("Raster 1");
+                document.root.add_child(AnyLayer::Raster(layer))
             }
             _ => {
                 // Fallback to VectorLayer
@@ -1662,7 +1687,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                 AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                 AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                AnyLayer::Group(_) => vec![],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
             };
 
             for instance_id in active_layer_clips {
@@ -1680,7 +1705,7 @@ impl EditorApp {
                                     AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                                     AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                                     AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                                    AnyLayer::Group(_) => vec![],
+                                    AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
                                 };
                                 if member_splittable.contains(member_instance_id) {
                                     clips_to_split.push((*member_layer_id, *member_instance_id));
@@ -1791,7 +1816,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => &al.clip_instances,
                 AnyLayer::Video(vl) => &vl.clip_instances,
                 AnyLayer::Effect(el) => &el.clip_instances,
-                AnyLayer::Group(_) => &[],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
             };
             let instances: Vec<_> = clip_slice
             .iter()
@@ -2089,7 +2114,7 @@ impl EditorApp {
                     AnyLayer::Audio(al) => &al.clip_instances,
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
-                    AnyLayer::Group(_) => &[],
+                    AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
                 };
                 instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
@@ -2786,6 +2811,24 @@ impl EditorApp {
                     } else {
                         println!("⚠️  Audio engine not initialized - {} created but will be silent", layer_name);
                     }
+                }
+            }
+            MenuAction::AddRasterLayer => {
+                use lightningbeam_core::raster_layer::RasterLayer;
+                let editing_clip_id = self.editing_context.current_clip_id();
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                let layer_number = context_layers.len() + 1;
+                let layer_name = format!("Raster {}", layer_number);
+
+                let layer = RasterLayer::new(layer_name);
+                let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Raster(layer))
+                    .with_target_clip(editing_clip_id);
+                let _ = self.action_executor.execute(Box::new(action));
+
+                // Set newly created layer as active
+                let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+                if let Some(last_layer) = context_layers.last() {
+                    self.active_layer_id = Some(last_layer.id());
                 }
             }
             MenuAction::AddTestClip => {

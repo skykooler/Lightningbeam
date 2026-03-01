@@ -306,6 +306,11 @@ pub fn render_layer_isolated(
             }
             rendered.has_content = !group_layer.children.is_empty();
         }
+        AnyLayer::Raster(raster_layer) => {
+            render_raster_layer_to_scene(raster_layer, time, &mut rendered.scene, base_transform);
+            rendered.has_content = raster_layer.keyframe_at(time)
+                .map_or(false, |kf| kf.has_pixels());
+        }
     }
 
     rendered
@@ -332,6 +337,32 @@ fn render_vector_layer_to_scene(
         image_cache,
         video_manager,
     );
+}
+
+/// Render a raster layer's active keyframe to a Vello scene using an ImageBrush.
+///
+/// Uses `raw_pixels` directly — no PNG decode needed.
+fn render_raster_layer_to_scene(
+    layer: &crate::raster_layer::RasterLayer,
+    time: f64,
+    scene: &mut Scene,
+    base_transform: Affine,
+) {
+    let Some(kf) = layer.keyframe_at(time) else { return };
+    if kf.raw_pixels.is_empty() {
+        return;
+    }
+
+    let image_data = ImageData {
+        data: Blob::from(kf.raw_pixels.clone()),
+        format: ImageFormat::Rgba8,
+        width: kf.width,
+        height: kf.height,
+        alpha_type: ImageAlphaType::Alpha,
+    };
+    let brush = ImageBrush::new(image_data);
+    let canvas_rect = Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
+    scene.fill(Fill::NonZero, base_transform, &brush, None, &canvas_rect);
 }
 
 /// Render a video layer to an isolated scene (for compositing pipeline)
@@ -450,6 +481,9 @@ fn render_layer(
             for child in &group_layer.children {
                 render_layer(document, time, child, scene, base_transform, parent_opacity, image_cache, video_manager, camera_frame);
             }
+        }
+        AnyLayer::Raster(raster_layer) => {
+            render_raster_layer_to_scene(raster_layer, time, scene, base_transform);
         }
     }
 }

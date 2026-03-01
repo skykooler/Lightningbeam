@@ -1265,6 +1265,9 @@ impl AssetLibraryPane {
                 lightningbeam_core::layer::AnyLayer::Group(_) => {
                     // Group layers don't have their own clip instances
                 }
+                lightningbeam_core::layer::AnyLayer::Raster(_) => {
+                    // Raster layers don't have their own clip instances
+                }
             }
         }
         false

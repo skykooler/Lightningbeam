@@ -100,6 +100,7 @@ impl Action for TrimClipInstancesAction {
                                                 AnyLayer::Video(vl) => &vl.clip_instances,
                                                 AnyLayer::Effect(el) => &el.clip_instances,
                                                 AnyLayer::Group(_) => &[],
+                                                AnyLayer::Raster(_) => &[],
                                             };
 
                                             if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -136,6 +137,7 @@ impl Action for TrimClipInstancesAction {
                                             AnyLayer::Video(vl) => &vl.clip_instances,
                                             AnyLayer::Effect(el) => &el.clip_instances,
                                             AnyLayer::Group(_) => &[],
+                                            AnyLayer::Raster(_) => &[],
                                         };
 
                                         if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -179,6 +181,7 @@ impl Action for TrimClipInstancesAction {
                     AnyLayer::Vector(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
                     AnyLayer::Group(_) => &[],
+                    AnyLayer::Raster(_) => &[],
                 };
 
                 let instance = clip_instances.iter()
@@ -271,6 +274,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             // Apply trims
@@ -310,6 +314,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
+                AnyLayer::Raster(_) => continue,
             };
 
             // Restore original trim values

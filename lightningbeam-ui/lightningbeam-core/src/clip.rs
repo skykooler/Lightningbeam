@@ -116,6 +116,7 @@ impl VectorClip {
                 AnyLayer::Video(vl) => &vl.clip_instances,
                 AnyLayer::Effect(el) => &el.clip_instances,
                 AnyLayer::Group(_) => &[],
+                AnyLayer::Raster(_) => &[],
             };
             for ci in clip_instances {
                 let end = if let Some(td) = ci.timeline_duration {

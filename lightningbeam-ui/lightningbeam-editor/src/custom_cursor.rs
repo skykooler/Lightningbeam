@@ -45,6 +45,8 @@ impl CustomCursor {
             Tool::Text => CustomCursor::Text,
             Tool::RegionSelect => CustomCursor::Select, // Reuse select cursor for now
             Tool::Split => CustomCursor::Select, // Reuse select cursor for now
+            Tool::Erase => CustomCursor::Draw, // Reuse draw cursor for raster erase
+            Tool::Smudge => CustomCursor::Draw, // Reuse draw cursor for raster smudge
         }
     }
 

@@ -40,6 +40,7 @@ impl PaneRenderer for ToolbarPane {
                 AnyLayer::Video(_)  => LayerType::Video,
                 AnyLayer::Effect(_) => LayerType::Effect,
                 AnyLayer::Group(_)  => LayerType::Group,
+                AnyLayer::Raster(_) => LayerType::Raster,
             });
 
         // Auto-switch to Select if the current tool isn't available for this layer type

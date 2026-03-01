@@ -535,6 +535,7 @@ impl InfopanelPane {
                             AnyLayer::Video(_) => "Video",
                             AnyLayer::Effect(_) => "Effect",
                             AnyLayer::Group(_) => "Group",
+                            AnyLayer::Raster(_) => "Raster",
                         };
                         ui.horizontal(|ui| {
                             ui.label("Type:");
@@ -590,6 +591,7 @@ impl InfopanelPane {
                             AnyLayer::Video(l) => &l.clip_instances,
                             AnyLayer::Effect(l) => &l.clip_instances,
                             AnyLayer::Group(_) => &[],
+                            AnyLayer::Raster(_) => &[],
                         };
                         if let Some(ci) = instances.iter().find(|c| c.id == ci_id) {
                             found = true;
