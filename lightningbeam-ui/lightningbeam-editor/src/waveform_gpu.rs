@@ -108,7 +108,15 @@ pub struct PendingUpload {
     pub samples: std::sync::Arc<Vec<f32>>,
     pub sample_rate: u32,
     pub channels: u32,
+    /// If set, only upload up to this many frames (for chunked uploads).
+    /// The texture is allocated at full size, but total_frames is set to
+    /// the limited count so subsequent calls use the incremental path.
+    pub frame_limit: Option<usize>,
 }
+
+/// Maximum frames to convert and upload per frame (~250K frames ≈ 5.6s at 44.1kHz).
+/// Keeps the CPU f32→f16 conversion under ~2-3ms per frame.
+pub const UPLOAD_CHUNK_FRAMES: usize = 250_000;
 
 impl WaveformGpuResources {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
@@ -282,18 +290,22 @@ impl WaveformGpuResources {
         samples: &[f32],
         sample_rate: u32,
         channels: u32,
+        frame_limit: Option<usize>,
     ) -> Vec<wgpu::CommandBuffer> {
         let new_total_frames = samples.len() / channels.max(1) as usize;
         if new_total_frames == 0 {
             return Vec::new();
         }
 
+        // For incremental path, also respect frame_limit
+        let effective_frames = frame_limit.map_or(new_total_frames, |lim| lim.min(new_total_frames));
+
         // If entry exists and texture is large enough, do an incremental update
         let incremental = if let Some(entry) = self.entries.get(&pool_index) {
             let new_tex_height = (new_total_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH;
-            if new_tex_height <= entry.tex_height && new_total_frames > entry.total_frames as usize {
+            if new_tex_height <= entry.tex_height && effective_frames > entry.total_frames as usize {
                 Some((entry.total_frames as usize, entry.tex_height))
-            } else if new_total_frames <= entry.total_frames as usize {
+            } else if effective_frames <= entry.total_frames as usize {
                 return Vec::new(); // No new data
             } else {
                 None // Texture too small, need full recreate
@@ -305,7 +317,7 @@ impl WaveformGpuResources {
         if let Some((old_frames, tex_height)) = incremental {
             // Write only the NEW rows into the existing texture
             let start_row = old_frames as u32 / TEX_WIDTH;
-            let end_row = (new_total_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH;
+            let end_row = (effective_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH;
             let rows_to_write = end_row - start_row;
 
             let row_texel_count = (TEX_WIDTH * rows_to_write) as usize;
@@ -314,7 +326,7 @@ impl WaveformGpuResources {
             let row_start_frame = start_row as usize * TEX_WIDTH as usize;
             for frame in 0..(rows_to_write as usize * TEX_WIDTH as usize) {
                 let global_frame = row_start_frame + frame;
-                if global_frame >= new_total_frames {
+                if global_frame >= effective_frames {
                     break;
                 }
                 let sample_offset = global_frame * channels as usize;
@@ -364,11 +376,11 @@ impl WaveformGpuResources {
                 TEX_WIDTH,
                 tex_height,
                 mip_count,
-                new_total_frames as u32,
+                effective_frames as u32,
             );
 
             // Update total_frames after borrow of entry is done
-            self.entries.get_mut(&pool_index).unwrap().total_frames = new_total_frames as u64;
+            self.entries.get_mut(&pool_index).unwrap().total_frames = effective_frames as u64;
             return cmds;
         }
 
@@ -378,12 +390,15 @@ impl WaveformGpuResources {
         self.per_instance.retain(|&(pi, _), _| pi != pool_index);
 
         let total_frames = new_total_frames;
+        // Upload only effective_frames worth of data on this call
+        let upload_frames = effective_frames;
 
         // For live recording (pool_index == usize::MAX), pre-allocate extra texture
         // height to avoid frequent full recreates as recording grows.
         // Allocate 60 seconds ahead so incremental updates can fill without recreating.
+        // When chunking, always allocate for the full total so incremental updates fit.
         let alloc_frames = if pool_index == usize::MAX {
-            let extra = sample_rate as usize * 60; // 60s of mono frames (texture is per-frame, not per-sample)
+            let extra = sample_rate as usize * 60;
             total_frames + extra
         } else {
             total_frames
@@ -411,12 +426,16 @@ impl WaveformGpuResources {
             let seg_end_frame = ((seg + 1) as u64 * frames_per_segment as u64)
                 .min(total_frames as u64);
             let seg_frame_count = (seg_end_frame - seg_start_frame) as u32;
+            // Limit actual data processing to upload_frames (for chunked uploads)
+            let seg_upload_end = ((seg + 1) as u64 * frames_per_segment as u64)
+                .min(upload_frames as u64);
+            let seg_upload_count = seg_upload_end.saturating_sub(seg_start_frame) as u32;
 
-            // Allocate texture large enough for future growth (recording) or exact fit (normal)
+            // Allocate texture large enough for the FULL data (not just this chunk)
             let alloc_seg_frames = if pool_index == usize::MAX {
                 (alloc_frames as u32).min(seg_frame_count + sample_rate * 60)
             } else {
-                seg_frame_count
+                seg_frame_count // full size so incremental updates fit
             };
             let tex_height = (alloc_seg_frames + TEX_WIDTH - 1) / TEX_WIDTH;
             let mip_count = compute_mip_count(TEX_WIDTH, tex_height);
@@ -440,12 +459,12 @@ impl WaveformGpuResources {
             });
 
             // Pack raw samples into Rgba16Float data for mip 0
-            // Only pack rows containing actual data (not the pre-allocated empty region)
-            let data_height = (seg_frame_count + TEX_WIDTH - 1) / TEX_WIDTH;
+            // Only pack rows containing data uploaded this chunk
+            let data_height = (seg_upload_count + TEX_WIDTH - 1) / TEX_WIDTH;
             let data_texel_count = (TEX_WIDTH * data_height) as usize;
             let mut mip0_data: Vec<half::f16> = vec![half::f16::ZERO; data_texel_count * 4];
 
-            for frame in 0..seg_frame_count as usize {
+            for frame in 0..seg_upload_count as usize {
                 let global_frame = seg_start_frame as usize + frame;
                 let sample_offset = global_frame * channels as usize;
 
@@ -490,14 +509,14 @@ impl WaveformGpuResources {
                 );
             }
 
-            // Generate mipmaps via compute shader
+            // Generate mipmaps via compute shader (only for uploaded data)
             let cmds = self.generate_mipmaps(
                 device,
                 &texture,
                 TEX_WIDTH,
                 tex_height,
                 mip_count,
-                seg_frame_count,
+                seg_upload_count,
             );
             all_command_buffers.extend(cmds);
 
@@ -549,7 +568,7 @@ impl WaveformGpuResources {
                 render_bind_groups,
                 uniform_buffers,
                 frames_per_segment,
-                total_frames: total_frames as u64,
+                total_frames: upload_frames as u64, // only what was uploaded this chunk
                 tex_height: (alloc_frames as u32 + TEX_WIDTH - 1) / TEX_WIDTH,
                 sample_rate,
                 channels,
@@ -681,6 +700,7 @@ impl egui_wgpu::CallbackTrait for WaveformCallback {
                 &upload.samples,
                 upload.sample_rate,
                 upload.channels,
+                upload.frame_limit,
             );
             cmds.extend(new_cmds);
         }

@@ -181,6 +181,10 @@ pub struct TimelinePane {
 
     /// Whether to display time as seconds or measures
     time_display_format: TimeDisplayFormat,
+
+    /// Waveform upload progress: pool_index -> frames uploaded so far.
+    /// Tracks chunked GPU uploads across frames to avoid hitches.
+    waveform_upload_progress: std::collections::HashMap<usize, usize>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -367,6 +371,7 @@ impl TimelinePane {
             layer_control_clicked: false,
             context_menu_clip: None,
             time_display_format: TimeDisplayFormat::Seconds,
+            waveform_upload_progress: std::collections::HashMap::new(),
         }
     }
 
@@ -1497,7 +1502,7 @@ impl TimelinePane {
     /// Render layer rows (timeline content area)
     /// Returns video clip hover data for processing after input handling
     fn render_layers(
-        &self,
+        &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
         theme: &crate::theme::Theme,
@@ -2128,11 +2133,27 @@ impl TimelinePane {
                                             let screen_size = ui.ctx().content_rect().size();
 
                                             let pending_upload = if waveform_gpu_dirty.contains(audio_pool_index) {
-                                                waveform_gpu_dirty.remove(audio_pool_index);
+                                                // Chunked upload: track progress across frames
+                                                let chunk = crate::waveform_gpu::UPLOAD_CHUNK_FRAMES;
+                                                let progress = self.waveform_upload_progress.get(audio_pool_index).copied().unwrap_or(0);
+                                                let next_end = (progress + chunk).min(total_frames);
+                                                let frame_limit = Some(next_end);
+
+                                                if next_end >= total_frames {
+                                                    // Final chunk — done
+                                                    waveform_gpu_dirty.remove(audio_pool_index);
+                                                    self.waveform_upload_progress.remove(audio_pool_index);
+                                                } else {
+                                                    // More chunks needed
+                                                    self.waveform_upload_progress.insert(*audio_pool_index, next_end);
+                                                    ui.ctx().request_repaint();
+                                                }
+
                                                 Some(crate::waveform_gpu::PendingUpload {
                                                     samples: samples.clone(),
                                                     sample_rate: *sr,
                                                     channels: *ch,
+                                                    frame_limit,
                                                 })
                                             } else {
                                                 None
@@ -2239,6 +2260,7 @@ impl TimelinePane {
                                                         samples: samples.clone(),
                                                         sample_rate: *sr,
                                                         channels: *ch,
+                                                        frame_limit: None, // recording uses incremental path
                                                     })
                                                 } else {
                                                     None
