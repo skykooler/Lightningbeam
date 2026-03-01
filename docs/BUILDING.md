@@ -16,7 +16,12 @@ This guide provides detailed instructions for building Lightningbeam on differen
 ```bash
 # Clone the repository
 git clone https://github.com/skykooler/lightningbeam.git
-cd lightningbeam/lightningbeam-ui
+cd lightningbeam
+
+# Initialize submodules (including nested ones required by nam-ffi)
+git submodule update --init --recursive
+
+cd lightningbeam-ui
 
 # Build and run
 cargo build
@@ -269,6 +274,23 @@ cargo build -p lightningbeam-core
 ```
 
 ## Troubleshooting
+
+### Submodule / CMake Issues
+
+#### "does not contain a CMakeLists.txt file" (RTNeural or math_approx)
+
+**Cause**: The `vendor/NeuralAudio` submodule has its own nested submodules (`deps/RTNeural`, `deps/math_approx`) that weren't initialized. A plain `git submodule update --init` only initializes top-level submodules.
+
+**Solution**: Use `--recursive` to initialize all nested submodules:
+```bash
+git submodule update --init --recursive
+```
+
+Or, if the top-level submodule is already checked out:
+```bash
+cd vendor/NeuralAudio
+git submodule update --init
+```
 
 ### Audio Issues
 
