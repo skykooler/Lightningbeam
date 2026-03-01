@@ -358,7 +358,10 @@ fn render_raster_layer_to_scene(
         format: ImageFormat::Rgba8,
         width: kf.width,
         height: kf.height,
-        alpha_type: ImageAlphaType::Alpha,
+        // raw_pixels stores sRGB-encoded premultiplied RGBA (channels are
+        // gamma-encoded, alpha is linear).  Premultiplied tells Vello to
+        // decode the sRGB channels without premultiplying again.
+        alpha_type: ImageAlphaType::AlphaPremultiplied,
     };
     let brush = ImageBrush::new(image_data);
     let canvas_rect = Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);

@@ -23,6 +23,7 @@ use theme::{Theme, ThemeMode};
 
 mod waveform_gpu;
 mod cqt_gpu;
+mod gpu_brush;
 
 mod config;
 use config::AppConfig;

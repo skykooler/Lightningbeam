@@ -36,6 +36,10 @@ struct SharedVelloResources {
     effect_processor: Mutex<EffectProcessor>,
     /// sRGB to linear color converter (for Vello output)
     srgb_to_linear: SrgbToLinearConverter,
+    /// GPU raster brush engine (compute pipeline + canvas texture cache)
+    gpu_brush: Mutex<crate::gpu_brush::GpuBrushEngine>,
+    /// Canvas blit pipeline (renders GPU canvas to layer sRGB buffer)
+    canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -206,7 +210,11 @@ impl SharedVelloResources {
         // Initialize sRGB to linear converter for Vello output
         let srgb_to_linear = SrgbToLinearConverter::new(device);
 
-        println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, effect processor, and color converter)");
+        // Initialize GPU raster brush engine
+        let gpu_brush = crate::gpu_brush::GpuBrushEngine::new(device);
+        let canvas_blit = crate::gpu_brush::CanvasBlitPipeline::new(device);
+
+        println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, effect processor, color converter, and GPU brush engine)");
 
         Ok(Self {
             renderer: Arc::new(Mutex::new(renderer)),
@@ -220,6 +228,8 @@ impl SharedVelloResources {
             compositor,
             effect_processor: Mutex::new(effect_processor),
             srgb_to_linear,
+            gpu_brush: Mutex::new(gpu_brush),
+            canvas_blit,
         })
     }
 }
@@ -390,6 +400,15 @@ struct VelloRenderContext {
     mouse_world_pos: Option<vello::kurbo::Point>,
     /// Latest webcam frame for live preview (if any camera is active)
     webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
+    /// GPU brush dabs to dispatch in this frame's prepare() call.
+    pending_raster_dabs: Option<PendingRasterDabs>,
+    /// Instance ID (for storing readback results in the global map).
+    instance_id_for_readback: u64,
+    /// The (layer_id, keyframe_id) of the raster layer with a live GPU canvas.
+    /// Present for the entire stroke duration, not just frames with new dabs.
+    painting_canvas: Option<(uuid::Uuid, uuid::Uuid)>,
+    /// GPU canvas keyframe to remove at the top of this prepare() call.
+    pending_canvas_removal: Option<uuid::Uuid>,
 }
 
 /// Callback for Vello rendering within egui
@@ -469,6 +488,77 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Uses incremental compositing: render layer → composite onto accumulator → release buffer
             // This means we only need 1 layer buffer at a time (plus the HDR accumulator)
             instance_resources.ensure_hdr_texture(device, &shared, width, height);
+
+            // --- Deferred GPU canvas removal ---
+            // The previous frame's render_content consumed a readback result and updated
+            // raw_pixels.  Now that the Vello scene is current we can safely drop the
+            // GPU canvas; painting_canvas was already cleared so the compositor will use
+            // the Vello scene from here on.
+            if let Some(kf_id) = self.ctx.pending_canvas_removal {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    gpu_brush.remove_canvas(&kf_id);
+                }
+            }
+
+            // --- GPU brush dispatch ---
+            // Dispatch the compute shader for any pending raster dabs from this frame's
+            // input event.  Must happen before compositing so the updated canvas texture
+            // is sampled correctly when the layer is blitted.
+            if let Some(ref pending) = self.ctx.pending_raster_dabs {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // Ensure the canvas pair exists (creates it if missing or wrong size)
+                    gpu_brush.ensure_canvas(
+                        device,
+                        pending.keyframe_id,
+                        pending.canvas_width,
+                        pending.canvas_height,
+                    );
+                    // On stroke start, upload the pre-stroke pixel data to both textures
+                    if let Some(ref pixels) = pending.initial_pixels {
+                        if let Some(canvas) = gpu_brush.canvases.get(&pending.keyframe_id) {
+                            canvas.upload(queue, pixels);
+                        }
+                    }
+                    // Dispatch the compute shader for this frame's dabs
+                    if !pending.dabs.is_empty() {
+                        gpu_brush.render_dabs(
+                            device,
+                            queue,
+                            pending.keyframe_id,
+                            &pending.dabs,
+                            pending.dab_bbox,
+                            pending.canvas_width,
+                            pending.canvas_height,
+                        );
+                    }
+                    // On stroke end, read back the finished canvas and store it so
+                    // the next ui() call can create the undo action.
+                    if pending.wants_final_readback {
+                        if let Some(pixels) = gpu_brush.readback_canvas(
+                            device,
+                            queue,
+                            pending.keyframe_id,
+                        ) {
+                            let results = RASTER_READBACK_RESULTS.get_or_init(|| {
+                                Arc::new(Mutex::new(std::collections::HashMap::new()))
+                            });
+                            if let Ok(mut map) = results.lock() {
+                                map.insert(self.ctx.instance_id_for_readback, RasterReadbackResult {
+                                    layer_id:      pending.layer_id,
+                                    time:          pending.time,
+                                    canvas_width:  pending.canvas_width,
+                                    canvas_height: pending.canvas_height,
+                                    pixels,
+                                });
+                            }
+                            // Canvas is kept alive: the compositor will still blit it
+                            // this frame (painting_canvas is still Some).  render_content
+                            // will clear painting_canvas and set pending_canvas_removal,
+                            // so the texture is freed at the top of the next prepare().
+                        }
+                    }
+                }
+            }
 
             let mut image_cache = shared.image_cache.lock().unwrap();
 
@@ -558,7 +648,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Now render and composite each layer incrementally
             for rendered_layer in &composite_result.layers {
-                if !rendered_layer.has_content {
+                // Check if this raster layer has a live GPU canvas that should be
+                // blitted every frame, even when no new dabs arrived this frame.
+                // `painting_canvas` persists for the entire stroke duration.
+                let gpu_canvas_kf: Option<uuid::Uuid> = self.ctx.painting_canvas
+                    .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
+                    .map(|(_, kf_id)| kf_id);
+
+                if !rendered_layer.has_content && gpu_canvas_kf.is_none() {
                     continue;
                 }
 
@@ -573,9 +670,42 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             buffer_pool.get_view(hdr_layer_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
-                            // Render layer scene to sRGB buffer
-                            if let Ok(mut renderer) = shared.renderer.lock() {
-                                renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
+                            // GPU canvas blit path: if a live GPU canvas exists for this
+                            // raster layer, sample it directly instead of rendering the Vello
+                            // scene (which lags until raw_pixels is updated after readback).
+                            let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf {
+                                let mut used = false;
+                                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
+                                    if let Some(canvas) = gpu_brush.canvases.get(&kf_id) {
+                                        let camera = crate::gpu_brush::CameraParams {
+                                            pan_x:      self.ctx.pan_offset.x,
+                                            pan_y:      self.ctx.pan_offset.y,
+                                            zoom:       self.ctx.zoom,
+                                            canvas_w:   canvas.width as f32,
+                                            canvas_h:   canvas.height as f32,
+                                            viewport_w: width as f32,
+                                            viewport_h: height as f32,
+                                            _pad: 0.0,
+                                        };
+                                        shared.canvas_blit.blit(
+                                            device, queue,
+                                            canvas.src_view(),
+                                            srgb_view,
+                                            &camera,
+                                        );
+                                        used = true;
+                                    }
+                                }
+                                used
+                            } else {
+                                false
+                            };
+
+                            if !used_gpu_canvas {
+                                // Render layer scene to sRGB buffer
+                                if let Ok(mut renderer) = shared.renderer.lock() {
+                                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
+                                }
                             }
 
                             // Convert sRGB to linear HDR
@@ -2140,6 +2270,20 @@ pub struct StagePane {
     raster_stroke_state: Option<(uuid::Uuid, f64, lightningbeam_core::brush_engine::StrokeState, Vec<u8>)>,
     // Last raster stroke point (for incremental segment painting)
     raster_last_point: Option<lightningbeam_core::raster_layer::StrokePoint>,
+    /// GPU dabs computed during this frame's drag event — consumed by prepare().
+    pending_raster_dabs: Option<PendingRasterDabs>,
+    /// Undo snapshot info captured at mouse-down; claimed when readback completes.
+    /// (layer_id, time, canvas_w, canvas_h, buffer_before)
+    pending_undo_before: Option<(uuid::Uuid, f64, u32, u32, Vec<u8>)>,
+    /// The (layer_id, keyframe_id) of the raster layer whose GPU canvas is live.
+    /// Set on mouse-down, cleared when the readback result is consumed.
+    /// Used every frame to blit the GPU canvas instead of the stale Vello scene.
+    painting_canvas: Option<(uuid::Uuid, uuid::Uuid)>,
+    /// Keyframe UUID whose GPU canvas should be removed at the start of the next
+    /// prepare() call.  Set by render_content after consuming the readback result
+    /// and updating raw_pixels, so the canvas lives one extra composite frame to
+    /// avoid a flash of the stale Vello scene.
+    pending_canvas_removal: Option<uuid::Uuid>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2170,6 +2314,46 @@ static INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 // Global storage for eyedropper results (instance_id -> (color, color_mode))
 static EYEDROPPER_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, (egui::Color32, super::ColorMode)>>>> = OnceLock::new();
+
+/// Pending GPU dabs for a single drag event.
+///
+/// Created by the event handler (`handle_raster_stroke_tool`) and consumed once
+/// by `VelloCallback::prepare()`.
+struct PendingRasterDabs {
+    /// Keyframe UUID — indexes the canvas texture pair in `GpuBrushEngine`.
+    keyframe_id: uuid::Uuid,
+    /// Layer UUID — used for the undo readback result.
+    layer_id: uuid::Uuid,
+    /// Playback time of the keyframe.
+    time: f64,
+    /// Canvas dimensions (pixels).
+    canvas_width: u32,
+    canvas_height: u32,
+    /// Raw RGBA pixel data to upload to the canvas texture on the very first dab of
+    /// a stroke (i.e., when the stroke starts).  `None` on subsequent drag events.
+    initial_pixels: Option<Vec<u8>>,
+    /// Dab list computed by `BrushEngine::compute_dabs()`.
+    dabs: Vec<lightningbeam_core::brush_engine::GpuDab>,
+    /// Union bounding box of `dabs` (x0, y0, x1, y1) in canvas pixel coords.
+    dab_bbox: (i32, i32, i32, i32),
+    /// When `true`, perform a full canvas readback after dispatching and store
+    /// the result in `RASTER_READBACK_RESULTS` so the next frame can create
+    /// the undo action.
+    wants_final_readback: bool,
+}
+
+/// Result stored by `prepare()` after a stroke-end readback.
+struct RasterReadbackResult {
+    layer_id: uuid::Uuid,
+    time: f64,
+    canvas_width: u32,
+    canvas_height: u32,
+    /// Raw RGBA pixels from the completed stroke.
+    pixels: Vec<u8>,
+}
+
+// Global storage for raster readback results (instance_id -> result)
+static RASTER_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, RasterReadbackResult>>>> = OnceLock::new();
 
 /// Cached 2x2 stipple image brush for selection overlay.
 /// Pattern: [[black, transparent], [transparent, white]]
@@ -2217,6 +2401,10 @@ impl StagePane {
             current_snap: None,
             raster_stroke_state: None,
             raster_last_point: None,
+            pending_raster_dabs: None,
+            pending_undo_before: None,
+            painting_canvas: None,
+            pending_canvas_removal: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -4183,9 +4371,12 @@ impl StagePane {
 
     /// Handle raster stroke tool input (Draw/Erase/Smudge on a raster layer).
     ///
-    /// Paints incrementally into `document_mut()` on every drag event so the
-    /// result is visible immediately.  On mouse-up the pre/post raw-pixel
-    /// buffers are wrapped in a `RasterStrokeAction` for undo/redo.
+    /// Computes GPU dab lists for each drag event and stores them in
+    /// `self.pending_raster_dabs` for dispatch by `VelloCallback::prepare()`.
+    ///
+    /// The actual pixel rendering happens on the GPU (compute shader).  The CPU
+    /// only does dab placement arithmetic (cheap).  On stroke end a readback is
+    /// requested so the undo system can capture the final pixel state.
     fn handle_raster_stroke_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -4197,7 +4388,7 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::raster_layer::StrokePoint;
-        use lightningbeam_core::brush_engine::{BrushEngine, StrokeState, image_from_raw};
+        use lightningbeam_core::brush_engine::{BrushEngine, StrokeState};
         use lightningbeam_core::raster_layer::StrokeRecord;
 
         let active_layer_id = match *shared.active_layer_id {
@@ -4209,9 +4400,7 @@ impl StagePane {
         let is_raster = shared.action_executor.document()
             .get_layer(&active_layer_id)
             .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
-        if !is_raster {
-            return;
-        }
+        if !is_raster { return; }
 
         let brush = {
             use lightningbeam_core::brush_settings::BrushSettings;
@@ -4235,73 +4424,143 @@ impl StagePane {
             [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, c.a() as f32 / 255.0]
         };
 
-        // Mouse down: snapshot buffer_before, init stroke state, paint first dab
+        // ----------------------------------------------------------------
+        // Mouse down: capture buffer_before, start stroke, compute first dab
+        // ----------------------------------------------------------------
         if self.rsp_drag_started(response) || self.rsp_clicked(response) {
-            let (doc_width, doc_height, buffer_before) = {
+            let (doc_width, doc_height) = {
                 let doc = shared.action_executor.document();
-                let buf = doc.get_layer(&active_layer_id)
-                    .and_then(|l| if let AnyLayer::Raster(rl) = l {
-                        rl.keyframe_at(*shared.playback_time).map(|kf| kf.raw_pixels.clone())
-                    } else { None })
-                    .unwrap_or_default();
-                (doc.width as u32, doc.height as u32, buf)
+                (doc.width as u32, doc.height as u32)
             };
 
-            // Start a fresh stroke state; MAX distance ensures first point gets a dab
-            let mut stroke_state = StrokeState::new();
-            stroke_state.distance_since_last_dab = f32::MAX;
-
-            let first_pt = StrokePoint { x: world_pos.x, y: world_pos.y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 };
-
-            // Paint the first dab directly into the document
+            // Ensure the keyframe exists BEFORE reading its ID, so we always get
+            // the real UUID.  Previously we read the ID first and fell back to a
+            // randomly-generated UUID when no keyframe existed; that fake UUID was
+            // stored in painting_canvas but subsequent drag frames used the real UUID
+            // from keyframe_at(), causing the GPU canvas to be a different object from
+            // the one being composited.
             {
                 let doc = shared.action_executor.document_mut();
                 if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&active_layer_id) {
-                    let kf = rl.ensure_keyframe_at(*shared.playback_time, doc_width, doc_height);
-                    let mut img = image_from_raw(std::mem::take(&mut kf.raw_pixels), kf.width, kf.height);
-                    let single = StrokeRecord {
-                        brush_settings: brush.clone(),
-                        color,
-                        blend_mode,
-                        points: vec![first_pt.clone()],
-                    };
-                    BrushEngine::apply_stroke_with_state(&mut img, &single, &mut stroke_state);
-                    kf.raw_pixels = img.into_raw();
+                    rl.ensure_keyframe_at(*shared.playback_time, doc_width, doc_height);
                 }
             }
 
-            self.raster_stroke_state = Some((active_layer_id, *shared.playback_time, stroke_state, buffer_before));
+            // Now read the guaranteed-to-exist keyframe to get the real UUID.
+            let (keyframe_id, canvas_width, canvas_height, buffer_before, initial_pixels) = {
+                let doc = shared.action_executor.document();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&active_layer_id) {
+                    if let Some(kf) = rl.keyframe_at(*shared.playback_time) {
+                        let raw = kf.raw_pixels.clone();
+                        let init = if raw.is_empty() {
+                            vec![0u8; (kf.width * kf.height * 4) as usize]
+                        } else {
+                            raw.clone()
+                        };
+                        (kf.id, kf.width, kf.height, raw, init)
+                    } else {
+                        return; // shouldn't happen after ensure_keyframe_at
+                    }
+                } else {
+                    return;
+                }
+            };
+
+            // Compute the first dab (single-point tap)
+            let mut stroke_state = StrokeState::new();
+            stroke_state.distance_since_last_dab = f32::MAX;
+
+            let first_pt = StrokePoint {
+                x: world_pos.x, y: world_pos.y,
+                pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+            };
+            let single = StrokeRecord {
+                brush_settings: brush.clone(),
+                color,
+                blend_mode,
+                points: vec![first_pt.clone()],
+            };
+            let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state);
+
+            self.painting_canvas = Some((active_layer_id, keyframe_id));
+            self.pending_undo_before = Some((
+                active_layer_id,
+                *shared.playback_time,
+                canvas_width,
+                canvas_height,
+                buffer_before,
+            ));
+            self.pending_raster_dabs = Some(PendingRasterDabs {
+                keyframe_id,
+                layer_id: active_layer_id,
+                time: *shared.playback_time,
+                canvas_width,
+                canvas_height,
+                initial_pixels: Some(initial_pixels),
+                dabs,
+                dab_bbox,
+                wants_final_readback: false,
+            });
+            self.raster_stroke_state = Some((
+                active_layer_id,
+                *shared.playback_time,
+                stroke_state,
+                Vec::new(), // buffer_before now lives in pending_undo_before
+            ));
             self.raster_last_point = Some(first_pt);
             *shared.tool_state = ToolState::DrawingRasterStroke { points: vec![] };
         }
 
-        // Mouse drag: paint each new segment immediately
+        // ----------------------------------------------------------------
+        // Mouse drag: compute dabs for this segment
+        // ----------------------------------------------------------------
         if self.rsp_dragged(response) {
             if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
                 if let Some(prev_pt) = self.raster_last_point.take() {
-                    let curr_pt = StrokePoint { x: world_pos.x, y: world_pos.y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 };
+                    let curr_pt = StrokePoint {
+                        x: world_pos.x, y: world_pos.y,
+                        pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                    };
 
-                    // Skip if not moved enough
                     const MIN_DIST_SQ: f32 = 1.5 * 1.5;
                     let dx = curr_pt.x - prev_pt.x;
                     let dy = curr_pt.y - prev_pt.y;
-                    let moved_pt = if dx * dx + dy * dy >= MIN_DIST_SQ { curr_pt.clone() } else { prev_pt.clone() };
+                    let moved_pt = if dx * dx + dy * dy >= MIN_DIST_SQ {
+                        curr_pt.clone()
+                    } else {
+                        prev_pt.clone()
+                    };
 
                     if dx * dx + dy * dy >= MIN_DIST_SQ {
-                        let doc = shared.action_executor.document_mut();
-                        if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                            if let Some(kf) = rl.keyframe_at_mut(time) {
-                                let mut img = image_from_raw(std::mem::take(&mut kf.raw_pixels), kf.width, kf.height);
-                                let seg = StrokeRecord {
-                                    brush_settings: brush.clone(),
-                                    color,
-                                    blend_mode,
-                                    points: vec![prev_pt, curr_pt],
-                                };
-                                BrushEngine::apply_stroke_with_state(&mut img, &seg, stroke_state);
-                                kf.raw_pixels = img.into_raw();
-                            }
-                        }
+                        // Get keyframe info (needed for canvas dimensions)
+                        let (kf_id, kw, kh) = {
+                            let doc = shared.action_executor.document();
+                            if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                                if let Some(kf) = rl.keyframe_at(time) {
+                                    (kf.id, kf.width, kf.height)
+                                } else { self.raster_last_point = Some(moved_pt); return; }
+                            } else { self.raster_last_point = Some(moved_pt); return; }
+                        };
+
+                        let seg = StrokeRecord {
+                            brush_settings: brush.clone(),
+                            color,
+                            blend_mode,
+                            points: vec![prev_pt, curr_pt],
+                        };
+                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state);
+
+                        self.pending_raster_dabs = Some(PendingRasterDabs {
+                            keyframe_id: kf_id,
+                            layer_id,
+                            time,
+                            canvas_width: kw,
+                            canvas_height: kh,
+                            initial_pixels: None,
+                            dabs,
+                            dab_bbox,
+                            wants_final_readback: false,
+                        });
                     }
 
                     self.raster_last_point = Some(moved_pt);
@@ -4309,37 +4568,44 @@ impl StagePane {
             }
         }
 
-        // Mouse up: wrap the pre/post buffers in an undo action
+        // ----------------------------------------------------------------
+        // Mouse up: request a full-canvas readback for the undo snapshot
+        // ----------------------------------------------------------------
         if self.rsp_drag_stopped(response)
             || (self.rsp_any_released(ui) && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }))
         {
-            if let Some((layer_id, time, _, buffer_before)) = self.raster_stroke_state.take() {
-                use lightningbeam_core::actions::RasterStrokeAction;
-
-                let (doc_width, doc_height, buffer_after) = {
-                    let doc = shared.action_executor.document();
-                    let buf = doc.get_layer(&layer_id)
-                        .and_then(|l| if let AnyLayer::Raster(rl) = l {
-                            rl.keyframe_at(time).map(|kf| kf.raw_pixels.clone())
-                        } else { None })
-                        .unwrap_or_default();
-                    (doc.width as u32, doc.height as u32, buf)
-                };
-
-                let action = RasterStrokeAction::new(
-                    layer_id,
-                    time,
-                    buffer_before,
-                    buffer_after,
-                    doc_width,
-                    doc_height,
-                );
-                // execute is a no-op for the first call (pixels already in document),
-                // but registers the action in the undo stack
-                let _ = shared.action_executor.execute(Box::new(action));
-            }
+            self.raster_stroke_state = None;
             self.raster_last_point = None;
             *shared.tool_state = ToolState::Idle;
+
+            // Mark the pending dabs (if any this frame) for final readback.
+            // If there are no pending dabs this frame, create a "readback only" entry.
+            if let Some(ref mut pending) = self.pending_raster_dabs {
+                pending.wants_final_readback = true;
+            } else if let Some((ub_layer, ub_time, ub_cw, ub_ch, _)) =
+                    self.pending_undo_before.as_ref()
+            {
+                let (ub_layer, ub_time, ub_cw, ub_ch) = (*ub_layer, *ub_time, *ub_cw, *ub_ch);
+                // Get keyframe_id for the canvas texture lookup
+                let kf_id = shared.action_executor.document()
+                    .get_layer(&ub_layer)
+                    .and_then(|l| if let AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(ub_time).map(|kf| kf.id)
+                    } else { None });
+                if let Some(kf_id) = kf_id {
+                    self.pending_raster_dabs = Some(PendingRasterDabs {
+                        keyframe_id: kf_id,
+                        layer_id: ub_layer,
+                        time: ub_time,
+                        canvas_width: ub_cw,
+                        canvas_height: ub_ch,
+                        initial_pixels: None,
+                        dabs: Vec::new(),
+                        dab_bbox: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+                        wants_final_readback: true,
+                    });
+                }
+            }
         }
     }
 
@@ -6830,6 +7096,35 @@ impl PaneRenderer for StagePane {
             self.pan_offset = viewport_center - canvas_center;
         }
 
+        // Check for completed raster stroke readbacks and create undo actions
+        if let Ok(mut results) = RASTER_READBACK_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock() {
+            if let Some(readback) = results.remove(&self.instance_id) {
+                if let Some((layer_id, time, w, h, buffer_before)) = self.pending_undo_before.take() {
+                    use lightningbeam_core::actions::RasterStrokeAction;
+                    let action = RasterStrokeAction::new(
+                        layer_id,
+                        time,
+                        buffer_before,
+                        readback.pixels.clone(),
+                        w,
+                        h,
+                    );
+                    // execute() sets raw_pixels = buffer_after so future Vello renders
+                    // and file saves see the completed stroke.
+                    let _ = shared.action_executor.execute(Box::new(action));
+                }
+                // raw_pixels is now up to date; switch compositing back to the Vello
+                // scene.  Schedule the GPU canvas for removal at the start of the next
+                // prepare() — keeping it alive for this frame's composite avoids a
+                // one-frame flash of the stale Vello scene.
+                if let Some((_, kf_id)) = self.painting_canvas.take() {
+                    self.pending_canvas_removal = Some(kf_id);
+                }
+            }
+        }
+
         // Check for completed eyedropper samples from GPU readback and apply them
         if let Ok(mut results) = EYEDROPPER_RESULTS
             .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
@@ -7176,6 +7471,10 @@ impl PaneRenderer for StagePane {
             region_selection: shared.region_selection.clone(),
             mouse_world_pos,
             webcam_frame: shared.webcam_frame.clone(),
+            pending_raster_dabs: self.pending_raster_dabs.take(),
+            instance_id_for_readback: self.instance_id,
+            painting_canvas: self.painting_canvas,
+            pending_canvas_removal: self.pending_canvas_removal.take(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(
