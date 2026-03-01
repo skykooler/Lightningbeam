@@ -263,6 +263,10 @@ pub struct SharedPaneState<'a> {
     pub clipboard_consumed: &'a mut bool,
     /// Remappable keyboard shortcut manager
     pub keymap: &'a crate::keymap::KeymapManager,
+    /// Set by MenuAction::Group when focus is Nodes — consumed by node graph pane
+    pub pending_node_group: &'a mut bool,
+    /// Set by MenuAction::Group (ungroup variant) when focus is Nodes — consumed by node graph pane
+    pub pending_node_ungroup: &'a mut bool,
     /// Test mode state for event recording (debug builds only)
     #[cfg(debug_assertions)]
     pub test_mode: &'a mut crate::test_mode::TestModeState,

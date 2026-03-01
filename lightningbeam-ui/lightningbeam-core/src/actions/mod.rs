@@ -30,6 +30,7 @@ pub mod group_shapes;
 pub mod convert_to_movie_clip;
 pub mod region_split;
 pub mod toggle_group_expansion;
+pub mod group_layers;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -58,3 +59,4 @@ pub use group_shapes::GroupAction;
 pub use convert_to_movie_clip::ConvertToMovieClipAction;
 pub use region_split::RegionSplitAction;
 pub use toggle_group_expansion::ToggleGroupExpansionAction;
+pub use group_layers::GroupLayersAction;

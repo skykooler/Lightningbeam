@@ -11,7 +11,7 @@ use clap::Parser;
 use uuid::Uuid;
 
 mod panes;
-use panes::{PaneInstance, PaneRenderer, SharedPaneState};
+use panes::{PaneInstance, PaneRenderer};
 
 mod widgets;
 
@@ -755,6 +755,10 @@ struct EditorApp {
     /// Count of in-flight graph preset loads — keeps the repaint loop alive
     /// until the audio thread sends GraphPresetLoaded events for all of them
     pending_graph_loads: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set by MenuAction::Group when focus is Nodes — consumed by node graph pane next frame
+    pending_node_group: bool,
+    /// Set by MenuAction::Ungroup when focus is Nodes — consumed by node graph pane next frame
+    pending_node_ungroup: bool,
     #[allow(dead_code)] // Stored for future export/recording configuration
     audio_sample_rate: u32,
     #[allow(dead_code)]
@@ -1018,6 +1022,8 @@ impl EditorApp {
             audio_event_rx,
             audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_graph_loads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            pending_node_group: false,
+            pending_node_ungroup: false,
             audio_sample_rate,
             audio_channels,
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2572,29 +2578,46 @@ impl EditorApp {
 
             // Modify menu
             MenuAction::Group => {
-                if let Some(layer_id) = self.active_layer_id {
-                    if self.selection.has_dcel_selection() {
-                        // TODO: DCEL group deferred to Phase 2 (extract subgraph)
-                    } else {
-                        let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                        if clip_ids.len() >= 2 {
-                            let instance_id = uuid::Uuid::new_v4();
-                            let action = lightningbeam_core::actions::GroupAction::new(
-                                layer_id,
-                                self.playback_time,
-                                Vec::new(),
-                                clip_ids,
-                                instance_id,
-                            );
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Failed to group: {}", e);
-                            } else {
-                                self.selection.clear();
-                                self.selection.add_clip_instance(instance_id);
-                            }
+                match &self.focus {
+                    lightningbeam_core::selection::FocusSelection::Layers(ids) if ids.len() >= 2 => {
+                        let parent_group_id = find_parent_group_id(self.action_executor.document(), &ids[0]);
+                        let group_id = uuid::Uuid::new_v4();
+                        let action = lightningbeam_core::actions::GroupLayersAction::new(
+                            ids.clone(), parent_group_id, group_id,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to group layers: {}", e);
+                        } else {
+                            self.active_layer_id = Some(group_id);
+                            self.focus = lightningbeam_core::selection::FocusSelection::Layers(vec![group_id]);
                         }
                     }
-                    let _ = layer_id;
+                    lightningbeam_core::selection::FocusSelection::Nodes(_) => {
+                        self.pending_node_group = true;
+                    }
+                    _ => {
+                        // Existing clip instance grouping fallback (stub)
+                        if let Some(layer_id) = self.active_layer_id {
+                            if self.selection.has_dcel_selection() {
+                                // TODO: DCEL group deferred to Phase 2
+                            } else {
+                                let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
+                                if clip_ids.len() >= 2 {
+                                    let instance_id = uuid::Uuid::new_v4();
+                                    let action = lightningbeam_core::actions::GroupAction::new(
+                                        layer_id, self.playback_time, Vec::new(), clip_ids, instance_id,
+                                    );
+                                    if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                        eprintln!("Failed to group: {}", e);
+                                    } else {
+                                        self.selection.clear();
+                                        self.selection.add_clip_instance(instance_id);
+                                    }
+                                }
+                            }
+                            let _ = layer_id;
+                        }
+                    }
                 }
             }
             MenuAction::ConvertToMovieClip => {
@@ -4976,74 +4999,78 @@ impl eframe::App for EditorApp {
 
             // Create render context
             let mut ctx = RenderContext {
-                tool_icon_cache: &mut self.tool_icon_cache,
-                icon_cache: &mut self.icon_cache,
-                selected_tool: &mut self.selected_tool,
-                fill_color: &mut self.fill_color,
-                stroke_color: &mut self.stroke_color,
-                active_color_mode: &mut self.active_color_mode,
+                shared: panes::SharedPaneState {
+                    tool_icon_cache: &mut self.tool_icon_cache,
+                    icon_cache: &mut self.icon_cache,
+                    selected_tool: &mut self.selected_tool,
+                    fill_color: &mut self.fill_color,
+                    stroke_color: &mut self.stroke_color,
+                    active_color_mode: &mut self.active_color_mode,
+                    pending_view_action: &mut self.pending_view_action,
+                    fallback_pane_priority: &mut fallback_pane_priority,
+                    pending_handlers: &mut pending_handlers,
+                    theme: &self.theme,
+                    action_executor: &mut self.action_executor,
+                    selection: &mut self.selection,
+                    focus: &mut self.focus,
+                    editing_clip_id: self.editing_context.current_clip_id(),
+                    editing_instance_id: self.editing_context.current_instance_id(),
+                    editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
+                    pending_enter_clip: &mut pending_enter_clip,
+                    pending_exit_clip: &mut pending_exit_clip,
+                    active_layer_id: &mut self.active_layer_id,
+                    tool_state: &mut self.tool_state,
+                    pending_actions: &mut pending_actions,
+                    draw_simplify_mode: &mut self.draw_simplify_mode,
+                    rdp_tolerance: &mut self.rdp_tolerance,
+                    schneider_max_error: &mut self.schneider_max_error,
+                    audio_controller: self.audio_controller.as_ref(),
+                    video_manager: &self.video_manager,
+                    playback_time: &mut self.playback_time,
+                    is_playing: &mut self.is_playing,
+                    is_recording: &mut self.is_recording,
+                    recording_clips: &mut self.recording_clips,
+                    recording_start_time: &mut self.recording_start_time,
+                    recording_layer_id: &mut self.recording_layer_id,
+                    dragging_asset: &mut self.dragging_asset,
+                    stroke_width: &mut self.stroke_width,
+                    fill_enabled: &mut self.fill_enabled,
+                    snap_enabled: &mut self.snap_enabled,
+                    paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
+                    polygon_sides: &mut self.polygon_sides,
+                    layer_to_track_map: &self.layer_to_track_map,
+                    midi_event_cache: &mut self.midi_event_cache,
+                    audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
+                    raw_audio_cache: &self.raw_audio_cache,
+                    waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
+                    effect_to_load: &mut self.effect_to_load,
+                    effect_thumbnail_requests: &mut effect_thumbnail_requests,
+                    effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
+                        .map(|g| g.thumbnail_cache())
+                        .unwrap_or(&empty_thumbnail_cache),
+                    effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
+                    webcam_frame: self.webcam_frame.clone(),
+                    webcam_record_command: &mut self.webcam_record_command,
+                    target_format: self.target_format,
+                    pending_menu_actions: &mut pending_menu_actions,
+                    clipboard_manager: &mut self.clipboard_manager,
+                    waveform_stereo: self.config.waveform_stereo,
+                    project_generation: &mut self.project_generation,
+                    script_to_edit: &mut self.script_to_edit,
+                    script_saved: &mut self.script_saved,
+                    region_selection: &mut self.region_selection,
+                    region_select_mode: &mut self.region_select_mode,
+                    pending_graph_loads: &self.pending_graph_loads,
+                    clipboard_consumed: &mut clipboard_consumed,
+                    keymap: &self.keymap,
+                    pending_node_group: &mut self.pending_node_group,
+                    pending_node_ungroup: &mut self.pending_node_ungroup,
+                    #[cfg(debug_assertions)]
+                    test_mode: &mut self.test_mode,
+                    #[cfg(debug_assertions)]
+                    synthetic_input: &mut synthetic_input_storage,
+                },
                 pane_instances: &mut self.pane_instances,
-                pending_view_action: &mut self.pending_view_action,
-                fallback_pane_priority: &mut fallback_pane_priority,
-                pending_handlers: &mut pending_handlers,
-                theme: &self.theme,
-                action_executor: &mut self.action_executor,
-                selection: &mut self.selection,
-                focus: &mut self.focus,
-                editing_clip_id: self.editing_context.current_clip_id(),
-                editing_instance_id: self.editing_context.current_instance_id(),
-                editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
-                pending_enter_clip: &mut pending_enter_clip,
-                pending_exit_clip: &mut pending_exit_clip,
-                active_layer_id: &mut self.active_layer_id,
-                tool_state: &mut self.tool_state,
-                pending_actions: &mut pending_actions,
-                draw_simplify_mode: &mut self.draw_simplify_mode,
-                rdp_tolerance: &mut self.rdp_tolerance,
-                schneider_max_error: &mut self.schneider_max_error,
-                audio_controller: self.audio_controller.as_ref(),
-                video_manager: &self.video_manager,
-                playback_time: &mut self.playback_time,
-                is_playing: &mut self.is_playing,
-                is_recording: &mut self.is_recording,
-                recording_clips: &mut self.recording_clips,
-                recording_start_time: &mut self.recording_start_time,
-                recording_layer_id: &mut self.recording_layer_id,
-                dragging_asset: &mut self.dragging_asset,
-                stroke_width: &mut self.stroke_width,
-                fill_enabled: &mut self.fill_enabled,
-                snap_enabled: &mut self.snap_enabled,
-                paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
-                polygon_sides: &mut self.polygon_sides,
-                layer_to_track_map: &self.layer_to_track_map,
-                midi_event_cache: &mut self.midi_event_cache,
-                audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
-                raw_audio_cache: &self.raw_audio_cache,
-                waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
-                effect_to_load: &mut self.effect_to_load,
-                effect_thumbnail_requests: &mut effect_thumbnail_requests,
-                effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
-                    .map(|g| g.thumbnail_cache())
-                    .unwrap_or(&empty_thumbnail_cache),
-                effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
-                webcam_frame: self.webcam_frame.clone(),
-                webcam_record_command: &mut self.webcam_record_command,
-                target_format: self.target_format,
-                pending_menu_actions: &mut pending_menu_actions,
-                clipboard_manager: &mut self.clipboard_manager,
-                waveform_stereo: self.config.waveform_stereo,
-                project_generation: &mut self.project_generation,
-                script_to_edit: &mut self.script_to_edit,
-                script_saved: &mut self.script_saved,
-                region_selection: &mut self.region_selection,
-                region_select_mode: &mut self.region_select_mode,
-                pending_graph_loads: &self.pending_graph_loads,
-                clipboard_consumed: &mut clipboard_consumed,
-                keymap: &self.keymap,
-                #[cfg(debug_assertions)]
-                test_mode: &mut self.test_mode,
-                #[cfg(debug_assertions)]
-                synthetic_input: &mut synthetic_input_storage,
             };
 
             render_layout_node(
@@ -5489,101 +5516,33 @@ impl eframe::App for EditorApp {
 }
 
 /// Context for rendering operations - bundles all mutable state needed during rendering
-/// This avoids having 25+ individual parameters in rendering functions
+/// Wraps SharedPaneState + pane_instances for layout rendering.
+/// pane_instances is kept separate from SharedPaneState so we can borrow
+/// a specific pane instance mutably while passing the rest as &mut SharedPaneState.
 struct RenderContext<'a> {
-    tool_icon_cache: &'a mut ToolIconCache,
-    icon_cache: &'a mut IconCache,
-    selected_tool: &'a mut Tool,
-    fill_color: &'a mut egui::Color32,
-    stroke_color: &'a mut egui::Color32,
-    active_color_mode: &'a mut panes::ColorMode,
+    shared: panes::SharedPaneState<'a>,
     pane_instances: &'a mut HashMap<NodePath, PaneInstance>,
-    pending_view_action: &'a mut Option<MenuAction>,
-    fallback_pane_priority: &'a mut Option<u32>,
-    pending_handlers: &'a mut Vec<panes::ViewActionHandler>,
-    theme: &'a Theme,
-    action_executor: &'a mut lightningbeam_core::action::ActionExecutor,
-    selection: &'a mut lightningbeam_core::selection::Selection,
-    focus: &'a mut lightningbeam_core::selection::FocusSelection,
-    editing_clip_id: Option<Uuid>,
-    editing_instance_id: Option<Uuid>,
-    editing_parent_layer_id: Option<Uuid>,
-    pending_enter_clip: &'a mut Option<(Uuid, Uuid, Uuid)>,
-    pending_exit_clip: &'a mut bool,
-    active_layer_id: &'a mut Option<Uuid>,
-    tool_state: &'a mut lightningbeam_core::tool::ToolState,
-    pending_actions: &'a mut Vec<Box<dyn lightningbeam_core::action::Action>>,
-    draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
-    rdp_tolerance: &'a mut f64,
-    schneider_max_error: &'a mut f64,
-    audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
-    video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
-    playback_time: &'a mut f64,
-    is_playing: &'a mut bool,
-    // Recording state
-    is_recording: &'a mut bool,
-    recording_clips: &'a mut HashMap<Uuid, u32>,
-    recording_start_time: &'a mut f64,
-    recording_layer_id: &'a mut Option<Uuid>,
-    dragging_asset: &'a mut Option<panes::DraggingAsset>,
-    // Tool-specific options for infopanel
-    stroke_width: &'a mut f64,
-    fill_enabled: &'a mut bool,
-    snap_enabled: &'a mut bool,
-    paint_bucket_gap_tolerance: &'a mut f64,
-    polygon_sides: &'a mut u32,
-    /// Mapping from Document layer UUIDs to daw-backend TrackIds
-    layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
-    /// Cache of MIDI events for rendering (keyed by backend midi_clip_id)
-    midi_event_cache: &'a mut HashMap<u32, Vec<(f64, u8, u8, bool)>>,
-    /// Audio pool indices with new raw audio data this frame (for thumbnail invalidation)
-    audio_pools_with_new_waveforms: &'a HashSet<usize>,
-    /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
-    raw_audio_cache: &'a HashMap<usize, (Arc<Vec<f32>>, u32, u32)>,
-    /// Pool indices needing GPU texture upload
-    waveform_gpu_dirty: &'a mut HashSet<usize>,
-    /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
-    effect_to_load: &'a mut Option<Uuid>,
-    /// Queue for effect thumbnail requests
-    effect_thumbnail_requests: &'a mut Vec<Uuid>,
-    /// Cache of generated effect thumbnails
-    effect_thumbnail_cache: &'a HashMap<Uuid, Vec<u8>>,
-    /// Effect IDs whose thumbnails should be invalidated
-    effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
-    /// Latest webcam capture frame (None if no camera active)
-    webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
-    /// Pending webcam recording command
-    webcam_record_command: &'a mut Option<panes::WebcamRecordCommand>,
-    /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
-    target_format: wgpu::TextureFormat,
-    /// Menu actions queued by panes (e.g. context menus), processed after rendering
-    pending_menu_actions: &'a mut Vec<MenuAction>,
-    /// Clipboard manager for paste availability checks
-    clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
-    /// Whether to show waveforms as stacked stereo
-    waveform_stereo: bool,
-    /// Project generation counter (incremented on load)
-    project_generation: &'a mut u64,
-    /// Script ID to open in the script editor (from node graph)
-    script_to_edit: &'a mut Option<Uuid>,
-    /// Script ID just saved (triggers auto-recompile of nodes using it)
-    script_saved: &'a mut Option<Uuid>,
-    /// Active region selection (temporary split state)
-    region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
-    /// Region select mode (Rectangle or Lasso)
-    region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
-    /// Counter for in-flight graph preset loads (keeps repaint loop alive)
-    pending_graph_loads: &'a std::sync::Arc<std::sync::atomic::AtomicU32>,
-    /// Set by panes when they handle Ctrl+C/X/V internally
-    clipboard_consumed: &'a mut bool,
-    /// Remappable keyboard shortcut manager
-    keymap: &'a KeymapManager,
-    /// Test mode state for event recording (debug builds only)
-    #[cfg(debug_assertions)]
-    test_mode: &'a mut test_mode::TestModeState,
-    /// Synthetic input from test mode replay (debug builds only)
-    #[cfg(debug_assertions)]
-    synthetic_input: &'a mut Option<test_mode::SyntheticInput>,
+}
+
+/// Find which GroupLayer (if any) contains the given layer as a direct child.
+/// Returns None if the layer is at document root level.
+fn find_parent_group_id(doc: &lightningbeam_core::document::Document, layer_id: &uuid::Uuid) -> Option<uuid::Uuid> {
+    fn search_children(children: &[lightningbeam_core::layer::AnyLayer], target: &uuid::Uuid) -> Option<uuid::Uuid> {
+        for child in children {
+            if let lightningbeam_core::layer::AnyLayer::Group(g) = child {
+                // Check if target is a direct child of this group
+                if g.children.iter().any(|c| c.id() == *target) {
+                    return Some(g.layer.id);
+                }
+                // Recurse into nested groups
+                if let Some(found) = search_children(&g.children, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    search_children(&doc.root.children, layer_id)
 }
 
 /// Recursively render a layout node with drag support
@@ -5923,7 +5882,7 @@ fn render_pane(
 
     // Load and render icon if available
     if let Some(pane_type) = pane_type {
-        if let Some(icon) = ctx.icon_cache.get_or_load(pane_type, ui.ctx()) {
+        if let Some(icon) = ctx.shared.icon_cache.get_or_load(pane_type, ui.ctx()) {
             let icon_texture_id = icon.id();
             let icon_rect = icon_button_rect.shrink(2.0); // Small padding inside button
             ui.painter().image(
@@ -5957,7 +5916,7 @@ fn render_pane(
 
             for pane_type_option in PaneType::all() {
                 // Load icon for this pane type
-                if let Some(icon) = ctx.icon_cache.get_or_load(*pane_type_option, ui.ctx()) {
+                if let Some(icon) = ctx.shared.icon_cache.get_or_load(*pane_type_option, ui.ctx()) {
                     ui.horizontal(|ui| {
                         // Show icon
                         let icon_texture_id = icon.id();
@@ -6020,74 +5979,7 @@ fn render_pane(
 
         if let Some(pane_instance) = ctx.pane_instances.get_mut(path) {
             let mut header_ui = ui.new_child(egui::UiBuilder::new().max_rect(header_controls_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-            let mut shared = panes::SharedPaneState {
-                tool_icon_cache: ctx.tool_icon_cache,
-                icon_cache: ctx.icon_cache,
-                selected_tool: ctx.selected_tool,
-                fill_color: ctx.fill_color,
-                stroke_color: ctx.stroke_color,
-                active_color_mode: ctx.active_color_mode,
-                pending_view_action: ctx.pending_view_action,
-                fallback_pane_priority: ctx.fallback_pane_priority,
-                theme: ctx.theme,
-                pending_handlers: ctx.pending_handlers,
-                action_executor: ctx.action_executor,
-                selection: ctx.selection,
-                focus: ctx.focus,
-                active_layer_id: ctx.active_layer_id,
-                tool_state: ctx.tool_state,
-                pending_actions: ctx.pending_actions,
-                draw_simplify_mode: ctx.draw_simplify_mode,
-                rdp_tolerance: ctx.rdp_tolerance,
-                schneider_max_error: ctx.schneider_max_error,
-                audio_controller: ctx.audio_controller,
-                video_manager: ctx.video_manager,
-                layer_to_track_map: ctx.layer_to_track_map,
-                playback_time: ctx.playback_time,
-                is_playing: ctx.is_playing,
-                is_recording: ctx.is_recording,
-                recording_clips: ctx.recording_clips,
-                recording_start_time: ctx.recording_start_time,
-                recording_layer_id: ctx.recording_layer_id,
-                dragging_asset: ctx.dragging_asset,
-                stroke_width: ctx.stroke_width,
-                fill_enabled: ctx.fill_enabled,
-                snap_enabled: ctx.snap_enabled,
-                paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
-                polygon_sides: ctx.polygon_sides,
-                midi_event_cache: ctx.midi_event_cache,
-                audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
-                raw_audio_cache: ctx.raw_audio_cache,
-                waveform_gpu_dirty: ctx.waveform_gpu_dirty,
-                effect_to_load: ctx.effect_to_load,
-                effect_thumbnail_requests: ctx.effect_thumbnail_requests,
-                effect_thumbnail_cache: ctx.effect_thumbnail_cache,
-                effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
-                webcam_frame: ctx.webcam_frame.clone(),
-                webcam_record_command: ctx.webcam_record_command,
-                target_format: ctx.target_format,
-                pending_menu_actions: ctx.pending_menu_actions,
-                clipboard_manager: ctx.clipboard_manager,
-                waveform_stereo: ctx.waveform_stereo,
-                project_generation: ctx.project_generation,
-                script_to_edit: ctx.script_to_edit,
-                script_saved: ctx.script_saved,
-                region_selection: ctx.region_selection,
-                region_select_mode: ctx.region_select_mode,
-                pending_graph_loads: ctx.pending_graph_loads,
-                clipboard_consumed: ctx.clipboard_consumed,
-                keymap: ctx.keymap,
-                editing_clip_id: ctx.editing_clip_id,
-                editing_instance_id: ctx.editing_instance_id,
-                editing_parent_layer_id: ctx.editing_parent_layer_id,
-                pending_enter_clip: ctx.pending_enter_clip,
-                pending_exit_clip: ctx.pending_exit_clip,
-                #[cfg(debug_assertions)]
-                test_mode: ctx.test_mode,
-                #[cfg(debug_assertions)]
-                synthetic_input: ctx.synthetic_input,
-            };
-            pane_instance.render_header(&mut header_ui, &mut shared);
+            pane_instance.render_header(&mut header_ui, &mut ctx.shared);
         }
     }
 
@@ -6110,77 +6002,7 @@ fn render_pane(
 
         // Get the pane instance and render its content
         if let Some(pane_instance) = ctx.pane_instances.get_mut(path) {
-            // Create shared state
-            let mut shared = SharedPaneState {
-                tool_icon_cache: ctx.tool_icon_cache,
-                icon_cache: ctx.icon_cache,
-                selected_tool: ctx.selected_tool,
-                fill_color: ctx.fill_color,
-                stroke_color: ctx.stroke_color,
-                active_color_mode: ctx.active_color_mode,
-                pending_view_action: ctx.pending_view_action,
-                fallback_pane_priority: ctx.fallback_pane_priority,
-                theme: ctx.theme,
-                pending_handlers: ctx.pending_handlers,
-                action_executor: ctx.action_executor,
-                selection: ctx.selection,
-                focus: ctx.focus,
-                active_layer_id: ctx.active_layer_id,
-                tool_state: ctx.tool_state,
-                pending_actions: ctx.pending_actions,
-                draw_simplify_mode: ctx.draw_simplify_mode,
-                rdp_tolerance: ctx.rdp_tolerance,
-                schneider_max_error: ctx.schneider_max_error,
-                audio_controller: ctx.audio_controller,
-                video_manager: ctx.video_manager,
-                layer_to_track_map: ctx.layer_to_track_map,
-                playback_time: ctx.playback_time,
-                is_playing: ctx.is_playing,
-                is_recording: ctx.is_recording,
-                recording_clips: ctx.recording_clips,
-                recording_start_time: ctx.recording_start_time,
-                recording_layer_id: ctx.recording_layer_id,
-                dragging_asset: ctx.dragging_asset,
-                stroke_width: ctx.stroke_width,
-                fill_enabled: ctx.fill_enabled,
-                snap_enabled: ctx.snap_enabled,
-                paint_bucket_gap_tolerance: ctx.paint_bucket_gap_tolerance,
-                polygon_sides: ctx.polygon_sides,
-                midi_event_cache: ctx.midi_event_cache,
-                audio_pools_with_new_waveforms: ctx.audio_pools_with_new_waveforms,
-                raw_audio_cache: ctx.raw_audio_cache,
-                waveform_gpu_dirty: ctx.waveform_gpu_dirty,
-                effect_to_load: ctx.effect_to_load,
-                effect_thumbnail_requests: ctx.effect_thumbnail_requests,
-                effect_thumbnail_cache: ctx.effect_thumbnail_cache,
-                effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
-                webcam_frame: ctx.webcam_frame.clone(),
-                webcam_record_command: ctx.webcam_record_command,
-                target_format: ctx.target_format,
-                pending_menu_actions: ctx.pending_menu_actions,
-                clipboard_manager: ctx.clipboard_manager,
-                waveform_stereo: ctx.waveform_stereo,
-                project_generation: ctx.project_generation,
-                script_to_edit: ctx.script_to_edit,
-                script_saved: ctx.script_saved,
-                region_selection: ctx.region_selection,
-                region_select_mode: ctx.region_select_mode,
-                pending_graph_loads: ctx.pending_graph_loads,
-                clipboard_consumed: ctx.clipboard_consumed,
-                keymap: ctx.keymap,
-                editing_clip_id: ctx.editing_clip_id,
-                editing_instance_id: ctx.editing_instance_id,
-                editing_parent_layer_id: ctx.editing_parent_layer_id,
-                pending_enter_clip: ctx.pending_enter_clip,
-                pending_exit_clip: ctx.pending_exit_clip,
-                #[cfg(debug_assertions)]
-                test_mode: ctx.test_mode,
-                #[cfg(debug_assertions)]
-                synthetic_input: ctx.synthetic_input,
-            };
-
-            // Render pane content (header was already rendered above)
-            pane_instance.render_content(ui, content_rect, path, &mut shared);
+            pane_instance.render_content(ui, content_rect, path, &mut ctx.shared);
         }
     } else {
         // Unknown pane type - draw placeholder

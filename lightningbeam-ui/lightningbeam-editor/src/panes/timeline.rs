@@ -242,6 +242,14 @@ impl<'a> TimelineRow<'a> {
             TimelineRow::GroupChild { child, .. } => Some(child),
         }
     }
+
+    /// Returns the parent group ID, or None if this row is at root level.
+    fn parent_id(&self) -> Option<uuid::Uuid> {
+        match self {
+            TimelineRow::GroupChild { group, .. } => Some(group.layer.id),
+            _ => None,
+        }
+    }
 }
 
 /// Build a flattened list of timeline rows from the reversed context_layers.
@@ -297,6 +305,49 @@ fn flatten_layer<'a>(
             }
         }
     }
+}
+
+/// Shift+click layer selection: toggle a layer in/out of the focus selection,
+/// enforcing the sibling constraint (all selected layers must share the same parent).
+fn shift_toggle_layer(
+    focus: &mut lightningbeam_core::selection::FocusSelection,
+    layer_id: uuid::Uuid,
+    clicked_parent: Option<uuid::Uuid>,
+    rows: &[TimelineRow],
+) {
+    use lightningbeam_core::selection::FocusSelection;
+
+    if let FocusSelection::Layers(ids) = focus {
+        // Check if existing selection shares the same parent as the clicked layer
+        let existing_parent = ids.first().and_then(|first_id| {
+            rows.iter()
+                .find(|r| r.layer_id() == *first_id)
+                .and_then(|r| r.parent_id())
+        });
+        // For root-level layers, existing_parent is None; for group children, it's Some(group_id)
+        // We need to compare them properly: both None means same parent (root)
+        let same_parent = if ids.is_empty() {
+            true
+        } else {
+            existing_parent == clicked_parent
+        };
+
+        if same_parent {
+            // Toggle the clicked layer in/out
+            if let Some(pos) = ids.iter().position(|id| *id == layer_id) {
+                ids.remove(pos);
+                if ids.is_empty() {
+                    *focus = FocusSelection::None;
+                }
+            } else {
+                ids.push(layer_id);
+            }
+            return;
+        }
+    }
+
+    // Different parent or focus wasn't Layers — start fresh
+    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
 }
 
 /// Collect all (layer_ref, clip_instances) tuples from context_layers,
@@ -1083,6 +1134,7 @@ impl TimelinePane {
         rect: egui::Rect,
         theme: &crate::theme::Theme,
         active_layer_id: &Option<uuid::Uuid>,
+        focus: &lightningbeam_core::selection::FocusSelection,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         _document: &lightningbeam_core::document::Document,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
@@ -1168,7 +1220,11 @@ impl TimelinePane {
 
             // Active vs inactive background colors
             let is_active = active_layer_id.map_or(false, |id| id == layer_id);
-            let bg_color = if is_active {
+            let is_selected = match focus {
+                lightningbeam_core::selection::FocusSelection::Layers(ids) => ids.contains(&layer_id),
+                _ => false,
+            };
+            let bg_color = if is_active || is_selected {
                 active_color
             } else {
                 inactive_color
@@ -1513,6 +1569,7 @@ impl TimelinePane {
         theme: &crate::theme::Theme,
         document: &lightningbeam_core::document::Document,
         active_layer_id: &Option<uuid::Uuid>,
+        focus: &lightningbeam_core::selection::FocusSelection,
         selection: &lightningbeam_core::selection::Selection,
         midi_event_cache: &std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
         raw_audio_cache: &std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
@@ -1565,7 +1622,11 @@ impl TimelinePane {
 
             // Active vs inactive background colors
             let is_active = active_layer_id.map_or(false, |id| id == row_layer_id);
-            let bg_color = if is_active {
+            let is_selected = match focus {
+                lightningbeam_core::selection::FocusSelection::Layers(ids) => ids.contains(&row_layer_id),
+                _ => false,
+            };
+            let bg_color = if is_active || is_selected {
                 active_color
             } else {
                 inactive_color
@@ -2868,8 +2929,13 @@ impl TimelinePane {
                 let header_rows = build_timeline_rows(context_layers);
                 if clicked_layer_index < header_rows.len() {
                     let layer_id = header_rows[clicked_layer_index].layer_id();
+                    let clicked_parent = header_rows[clicked_layer_index].parent_id();
                     *active_layer_id = Some(layer_id);
-                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+                    if shift_held {
+                        shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
+                    } else {
+                        *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+                    }
                 }
             }
         }
@@ -3266,12 +3332,14 @@ impl TimelinePane {
                     let empty_click_rows = build_timeline_rows(context_layers);
                     if clicked_layer_index < empty_click_rows.len() {
                         let layer_id = empty_click_rows[clicked_layer_index].layer_id();
+                        let clicked_parent = empty_click_rows[clicked_layer_index].parent_id();
                         *active_layer_id = Some(layer_id);
-                        // Clear clip instance selection when clicking on empty layer area
-                        if !shift_held {
+                        if shift_held {
+                            shift_toggle_layer(focus, layer_id, clicked_parent, &empty_click_rows);
+                        } else {
                             selection.clear_clip_instances();
+                            *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
                         }
-                        *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
                     }
                 }
             }
@@ -3715,7 +3783,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, &mut shared.pending_actions, document, &context_layers);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
@@ -3723,7 +3791,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

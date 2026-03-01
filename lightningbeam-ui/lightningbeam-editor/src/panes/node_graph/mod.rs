@@ -3095,29 +3095,25 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                 }
             }
 
-            // Handle pane-local keyboard shortcuts (only when pointer is over this pane)
-            if ui.rect_contains_pointer(rect) {
-                let ctrl_g = ui.input(|i| {
-                    shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphGroup, i)
-                });
-                if ctrl_g && !self.state.selected_nodes.is_empty() {
+            // Handle group/ungroup commands from global MenuAction dispatch
+            if *shared.pending_node_group {
+                *shared.pending_node_group = false;
+                if !self.state.selected_nodes.is_empty() {
                     self.group_selected_nodes(shared);
                 }
-
-                // Ctrl+Shift+G to ungroup
-                let ctrl_shift_g = ui.input(|i| {
-                    shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphUngroup, i)
-                });
-                if ctrl_shift_g {
-                    // Ungroup any selected group placeholders
-                    let group_ids_to_ungroup: Vec<GroupId> = self.state.selected_nodes.iter()
-                        .filter_map(|fid| self.group_placeholder_map.get(fid).copied())
-                        .collect();
-                    for gid in group_ids_to_ungroup {
-                        self.ungroup(gid, shared);
-                    }
+            }
+            if *shared.pending_node_ungroup {
+                *shared.pending_node_ungroup = false;
+                let group_ids_to_ungroup: Vec<GroupId> = self.state.selected_nodes.iter()
+                    .filter_map(|fid| self.group_placeholder_map.get(fid).copied())
+                    .collect();
+                for gid in group_ids_to_ungroup {
+                    self.ungroup(gid, shared);
                 }
+            }
 
+            // Handle pane-local keyboard shortcuts (only when pointer is over this pane)
+            if ui.rect_contains_pointer(rect) {
                 // F2 to rename selected group
                 let f2 = ui.input(|i| shared.keymap.action_pressed(crate::keymap::AppAction::NodeGraphRename, i));
                 if f2 && self.renaming_group.is_none() {
