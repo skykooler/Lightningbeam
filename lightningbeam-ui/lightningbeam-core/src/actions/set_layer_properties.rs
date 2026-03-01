@@ -5,7 +5,7 @@
 
 use crate::action::Action;
 use crate::document::Document;
-use crate::layer::LayerTrait;
+use crate::layer::{AnyLayer, LayerTrait};
 use uuid::Uuid;
 
 /// Property that can be set on a layer
@@ -17,6 +17,8 @@ pub enum LayerProperty {
     Locked(bool),
     Opacity(f64),
     Visible(bool),
+    /// Video layer only: toggle live webcam preview
+    CameraEnabled(bool),
 }
 
 /// Stored old value for rollback
@@ -28,6 +30,7 @@ enum OldValue {
     Locked(bool),
     Opacity(f64),
     Visible(bool),
+    CameraEnabled(bool),
 }
 
 /// Action that sets a property on one or more layers
@@ -87,6 +90,14 @@ impl Action for SetLayerPropertiesAction {
                         LayerProperty::Locked(_) => OldValue::Locked(layer.locked()),
                         LayerProperty::Opacity(_) => OldValue::Opacity(layer.opacity()),
                         LayerProperty::Visible(_) => OldValue::Visible(layer.visible()),
+                        LayerProperty::CameraEnabled(_) => {
+                            let val = if let AnyLayer::Video(v) = layer {
+                                v.camera_enabled
+                            } else {
+                                false
+                            };
+                            OldValue::CameraEnabled(val)
+                        }
                     });
                 }
 
@@ -98,6 +109,11 @@ impl Action for SetLayerPropertiesAction {
                     LayerProperty::Locked(l) => layer.set_locked(*l),
                     LayerProperty::Opacity(o) => layer.set_opacity(*o),
                     LayerProperty::Visible(v) => layer.set_visible(*v),
+                    LayerProperty::CameraEnabled(c) => {
+                        if let AnyLayer::Video(v) = layer {
+                            v.camera_enabled = *c;
+                        }
+                    }
                 }
             }
         }
@@ -117,6 +133,11 @@ impl Action for SetLayerPropertiesAction {
                         OldValue::Locked(l) => layer.set_locked(*l),
                         OldValue::Opacity(o) => layer.set_opacity(*o),
                         OldValue::Visible(v) => layer.set_visible(*v),
+                        OldValue::CameraEnabled(c) => {
+                            if let AnyLayer::Video(v) = layer {
+                                v.camera_enabled = *c;
+                            }
+                        }
                     }
                 }
             }
@@ -140,7 +161,7 @@ impl Action for SetLayerPropertiesAction {
                     LayerProperty::Volume(v) => controller.set_track_volume(track_id, *v as f32),
                     LayerProperty::Muted(m) => controller.set_track_mute(track_id, *m),
                     LayerProperty::Soloed(s) => controller.set_track_solo(track_id, *s),
-                    _ => {} // Locked/Opacity/Visible are UI-only
+                    _ => {} // Locked/Opacity/Visible/CameraEnabled are UI-only
                 }
             }
         }
@@ -180,6 +201,7 @@ impl Action for SetLayerPropertiesAction {
             LayerProperty::Locked(_) => "lock",
             LayerProperty::Opacity(_) => "opacity",
             LayerProperty::Visible(_) => "visibility",
+            LayerProperty::CameraEnabled(_) => "camera",
         };
 
         if self.layer_ids.len() == 1 {

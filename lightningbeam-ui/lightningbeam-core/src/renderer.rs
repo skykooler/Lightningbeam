@@ -178,6 +178,7 @@ pub fn render_document_for_compositing(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
 ) -> CompositeRenderResult {
     let time = document.current_time;
 
@@ -211,6 +212,7 @@ pub fn render_document_for_compositing(
             base_transform,
             image_cache,
             video_manager,
+            camera_frame,
         );
         rendered_layers.push(rendered);
     }
@@ -235,6 +237,7 @@ pub fn render_layer_isolated(
     base_transform: Affine,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
 ) -> RenderedLayer {
     let layer_id = layer.id();
     let opacity = layer.opacity() as f32;
@@ -267,6 +270,8 @@ pub fn render_layer_isolated(
         }
         AnyLayer::Video(video_layer) => {
             let mut video_mgr = video_manager.lock().unwrap();
+            // Only pass camera_frame for the layer that has camera enabled
+            let layer_camera_frame = if video_layer.camera_enabled { camera_frame } else { None };
             render_video_layer_to_scene(
                 document,
                 time,
@@ -275,8 +280,10 @@ pub fn render_layer_isolated(
                 base_transform,
                 1.0, // Full opacity - layer opacity handled in compositing
                 &mut video_mgr,
+                layer_camera_frame,
             );
-            rendered.has_content = !video_layer.clip_instances.is_empty();
+            rendered.has_content = !video_layer.clip_instances.is_empty()
+                || (video_layer.camera_enabled && camera_frame.is_some());
         }
         AnyLayer::Effect(effect_layer) => {
             // Effect layers are processed during compositing, not rendered to scene
@@ -325,6 +332,7 @@ fn render_video_layer_to_scene(
     base_transform: Affine,
     parent_opacity: f64,
     video_manager: &mut crate::video::VideoManager,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
 ) {
     // Render using the existing function but to this isolated scene
     render_video_layer(
@@ -335,6 +343,7 @@ fn render_video_layer_to_scene(
         base_transform,
         parent_opacity,
         video_manager,
+        camera_frame,
     );
 }
 
@@ -373,10 +382,10 @@ pub fn render_document_with_transform(
     for layer in document.visible_layers() {
         if any_soloed {
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None);
             }
         } else {
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None);
         }
     }
 }
@@ -408,6 +417,7 @@ fn render_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
 ) {
     match layer {
         AnyLayer::Vector(vector_layer) => {
@@ -418,7 +428,8 @@ fn render_layer(
         }
         AnyLayer::Video(video_layer) => {
             let mut video_mgr = video_manager.lock().unwrap();
-            render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr);
+            let layer_camera_frame = if video_layer.camera_enabled { camera_frame } else { None };
+            render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr, layer_camera_frame);
         }
         AnyLayer::Effect(_) => {
             // Effect layers are processed during GPU compositing, not rendered to scene
@@ -612,7 +623,7 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager, None);
     }
 }
 
@@ -625,11 +636,15 @@ fn render_video_layer(
     base_transform: Affine,
     parent_opacity: f64,
     video_manager: &mut crate::video::VideoManager,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
 ) {
     use crate::animation::TransformProperty;
 
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
+
+    // Track whether any clip was rendered at the current time
+    let mut clip_rendered = false;
 
     // Render each video clip instance
     for clip_instance in &layer.clip_instances {
@@ -780,6 +795,49 @@ fn render_video_layer(
             None,
             &video_rect,
         );
+        clip_rendered = true;
+    }
+
+    // If no clip was rendered at this time and camera is enabled, show live preview
+    if !clip_rendered && layer.camera_enabled {
+        if let Some(frame) = camera_frame {
+            let final_opacity = layer_opacity as f32;
+
+            let blob_data: Arc<dyn AsRef<[u8]> + Send + Sync> = frame.rgba_data.clone();
+            let image_data = ImageData {
+                data: Blob::new(blob_data),
+                format: ImageFormat::Rgba8,
+                width: frame.width,
+                height: frame.height,
+                alpha_type: ImageAlphaType::Alpha,
+            };
+            let image = ImageBrush::new(image_data);
+            let image_with_alpha = image.with_alpha(final_opacity);
+            let frame_rect = Rect::new(0.0, 0.0, frame.width as f64, frame.height as f64);
+
+            // Scale-to-fit and center in document (same as imported video clips)
+            let video_w = frame.width as f64;
+            let video_h = frame.height as f64;
+            let scale_x = document.width / video_w;
+            let scale_y = document.height / video_h;
+            let uniform_scale = scale_x.min(scale_y);
+            let scaled_w = video_w * uniform_scale;
+            let scaled_h = video_h * uniform_scale;
+            let offset_x = (document.width - scaled_w) / 2.0;
+            let offset_y = (document.height - scaled_h) / 2.0;
+
+            let preview_transform = base_transform
+                * Affine::translate((offset_x, offset_y))
+                * Affine::scale(uniform_scale);
+
+            scene.fill(
+                Fill::NonZero,
+                preview_transform,
+                &image_with_alpha,
+                None,
+                &frame_rect,
+            );
+        }
     }
 }
 

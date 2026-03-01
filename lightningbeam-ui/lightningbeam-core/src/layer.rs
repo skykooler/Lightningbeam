@@ -606,6 +606,11 @@ pub struct VideoLayer {
     /// Clip instances (references to video clips)
     /// VideoLayer can contain instances of VideoClips
     pub clip_instances: Vec<ClipInstance>,
+
+    /// When true, the live webcam feed is shown in the stage for this
+    /// layer (at times when no clip instance is active).
+    #[serde(default)]
+    pub camera_enabled: bool,
 }
 
 impl LayerTrait for VideoLayer {
@@ -684,6 +689,7 @@ impl VideoLayer {
         Self {
             layer: Layer::new(LayerType::Video, name),
             clip_instances: Vec::new(),
+            camera_enabled: false,
         }
     }
 }

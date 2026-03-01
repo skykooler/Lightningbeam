@@ -3456,7 +3456,7 @@ dependencies = [
 
 [[package]]
 name = "lightningbeam-editor"
-version = "1.0.0-alpha"
+version = "1.0.1-alpha"
 dependencies = [
  "beamdsp",
  "bytemuck",

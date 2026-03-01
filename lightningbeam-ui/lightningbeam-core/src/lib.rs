@@ -47,6 +47,7 @@ pub mod region_select;
 pub mod dcel2;
 pub use dcel2 as dcel;
 pub mod snap;
+pub mod webcam;
 
 #[cfg(debug_assertions)]
 pub mod test_mode;
