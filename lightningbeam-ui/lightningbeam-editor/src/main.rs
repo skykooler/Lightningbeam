@@ -320,6 +320,7 @@ mod tool_icons {
     pub static POLYGON: &[u8] = include_bytes!("../../../src/assets/polygon.svg");
     pub static BEZIER_EDIT: &[u8] = include_bytes!("../../../src/assets/bezier_edit.svg");
     pub static TEXT: &[u8] = include_bytes!("../../../src/assets/text.svg");
+    pub static SPLIT: &[u8] = include_bytes!("../../../src/assets/split.svg");
 }
 
 /// Embedded focus icon SVGs
@@ -387,6 +388,7 @@ impl ToolIconCache {
                 Tool::BezierEdit => tool_icons::BEZIER_EDIT,
                 Tool::Text => tool_icons::TEXT,
                 Tool::RegionSelect => tool_icons::SELECT, // Reuse select icon for now
+                Tool::Split => tool_icons::SPLIT,
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -6016,7 +6018,7 @@ fn render_pane(
             }
 
             // Icon
-            if let Some(icon) = ctx.icon_cache.get_or_load(tab_type, ui.ctx()) {
+            if let Some(icon) = ctx.shared.icon_cache.get_or_load(tab_type, ui.ctx()) {
                 let icon_texture_id = icon.id();
                 ui.painter().image(
                     icon_texture_id,

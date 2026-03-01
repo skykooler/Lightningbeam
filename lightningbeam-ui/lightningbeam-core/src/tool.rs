@@ -35,6 +35,8 @@ pub enum Tool {
     Text,
     /// Region select tool - select sub-regions of shapes by clipping
     RegionSelect,
+    /// Split tool - split audio/video clips at a point
+    Split,
 }
 
 /// Region select mode
@@ -210,6 +212,7 @@ impl Tool {
             Tool::BezierEdit => "Bezier Edit",
             Tool::Text => "Text",
             Tool::RegionSelect => "Region Select",
+            Tool::Split => "Split",
         }
     }
 
@@ -228,10 +231,11 @@ impl Tool {
             Tool::BezierEdit => "bezier_edit.svg",
             Tool::Text => "text.svg",
             Tool::RegionSelect => "region_select.svg",
+            Tool::Split => "split.svg",
         }
     }
 
-    /// Get all available tools
+    /// Get all vector-layer tools (the full drawing toolset)
     pub fn all() -> &'static [Tool] {
         &[
             Tool::Select,
@@ -249,6 +253,16 @@ impl Tool {
         ]
     }
 
+    /// Get the tools available for a given layer type
+    pub fn for_layer_type(layer_type: Option<crate::layer::LayerType>) -> &'static [Tool] {
+        use crate::layer::LayerType;
+        match layer_type {
+            None | Some(LayerType::Vector) => Tool::all(),
+            Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split],
+            _ => &[Tool::Select],
+        }
+    }
+
     /// Get keyboard shortcut hint
     pub fn shortcut_hint(self) -> &'static str {
         match self {
@@ -264,6 +278,7 @@ impl Tool {
             Tool::BezierEdit => "A",
             Tool::Text => "T",
             Tool::RegionSelect => "S",
+            Tool::Split => "C",
         }
     }
 }

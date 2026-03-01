@@ -4,6 +4,7 @@
 /// Users can click to select tools, which updates the global selected_tool state.
 
 use eframe::egui;
+use lightningbeam_core::layer::{AnyLayer, LayerType};
 use lightningbeam_core::tool::{Tool, RegionSelectMode};
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
@@ -30,14 +31,28 @@ impl PaneRenderer for ToolbarPane {
         let button_padding = 8.0;
         let button_spacing = 4.0;
 
+        // Determine which tools to show based on the active layer type
+        let active_layer_type: Option<LayerType> = shared.active_layer_id
+            .and_then(|id| shared.action_executor.document().get_layer(&id))
+            .map(|layer| match layer {
+                AnyLayer::Vector(_) => LayerType::Vector,
+                AnyLayer::Audio(_)  => LayerType::Audio,
+                AnyLayer::Video(_)  => LayerType::Video,
+                AnyLayer::Effect(_) => LayerType::Effect,
+                AnyLayer::Group(_)  => LayerType::Group,
+            });
+
+        // Auto-switch to Select if the current tool isn't available for this layer type
+        let tools = Tool::for_layer_type(active_layer_type);
+        if !tools.contains(shared.selected_tool) {
+            *shared.selected_tool = Tool::Select;
+        }
+
         // Calculate how many columns we can fit
         let available_width = rect.width() - (button_padding * 2.0);
         let columns =
             ((available_width + button_spacing) / (button_size + button_spacing)).floor() as usize;
         let columns = columns.max(1); // At least 1 column
-
-        // Calculate total number of tools and rows
-        let tools = Tool::all();
         let total_tools = tools.len();
         let total_rows = (total_tools + columns - 1) / columns;
 
@@ -177,7 +192,8 @@ impl PaneRenderer for ToolbarPane {
             y += button_size + button_spacing;
         }
 
-        // Add color pickers below the tool buttons
+        // Add color pickers below the tool buttons (vector layers only)
+        if matches!(active_layer_type, None | Some(LayerType::Vector)) {
         y += button_spacing * 2.0; // Extra spacing
 
         // Fill Color
@@ -247,6 +263,7 @@ impl PaneRenderer for ToolbarPane {
                     *shared.active_color_mode = super::ColorMode::Stroke;
                 }
             });
+        } // end color pickers (vector only)
     }
 
     fn name(&self) -> &str {
