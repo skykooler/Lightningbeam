@@ -31,6 +31,7 @@ impl ClipboardLayerType {
                 AudioLayerType::Midi => ClipboardLayerType::AudioMidi,
             },
             AnyLayer::Effect(_) => ClipboardLayerType::Effect,
+            AnyLayer::Group(_) => ClipboardLayerType::Vector, // Groups don't have a direct clipboard type; treat as vector
         }
     }
 

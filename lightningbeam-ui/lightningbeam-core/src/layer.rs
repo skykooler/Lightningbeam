@@ -25,6 +25,8 @@ pub enum LayerType {
     Automation,
     /// Visual effects layer
     Effect,
+    /// Group layer containing child layers (e.g. video + audio)
+    Group,
 }
 
 /// Common trait for all layer types
@@ -694,6 +696,80 @@ impl VideoLayer {
     }
 }
 
+/// Group layer containing child layers (e.g. video + audio).
+/// Collapsible in the timeline; when collapsed shows a merged clip view.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupLayer {
+    /// Base layer properties
+    pub layer: Layer,
+
+    /// Child layers in this group (typically one VideoLayer + one AudioLayer)
+    pub children: Vec<AnyLayer>,
+
+    /// Whether the group is expanded in the timeline
+    #[serde(default = "default_true")]
+    pub expanded: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl LayerTrait for GroupLayer {
+    fn id(&self) -> Uuid { self.layer.id }
+    fn name(&self) -> &str { &self.layer.name }
+    fn set_name(&mut self, name: String) { self.layer.name = name; }
+    fn has_custom_name(&self) -> bool { self.layer.has_custom_name }
+    fn set_has_custom_name(&mut self, custom: bool) { self.layer.has_custom_name = custom; }
+    fn visible(&self) -> bool { self.layer.visible }
+    fn set_visible(&mut self, visible: bool) { self.layer.visible = visible; }
+    fn opacity(&self) -> f64 { self.layer.opacity }
+    fn set_opacity(&mut self, opacity: f64) { self.layer.opacity = opacity; }
+    fn volume(&self) -> f64 { self.layer.volume }
+    fn set_volume(&mut self, volume: f64) { self.layer.volume = volume; }
+    fn muted(&self) -> bool { self.layer.muted }
+    fn set_muted(&mut self, muted: bool) { self.layer.muted = muted; }
+    fn soloed(&self) -> bool { self.layer.soloed }
+    fn set_soloed(&mut self, soloed: bool) { self.layer.soloed = soloed; }
+    fn locked(&self) -> bool { self.layer.locked }
+    fn set_locked(&mut self, locked: bool) { self.layer.locked = locked; }
+}
+
+impl GroupLayer {
+    /// Create a new group layer
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            layer: Layer::new(LayerType::Group, name),
+            children: Vec::new(),
+            expanded: true,
+        }
+    }
+
+    /// Add a child layer to this group
+    pub fn add_child(&mut self, layer: AnyLayer) {
+        self.children.push(layer);
+    }
+
+    /// Get clip instances from all child layers as (child_layer_id, &ClipInstance) pairs
+    pub fn all_child_clip_instances(&self) -> Vec<(Uuid, &ClipInstance)> {
+        let mut result = Vec::new();
+        for child in &self.children {
+            let child_id = child.id();
+            let instances: &[ClipInstance] = match child {
+                AnyLayer::Audio(l) => &l.clip_instances,
+                AnyLayer::Video(l) => &l.clip_instances,
+                AnyLayer::Vector(l) => &l.clip_instances,
+                AnyLayer::Effect(l) => &l.clip_instances,
+                AnyLayer::Group(_) => &[], // no nested groups
+            };
+            for ci in instances {
+                result.push((child_id, ci));
+            }
+        }
+        result
+    }
+}
+
 /// Unified layer enum for polymorphic handling
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AnyLayer {
@@ -701,6 +777,7 @@ pub enum AnyLayer {
     Audio(AudioLayer),
     Video(VideoLayer),
     Effect(EffectLayer),
+    Group(GroupLayer),
 }
 
 impl LayerTrait for AnyLayer {
@@ -710,6 +787,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.id(),
             AnyLayer::Video(l) => l.id(),
             AnyLayer::Effect(l) => l.id(),
+            AnyLayer::Group(l) => l.id(),
         }
     }
 
@@ -719,6 +797,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.name(),
             AnyLayer::Video(l) => l.name(),
             AnyLayer::Effect(l) => l.name(),
+            AnyLayer::Group(l) => l.name(),
         }
     }
 
@@ -728,6 +807,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_name(name),
             AnyLayer::Video(l) => l.set_name(name),
             AnyLayer::Effect(l) => l.set_name(name),
+            AnyLayer::Group(l) => l.set_name(name),
         }
     }
 
@@ -737,6 +817,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.has_custom_name(),
             AnyLayer::Video(l) => l.has_custom_name(),
             AnyLayer::Effect(l) => l.has_custom_name(),
+            AnyLayer::Group(l) => l.has_custom_name(),
         }
     }
 
@@ -746,6 +827,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_has_custom_name(custom),
             AnyLayer::Video(l) => l.set_has_custom_name(custom),
             AnyLayer::Effect(l) => l.set_has_custom_name(custom),
+            AnyLayer::Group(l) => l.set_has_custom_name(custom),
         }
     }
 
@@ -755,6 +837,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.visible(),
             AnyLayer::Video(l) => l.visible(),
             AnyLayer::Effect(l) => l.visible(),
+            AnyLayer::Group(l) => l.visible(),
         }
     }
 
@@ -764,6 +847,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_visible(visible),
             AnyLayer::Video(l) => l.set_visible(visible),
             AnyLayer::Effect(l) => l.set_visible(visible),
+            AnyLayer::Group(l) => l.set_visible(visible),
         }
     }
 
@@ -773,6 +857,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.opacity(),
             AnyLayer::Video(l) => l.opacity(),
             AnyLayer::Effect(l) => l.opacity(),
+            AnyLayer::Group(l) => l.opacity(),
         }
     }
 
@@ -782,6 +867,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_opacity(opacity),
             AnyLayer::Video(l) => l.set_opacity(opacity),
             AnyLayer::Effect(l) => l.set_opacity(opacity),
+            AnyLayer::Group(l) => l.set_opacity(opacity),
         }
     }
 
@@ -791,6 +877,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.volume(),
             AnyLayer::Video(l) => l.volume(),
             AnyLayer::Effect(l) => l.volume(),
+            AnyLayer::Group(l) => l.volume(),
         }
     }
 
@@ -800,6 +887,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_volume(volume),
             AnyLayer::Video(l) => l.set_volume(volume),
             AnyLayer::Effect(l) => l.set_volume(volume),
+            AnyLayer::Group(l) => l.set_volume(volume),
         }
     }
 
@@ -809,6 +897,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.muted(),
             AnyLayer::Video(l) => l.muted(),
             AnyLayer::Effect(l) => l.muted(),
+            AnyLayer::Group(l) => l.muted(),
         }
     }
 
@@ -818,6 +907,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_muted(muted),
             AnyLayer::Video(l) => l.set_muted(muted),
             AnyLayer::Effect(l) => l.set_muted(muted),
+            AnyLayer::Group(l) => l.set_muted(muted),
         }
     }
 
@@ -827,6 +917,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.soloed(),
             AnyLayer::Video(l) => l.soloed(),
             AnyLayer::Effect(l) => l.soloed(),
+            AnyLayer::Group(l) => l.soloed(),
         }
     }
 
@@ -836,6 +927,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_soloed(soloed),
             AnyLayer::Video(l) => l.set_soloed(soloed),
             AnyLayer::Effect(l) => l.set_soloed(soloed),
+            AnyLayer::Group(l) => l.set_soloed(soloed),
         }
     }
 
@@ -845,6 +937,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.locked(),
             AnyLayer::Video(l) => l.locked(),
             AnyLayer::Effect(l) => l.locked(),
+            AnyLayer::Group(l) => l.locked(),
         }
     }
 
@@ -854,6 +947,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Audio(l) => l.set_locked(locked),
             AnyLayer::Video(l) => l.set_locked(locked),
             AnyLayer::Effect(l) => l.set_locked(locked),
+            AnyLayer::Group(l) => l.set_locked(locked),
         }
     }
 }
@@ -866,6 +960,7 @@ impl AnyLayer {
             AnyLayer::Audio(l) => &l.layer,
             AnyLayer::Video(l) => &l.layer,
             AnyLayer::Effect(l) => &l.layer,
+            AnyLayer::Group(l) => &l.layer,
         }
     }
 
@@ -876,6 +971,7 @@ impl AnyLayer {
             AnyLayer::Audio(l) => &mut l.layer,
             AnyLayer::Video(l) => &mut l.layer,
             AnyLayer::Effect(l) => &mut l.layer,
+            AnyLayer::Group(l) => &mut l.layer,
         }
     }
 

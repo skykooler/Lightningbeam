@@ -101,6 +101,9 @@ impl Action for AddClipInstanceAction {
             AnyLayer::Effect(_) => {
                 return Err("Cannot add clip instances to effect layers".to_string());
             }
+            AnyLayer::Group(_) => {
+                return Err("Cannot add clip instances directly to group layers".to_string());
+            }
         }
         self.executed = true;
 
@@ -135,6 +138,9 @@ impl Action for AddClipInstanceAction {
             }
             AnyLayer::Effect(_) => {
                 // Effect layers don't have clip instances, nothing to rollback
+            }
+            AnyLayer::Group(_) => {
+                // Group layers don't have clip instances, nothing to rollback
             }
         }
         self.executed = false;

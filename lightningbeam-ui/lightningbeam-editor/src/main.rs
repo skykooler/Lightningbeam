@@ -1429,6 +1429,36 @@ impl EditorApp {
             }
         }
 
+        // Layers inside group layers (recursive)
+        fn collect_audio_from_groups(
+            layers: &[lightningbeam_core::layer::AnyLayer],
+            parent_group_id: Option<uuid::Uuid>,
+            existing: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
+            out: &mut Vec<(uuid::Uuid, String, AudioLayerType, Option<uuid::Uuid>)>,
+        ) {
+            for layer in layers {
+                if let AnyLayer::Group(group) = layer {
+                    let gid = group.layer.id;
+                    collect_audio_from_groups(&group.children, Some(gid), existing, out);
+                } else if let AnyLayer::Audio(audio_layer) = layer {
+                    if parent_group_id.is_some() && !existing.contains_key(&audio_layer.layer.id) {
+                        out.push((
+                            audio_layer.layer.id,
+                            audio_layer.layer.name.clone(),
+                            audio_layer.audio_layer_type,
+                            parent_group_id,
+                        ));
+                    }
+                }
+            }
+        }
+        collect_audio_from_groups(
+            &self.action_executor.document().root.children,
+            None,
+            &self.layer_to_track_map,
+            &mut audio_layers_to_sync,
+        );
+
         // Layers inside vector clips
         for (&clip_id, clip) in &self.action_executor.document().vector_clips {
             for layer in clip.layers.root_data() {
@@ -1447,9 +1477,9 @@ impl EditorApp {
         }
 
         // Now create backend tracks for each
-        for (layer_id, layer_name, audio_type, parent_clip_id) in audio_layers_to_sync {
-            // If inside a clip, ensure a metatrack exists
-            let parent_track = parent_clip_id.and_then(|cid| self.ensure_metatrack_for_clip(cid));
+        for (layer_id, layer_name, audio_type, parent_id) in audio_layers_to_sync {
+            // If inside a clip or group, ensure a metatrack exists
+            let parent_track = parent_id.and_then(|pid| self.ensure_metatrack_for_parent(pid));
 
             match audio_type {
                 AudioLayerType::Midi => {
@@ -1489,6 +1519,53 @@ impl EditorApp {
                 }
             }
         }
+    }
+
+    /// Ensure a backend metatrack exists for a parent container (VectorClip or GroupLayer).
+    /// Checks if the ID belongs to a GroupLayer first, then falls back to VectorClip.
+    fn ensure_metatrack_for_parent(&mut self, parent_id: Uuid) -> Option<daw_backend::TrackId> {
+        // Return existing metatrack if already mapped
+        if let Some(&track_id) = self.clip_to_metatrack_map.get(&parent_id) {
+            return Some(track_id);
+        }
+
+        // Check if it's a GroupLayer
+        let is_group = self.action_executor.document().root.children.iter()
+            .any(|l| matches!(l, lightningbeam_core::layer::AnyLayer::Group(g) if g.layer.id == parent_id));
+
+        if is_group {
+            return self.ensure_metatrack_for_group(parent_id);
+        }
+
+        // Fall back to VectorClip
+        self.ensure_metatrack_for_clip(parent_id)
+    }
+
+    /// Ensure a backend metatrack (group track) exists for a GroupLayer.
+    fn ensure_metatrack_for_group(&mut self, group_layer_id: Uuid) -> Option<daw_backend::TrackId> {
+        if let Some(&track_id) = self.clip_to_metatrack_map.get(&group_layer_id) {
+            return Some(track_id);
+        }
+
+        let group_name = self.action_executor.document().root.children.iter()
+            .find(|l| l.id() == group_layer_id)
+            .map(|l| l.name().to_string())
+            .unwrap_or_else(|| "Group".to_string());
+
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            match controller.create_group_track_sync(format!("[{}]", group_name), None) {
+                Ok(track_id) => {
+                    self.clip_to_metatrack_map.insert(group_layer_id, track_id);
+                    println!("✅ Created metatrack for group '{}' (TrackId: {})", group_name, track_id);
+                    return Some(track_id);
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to create metatrack for group '{}': {}", group_name, e);
+                }
+            }
+        }
+        None
     }
 
     /// Ensure a backend metatrack (group track) exists for a movie clip.
@@ -1574,6 +1651,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                 AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                 AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
+                AnyLayer::Group(_) => vec![],
             };
 
             for instance_id in active_layer_clips {
@@ -1591,6 +1669,7 @@ impl EditorApp {
                                     AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                                     AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                                     AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
+                                    AnyLayer::Group(_) => vec![],
                                 };
                                 if member_splittable.contains(member_instance_id) {
                                     clips_to_split.push((*member_layer_id, *member_instance_id));
@@ -1696,12 +1775,14 @@ impl EditorApp {
 
             let layer_type = ClipboardLayerType::from_layer(layer);
 
-            let instances: Vec<_> = match layer {
+            let clip_slice: &[lightningbeam_core::clip::ClipInstance] = match layer {
                 AnyLayer::Vector(vl) => &vl.clip_instances,
                 AnyLayer::Audio(al) => &al.clip_instances,
                 AnyLayer::Video(vl) => &vl.clip_instances,
                 AnyLayer::Effect(el) => &el.clip_instances,
-            }
+                AnyLayer::Group(_) => &[],
+            };
+            let instances: Vec<_> = clip_slice
             .iter()
             .filter(|ci| self.selection.contains_clip_instance(&ci.id))
             .cloned()
@@ -1992,11 +2073,12 @@ impl EditorApp {
                     Some(l) => l,
                     None => return,
                 };
-                let instances = match layer {
+                let instances: &[lightningbeam_core::clip::ClipInstance] = match layer {
                     AnyLayer::Vector(vl) => &vl.clip_instances,
                     AnyLayer::Audio(al) => &al.clip_instances,
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
+                    AnyLayer::Group(_) => &[],
                 };
                 instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
@@ -3745,57 +3827,91 @@ impl EditorApp {
 
         // Find the video clip instance in the document
         let document = self.action_executor.document();
-        let mut video_instance_info: Option<(uuid::Uuid, uuid::Uuid, f64)> = None; // (layer_id, instance_id, timeline_start)
+        let mut video_instance_info: Option<(uuid::Uuid, f64, bool)> = None; // (layer_id, timeline_start, already_in_group)
 
-        // Search all layers (root + inside movie clips) for a video clip instance with matching clip_id
-        let all_layers = document.all_layers();
-        for layer in &all_layers {
-            if let AnyLayer::Video(video_layer) = layer {
-                for instance in &video_layer.clip_instances {
-                    if instance.clip_id == video_clip_id {
-                        video_instance_info = Some((
-                            video_layer.layer.id,
-                            instance.id,
-                            instance.timeline_start,
-                        ));
-                        break;
+        // Search root layers for a video clip instance with matching clip_id
+        for layer in &document.root.children {
+            match layer {
+                AnyLayer::Video(video_layer) => {
+                    for instance in &video_layer.clip_instances {
+                        if instance.clip_id == video_clip_id {
+                            video_instance_info = Some((video_layer.layer.id, instance.timeline_start, false));
+                            break;
+                        }
                     }
                 }
+                AnyLayer::Group(group) => {
+                    for child in &group.children {
+                        if let AnyLayer::Video(video_layer) = child {
+                            for instance in &video_layer.clip_instances {
+                                if instance.clip_id == video_clip_id {
+                                    video_instance_info = Some((video_layer.layer.id, instance.timeline_start, true));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
             if video_instance_info.is_some() {
                 break;
             }
         }
 
-        // If we found a video instance, auto-place the audio
-        if let Some((video_layer_id, video_instance_id, timeline_start)) = video_instance_info {
-            // Find or create sampled audio track
-            let audio_layer_id = {
-                let doc = self.action_executor.document();
-                panes::find_sampled_audio_track(doc)
-            }.unwrap_or_else(|| {
-                // Create new sampled audio layer
-                let audio_layer = AudioLayer::new_sampled("Audio Track");
-                self.action_executor.document_mut().root.add_child(
-                    AnyLayer::Audio(audio_layer)
-                )
-            });
+        // If we found a video instance, wrap it in a GroupLayer with a new AudioLayer
+        if let Some((video_layer_id, timeline_start, already_in_group)) = video_instance_info {
+            if already_in_group {
+                // Video is already in a group (shouldn't happen normally, but handle it)
+                println!("   ℹ️ Video already in a group layer, skipping auto-group");
+                return;
+            }
 
-            // Sync newly created audio layer with backend BEFORE adding clip instances
+            // Get video name for the group
+            let video_name = self.action_executor.document().video_clips
+                .get(&video_clip_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Video".to_string());
+
+            // Remove the VideoLayer from root
+            let video_layer_opt = {
+                let doc = self.action_executor.document_mut();
+                let idx = doc.root.children.iter().position(|l| l.id() == video_layer_id);
+                idx.map(|i| doc.root.children.remove(i))
+            };
+
+            let Some(video_layer) = video_layer_opt else {
+                eprintln!("❌ Could not find video layer {} in root to move into group", video_layer_id);
+                return;
+            };
+
+            // Create AudioLayer for the extracted audio
+            let audio_layer = AudioLayer::new_sampled("Audio");
+            let audio_layer_id = audio_layer.layer.id;
+
+            // Build GroupLayer containing both
+            let mut group = GroupLayer::new(video_name);
+            group.expanded = false; // start collapsed
+            group.add_child(video_layer);
+            group.add_child(AnyLayer::Audio(audio_layer));
+            let group_id = group.layer.id;
+
+            // Add GroupLayer to root
+            self.action_executor.document_mut().root.add_child(AnyLayer::Group(group));
+
+            // Sync backend (creates metatrack for group + audio track as child)
             self.sync_audio_layers_to_backend();
 
             // Create audio clip instance at same timeline position as video
             let audio_instance = ClipInstance::new(audio_clip_id)
                 .with_timeline_start(timeline_start);
-            let audio_instance_id = audio_instance.id;
 
-            // Execute audio action with backend sync
+            // Execute audio clip placement with backend sync
             let audio_action = lightningbeam_core::actions::AddClipInstanceAction::new(
                 audio_layer_id,
                 audio_instance,
             );
 
-            // Execute with backend synchronization
             if let Some(ref controller_arc) = self.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
                 let mut backend_context = lightningbeam_core::action::BackendContext {
@@ -3806,19 +3922,13 @@ impl EditorApp {
                 };
 
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
-                    eprintln!("❌ Failed to execute extracted audio AddClipInstanceAction with backend: {}", e);
+                    eprintln!("❌ Failed to place extracted audio clip: {}", e);
                 }
             } else {
                 let _ = self.action_executor.execute(Box::new(audio_action));
             }
 
-            // Create instance group linking video and audio
-            let mut group = lightningbeam_core::instance_group::InstanceGroup::new();
-            group.add_member(video_layer_id, video_instance_id);
-            group.add_member(audio_layer_id, audio_instance_id);
-            self.action_executor.document_mut().add_instance_group(group);
-
-            println!("   🔗 Auto-placed audio and linked to video instance");
+            println!("   🔗 Created group layer '{}' with video + audio", group_id);
         }
     }
 

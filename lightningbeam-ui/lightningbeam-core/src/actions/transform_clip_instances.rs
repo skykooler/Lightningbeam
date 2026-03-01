@@ -99,6 +99,7 @@ impl Action for TransformClipInstancesAction {
                 }
             }
             AnyLayer::Effect(_) => {}
+            AnyLayer::Group(_) => {}
         }
         Ok(())
     }
@@ -136,6 +137,7 @@ impl Action for TransformClipInstancesAction {
                 }
             }
             AnyLayer::Effect(_) => {}
+            AnyLayer::Group(_) => {}
         }
         Ok(())
     }

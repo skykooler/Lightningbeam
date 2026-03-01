@@ -295,6 +295,17 @@ pub fn render_layer_isolated(
                 .collect();
             return RenderedLayer::effect_layer(layer_id, opacity, active_effects);
         }
+        AnyLayer::Group(group_layer) => {
+            // Render each child layer's content into the group's scene
+            for child in &group_layer.children {
+                render_layer(
+                    document, time, child, &mut rendered.scene, base_transform,
+                    1.0, // Full opacity - layer opacity handled in compositing
+                    image_cache, video_manager, camera_frame,
+                );
+            }
+            rendered.has_content = !group_layer.children.is_empty();
+        }
     }
 
     rendered
@@ -433,6 +444,12 @@ fn render_layer(
         }
         AnyLayer::Effect(_) => {
             // Effect layers are processed during GPU compositing, not rendered to scene
+        }
+        AnyLayer::Group(group_layer) => {
+            // Render each child layer in the group
+            for child in &group_layer.children {
+                render_layer(document, time, child, scene, base_transform, parent_opacity, image_cache, video_manager, camera_frame);
+            }
         }
     }
 }

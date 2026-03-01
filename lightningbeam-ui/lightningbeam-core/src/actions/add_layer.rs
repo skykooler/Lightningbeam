@@ -15,6 +15,9 @@ pub struct AddLayerAction {
     /// If Some, add to this VectorClip's layers instead of root
     target_clip_id: Option<Uuid>,
 
+    /// If Some, add as a child of this GroupLayer instead of root
+    target_group_id: Option<Uuid>,
+
     /// ID of the created layer (set after execution)
     created_layer_id: Option<Uuid>,
 }
@@ -30,6 +33,7 @@ impl AddLayerAction {
         Self {
             layer: AnyLayer::Vector(layer),
             target_clip_id: None,
+            target_group_id: None,
             created_layer_id: None,
         }
     }
@@ -43,6 +47,7 @@ impl AddLayerAction {
         Self {
             layer,
             target_clip_id: None,
+            target_group_id: None,
             created_layer_id: None,
         }
     }
@@ -50,6 +55,12 @@ impl AddLayerAction {
     /// Set the target clip for this action (add layer inside a movie clip)
     pub fn with_target_clip(mut self, clip_id: Option<Uuid>) -> Self {
         self.target_clip_id = clip_id;
+        self
+    }
+
+    /// Set the target group for this action (add layer inside a group layer)
+    pub fn with_target_group(mut self, group_id: Uuid) -> Self {
+        self.target_group_id = Some(group_id);
         self
     }
 
@@ -61,7 +72,18 @@ impl AddLayerAction {
 
 impl Action for AddLayerAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        let layer_id = if let Some(clip_id) = self.target_clip_id {
+        let layer_id = if let Some(group_id) = self.target_group_id {
+            // Add layer inside a group layer
+            let id = self.layer.id();
+            if let Some(AnyLayer::Group(g)) = document.root.children.iter_mut()
+                .find(|l| l.id() == group_id)
+            {
+                g.add_child(self.layer.clone());
+            } else {
+                return Err(format!("Target group {} not found", group_id));
+            }
+            id
+        } else if let Some(clip_id) = self.target_clip_id {
             // Add layer inside a vector clip (movie clip)
             let clip = document.vector_clips.get_mut(&clip_id)
                 .ok_or_else(|| format!("Target clip {} not found", clip_id))?;
@@ -84,7 +106,14 @@ impl Action for AddLayerAction {
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         // Remove the created layer if it exists
         if let Some(layer_id) = self.created_layer_id {
-            if let Some(clip_id) = self.target_clip_id {
+            if let Some(group_id) = self.target_group_id {
+                // Remove from group layer
+                if let Some(AnyLayer::Group(g)) = document.root.children.iter_mut()
+                    .find(|l| l.id() == group_id)
+                {
+                    g.children.retain(|l| l.id() != layer_id);
+                }
+            } else if let Some(clip_id) = self.target_clip_id {
                 // Remove from vector clip
                 if let Some(clip) = document.vector_clips.get_mut(&clip_id) {
                     clip.layers.roots.retain(|node| node.data.id() != layer_id);
@@ -107,6 +136,7 @@ impl Action for AddLayerAction {
             AnyLayer::Audio(_) => "Add audio layer",
             AnyLayer::Video(_) => "Add video layer",
             AnyLayer::Effect(_) => "Add effect layer",
+            AnyLayer::Group(_) => "Add group layer",
         }
         .to_string()
     }

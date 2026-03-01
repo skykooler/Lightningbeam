@@ -112,6 +112,7 @@ impl Action for SplitClipInstanceAction {
             AnyLayer::Audio(al) => &al.clip_instances,
             AnyLayer::Video(vl) => &vl.clip_instances,
             AnyLayer::Effect(el) => &el.clip_instances,
+            AnyLayer::Group(_) => return Err("Cannot split clip instances on group layers".to_string()),
         };
 
         let instance = clip_instances
@@ -228,6 +229,9 @@ impl Action for SplitClipInstanceAction {
                 }
                 el.clip_instances.push(right_instance);
             }
+            AnyLayer::Group(_) => {
+                return Err("Cannot split clip instances on group layers".to_string());
+            }
         }
 
         self.executed = true;
@@ -282,6 +286,9 @@ impl Action for SplitClipInstanceAction {
                     inst.trim_end = self.original_trim_end;
                     inst.timeline_duration = self.original_timeline_duration;
                 }
+            }
+            AnyLayer::Group(_) => {
+                // Group layers don't have clip instances, nothing to rollback
             }
         }
 

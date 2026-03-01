@@ -1262,6 +1262,9 @@ impl AssetLibraryPane {
                         }
                     }
                 }
+                lightningbeam_core::layer::AnyLayer::Group(_) => {
+                    // Group layers don't have their own clip instances
+                }
             }
         }
         false

@@ -44,14 +44,62 @@ impl GraphicsObject {
         id
     }
 
-    /// Get a child layer by ID
+    /// Get a child layer by ID (searches direct children and recurses into groups)
     pub fn get_child(&self, id: &Uuid) -> Option<&AnyLayer> {
-        self.children.iter().find(|l| &l.id() == id)
+        for layer in &self.children {
+            if &layer.id() == id {
+                return Some(layer);
+            }
+            if let AnyLayer::Group(group) = layer {
+                if let Some(found) = Self::find_in_group(&group.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
 
-    /// Get a mutable child layer by ID
+    /// Get a mutable child layer by ID (searches direct children and recurses into groups)
     pub fn get_child_mut(&mut self, id: &Uuid) -> Option<&mut AnyLayer> {
-        self.children.iter_mut().find(|l| &l.id() == id)
+        for layer in &mut self.children {
+            if &layer.id() == id {
+                return Some(layer);
+            }
+            if let AnyLayer::Group(group) = layer {
+                if let Some(found) = Self::find_in_group_mut(&mut group.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_in_group<'a>(children: &'a [AnyLayer], id: &Uuid) -> Option<&'a AnyLayer> {
+        for child in children {
+            if &child.id() == id {
+                return Some(child);
+            }
+            if let AnyLayer::Group(group) = child {
+                if let Some(found) = Self::find_in_group(&group.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_in_group_mut<'a>(children: &'a mut [AnyLayer], id: &Uuid) -> Option<&'a mut AnyLayer> {
+        for child in children {
+            if &child.id() == id {
+                return Some(child);
+            }
+            if let AnyLayer::Group(group) = child {
+                if let Some(found) = Self::find_in_group_mut(&mut group.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
 
     /// Remove a child layer by ID
@@ -371,6 +419,52 @@ impl Document {
                         }
                     }
                 }
+                crate::layer::AnyLayer::Group(group) => {
+                    // Recurse into group children to find their clip instance endpoints
+                    fn process_group_children(
+                        children: &[crate::layer::AnyLayer],
+                        doc: &Document,
+                        max_end: &mut f64,
+                        calc_end: &dyn Fn(&ClipInstance, f64) -> f64,
+                    ) {
+                        for child in children {
+                            match child {
+                                crate::layer::AnyLayer::Vector(vl) => {
+                                    for inst in &vl.clip_instances {
+                                        if let Some(clip) = doc.vector_clips.get(&inst.clip_id) {
+                                            *max_end = max_end.max(calc_end(inst, clip.duration));
+                                        }
+                                    }
+                                }
+                                crate::layer::AnyLayer::Audio(al) => {
+                                    for inst in &al.clip_instances {
+                                        if let Some(clip) = doc.audio_clips.get(&inst.clip_id) {
+                                            *max_end = max_end.max(calc_end(inst, clip.duration));
+                                        }
+                                    }
+                                }
+                                crate::layer::AnyLayer::Video(vl) => {
+                                    for inst in &vl.clip_instances {
+                                        if let Some(clip) = doc.video_clips.get(&inst.clip_id) {
+                                            *max_end = max_end.max(calc_end(inst, clip.duration));
+                                        }
+                                    }
+                                }
+                                crate::layer::AnyLayer::Effect(el) => {
+                                    for inst in &el.clip_instances {
+                                        if let Some(dur) = doc.get_clip_duration(&inst.clip_id) {
+                                            *max_end = max_end.max(calc_end(inst, dur));
+                                        }
+                                    }
+                                }
+                                crate::layer::AnyLayer::Group(g) => {
+                                    process_group_children(&g.children, doc, max_end, calc_end);
+                                }
+                            }
+                        }
+                    }
+                    process_group_children(&group.children, self, &mut max_end_time, &calculate_instance_end);
+                }
             }
         }
 
@@ -489,7 +583,16 @@ impl Document {
 
     /// Get all layers across the entire document (root + inside all vector clips).
     pub fn all_layers(&self) -> Vec<&AnyLayer> {
-        let mut layers: Vec<&AnyLayer> = self.root.children.iter().collect();
+        let mut layers: Vec<&AnyLayer> = Vec::new();
+        fn collect_layers<'a>(list: &'a [AnyLayer], out: &mut Vec<&'a AnyLayer>) {
+            for layer in list {
+                out.push(layer);
+                if let AnyLayer::Group(g) = layer {
+                    collect_layers(&g.children, out);
+                }
+            }
+        }
+        collect_layers(&self.root.children, &mut layers);
         for clip in self.vector_clips.values() {
             layers.extend(clip.layers.root_data());
         }
@@ -718,6 +821,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
@@ -756,6 +860,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         for instance in instances {
@@ -799,7 +904,7 @@ impl Document {
         let desired_start = desired_start.max(0.0);
 
         // Vector layers don't need overlap adjustment, but still respect timeline start
-        if matches!(layer, AnyLayer::Vector(_)) {
+        if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
             return Some(desired_start);
         }
 
@@ -816,6 +921,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(_) => return Some(desired_start), // Shouldn't reach here
+            AnyLayer::Group(_) => return Some(desired_start), // Groups don't have own clips
         };
 
         let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
@@ -898,7 +1004,7 @@ impl Document {
         let Some(layer) = self.get_layer(layer_id) else {
             return desired_offset;
         };
-        if matches!(layer, AnyLayer::Vector(_)) {
+        if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
             return desired_offset;
         }
 
@@ -909,6 +1015,7 @@ impl Document {
             AnyLayer::Video(v) => &v.clip_instances,
             AnyLayer::Effect(e) => &e.clip_instances,
             AnyLayer::Vector(v) => &v.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         // Collect non-group clip ranges
@@ -966,8 +1073,8 @@ impl Document {
         };
 
         // Only check audio, video, and effect layers
-        if matches!(layer, AnyLayer::Vector(_)) {
-            return current_timeline_start; // No limit for vector layers
+        if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
+            return current_timeline_start; // No limit for vector/group layers
         };
 
         // Find the nearest clip to the left
@@ -978,6 +1085,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         for other in instances {
@@ -1015,8 +1123,8 @@ impl Document {
         };
 
         // Only check audio, video, and effect layers
-        if matches!(layer, AnyLayer::Vector(_)) {
-            return f64::MAX; // No limit for vector layers
+        if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
+            return f64::MAX; // No limit for vector/group layers
         }
 
         let instances: &[ClipInstance] = match layer {
@@ -1024,6 +1132,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         let mut nearest_start = f64::MAX;
@@ -1060,7 +1169,7 @@ impl Document {
             return current_effective_start;
         };
 
-        if matches!(layer, AnyLayer::Vector(_)) {
+        if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
             return current_effective_start;
         }
 
@@ -1069,6 +1178,7 @@ impl Document {
             AnyLayer::Video(video) => &video.clip_instances,
             AnyLayer::Effect(effect) => &effect.clip_instances,
             AnyLayer::Vector(vector) => &vector.clip_instances,
+            AnyLayer::Group(_) => &[],
         };
 
         let mut nearest_end = 0.0;

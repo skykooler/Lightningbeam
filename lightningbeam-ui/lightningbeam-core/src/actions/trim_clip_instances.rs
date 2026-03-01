@@ -99,6 +99,7 @@ impl Action for TrimClipInstancesAction {
                                                 AnyLayer::Audio(al) => &al.clip_instances,
                                                 AnyLayer::Video(vl) => &vl.clip_instances,
                                                 AnyLayer::Effect(el) => &el.clip_instances,
+                                                AnyLayer::Group(_) => &[],
                                             };
 
                                             if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -134,6 +135,7 @@ impl Action for TrimClipInstancesAction {
                                             AnyLayer::Audio(al) => &al.clip_instances,
                                             AnyLayer::Video(vl) => &vl.clip_instances,
                                             AnyLayer::Effect(el) => &el.clip_instances,
+                                            AnyLayer::Group(_) => &[],
                                         };
 
                                         if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -176,6 +178,7 @@ impl Action for TrimClipInstancesAction {
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Vector(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
+                    AnyLayer::Group(_) => &[],
                 };
 
                 let instance = clip_instances.iter()
@@ -267,6 +270,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Audio(al) => &mut al.clip_instances,
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
+                AnyLayer::Group(_) => continue,
             };
 
             // Apply trims
@@ -305,6 +309,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Audio(al) => &mut al.clip_instances,
                 AnyLayer::Video(vl) => &mut vl.clip_instances,
                 AnyLayer::Effect(el) => &mut el.clip_instances,
+                AnyLayer::Group(_) => continue,
             };
 
             // Restore original trim values

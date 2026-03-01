@@ -8,7 +8,7 @@
 
 use eframe::egui;
 use lightningbeam_core::clip::ClipInstance;
-use lightningbeam_core::layer::{AnyLayer, AudioLayerType, LayerTrait};
+use lightningbeam_core::layer::{AnyLayer, AudioLayerType, GroupLayer, LayerTrait};
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 
 const RULER_HEIGHT: f32 = 30.0;
@@ -117,6 +117,7 @@ fn effective_clip_duration(
         AnyLayer::Audio(_) => document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration),
         AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| c.duration),
         AnyLayer::Effect(_) => Some(lightningbeam_core::effect::EFFECT_DURATION),
+        AnyLayer::Group(_) => None,
     }
 }
 
@@ -195,6 +196,123 @@ fn can_drop_on_layer(layer: &AnyLayer, clip_type: DragClipType) -> bool {
         }
         (AnyLayer::Effect(_), DragClipType::Effect) => true,
         _ => false,
+    }
+}
+
+/// Represents a single row in the timeline's virtual layer list.
+/// Expanded groups show their children directly (no separate header row).
+/// Collapsed groups show as a single row with merged clips.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum TimelineRow<'a> {
+    /// A normal standalone layer (not in any group)
+    Normal(&'a AnyLayer),
+    /// A collapsed group -- single row with expand triangle and merged clips
+    CollapsedGroup { group: &'a GroupLayer, depth: u32 },
+    /// A child layer inside an expanded group
+    GroupChild {
+        child: &'a AnyLayer,
+        group: &'a GroupLayer,  // the immediate parent group (for collapse action)
+        depth: u32,             // nesting depth (1 = direct child of root group)
+        show_collapse: bool,    // true for first visible child -- shows collapse triangle
+    },
+}
+
+impl<'a> TimelineRow<'a> {
+    fn layer_id(&self) -> uuid::Uuid {
+        match self {
+            TimelineRow::Normal(l) => l.id(),
+            TimelineRow::CollapsedGroup { group, .. } => group.layer.id,
+            TimelineRow::GroupChild { child, .. } => child.id(),
+        }
+    }
+
+    fn as_any_layer(&self) -> Option<&'a AnyLayer> {
+        match self {
+            TimelineRow::Normal(l) => Some(l),
+            TimelineRow::CollapsedGroup { .. } => None,
+            TimelineRow::GroupChild { child, .. } => Some(child),
+        }
+    }
+}
+
+/// Build a flattened list of timeline rows from the reversed context_layers.
+/// Expanded groups emit their children directly (no header row).
+/// Collapsed groups emit a single CollapsedGroup row.
+fn build_timeline_rows<'a>(context_layers: &[&'a AnyLayer]) -> Vec<TimelineRow<'a>> {
+    let mut rows = Vec::new();
+    for &layer in context_layers.iter().rev() {
+        flatten_layer(layer, 0, None, &mut rows);
+    }
+    rows
+}
+
+fn flatten_layer<'a>(
+    layer: &'a AnyLayer,
+    depth: u32,
+    parent_group: Option<&'a GroupLayer>,
+    rows: &mut Vec<TimelineRow<'a>>,
+) {
+    match layer {
+        AnyLayer::Group(g) if !g.expanded => {
+            rows.push(TimelineRow::CollapsedGroup { group: g, depth });
+        }
+        AnyLayer::Group(g) => {
+            // Expanded group: no header row, emit children directly.
+            // The first emitted row gets the collapse triangle for this group.
+            let mut first_emitted = true;
+            for child in &g.children {
+                let before_len = rows.len();
+                flatten_layer(child, depth + 1, Some(g), rows);
+                // Mark the first emitted GroupChild row with the collapse triangle
+                if first_emitted && rows.len() > before_len {
+                    if let Some(TimelineRow::GroupChild { show_collapse, group, .. }) = rows.get_mut(before_len) {
+                        *show_collapse = true;
+                        *group = g; // point to THIS group for the collapse action
+                    }
+                    first_emitted = false;
+                }
+            }
+        }
+        _ => {
+            if depth > 0 {
+                if let Some(group) = parent_group {
+                    rows.push(TimelineRow::GroupChild {
+                        child: layer,
+                        group,
+                        depth,
+                        show_collapse: false,
+                    });
+                }
+            } else {
+                rows.push(TimelineRow::Normal(layer));
+            }
+        }
+    }
+}
+
+/// Collect all (layer_ref, clip_instances) tuples from context_layers,
+/// recursively descending into group children.
+/// Returns (&AnyLayer, &[ClipInstance]) so callers have access to both layer info and clips.
+fn all_layer_clip_instances<'a>(context_layers: &[&'a AnyLayer]) -> Vec<(&'a AnyLayer, &'a [ClipInstance])> {
+    let mut result = Vec::new();
+    for &layer in context_layers {
+        collect_clip_instances(layer, &mut result);
+    }
+    result
+}
+
+fn collect_clip_instances<'a>(layer: &'a AnyLayer, result: &mut Vec<(&'a AnyLayer, &'a [ClipInstance])>) {
+    match layer {
+        AnyLayer::Vector(l) => result.push((layer, &l.clip_instances)),
+        AnyLayer::Audio(l) => result.push((layer, &l.clip_instances)),
+        AnyLayer::Video(l) => result.push((layer, &l.clip_instances)),
+        AnyLayer::Effect(l) => result.push((layer, &l.clip_instances)),
+        AnyLayer::Group(g) => {
+            for child in &g.children {
+                collect_clip_instances(child, result);
+            }
+        }
     }
 }
 
@@ -472,7 +590,8 @@ impl TimelinePane {
         editing_clip_id: Option<&uuid::Uuid>,
     ) -> Option<(ClipDragType, uuid::Uuid)> {
         let context_layers = document.context_layers(editing_clip_id);
-        let layer_count = context_layers.len();
+        let rows = build_timeline_rows(&context_layers);
+        let layer_count = rows.len();
 
         // Check if pointer is in valid area
         if pointer_pos.y < header_rect.min.y {
@@ -489,15 +608,21 @@ impl TimelinePane {
             return None;
         }
 
-        let rev_layers: Vec<&lightningbeam_core::layer::AnyLayer> = context_layers.iter().rev().copied().collect();
-        let layer = rev_layers.get(hovered_layer_index)?;
+        let row = &rows[hovered_layer_index];
+        // Collapsed groups have no directly clickable clips
+        let layer: &AnyLayer = match row {
+            TimelineRow::Normal(l) => l,
+            TimelineRow::GroupChild { child, .. } => child,
+            TimelineRow::CollapsedGroup { .. } => return None,
+        };
         let _layer_data = layer.layer();
 
-        let clip_instances = match layer {
+        let clip_instances: &[ClipInstance] = match layer {
             lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
             lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
             lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
             lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+            lightningbeam_core::layer::AnyLayer::Group(_) => &[],
         };
 
         // Check each clip instance
@@ -549,6 +674,76 @@ impl TimelinePane {
                 };
 
                 return Some((drag_type, clip_instance.id));
+            }
+        }
+
+        None
+    }
+
+    /// Detect if the pointer is over a merged span in a collapsed group row.
+    /// Returns all child clip instance IDs that contribute to the hit span.
+    fn detect_collapsed_group_at_pointer(
+        &self,
+        pointer_pos: egui::Pos2,
+        document: &lightningbeam_core::document::Document,
+        content_rect: egui::Rect,
+        header_rect: egui::Rect,
+        editing_clip_id: Option<&uuid::Uuid>,
+    ) -> Option<Vec<uuid::Uuid>> {
+        let context_layers = document.context_layers(editing_clip_id);
+        let rows = build_timeline_rows(&context_layers);
+
+        if pointer_pos.y < header_rect.min.y || pointer_pos.x < content_rect.min.x {
+            return None;
+        }
+
+        let relative_y = pointer_pos.y - header_rect.min.y + self.viewport_scroll_y;
+        let hovered_index = (relative_y / LAYER_HEIGHT) as usize;
+        if hovered_index >= rows.len() {
+            return None;
+        }
+
+        let TimelineRow::CollapsedGroup { group, .. } = &rows[hovered_index] else {
+            return None;
+        };
+
+        // Compute merged spans with the child clip IDs that contribute to each
+        let child_clips = group.all_child_clip_instances();
+        let mut spans: Vec<(f64, f64, Vec<uuid::Uuid>)> = Vec::new(); // (start, end, clip_ids)
+
+        for (_child_layer_id, ci) in &child_clips {
+            let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
+                ci.trim_end.unwrap_or(1.0) - ci.trim_start
+            });
+            let start = ci.effective_start();
+            let end = start + ci.total_duration(clip_dur);
+            spans.push((start, end, vec![ci.id]));
+        }
+
+        spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Merge overlapping spans
+        let mut merged: Vec<(f64, f64, Vec<uuid::Uuid>)> = Vec::new();
+        for (s, e, ids) in spans {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    last.2.extend(ids);
+                } else {
+                    merged.push((s, e, ids));
+                }
+            } else {
+                merged.push((s, e, ids));
+            }
+        }
+
+        // Check which merged span the pointer is over
+        let mouse_x = pointer_pos.x - content_rect.min.x;
+        for (s, e, ids) in merged {
+            let sx = self.time_to_x(s);
+            let ex = self.time_to_x(e).max(sx + MIN_CLIP_WIDTH_PX);
+            if mouse_x >= sx && mouse_x <= ex {
+                return Some(ids);
             }
         }
 
@@ -902,9 +1097,11 @@ impl TimelinePane {
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
         let secondary_text_color = egui::Color32::from_gray(150);
 
-        // Draw layer headers from document (reversed so newest layers appear on top)
-        for (i, layer) in context_layers.iter().rev().enumerate() {
-            let layer = *layer;
+        // Build virtual row list (accounts for group expansion)
+        let rows = build_timeline_rows(context_layers);
+
+        // Draw layer headers from virtual row list
+        for (i, row) in rows.iter().enumerate() {
             let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
@@ -912,13 +1109,55 @@ impl TimelinePane {
                 continue;
             }
 
+            // Indent for group children and collapsed groups based on depth
+            let indent = match row {
+                TimelineRow::GroupChild { depth, .. } => *depth as f32 * 16.0,
+                TimelineRow::CollapsedGroup { depth, .. } => *depth as f32 * 16.0,
+                _ => 0.0,
+            };
+
             let header_rect = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x, y),
                 egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
             );
 
+            // Determine the AnyLayer or GroupLayer for this row
+            let (layer_id, layer_name, layer_type, type_color) = match row {
+                TimelineRow::Normal(layer) => {
+                    let data = layer.layer();
+                    let (lt, tc) = match layer {
+                        AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                        AnyLayer::Audio(al) => match al.audio_layer_type {
+                            AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                            AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                        },
+                        AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                        AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                        AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                    };
+                    (layer.id(), data.name.clone(), lt, tc)
+                }
+                TimelineRow::CollapsedGroup { group, .. } => {
+                    (group.layer.id, group.layer.name.clone(), "Group", egui::Color32::from_rgb(0, 180, 180))
+                }
+                TimelineRow::GroupChild { child, .. } => {
+                    let data = child.layer();
+                    let (lt, tc) = match child {
+                        AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                        AnyLayer::Audio(al) => match al.audio_layer_type {
+                            AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                            AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                        },
+                        AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                        AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                        AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                    };
+                    (child.id(), data.name.clone(), lt, tc)
+                }
+            };
+
             // Active vs inactive background colors
-            let is_active = active_layer_id.map_or(false, |id| id == layer.id());
+            let is_active = active_layer_id.map_or(false, |id| id == layer_id);
             let bg_color = if is_active {
                 active_color
             } else {
@@ -927,39 +1166,106 @@ impl TimelinePane {
 
             ui.painter().rect_filled(header_rect, 0.0, bg_color);
 
-            // Get layer info
-            let layer_data = layer.layer();
-            let layer_name = &layer_data.name;
-            let (layer_type, type_color) = match layer {
-                lightningbeam_core::layer::AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)), // Orange
-                lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
-                    match audio_layer.audio_layer_type {
-                        lightningbeam_core::layer::AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)), // Green
-                        lightningbeam_core::layer::AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)), // Blue
+            // Gutter area (left of indicator) — solid group color, with collapse chevron
+            if indent > 0.0 {
+                let gutter_rect = egui::Rect::from_min_size(
+                    header_rect.min,
+                    egui::vec2(indent, LAYER_HEIGHT),
+                );
+                // Solid dark group color for the gutter strip
+                let group_color = match row {
+                    TimelineRow::GroupChild { .. } | TimelineRow::CollapsedGroup { .. } => {
+                        // Solid dark teal for the group gutter
+                        egui::Color32::from_rgb(0, 50, 50)
+                    }
+                    _ => header_bg,
+                };
+                ui.painter().rect_filled(gutter_rect, 0.0, group_color);
+
+                // Thin colored accent line at right edge of gutter (group color)
+                let accent_rect = egui::Rect::from_min_size(
+                    egui::pos2(header_rect.min.x + indent - 2.0, y),
+                    egui::vec2(2.0, LAYER_HEIGHT),
+                );
+                ui.painter().rect_filled(accent_rect, 0.0, egui::Color32::from_rgb(0, 180, 180));
+
+                // Draw collapse triangle on first child row (painted, not text)
+                if let TimelineRow::GroupChild { show_collapse: true, .. } = row {
+                    let cx = header_rect.min.x + indent * 0.5;
+                    let cy = y + LAYER_HEIGHT * 0.5;
+                    let s = 4.0; // half-size of triangle
+                    // Down-pointing triangle (▼) for collapse
+                    let tri = vec![
+                        egui::pos2(cx - s, cy - s * 0.6),
+                        egui::pos2(cx + s, cy - s * 0.6),
+                        egui::pos2(cx, cy + s * 0.6),
+                    ];
+                    ui.painter().add(egui::Shape::convex_polygon(tri, egui::Color32::from_gray(180), egui::Stroke::NONE));
+                }
+
+                // Make the ENTIRE gutter clickable for collapse on any GroupChild row
+                if let TimelineRow::GroupChild { group, .. } = row {
+                    let gutter_response = ui.scope_builder(egui::UiBuilder::new().max_rect(gutter_rect), |ui| {
+                        ui.allocate_rect(gutter_rect, egui::Sense::click())
+                    }).inner;
+                    if gutter_response.clicked() {
+                        self.layer_control_clicked = true;
+                        pending_actions.push(Box::new(
+                            lightningbeam_core::actions::ToggleGroupExpansionAction::new(group.layer.id, false),
+                        ));
                     }
                 }
-                lightningbeam_core::layer::AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)), // Purple
-                lightningbeam_core::layer::AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)), // Pink
-            };
+            }
 
-            // Color indicator bar on the left edge
+            // Color indicator bar on the left edge (after gutter)
             let indicator_rect = egui::Rect::from_min_size(
-                header_rect.min,
+                header_rect.min + egui::vec2(indent, 0.0),
                 egui::vec2(4.0, LAYER_HEIGHT),
             );
             ui.painter().rect_filled(indicator_rect, 0.0, type_color);
 
+            // Expand triangle in the header for collapsed groups
+            let mut name_x_offset = 10.0 + indent;
+            if let TimelineRow::CollapsedGroup { group, .. } = row {
+                // Right-pointing triangle (▶) for expand, painted manually
+                let cx = header_rect.min.x + indent + 14.0;
+                let cy = y + 17.0;
+                let s = 4.0;
+                let tri = vec![
+                    egui::pos2(cx - s * 0.6, cy - s),
+                    egui::pos2(cx - s * 0.6, cy + s),
+                    egui::pos2(cx + s * 0.6, cy),
+                ];
+                ui.painter().add(egui::Shape::convex_polygon(tri, egui::Color32::from_gray(180), egui::Stroke::NONE));
+
+                // Clickable area for expand
+                let chevron_rect = egui::Rect::from_min_size(
+                    egui::pos2(header_rect.min.x + indent + 4.0, y + 4.0),
+                    egui::vec2(20.0, 24.0),
+                );
+                let chevron_response = ui.scope_builder(egui::UiBuilder::new().max_rect(chevron_rect), |ui| {
+                    ui.allocate_rect(chevron_rect, egui::Sense::click())
+                }).inner;
+                if chevron_response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::ToggleGroupExpansionAction::new(group.layer.id, true),
+                    ));
+                }
+                name_x_offset = 10.0 + indent + 18.0;
+            }
+
             // Layer name
             ui.painter().text(
-                header_rect.min + egui::vec2(10.0, 10.0),
+                header_rect.min + egui::vec2(name_x_offset, 10.0),
                 egui::Align2::LEFT_TOP,
-                layer_name,
+                &layer_name,
                 egui::FontId::proportional(14.0),
                 text_color,
             );
 
             // Layer type (smaller text below name with colored background)
-            let type_text_pos = header_rect.min + egui::vec2(10.0, 28.0);
+            let type_text_pos = header_rect.min + egui::vec2(name_x_offset, 28.0);
             let type_text_galley = ui.painter().layout_no_wrap(
                 layer_type.to_string(),
                 egui::FontId::proportional(11.0),
@@ -984,6 +1290,18 @@ impl TimelinePane {
                 egui::FontId::proportional(11.0),
                 secondary_text_color,
             );
+
+            // Get the AnyLayer reference for controls
+            let any_layer_for_controls: Option<&AnyLayer> = match row {
+                TimelineRow::Normal(l) => Some(l),
+                TimelineRow::CollapsedGroup { group, .. } => {
+                    // We need an AnyLayer ref - find it from context_layers
+                    context_layers.iter().rev().copied().find(|l| l.id() == group.layer.id)
+                }
+                TimelineRow::GroupChild { child, .. } => Some(child),
+            };
+
+            let Some(layer_for_controls) = any_layer_for_controls else { continue; };
 
             // Layer controls (mute, solo, lock, volume)
             let controls_top = header_rect.min.y + 4.0;
@@ -1013,15 +1331,14 @@ impl TimelinePane {
             );
 
             // Get layer ID and current property values from the layer we already have
-            let layer_id = layer.id();
-            let current_volume = layer.volume();
-            let is_muted = layer.muted();
-            let is_soloed = layer.soloed();
-            let is_locked = layer.locked();
+            let current_volume = layer_for_controls.volume();
+            let is_muted = layer_for_controls.muted();
+            let is_soloed = layer_for_controls.soloed();
+            let is_locked = layer_for_controls.locked();
 
             // Mute button — or camera toggle for video layers
-            let is_video_layer = matches!(layer, lightningbeam_core::layer::AnyLayer::Video(_));
-            let camera_enabled = if let lightningbeam_core::layer::AnyLayer::Video(v) = layer {
+            let is_video_layer = matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(_));
+            let camera_enabled = if let lightningbeam_core::layer::AnyLayer::Video(v) = layer_for_controls {
                 v.camera_enabled
             } else {
                 false
@@ -1213,9 +1530,11 @@ impl TimelinePane {
             }
         }
 
-        // Draw layer rows from document (reversed so newest layers appear on top)
-        for (i, layer) in context_layers.iter().rev().enumerate() {
-            let layer = *layer;
+        // Build virtual row list (accounts for group expansion)
+        let rows = build_timeline_rows(context_layers);
+
+        // Draw layer rows from virtual row list
+        for (i, row) in rows.iter().enumerate() {
             let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
@@ -1228,8 +1547,10 @@ impl TimelinePane {
                 egui::vec2(rect.width(), LAYER_HEIGHT),
             );
 
+            let row_layer_id = row.layer_id();
+
             // Active vs inactive background colors
-            let is_active = active_layer_id.map_or(false, |id| id == layer.id());
+            let is_active = active_layer_id.map_or(false, |id| id == row_layer_id);
             let bg_color = if is_active {
                 active_color
             } else {
@@ -1277,12 +1598,98 @@ impl TimelinePane {
                 }
             }
 
+            // For collapsed groups, render merged clip spans and skip normal clip rendering
+            if let TimelineRow::CollapsedGroup { group: g, .. } = row {
+                // Collect all child clip time ranges (with drag preview offset)
+                let child_clips = g.all_child_clip_instances();
+                let is_move_drag = self.clip_drag_state == Some(ClipDragType::Move);
+                let mut ranges: Vec<(f64, f64)> = Vec::new();
+                for (_child_layer_id, ci) in &child_clips {
+                    let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
+                        ci.trim_end.unwrap_or(1.0) - ci.trim_start
+                    });
+                    let mut start = ci.effective_start();
+                    let dur = ci.total_duration(clip_dur);
+                    // Apply drag offset for selected clips during move
+                    if is_move_drag && selection.contains_clip_instance(&ci.id) {
+                        start = (start + self.drag_offset).max(0.0);
+                    }
+                    ranges.push((start, start + dur));
+                }
+
+                // Sort and merge overlapping ranges
+                ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                let mut merged: Vec<(f64, f64)> = Vec::new();
+                for (s, e) in ranges {
+                    if let Some(last) = merged.last_mut() {
+                        if s <= last.1 {
+                            last.1 = last.1.max(e);
+                        } else {
+                            merged.push((s, e));
+                        }
+                    } else {
+                        merged.push((s, e));
+                    }
+                }
+
+                // Check if any child clips are selected (for highlight)
+                let any_selected = child_clips.iter().any(|(_, ci)| selection.contains_clip_instance(&ci.id));
+                // Draw each merged span as a teal bar (brighter when selected)
+                let teal = if any_selected {
+                    egui::Color32::from_rgb(30, 190, 190)
+                } else {
+                    egui::Color32::from_rgb(0, 150, 150)
+                };
+                let bright_teal = if any_selected {
+                    egui::Color32::from_rgb(150, 255, 255)
+                } else {
+                    egui::Color32::from_rgb(100, 220, 220)
+                };
+                for (s, e) in &merged {
+                    let sx = self.time_to_x(*s);
+                    let ex = self.time_to_x(*e).max(sx + MIN_CLIP_WIDTH_PX);
+                    if ex >= 0.0 && sx <= rect.width() {
+                        let vsx = sx.max(0.0);
+                        let vex = ex.min(rect.width());
+                        let span_rect = egui::Rect::from_min_max(
+                            egui::pos2(rect.min.x + vsx, y + 10.0),
+                            egui::pos2(rect.min.x + vex, y + LAYER_HEIGHT - 10.0),
+                        );
+                        painter.rect_filled(span_rect, 3.0, teal);
+                        painter.rect_stroke(
+                            span_rect,
+                            3.0,
+                            egui::Stroke::new(1.0, bright_teal),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+                }
+
+                // Separator line at bottom
+                painter.line_segment(
+                    [
+                        egui::pos2(layer_rect.min.x, layer_rect.max.y),
+                        egui::pos2(layer_rect.max.x, layer_rect.max.y),
+                    ],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                );
+                continue; // Skip normal clip rendering for collapsed groups
+            }
+
+            // Get the AnyLayer for normal rendering (Normal or GroupChild rows)
+            let layer: &AnyLayer = match row {
+                TimelineRow::Normal(l) => l,
+                TimelineRow::GroupChild { child, .. } => child,
+                TimelineRow::CollapsedGroup { .. } => unreachable!(), // handled above
+            };
+
             // Draw clip instances for this layer
-            let clip_instances = match layer {
+            let clip_instances: &[ClipInstance] = match layer {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
             };
 
             // For moves, precompute the clamped offset so all selected clips move uniformly
@@ -1584,6 +1991,10 @@ impl TimelinePane {
                             lightningbeam_core::layer::AnyLayer::Effect(_) => (
                                 egui::Color32::from_rgb(220, 80, 160), // Pink
                                 egui::Color32::from_rgb(255, 120, 200), // Bright pink
+                            ),
+                            lightningbeam_core::layer::AnyLayer::Group(_) => (
+                                egui::Color32::from_rgb(0, 150, 150), // Teal
+                                egui::Color32::from_rgb(100, 220, 220), // Bright teal
                             ),
                         };
 
@@ -2046,18 +2457,41 @@ impl TimelinePane {
                 if pos.y >= header_rect.min.y && pos.x >= content_rect.min.x {
                     let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
                     let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-                    // Get the layer at this index (accounting for reversed display order)
-                    if clicked_layer_index < layer_count {
-                        let layers: Vec<_> = context_layers.iter().rev().copied().collect();
-                        if let Some(layer) = layers.get(clicked_layer_index) {
+                    // Get the layer at this index (using virtual rows for group support)
+                    let click_rows = build_timeline_rows(context_layers);
+                    if clicked_layer_index < click_rows.len() {
+                        let click_row = &click_rows[clicked_layer_index];
+                        // Check collapsed groups first (merged spans)
+                        if matches!(click_row, TimelineRow::CollapsedGroup { .. }) {
+                            if let Some(child_ids) = self.detect_collapsed_group_at_pointer(
+                                pos, document, content_rect, header_rect, editing_clip_id,
+                            ) {
+                                if !child_ids.is_empty() {
+                                    if shift_held {
+                                        for id in &child_ids {
+                                            selection.add_clip_instance(*id);
+                                        }
+                                    } else {
+                                        selection.clear_clip_instances();
+                                        for id in &child_ids {
+                                            selection.add_clip_instance(*id);
+                                        }
+                                    }
+                                    *active_layer_id = Some(click_row.layer_id());
+                                    clicked_clip_instance = true;
+                                }
+                            }
+                        } else if let Some(layer) = click_row.as_any_layer() {
+                            // Normal or GroupChild rows: check individual clips
                             let _layer_data = layer.layer();
 
                             // Get clip instances for this layer
-                            let clip_instances = match layer {
+                            let clip_instances: &[ClipInstance] = match layer {
                                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+                                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
                             };
 
                             // Check if click is within any clip instance
@@ -2114,12 +2548,10 @@ impl TimelinePane {
                 let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
                 let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
 
-                // Get the layer at this index (accounting for reversed display order)
-                if clicked_layer_index < layer_count {
-                    let layers: Vec<_> = context_layers.iter().rev().copied().collect();
-                    if let Some(layer) = layers.get(clicked_layer_index) {
-                        *active_layer_id = Some(layer.id());
-                    }
+                // Get the layer at this index (using virtual rows for group support)
+                let header_rows = build_timeline_rows(context_layers);
+                if clicked_layer_index < header_rows.len() {
+                    *active_layer_id = Some(header_rows[clicked_layer_index].layer_id());
                 }
             }
         }
@@ -2155,6 +2587,24 @@ impl TimelinePane {
                         // Start dragging with the detected drag type
                         self.clip_drag_state = Some(drag_type);
                         self.drag_offset = 0.0;
+                    } else if let Some(child_ids) = self.detect_collapsed_group_at_pointer(
+                        mousedown_pos,
+                        document,
+                        content_rect,
+                        header_rect,
+                        editing_clip_id,
+                    ) {
+                        // Collapsed group merged span — select all child clips and start Move drag
+                        if !child_ids.is_empty() {
+                            if !shift_held {
+                                selection.clear_clip_instances();
+                            }
+                            for id in &child_ids {
+                                selection.add_clip_instance(*id);
+                            }
+                            self.clip_drag_state = Some(ClipDragType::Move);
+                            self.drag_offset = 0.0;
+                        }
                     }
                 }
             }
@@ -2174,18 +2624,9 @@ impl TimelinePane {
                 let mut layer_moves: HashMap<uuid::Uuid, Vec<(uuid::Uuid, f64, f64)>> =
                     HashMap::new();
 
-                // Iterate through all layers to find selected clip instances
-                for &layer in context_layers {
+                // Iterate through all layers (including group children) to find selected clip instances
+                for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
                     let layer_id = layer.id();
-
-                    // Get clip instances for this layer
-                    let clip_instances = match layer {
-                        lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                        lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                        lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                        lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                    };
-
                     // Find selected clip instances in this layer
                     for clip_instance in clip_instances {
                         if selection.contains_clip_instance(&clip_instance.id) {
@@ -2225,25 +2666,9 @@ impl TimelinePane {
                                 )>,
                             > = HashMap::new();
 
-                            // Iterate through all layers to find selected clip instances
-                            for &layer in context_layers {
+                            // Iterate through all layers (including group children) to find selected clip instances
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
                                 let layer_id = layer.id();
-                                let _layer_data = layer.layer();
-
-                                let clip_instances = match layer {
-                                    lightningbeam_core::layer::AnyLayer::Vector(vl) => {
-                                        &vl.clip_instances
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Audio(al) => {
-                                        &al.clip_instances
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Video(vl) => {
-                                        &vl.clip_instances
-                                    }
-                                    lightningbeam_core::layer::AnyLayer::Effect(el) => {
-                                        &el.clip_instances
-                                    }
-                                };
 
                                 // Find selected clip instances in this layer
                                 for clip_instance in clip_instances {
@@ -2367,14 +2792,8 @@ impl TimelinePane {
                         ClipDragType::LoopExtendRight => {
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for &layer in context_layers {
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
                                 let layer_id = layer.id();
-                                let clip_instances = match layer {
-                                    lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                                };
 
                                 for clip_instance in clip_instances {
                                     if selection.contains_clip_instance(&clip_instance.id) {
@@ -2439,14 +2858,8 @@ impl TimelinePane {
                             // Extend loop_before (pre-loop region)
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for &layer in context_layers {
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
                                 let layer_id = layer.id();
-                                let clip_instances = match layer {
-                                    lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                                    lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                                };
 
                                 for clip_instance in clip_instances {
                                     if selection.contains_clip_instance(&clip_instance.id) {
@@ -2529,15 +2942,13 @@ impl TimelinePane {
                     let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
                     let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
 
-                    // Get the layer at this index (accounting for reversed display order)
-                    if clicked_layer_index < layer_count {
-                        let layers: Vec<_> = context_layers.iter().rev().copied().collect();
-                        if let Some(layer) = layers.get(clicked_layer_index) {
-                            *active_layer_id = Some(layer.id());
-                            // Clear clip instance selection when clicking on empty layer area
-                            if !shift_held {
-                                selection.clear_clip_instances();
-                            }
+                    // Get the layer at this index (using virtual rows for group support)
+                    let empty_click_rows = build_timeline_rows(context_layers);
+                    if clicked_layer_index < empty_click_rows.len() {
+                        *active_layer_id = Some(empty_click_rows[clicked_layer_index].layer_id());
+                        // Clear clip instance selection when clicking on empty layer area
+                        if !shift_held {
+                            selection.clear_clip_instances();
                         }
                     }
                 }
@@ -2909,16 +3320,18 @@ impl PaneRenderer for TimelinePane {
         let document = shared.action_executor.document();
         let editing_clip_id = shared.editing_clip_id;
         let context_layers = document.context_layers(editing_clip_id.as_ref());
-        let layer_count = context_layers.len();
+        // Use virtual row count (includes expanded group children) for height calculations
+        let layer_count = build_timeline_rows(&context_layers).len();
 
         // Calculate project duration from last clip endpoint across all layers
         let mut max_endpoint: f64 = 10.0; // Default minimum duration
         for &layer in &context_layers {
-            let clip_instances = match layer {
+            let clip_instances: &[ClipInstance] = match layer {
                 lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
                 lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
+                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
             };
 
             for clip_instance in clip_instances {
@@ -3054,6 +3467,7 @@ impl PaneRenderer for TimelinePane {
                             AnyLayer::Audio(al) => &al.clip_instances,
                             AnyLayer::Video(vl) => &vl.clip_instances,
                             AnyLayer::Effect(el) => &el.clip_instances,
+                            AnyLayer::Group(_) => &[],
                         };
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
@@ -3083,6 +3497,7 @@ impl PaneRenderer for TimelinePane {
                             AnyLayer::Audio(al) => &al.clip_instances,
                             AnyLayer::Video(vl) => &vl.clip_instances,
                             AnyLayer::Effect(el) => &el.clip_instances,
+                            AnyLayer::Group(_) => &[],
                         };
                         // Check each selected clip
                         enabled = instances.iter()
@@ -3309,10 +3724,11 @@ impl PaneRenderer for TimelinePane {
                     let relative_y = pointer_pos.y - content_rect.min.y + self.viewport_scroll_y;
                     let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
 
-                    // Get the layer at this index (accounting for reversed display order)
-                    let layers: Vec<_> = context_layers.iter().rev().copied().collect();
+                    // Get the layer at this index (using virtual rows for group support)
+                    let drop_rows = build_timeline_rows(&context_layers);
 
-                    if let Some(layer) = layers.get(hovered_layer_index) {
+                    let drop_layer = drop_rows.get(hovered_layer_index).and_then(|r| r.as_any_layer());
+                    if let Some(layer) = drop_layer {
                         let is_compatible = can_drop_on_layer(layer, dragging.clip_type);
 
                         // Visual feedback: highlight compatible tracks
