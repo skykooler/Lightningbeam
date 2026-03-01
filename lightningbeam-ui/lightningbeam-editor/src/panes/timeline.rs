@@ -138,13 +138,6 @@ enum TimeDisplayFormat {
     Measures,
 }
 
-/// Type of recording in progress (for stop logic dispatch)
-enum RecordingType {
-    Audio,
-    Midi,
-    Webcam,
-}
-
 /// State for an in-progress layer header drag-to-reorder operation.
 struct LayerDragState {
     /// IDs of the layers being dragged (in visual order, top to bottom)
@@ -516,184 +509,254 @@ impl TimelinePane {
         }
     }
 
-    /// Start recording on the active layer (audio or video with camera)
+    /// Start recording on all selected recordable layers (or the active layer as fallback).
+    /// Groups are recursed into. At most one layer per recording type is recorded to
+    /// (topmost in visual order wins).
     fn start_recording(&mut self, shared: &mut SharedPaneState) {
         use lightningbeam_core::clip::{AudioClip, ClipInstance};
 
-        let Some(active_layer_id) = *shared.active_layer_id else {
-            println!("⚠️  No active layer selected for recording");
-            return;
-        };
-
-        // Check if this is a video layer with camera enabled
-        let is_video_camera = {
-            let document = shared.action_executor.document();
-            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
-            context_layers.iter().copied()
-                .find(|l| l.id() == active_layer_id)
-                .map(|layer| {
-                    if let AnyLayer::Video(v) = layer {
-                        v.camera_enabled
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(false)
-        };
-
-        if is_video_camera {
-            // Issue webcam recording start command (processed by main.rs)
-            *shared.webcam_record_command = Some(super::WebcamRecordCommand::Start {
-                layer_id: active_layer_id,
-            });
-            *shared.is_recording = true;
-            *shared.recording_start_time = *shared.playback_time;
-            *shared.recording_layer_id = Some(active_layer_id);
-
-            // Auto-start playback for recording
-            if !*shared.is_playing {
-                if let Some(controller_arc) = shared.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-                    controller.play();
-                    *shared.is_playing = true;
-                    println!("▶ Auto-started playback for webcam recording");
+        // Step 1: Collect candidate layer IDs from focus selection, falling back to active layer
+        let candidate_ids: Vec<uuid::Uuid> = match shared.focus {
+            lightningbeam_core::selection::FocusSelection::Layers(ref ids) if !ids.is_empty() => {
+                ids.clone()
+            }
+            _ => {
+                if let Some(id) = *shared.active_layer_id {
+                    vec![id]
+                } else {
+                    println!("⚠️  No active layer selected for recording");
+                    return;
                 }
             }
-            println!("📹 Started webcam recording on layer {}", active_layer_id);
+        };
+
+        // Step 2: Resolve layers, recursing into groups to collect recordable leaves.
+        // Categorize by recording type. Use visual ordering (build_timeline_rows) to pick topmost.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum RecordCandidate {
+            AudioSampled,
+            AudioMidi,
+            VideoCamera,
+        }
+
+        let mut candidates: Vec<(uuid::Uuid, RecordCandidate, usize)> = Vec::new(); // (layer_id, type, visual_row_index)
+
+        {
+            let document = shared.action_executor.document();
+            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+            let rows = build_timeline_rows(&context_layers);
+
+            // Helper: collect recordable leaf layer IDs from a layer (recurse into groups)
+            fn collect_recordable_leaves(layer: &AnyLayer, out: &mut Vec<uuid::Uuid>) {
+                match layer {
+                    AnyLayer::Audio(_) => out.push(layer.id()),
+                    AnyLayer::Video(v) if v.camera_enabled => out.push(layer.id()),
+                    AnyLayer::Group(g) => {
+                        for child in &g.children {
+                            collect_recordable_leaves(child, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut leaf_ids: Vec<uuid::Uuid> = Vec::new();
+            for cid in &candidate_ids {
+                if let Some(layer) = context_layers.iter().copied().find(|l| l.id() == *cid) {
+                    collect_recordable_leaves(layer, &mut leaf_ids);
+                } else {
+                    // Try deeper in the tree (for layers inside groups)
+                    if let Some(layer) = document.root.get_child(cid) {
+                        collect_recordable_leaves(layer, &mut leaf_ids);
+                    }
+                }
+            }
+
+            // Deduplicate
+            leaf_ids.sort();
+            leaf_ids.dedup();
+
+            // Categorize and find visual row index for ordering
+            for leaf_id in &leaf_ids {
+                let visual_idx = rows.iter().position(|r| r.layer_id() == *leaf_id).unwrap_or(usize::MAX);
+                if let Some(layer) = document.root.get_child(leaf_id).or_else(|| {
+                    context_layers.iter().copied().find(|l| l.id() == *leaf_id)
+                }) {
+                    let cat = match layer {
+                        AnyLayer::Audio(a) => match a.audio_layer_type {
+                            AudioLayerType::Sampled => Some(RecordCandidate::AudioSampled),
+                            AudioLayerType::Midi => Some(RecordCandidate::AudioMidi),
+                        },
+                        AnyLayer::Video(v) if v.camera_enabled => Some(RecordCandidate::VideoCamera),
+                        _ => None,
+                    };
+                    if let Some(cat) = cat {
+                        candidates.push((*leaf_id, cat, visual_idx));
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            println!("⚠️  No recordable layers in selection");
             return;
         }
 
-        // Get layer type (copy it so we can drop the document borrow before mutating)
-        let layer_type = {
-            let document = shared.action_executor.document();
-            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
-            let Some(layer) = context_layers.iter().copied().find(|l| l.id() == active_layer_id) else {
-                println!("⚠️  Active layer not found in document");
-                return;
-            };
-            let AnyLayer::Audio(audio_layer) = layer else {
-                println!("⚠️  Active layer is not an audio layer - cannot record");
-                return;
-            };
-            audio_layer.audio_layer_type
-        };
-
-        // Get the backend track ID for this layer
-        let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) else {
-            println!("⚠️  No backend track mapped for layer {}", active_layer_id);
-            return;
-        };
-
-        let start_time = *shared.playback_time;
-
-        // Start recording based on layer type
-        if let Some(controller_arc) = shared.audio_controller {
-            let mut controller = controller_arc.lock().unwrap();
-
-            match layer_type {
-                AudioLayerType::Midi => {
-                    // Create backend MIDI clip and start recording
-                    let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
-                    controller.start_midi_recording(track_id, clip_id, start_time);
-                    shared.recording_clips.insert(active_layer_id, clip_id);
-                    println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
-                             track_id, start_time, clip_id);
-
-                    // Drop controller lock before document mutation
-                    drop(controller);
-
-                    // Create document clip + clip instance immediately (clip_id is known synchronously)
-                    let doc_clip = AudioClip::new_midi("Recording...", clip_id, 0.0);
-                    let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
-
-                    let clip_instance = ClipInstance::new(doc_clip_id)
-                        .with_timeline_start(start_time);
-
-                    if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&active_layer_id) {
-                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                            audio_layer.clip_instances.push(clip_instance);
-                        }
-                    }
-
-                    // Initialize empty cache entry for this clip
-                    shared.midi_event_cache.insert(clip_id, Vec::new());
+        // Step 3: Sort by visual position (topmost first) and deduplicate by type
+        candidates.sort_by_key(|c| c.2);
+        let mut seen_sampled = false;
+        let mut seen_midi = false;
+        let mut seen_webcam = false;
+        candidates.retain(|c| {
+            match c.1 {
+                RecordCandidate::AudioSampled => {
+                    if seen_sampled { return false; }
+                    seen_sampled = true;
                 }
-                AudioLayerType::Sampled => {
-                    // For audio recording, backend creates the clip
-                    controller.start_recording(track_id, start_time);
-                    println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
-                    drop(controller);
+                RecordCandidate::AudioMidi => {
+                    if seen_midi { return false; }
+                    seen_midi = true;
+                }
+                RecordCandidate::VideoCamera => {
+                    if seen_webcam { return false; }
+                    seen_webcam = true;
                 }
             }
+            true
+        });
 
-            // Re-acquire lock for playback start
-            if !*shared.is_playing {
+        let start_time = *shared.playback_time;
+        shared.recording_layer_ids.clear();
+
+        // Step 4: Dispatch recording for each candidate
+        for &(layer_id, ref cat, _) in &candidates {
+            match cat {
+                RecordCandidate::VideoCamera => {
+                    *shared.webcam_record_command = Some(super::WebcamRecordCommand::Start {
+                        layer_id,
+                    });
+                    shared.recording_layer_ids.push(layer_id);
+                    println!("📹 Started webcam recording on layer {}", layer_id);
+                }
+                RecordCandidate::AudioSampled => {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            controller.start_recording(track_id, start_time);
+                            println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
+                        }
+                        shared.recording_layer_ids.push(layer_id);
+                    } else {
+                        println!("⚠️  No backend track mapped for layer {}", layer_id);
+                    }
+                }
+                RecordCandidate::AudioMidi => {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
+                            controller.start_midi_recording(track_id, clip_id, start_time);
+                            shared.recording_clips.insert(layer_id, clip_id);
+                            println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
+                                     track_id, start_time, clip_id);
+                        }
+
+                        // Create document clip + clip instance immediately
+                        let doc_clip = AudioClip::new_midi("Recording...",
+                            *shared.recording_clips.get(&layer_id).unwrap_or(&0), 0.0);
+                        let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
+
+                        let clip_instance = ClipInstance::new(doc_clip_id)
+                            .with_timeline_start(start_time);
+
+                        if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                audio_layer.clip_instances.push(clip_instance);
+                            }
+                        }
+
+                        // Initialize empty cache entry
+                        if let Some(&clip_id) = shared.recording_clips.get(&layer_id) {
+                            shared.midi_event_cache.insert(clip_id, Vec::new());
+                        }
+
+                        shared.recording_layer_ids.push(layer_id);
+                    } else {
+                        println!("⚠️  No backend track mapped for layer {}", layer_id);
+                    }
+                }
+            }
+        }
+
+        if shared.recording_layer_ids.is_empty() {
+            println!("⚠️  Failed to start recording on any layer");
+            return;
+        }
+
+        // Auto-start playback if needed
+        if !*shared.is_playing {
+            if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
                 controller.play();
                 *shared.is_playing = true;
                 println!("▶ Auto-started playback for recording");
             }
-
-            // Store recording state
-            *shared.is_recording = true;
-            *shared.recording_start_time = start_time;
-            *shared.recording_layer_id = Some(active_layer_id);
-        } else {
-            println!("⚠️  No audio controller available");
         }
+
+        *shared.is_recording = true;
+        *shared.recording_start_time = start_time;
     }
 
-    /// Stop the current recording
+    /// Stop all active recordings
     fn stop_recording(&mut self, shared: &mut SharedPaneState) {
-        // Determine recording type by checking the layer
-        let recording_type = if let Some(layer_id) = *shared.recording_layer_id {
-            let context_layers = shared.action_executor.document().context_layers(shared.editing_clip_id.as_ref());
-            context_layers.iter().copied()
-                .find(|l| l.id() == layer_id)
-                .map(|layer| {
+        let stop_wall = std::time::Instant::now();
+        eprintln!("[STOP] stop_recording called at {:?}", stop_wall);
+
+        // Determine which recording types are active by checking recording_layer_ids
+        let mut has_audio = false;
+        let mut has_midi = false;
+        let mut has_webcam = false;
+
+        {
+            let document = shared.action_executor.document();
+            for layer_id in shared.recording_layer_ids.iter() {
+                if let Some(layer) = document.root.get_child(layer_id) {
                     match layer {
-                        lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
-                            if matches!(audio_layer.audio_layer_type, lightningbeam_core::layer::AudioLayerType::Midi) {
-                                RecordingType::Midi
-                            } else {
-                                RecordingType::Audio
+                        lightningbeam_core::layer::AnyLayer::Audio(a) => {
+                            match a.audio_layer_type {
+                                lightningbeam_core::layer::AudioLayerType::Sampled => has_audio = true,
+                                lightningbeam_core::layer::AudioLayerType::Midi => has_midi = true,
                             }
                         }
                         lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled => {
-                            RecordingType::Webcam
+                            has_webcam = true;
                         }
-                        _ => RecordingType::Audio,
-                    }
-                })
-                .unwrap_or(RecordingType::Audio)
-        } else {
-            RecordingType::Audio
-        };
-
-        match recording_type {
-            RecordingType::Webcam => {
-                // Issue webcam stop command (processed by main.rs)
-                *shared.webcam_record_command = Some(super::WebcamRecordCommand::Stop);
-                println!("📹 Stopped webcam recording");
-            }
-            _ => {
-                if let Some(controller_arc) = shared.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-
-                    if matches!(recording_type, RecordingType::Midi) {
-                        controller.stop_midi_recording();
-                        println!("🎹 Stopped MIDI recording");
-                    } else {
-                        controller.stop_recording();
-                        println!("🎤 Stopped audio recording");
+                        _ => {}
                     }
                 }
             }
         }
 
-        // Note: Don't clear recording_layer_id here!
-        // The RecordingStopped/MidiRecordingStopped event handler in main.rs
-        // needs it to finalize the clip. It will clear the state after processing.
+        if has_webcam {
+            *shared.webcam_record_command = Some(super::WebcamRecordCommand::Stop);
+            eprintln!("[STOP] Webcam stop command queued at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        if let Some(controller_arc) = shared.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            if has_midi {
+                controller.stop_midi_recording();
+                eprintln!("[STOP] MIDI stop command sent at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+            }
+            if has_audio {
+                controller.stop_recording();
+                eprintln!("[STOP] Audio stop command sent at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+
+        // Note: Don't clear recording_layer_ids here!
+        // The RecordingStopped/MidiRecordingStopped event handlers in main.rs
+        // need them to finalize clips. They will clear the state after processing.
         // Only clear is_recording to update UI state immediately.
         *shared.is_recording = false;
     }
@@ -3155,8 +3218,21 @@ impl TimelinePane {
                     if clicked_layer_index < header_rows.len() {
                         let layer_id = header_rows[clicked_layer_index].layer_id();
                         let clicked_parent = header_rows[clicked_layer_index].parent_id();
+                        let prev_active = *active_layer_id;
                         *active_layer_id = Some(layer_id);
                         if shift_held {
+                            // If focus doesn't already contain the previously active layer
+                            // (e.g. it was set by creating a layer rather than clicking),
+                            // seed the selection with it so shift-click extends from it.
+                            if let Some(prev) = prev_active.filter(|id| *id != layer_id) {
+                                let active_in_focus = matches!(
+                                    &focus,
+                                    lightningbeam_core::selection::FocusSelection::Layers(ids) if ids.contains(&prev)
+                                );
+                                if !active_in_focus {
+                                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![prev]);
+                                }
+                            }
                             shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
                         } else {
                             // Only change selection if the clicked layer isn't already selected
@@ -3742,8 +3818,18 @@ impl TimelinePane {
                     if clicked_layer_index < empty_click_rows.len() {
                         let layer_id = empty_click_rows[clicked_layer_index].layer_id();
                         let clicked_parent = empty_click_rows[clicked_layer_index].parent_id();
+                        let prev_active = *active_layer_id;
                         *active_layer_id = Some(layer_id);
                         if shift_held {
+                            if let Some(prev) = prev_active.filter(|id| *id != layer_id) {
+                                let active_in_focus = matches!(
+                                    &focus,
+                                    lightningbeam_core::selection::FocusSelection::Layers(ids) if ids.contains(&prev)
+                                );
+                                if !active_in_focus {
+                                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![prev]);
+                                }
+                            }
                             shift_toggle_layer(focus, layer_id, clicked_parent, &empty_click_rows);
                         } else {
                             selection.clear_clip_instances();

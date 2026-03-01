@@ -771,8 +771,6 @@ struct EditorApp {
     webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
     /// Pending webcam recording command (set by timeline, processed in update)
     webcam_record_command: Option<panes::WebcamRecordCommand>,
-    /// Layer being recorded to via webcam
-    webcam_recording_layer_id: Option<Uuid>,
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
@@ -793,7 +791,7 @@ struct EditorApp {
     is_recording: bool,                   // Whether recording is currently active
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
     recording_start_time: f64,            // Playback time when recording started
-    recording_layer_id: Option<Uuid>,     // Layer being recorded to (for creating clips)
+    recording_layer_ids: Vec<Uuid>,       // Layers being recorded to (for creating clips)
     // Asset drag-and-drop state
     dragging_asset: Option<panes::DraggingAsset>, // Asset being dragged from Asset Library
     // Clipboard
@@ -1032,7 +1030,6 @@ impl EditorApp {
             webcam: None,
             webcam_frame: None,
             webcam_record_command: None,
-            webcam_recording_layer_id: None,
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             clip_to_metatrack_map: HashMap::new(),
@@ -1045,7 +1042,7 @@ impl EditorApp {
             is_recording: false,              // Not recording initially
             recording_clips: HashMap::new(),  // No active recording clips
             recording_start_time: 0.0,        // Will be set when recording starts
-            recording_layer_id: None,         // Will be set when recording starts
+            recording_layer_ids: Vec::new(),  // Will be populated when recording starts
             dragging_asset: None, // No asset being dragged initially
             clipboard_manager: lightningbeam_core::clipboard::ClipboardManager::new(),
             effect_to_load: None,
@@ -4333,28 +4330,30 @@ impl eframe::App for EditorApp {
                         AudioEvent::RecordingStarted(track_id, backend_clip_id, rec_sample_rate, rec_channels) => {
                             println!("🎤 Recording started on track {:?}, backend_clip_id={}", track_id, backend_clip_id);
 
-                            // Create clip in document and add instance to layer
-                            if let Some(layer_id) = self.recording_layer_id {
-                                use lightningbeam_core::clip::{AudioClip, ClipInstance};
+                            // Create clip in document and add instance to the layer for this track
+                            if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
+                                if self.recording_layer_ids.contains(&layer_id) {
+                                    use lightningbeam_core::clip::{AudioClip, ClipInstance};
 
-                                // Create a recording-in-progress clip (no pool index yet)
-                                let clip = AudioClip::new_recording("Recording...");
-                                let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+                                    // Create a recording-in-progress clip (no pool index yet)
+                                    let clip = AudioClip::new_recording("Recording...");
+                                    let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                                // Create clip instance on the layer
-                                let clip_instance = ClipInstance::new(doc_clip_id)
-                                    .with_timeline_start(self.recording_start_time);
+                                    // Create clip instance on the layer
+                                    let clip_instance = ClipInstance::new(doc_clip_id)
+                                        .with_timeline_start(self.recording_start_time);
 
-                                // Add instance to layer (works for root and inside movie clips)
-                                if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
-                                    if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                        audio_layer.clip_instances.push(clip_instance);
-                                        println!("✅ Created recording clip instance on layer {}", layer_id);
+                                    // Add instance to layer (works for root and inside movie clips)
+                                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                            audio_layer.clip_instances.push(clip_instance);
+                                            println!("✅ Created recording clip instance on layer {}", layer_id);
+                                        }
                                     }
-                                }
 
-                                // Store mapping for later updates
-                                self.recording_clips.insert(layer_id, backend_clip_id);
+                                    // Store mapping for later updates
+                                    self.recording_clips.insert(layer_id, backend_clip_id);
+                                }
                             }
 
                             // Initialize live waveform cache for recording
@@ -4362,11 +4361,15 @@ impl eframe::App for EditorApp {
 
                             ctx.request_repaint();
                         }
-                        AudioEvent::RecordingProgress(_clip_id, duration) => {
+                        AudioEvent::RecordingProgress(_backend_clip_id, duration) => {
                             // Update clip duration as recording progresses
-                            if let Some(layer_id) = self.recording_layer_id {
-                                // First, find the clip_id from the layer (read-only borrow)
-                                let clip_id = {
+                            // Find which layer this backend clip belongs to via recording_clips
+                            let layer_id = self.recording_clips.iter()
+                                .find(|(_, &cid)| cid == _backend_clip_id)
+                                .map(|(&lid, _)| lid);
+                            if let Some(layer_id) = layer_id {
+                                // First, find the doc clip_id from the layer (read-only borrow)
+                                let doc_clip_id = {
                                     let document = self.action_executor.document();
                                     document.get_layer(&layer_id)
                                         .and_then(|layer| {
@@ -4379,8 +4382,8 @@ impl eframe::App for EditorApp {
                                 };
 
                                 // Then update the clip duration (mutable borrow)
-                                if let Some(clip_id) = clip_id {
-                                    if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
+                                if let Some(doc_clip_id) = doc_clip_id {
+                                    if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         if clip.is_recording() {
                                             clip.duration = duration;
                                         }
@@ -4390,7 +4393,7 @@ impl eframe::App for EditorApp {
                             ctx.request_repaint();
                         }
                         AudioEvent::RecordingStopped(_backend_clip_id, pool_index, _waveform) => {
-                            println!("🎤 Recording stopped: pool_index={}", pool_index);
+                            eprintln!("[STOP] AudioEvent::RecordingStopped received (pool_index={})", pool_index);
 
                             // Clean up live recording waveform cache
                             self.raw_audio_cache.remove(&usize::MAX);
@@ -4414,7 +4417,7 @@ impl eframe::App for EditorApp {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.get_pool_file_info(pool_index) {
                                     Ok((dur, _, _)) => {
-                                        println!("✅ Got duration from backend: {:.2}s", dur);
+                                        eprintln!("[AUDIO] Got duration from backend: {:.4}s", dur);
                                         self.audio_duration_cache.insert(pool_index, dur);
                                         dur
                                     }
@@ -4429,7 +4432,11 @@ impl eframe::App for EditorApp {
 
                             // Finalize the recording clip with real pool_index and duration
                             // and sync to backend for playback
-                            if let Some(layer_id) = self.recording_layer_id {
+                            // Find which layer this recording belongs to via recording_clips
+                            let recording_layer = self.recording_clips.iter()
+                                .find(|(_, &cid)| cid == _backend_clip_id)
+                                .map(|(&lid, _)| lid);
+                            if let Some(layer_id) = recording_layer {
                                 // First, find the clip instance and clip id
                                 let (clip_id, instance_id, timeline_start, trim_start) = {
                                     let document = self.action_executor.document();
@@ -4451,7 +4458,7 @@ impl eframe::App for EditorApp {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
-                                            println!("✅ Finalized recording clip: pool={}, duration={:.2}s", pool_index, duration);
+                                            eprintln!("[AUDIO] Finalized recording clip: pool={}, duration={:.4}s", pool_index, duration);
                                         }
                                     }
 
@@ -4493,22 +4500,32 @@ impl eframe::App for EditorApp {
                                 }
                             }
 
-                            // Clear recording state
-                            self.is_recording = false;
-                            self.recording_clips.clear();
-                            self.recording_layer_id = None;
+                            // Remove this layer from active recordings
+                            if let Some(layer_id) = recording_layer {
+                                self.recording_layer_ids.retain(|id| *id != layer_id);
+                                self.recording_clips.remove(&layer_id);
+                            }
+                            // Clear global recording state only when all recordings are done
+                            if self.recording_layer_ids.is_empty() {
+                                self.is_recording = false;
+                                self.recording_clips.clear();
+                            }
                             ctx.request_repaint();
                         }
                         AudioEvent::RecordingError(message) => {
                             eprintln!("❌ Recording error: {}", message);
                             self.is_recording = false;
                             self.recording_clips.clear();
-                            self.recording_layer_id = None;
+                            self.recording_layer_ids.clear();
                             ctx.request_repaint();
                         }
                         AudioEvent::MidiRecordingProgress(_track_id, clip_id, duration, notes) => {
                             // Update clip duration in document (so timeline bar grows)
-                            if let Some(layer_id) = self.recording_layer_id {
+                            // Find layer for this track via track_to_layer_map
+                            let midi_layer_id = self.track_to_layer_map.get(&_track_id)
+                                .filter(|lid| self.recording_layer_ids.contains(lid))
+                                .copied();
+                            if let Some(layer_id) = midi_layer_id {
                                 let doc_clip_id = {
                                     let document = self.action_executor.document();
                                     document.get_layer(&layer_id)
@@ -4567,7 +4584,10 @@ impl eframe::App for EditorApp {
                                         self.midi_event_cache.insert(clip_id, cache_events);
 
                                         // Update document clip with final duration and name
-                                        if let Some(layer_id) = self.recording_layer_id {
+                                        let midi_layer_id = self.track_to_layer_map.get(&track_id)
+                                            .filter(|lid| self.recording_layer_ids.contains(lid))
+                                            .copied();
+                                        if let Some(layer_id) = midi_layer_id {
                                             let doc_clip_id = {
                                                 let document = self.action_executor.document();
                                                 document.get_layer(&layer_id)
@@ -4601,10 +4621,15 @@ impl eframe::App for EditorApp {
                             // The backend created the instance in create_midi_clip(), but doesn't
                             // report the instance_id back. Needed for move/trim operations later.
 
-                            // Clear recording state
-                            self.is_recording = false;
-                            self.recording_clips.clear();
-                            self.recording_layer_id = None;
+                            // Remove this MIDI layer from active recordings
+                            if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
+                                self.recording_layer_ids.retain(|id| *id != layer_id);
+                                self.recording_clips.remove(&layer_id);
+                            }
+                            if self.recording_layer_ids.is_empty() {
+                                self.is_recording = false;
+                                self.recording_clips.clear();
+                            }
                             ctx.request_repaint();
                         }
                         AudioEvent::AudioFileReady { pool_index, path, channels, sample_rate, duration, format } => {
@@ -5031,7 +5056,7 @@ impl eframe::App for EditorApp {
                     is_recording: &mut self.is_recording,
                     recording_clips: &mut self.recording_clips,
                     recording_start_time: &mut self.recording_start_time,
-                    recording_layer_id: &mut self.recording_layer_id,
+                    recording_layer_ids: &mut self.recording_layer_ids,
                     dragging_asset: &mut self.dragging_asset,
                     stroke_width: &mut self.stroke_width,
                     fill_enabled: &mut self.fill_enabled,
@@ -5157,7 +5182,7 @@ impl eframe::App for EditorApp {
             // Process webcam recording commands from timeline
             if let Some(cmd) = self.webcam_record_command.take() {
                 match cmd {
-                    panes::WebcamRecordCommand::Start { layer_id } => {
+                    panes::WebcamRecordCommand::Start { .. } => {
                         // Ensure webcam is open
                         if self.webcam.is_none() {
                             if let Some(device) = lightningbeam_core::webcam::default_camera() {
@@ -5191,7 +5216,6 @@ impl eframe::App for EditorApp {
                             let recording_path = recording_dir.join(format!("webcam_recording_{}.{}", timestamp, ext));
                             match webcam.start_recording(recording_path, codec) {
                                 Ok(()) => {
-                                    self.webcam_recording_layer_id = Some(layer_id);
                                     eprintln!("[WEBCAM] Recording started");
                                 }
                                 Err(e) => {
@@ -5201,13 +5225,25 @@ impl eframe::App for EditorApp {
                         }
                     }
                     panes::WebcamRecordCommand::Stop => {
+                        eprintln!("[STOP] Webcam stop command processed (main.rs handler)");
+                        // Find the webcam recording layer before stopping (need it for cleanup)
+                        let webcam_layer_id = {
+                            let document = self.action_executor.document();
+                            self.recording_layer_ids.iter().copied().find(|lid| {
+                                document.get_layer(lid).map_or(false, |l| {
+                                    matches!(l, lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled)
+                                })
+                            })
+                        };
                         if let Some(webcam) = &mut self.webcam {
+                            let stop_t = std::time::Instant::now();
                             match webcam.stop_recording() {
                                 Ok(result) => {
+                                    eprintln!("[STOP] webcam.stop_recording() returned in {:.1}ms", stop_t.elapsed().as_secs_f64() * 1000.0);
                                     let file_path_str = result.file_path.to_string_lossy().to_string();
-                                    eprintln!("[WEBCAM] Recording saved to: {}", file_path_str);
+                                    eprintln!("[WEBCAM] Recording saved to: {} (recorder duration={:.4}s)", file_path_str, result.duration);
                                     // Create VideoClip + ClipInstance from recorded file
-                                    if let Some(layer_id) = self.webcam_recording_layer_id.take() {
+                                    if let Some(layer_id) = webcam_layer_id {
                                         match lightningbeam_core::video::probe_video(&file_path_str) {
                                             Ok(info) => {
                                                 use lightningbeam_core::clip::{VideoClip, ClipInstance};
@@ -5285,7 +5321,10 @@ impl eframe::App for EditorApp {
                                                     }
                                                 });
 
-                                                eprintln!("[WEBCAM] Created video clip: {:.1}s @ {:.1}fps", duration, info.fps);
+                                                eprintln!(
+                                                    "[WEBCAM] probe_video: duration={:.4}s, fps={:.1}, {}x{}. Using probe duration for clip.",
+                                                    info.duration, info.fps, info.width, info.height,
+                                                );
                                             }
                                             Err(e) => {
                                                 eprintln!("[WEBCAM] Failed to probe recorded video: {}", e);
@@ -5295,12 +5334,18 @@ impl eframe::App for EditorApp {
                                 }
                                 Err(e) => {
                                     eprintln!("[WEBCAM] Failed to stop recording: {}", e);
-                                    self.webcam_recording_layer_id = None;
+                                    // webcam layer cleanup handled by recording_layer_ids.clear() below
                                 }
                             }
                         }
-                        self.is_recording = false;
-                        self.recording_layer_id = None;
+                        // Remove webcam layer from active recordings
+                        if let Some(wid) = webcam_layer_id {
+                            self.recording_layer_ids.retain(|id| *id != wid);
+                        }
+                        if self.recording_layer_ids.is_empty() {
+                            self.is_recording = false;
+                            self.recording_clips.clear();
+                        }
                     }
                 }
             }

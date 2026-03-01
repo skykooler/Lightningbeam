@@ -57,8 +57,10 @@ pub struct DraggingAsset {
 
 /// Command for webcam recording (issued by timeline, processed by main)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WebcamRecordCommand {
     /// Start recording on the given video layer
+    // TODO: remove layer_id — recording_layer_ids now tracks which layers are recording
     Start { layer_id: uuid::Uuid },
     /// Stop current webcam recording
     Stop,
@@ -198,7 +200,7 @@ pub struct SharedPaneState<'a> {
     pub is_recording: &'a mut bool,  // Whether recording is currently active
     pub recording_clips: &'a mut std::collections::HashMap<uuid::Uuid, u32>, // layer_id -> clip_id
     pub recording_start_time: &'a mut f64,  // Playback time when recording started
-    pub recording_layer_id: &'a mut Option<uuid::Uuid>,  // Layer being recorded to
+    pub recording_layer_ids: &'a mut Vec<uuid::Uuid>,  // Layers being recorded to
     /// Asset being dragged from Asset Library (for cross-pane drag-and-drop)
     pub dragging_asset: &'a mut Option<DraggingAsset>,
     // Tool-specific options for infopanel
