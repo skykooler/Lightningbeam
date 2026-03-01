@@ -32,6 +32,23 @@ impl Dcel {
         result
     }
 
+    /// Compute the signed area of the cycle starting at `start`.
+    /// Positive = CCW (interior), negative = CW (exterior).
+    pub fn cycle_signed_area(&self, start: HalfEdgeId) -> f64 {
+        let mut area = 0.0;
+        let mut cur = start;
+        loop {
+            let p0 = self.vertices[self.half_edges[cur.idx()].origin.idx()].position;
+            cur = self.half_edges[cur.idx()].next;
+            let p1 = self.vertices[self.half_edges[cur.idx()].origin.idx()].position;
+            area += p0.x * p1.y - p1.x * p0.y;
+            if cur == start {
+                break;
+            }
+        }
+        area * 0.5
+    }
+
     /// Get all half-edges on a face's outer boundary.
     pub fn face_boundary(&self, face_id: FaceId) -> Vec<HalfEdgeId> {
         let ohe = self.faces[face_id.idx()].outer_half_edge;

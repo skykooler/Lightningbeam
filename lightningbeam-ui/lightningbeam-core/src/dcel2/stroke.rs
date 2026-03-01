@@ -874,6 +874,70 @@ mod tests {
         dcel.validate();
     }
 
+    /// Rectangle with a face, then a stroke drawn across it.
+    /// The stroke should split two rectangle edges and create sub-edges
+    /// inside and outside the face. All face assignments must be consistent.
+    #[test]
+    fn stroke_across_filled_rectangle() {
+        let mut dcel = Dcel::new();
+
+        // Insert rectangle as 4 line segments (like bezpath_to_cubic_segments would)
+        let r = 100.0;
+        let segs = [
+            // bottom: (0,0) → (r,0)
+            CubicBez::new(
+                Point::new(0.0, 0.0), Point::new(r / 3.0, 0.0),
+                Point::new(2.0 * r / 3.0, 0.0), Point::new(r, 0.0),
+            ),
+            // right: (r,0) → (r,r)
+            CubicBez::new(
+                Point::new(r, 0.0), Point::new(r, r / 3.0),
+                Point::new(r, 2.0 * r / 3.0), Point::new(r, r),
+            ),
+            // top: (r,r) → (0,r)
+            CubicBez::new(
+                Point::new(r, r), Point::new(2.0 * r / 3.0, r),
+                Point::new(r / 3.0, r), Point::new(0.0, r),
+            ),
+            // left: (0,r) → (0,0)
+            CubicBez::new(
+                Point::new(0.0, r), Point::new(0.0, 2.0 * r / 3.0),
+                Point::new(0.0, r / 3.0), Point::new(0.0, 0.0),
+            ),
+        ];
+
+        let rect_result = dcel.insert_stroke(&segs, None, None, 1.0);
+        println!("Rectangle: {} edges, {} vertices",
+            rect_result.new_edges.len(), rect_result.new_vertices.len());
+
+        // Create a face on the interior cycle (like add_shape does)
+        let first_edge = rect_result.new_edges[0];
+        let [he_a, he_b] = dcel.edge(first_edge).half_edges;
+        let interior_he = if dcel.cycle_signed_area(he_a) > 0.0 { he_a } else { he_b };
+        let face = dcel.create_face_at_cycle(interior_he);
+        println!("Created face {:?}", face);
+
+        dcel.validate();
+
+        // Now draw a horizontal stroke across the rectangle at y=50
+        // from x=-50 to x=150 (extending beyond both sides)
+        let stroke = CubicBez::new(
+            Point::new(-50.0, 50.0), Point::new(16.0, 50.0),
+            Point::new(83.0, 50.0), Point::new(150.0, 50.0),
+        );
+
+        let stroke_result = dcel.insert_stroke(&[stroke], None, None, 1.0);
+        println!("Stroke: {} edges, {} splits, {} vertices",
+            stroke_result.new_edges.len(), stroke_result.split_edges.len(),
+            stroke_result.new_vertices.len());
+
+        // Should have split 2 rectangle edges (left and right sides)
+        assert_eq!(stroke_result.split_edges.len(), 2,
+            "stroke should cross left and right sides of rectangle");
+
+        dcel.validate();
+    }
+
     #[test]
     fn insert_stroke_self_intersecting_segment() {
         let mut dcel = Dcel::new();

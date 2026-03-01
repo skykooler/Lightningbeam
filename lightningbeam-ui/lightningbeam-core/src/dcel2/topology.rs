@@ -224,7 +224,14 @@ impl Dcel {
         let into_v1 = self.half_edges[ccw_v1.idx()].prev;
         let into_v2 = self.half_edges[ccw_v2.idx()].prev;
 
-        let actual_face = self.half_edges[into_v1.idx()].face;
+        let face_v1 = self.half_edges[into_v1.idx()].face;
+        let face_v2 = self.half_edges[into_v2.idx()].face;
+        debug_assert_eq!(
+            face_v1, face_v2,
+            "insert_edge_both_connected: into_v1 (HE{}) on {:?} but into_v2 (HE{}) on {:?}",
+            into_v1.0, face_v1, into_v2.0, face_v2
+        );
+        let actual_face = face_v1;
 
         // Splice:
         //   into_v1 → he_fwd → ccw_v2 → ...
