@@ -4041,12 +4041,8 @@ impl eframe::App for EditorApp {
 
         // Webcam management: open/close based on camera_enabled layers, poll frames
         {
-            let any_camera_enabled = self.action_executor.document().root.children.iter().any(|layer| {
-                if let lightningbeam_core::layer::AnyLayer::Video(v) = layer {
-                    v.camera_enabled
-                } else {
-                    false
-                }
+            let any_camera_enabled = self.action_executor.document().all_layers().iter().any(|layer| {
+                matches!(layer, lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled)
             });
 
             if any_camera_enabled && self.webcam.is_none() {
