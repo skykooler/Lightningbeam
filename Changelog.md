@@ -1,3 +1,17 @@
+# 1.0.1-alpha:
+Changes:
+- Added real-time amp simulation via NAM
+- Added beat mode to the timeline
+- Changed shape drawing from making separate shapes to making shapes in the layer using a DCEL graph
+- Licensed under GPLv3
+- Added snapping for vector editing
+- Added organ instrument and vibrato node
+
+Bugfixes:
+- Fix preset loading not updating node graph editor
+- Fix stroke intersections not splitting strokes
+- Fix paint bucket fill not attaching to existing strokes
+
 # 1.0.0-alpha:
 Changes:
 - New native GUI built with egui + wgpu (replaces Tauri/web frontend)
