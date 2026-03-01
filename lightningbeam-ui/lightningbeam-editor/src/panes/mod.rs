@@ -55,6 +55,15 @@ pub struct DraggingAsset {
     pub linked_audio_clip_id: Option<Uuid>,
 }
 
+/// Command for webcam recording (issued by timeline, processed by main)
+#[derive(Debug)]
+pub enum WebcamRecordCommand {
+    /// Start recording on the given video layer
+    Start { layer_id: uuid::Uuid },
+    /// Stop current webcam recording
+    Stop,
+}
+
 pub mod toolbar;
 pub mod stage;
 pub mod timeline;
@@ -221,6 +230,10 @@ pub struct SharedPaneState<'a> {
     pub effect_thumbnail_cache: &'a std::collections::HashMap<Uuid, Vec<u8>>,
     /// Effect IDs whose thumbnails should be invalidated (e.g., after shader edit)
     pub effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
+    /// Latest webcam capture frame (None if no camera is active)
+    pub webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
+    /// Pending webcam recording commands (processed by main.rs after render)
+    pub webcam_record_command: &'a mut Option<WebcamRecordCommand>,
     /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
     pub target_format: wgpu::TextureFormat,
     /// Menu actions queued by panes (e.g. context menu items), processed by main after rendering

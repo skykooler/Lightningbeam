@@ -760,6 +760,14 @@ struct EditorApp {
     audio_channels: u32,
     // Video decoding and management
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, // Shared video manager
+    // Webcam capture state
+    webcam: Option<lightningbeam_core::webcam::WebcamCapture>,
+    /// Latest polled webcam frame (updated each frame for preview)
+    webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
+    /// Pending webcam recording command (set by timeline, processed in update)
+    webcam_record_command: Option<panes::WebcamRecordCommand>,
+    /// Layer being recorded to via webcam
+    webcam_recording_layer_id: Option<Uuid>,
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
@@ -1013,6 +1021,10 @@ impl EditorApp {
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
                 lightningbeam_core::video::VideoManager::new()
             )),
+            webcam: None,
+            webcam_frame: None,
+            webcam_record_command: None,
+            webcam_recording_layer_id: None,
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             clip_to_metatrack_map: HashMap::new(),
@@ -1341,7 +1353,8 @@ impl EditorApp {
                 document.root.add_child(AnyLayer::Vector(layer))
             }
             1 => {
-                // Video editing focus -> VideoLayer
+                // Video editing focus -> VideoLayer + black background
+                document.background_color = lightningbeam_core::shape::ShapeColor::rgb(0, 0, 0);
                 let layer = VideoLayer::new("Video 1");
                 document.root.add_child(AnyLayer::Video(layer))
             }
@@ -3893,6 +3906,44 @@ impl eframe::App for EditorApp {
             self.handle_audio_extraction_result(result);
         }
 
+        // Webcam management: open/close based on camera_enabled layers, poll frames
+        {
+            let any_camera_enabled = self.action_executor.document().root.children.iter().any(|layer| {
+                if let lightningbeam_core::layer::AnyLayer::Video(v) = layer {
+                    v.camera_enabled
+                } else {
+                    false
+                }
+            });
+
+            if any_camera_enabled && self.webcam.is_none() {
+                // Try to open the default camera
+                if let Some(device) = lightningbeam_core::webcam::default_camera() {
+                    match lightningbeam_core::webcam::WebcamCapture::open(&device) {
+                        Ok(cam) => {
+                            eprintln!("[WEBCAM] Opened camera: {}", device.name);
+                            self.webcam = Some(cam);
+                        }
+                        Err(e) => {
+                            eprintln!("[WEBCAM] Failed to open camera: {}", e);
+                        }
+                    }
+                }
+            } else if !any_camera_enabled && self.webcam.is_some() {
+                eprintln!("[WEBCAM] Closing camera (no layers with camera enabled)");
+                self.webcam = None;
+                self.webcam_frame = None;
+            }
+
+            // Poll latest frame from webcam
+            if let Some(webcam) = &mut self.webcam {
+                if let Some(frame) = webcam.poll_frame() {
+                    self.webcam_frame = Some(frame.clone());
+                    ctx.request_repaint(); // Keep repainting while camera is active
+                }
+            }
+        }
+
         // Check for native menu events (macOS)
         if let Some(menu_system) = &self.menu_system {
             if let Some(action) = menu_system.check_events() {
@@ -4861,6 +4912,8 @@ impl eframe::App for EditorApp {
                     .map(|g| g.thumbnail_cache())
                     .unwrap_or(&empty_thumbnail_cache),
                 effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
+                webcam_frame: self.webcam_frame.clone(),
+                webcam_record_command: &mut self.webcam_record_command,
                 target_format: self.target_format,
                 pending_menu_actions: &mut pending_menu_actions,
                 clipboard_manager: &mut self.clipboard_manager,
@@ -4958,6 +5011,157 @@ impl eframe::App for EditorApp {
             // Process menu actions queued by pane context menus
             for action in pending_menu_actions {
                 self.handle_menu_action(action);
+            }
+
+            // Process webcam recording commands from timeline
+            if let Some(cmd) = self.webcam_record_command.take() {
+                match cmd {
+                    panes::WebcamRecordCommand::Start { layer_id } => {
+                        // Ensure webcam is open
+                        if self.webcam.is_none() {
+                            if let Some(device) = lightningbeam_core::webcam::default_camera() {
+                                match lightningbeam_core::webcam::WebcamCapture::open(&device) {
+                                    Ok(cam) => {
+                                        eprintln!("[WEBCAM] Opened camera for recording: {}", device.name);
+                                        self.webcam = Some(cam);
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[WEBCAM] Failed to open camera for recording: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(webcam) = &mut self.webcam {
+                            // Generate output path in project directory or temp
+                            let recording_dir = if let Some(ref file_path) = self.current_file_path {
+                                file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+                            } else {
+                                std::env::temp_dir()
+                            };
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let codec = lightningbeam_core::webcam::RecordingCodec::H264; // TODO: read from preferences
+                            let ext = match codec {
+                                lightningbeam_core::webcam::RecordingCodec::H264 => "mp4",
+                                lightningbeam_core::webcam::RecordingCodec::Lossless => "mkv",
+                            };
+                            let recording_path = recording_dir.join(format!("webcam_recording_{}.{}", timestamp, ext));
+                            match webcam.start_recording(recording_path, codec) {
+                                Ok(()) => {
+                                    self.webcam_recording_layer_id = Some(layer_id);
+                                    eprintln!("[WEBCAM] Recording started");
+                                }
+                                Err(e) => {
+                                    eprintln!("[WEBCAM] Failed to start recording: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    panes::WebcamRecordCommand::Stop => {
+                        if let Some(webcam) = &mut self.webcam {
+                            match webcam.stop_recording() {
+                                Ok(result) => {
+                                    let file_path_str = result.file_path.to_string_lossy().to_string();
+                                    eprintln!("[WEBCAM] Recording saved to: {}", file_path_str);
+                                    // Create VideoClip + ClipInstance from recorded file
+                                    if let Some(layer_id) = self.webcam_recording_layer_id.take() {
+                                        match lightningbeam_core::video::probe_video(&file_path_str) {
+                                            Ok(info) => {
+                                                use lightningbeam_core::clip::{VideoClip, ClipInstance};
+                                                let clip = VideoClip {
+                                                    id: Uuid::new_v4(),
+                                                    name: result.file_path.file_name()
+                                                        .and_then(|n| n.to_str())
+                                                        .unwrap_or("Webcam Recording")
+                                                        .to_string(),
+                                                    file_path: file_path_str.clone(),
+                                                    width: info.width as f64,
+                                                    height: info.height as f64,
+                                                    duration: info.duration,
+                                                    frame_rate: info.fps,
+                                                    linked_audio_clip_id: None,
+                                                    folder_id: None,
+                                                };
+                                                let clip_id = clip.id;
+                                                let duration = clip.duration;
+                                                self.action_executor.document_mut().video_clips.insert(clip_id, clip);
+
+                                                let mut clip_instance = ClipInstance::new(clip_id)
+                                                    .with_timeline_start(self.recording_start_time)
+                                                    .with_timeline_duration(duration);
+
+                                                // Scale to fit document and center (like drag-dropped videos)
+                                                {
+                                                    let doc = self.action_executor.document();
+                                                    let video_width = info.width as f64;
+                                                    let video_height = info.height as f64;
+                                                    let scale_x = doc.width / video_width;
+                                                    let scale_y = doc.height / video_height;
+                                                    let uniform_scale = scale_x.min(scale_y);
+                                                    clip_instance.transform.scale_x = uniform_scale;
+                                                    clip_instance.transform.scale_y = uniform_scale;
+                                                    let scaled_w = video_width * uniform_scale;
+                                                    let scaled_h = video_height * uniform_scale;
+                                                    clip_instance.transform.x = (doc.width - scaled_w) / 2.0;
+                                                    clip_instance.transform.y = (doc.height - scaled_h) / 2.0;
+                                                }
+
+                                                if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                                    if let lightningbeam_core::layer::AnyLayer::Video(video_layer) = layer {
+                                                        video_layer.clip_instances.push(clip_instance);
+                                                    }
+                                                }
+
+                                                // Load into video manager for playback
+                                                // Use the video's native dimensions so decoded frames
+                                                // match the VideoClip width/height the renderer uses
+                                                // for the display rect.
+                                                {
+                                                    let mut vm = self.video_manager.lock().unwrap();
+                                                    if let Err(e) = vm.load_video(clip_id, file_path_str, info.width, info.height) {
+                                                        eprintln!("[WEBCAM] Failed to load recorded video: {}", e);
+                                                    }
+                                                }
+
+                                                // Generate thumbnails in background
+                                                let vm_clone = Arc::clone(&self.video_manager);
+                                                std::thread::spawn(move || {
+                                                    // Build keyframe index first
+                                                    {
+                                                        let vm = vm_clone.lock().unwrap();
+                                                        if let Err(e) = vm.build_keyframe_index(&clip_id) {
+                                                            eprintln!("[WEBCAM] Failed to build keyframe index: {e}");
+                                                        }
+                                                    }
+                                                    // Generate thumbnails
+                                                    {
+                                                        let mut vm = vm_clone.lock().unwrap();
+                                                        if let Err(e) = vm.generate_thumbnails(&clip_id, duration) {
+                                                            eprintln!("[WEBCAM] Failed to generate thumbnails: {e}");
+                                                        }
+                                                    }
+                                                });
+
+                                                eprintln!("[WEBCAM] Created video clip: {:.1}s @ {:.1}fps", duration, info.fps);
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[WEBCAM] Failed to probe recorded video: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[WEBCAM] Failed to stop recording: {}", e);
+                                    self.webcam_recording_layer_id = None;
+                                }
+                            }
+                        }
+                        self.is_recording = false;
+                        self.recording_layer_id = None;
+                    }
+                }
             }
 
             // Process editing context navigation (enter/exit movie clips)
@@ -5231,6 +5435,10 @@ struct RenderContext<'a> {
     effect_thumbnail_cache: &'a HashMap<Uuid, Vec<u8>>,
     /// Effect IDs whose thumbnails should be invalidated
     effect_thumbnails_to_invalidate: &'a mut Vec<Uuid>,
+    /// Latest webcam capture frame (None if no camera active)
+    webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
+    /// Pending webcam recording command
+    webcam_record_command: &'a mut Option<panes::WebcamRecordCommand>,
     /// Surface texture format for GPU rendering (Rgba8Unorm or Bgra8Unorm depending on platform)
     target_format: wgpu::TextureFormat,
     /// Menu actions queued by panes (e.g. context menus), processed after rendering
@@ -5739,6 +5947,8 @@ fn render_pane(
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
+                webcam_frame: ctx.webcam_frame.clone(),
+                webcam_record_command: ctx.webcam_record_command,
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,
@@ -5827,6 +6037,8 @@ fn render_pane(
                 effect_thumbnail_requests: ctx.effect_thumbnail_requests,
                 effect_thumbnail_cache: ctx.effect_thumbnail_cache,
                 effect_thumbnails_to_invalidate: ctx.effect_thumbnails_to_invalidate,
+                webcam_frame: ctx.webcam_frame.clone(),
+                webcam_record_command: ctx.webcam_record_command,
                 target_format: ctx.target_format,
                 pending_menu_actions: ctx.pending_menu_actions,
                 clipboard_manager: ctx.clipboard_manager,

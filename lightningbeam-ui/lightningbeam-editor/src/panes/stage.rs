@@ -388,6 +388,8 @@ struct VelloRenderContext {
     region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     /// Mouse position in document-local (clip-local) world coordinates, for hover hit testing
     mouse_world_pos: Option<vello::kurbo::Point>,
+    /// Latest webcam frame for live preview (if any camera is active)
+    webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
 }
 
 /// Callback for Vello rendering within egui
@@ -475,6 +477,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 camera_transform,
                 &mut image_cache,
                 &shared.video_manager,
+                self.ctx.webcam_frame.as_ref(),
             );
             drop(image_cache);
 
@@ -6961,6 +6964,7 @@ impl PaneRenderer for StagePane {
             editing_parent_layer_id: shared.editing_parent_layer_id,
             region_selection: shared.region_selection.clone(),
             mouse_world_pos,
+            webcam_frame: shared.webcam_frame.clone(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(

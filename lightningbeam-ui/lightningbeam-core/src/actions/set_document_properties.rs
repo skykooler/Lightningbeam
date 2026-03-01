@@ -5,6 +5,7 @@
 
 use crate::action::Action;
 use crate::document::Document;
+use crate::shape::ShapeColor;
 
 /// Individual property change for a document
 #[derive(Clone, Debug)]
@@ -13,18 +14,14 @@ pub enum DocumentPropertyChange {
     Height(f64),
     Duration(f64),
     Framerate(f64),
+    BackgroundColor(ShapeColor),
 }
 
-impl DocumentPropertyChange {
-    /// Extract the f64 value from any variant
-    fn value(&self) -> f64 {
-        match self {
-            DocumentPropertyChange::Width(v) => *v,
-            DocumentPropertyChange::Height(v) => *v,
-            DocumentPropertyChange::Duration(v) => *v,
-            DocumentPropertyChange::Framerate(v) => *v,
-        }
-    }
+/// Stored old value for undo (either f64 or color)
+#[derive(Clone, Debug)]
+enum OldValue {
+    F64(f64),
+    Color(ShapeColor),
 }
 
 /// Action that sets a property on the document
@@ -32,7 +29,7 @@ pub struct SetDocumentPropertiesAction {
     /// The new property value
     property: DocumentPropertyChange,
     /// The old value for undo
-    old_value: Option<f64>,
+    old_value: Option<OldValue>,
 }
 
 impl SetDocumentPropertiesAction {
@@ -68,41 +65,53 @@ impl SetDocumentPropertiesAction {
         }
     }
 
-    fn get_current_value(&self, document: &Document) -> f64 {
-        match &self.property {
-            DocumentPropertyChange::Width(_) => document.width,
-            DocumentPropertyChange::Height(_) => document.height,
-            DocumentPropertyChange::Duration(_) => document.duration,
-            DocumentPropertyChange::Framerate(_) => document.framerate,
-        }
-    }
-
-    fn apply_value(&self, document: &mut Document, value: f64) {
-        match &self.property {
-            DocumentPropertyChange::Width(_) => document.width = value,
-            DocumentPropertyChange::Height(_) => document.height = value,
-            DocumentPropertyChange::Duration(_) => document.duration = value,
-            DocumentPropertyChange::Framerate(_) => document.framerate = value,
+    /// Create a new action to set background color
+    pub fn set_background_color(color: ShapeColor) -> Self {
+        Self {
+            property: DocumentPropertyChange::BackgroundColor(color),
+            old_value: None,
         }
     }
 }
 
 impl Action for SetDocumentPropertiesAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        // Store old value if not already stored
         if self.old_value.is_none() {
-            self.old_value = Some(self.get_current_value(document));
+            self.old_value = Some(match &self.property {
+                DocumentPropertyChange::Width(_) => OldValue::F64(document.width),
+                DocumentPropertyChange::Height(_) => OldValue::F64(document.height),
+                DocumentPropertyChange::Duration(_) => OldValue::F64(document.duration),
+                DocumentPropertyChange::Framerate(_) => OldValue::F64(document.framerate),
+                DocumentPropertyChange::BackgroundColor(_) => OldValue::Color(document.background_color),
+            });
         }
 
-        // Apply new value
-        let new_value = self.property.value();
-        self.apply_value(document, new_value);
+        match &self.property {
+            DocumentPropertyChange::Width(v) => document.width = *v,
+            DocumentPropertyChange::Height(v) => document.height = *v,
+            DocumentPropertyChange::Duration(v) => document.duration = *v,
+            DocumentPropertyChange::Framerate(v) => document.framerate = *v,
+            DocumentPropertyChange::BackgroundColor(c) => document.background_color = *c,
+        }
         Ok(())
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        if let Some(old_value) = self.old_value {
-            self.apply_value(document, old_value);
+        match &self.old_value {
+            Some(OldValue::F64(v)) => {
+                let v = *v;
+                match &self.property {
+                    DocumentPropertyChange::Width(_) => document.width = v,
+                    DocumentPropertyChange::Height(_) => document.height = v,
+                    DocumentPropertyChange::Duration(_) => document.duration = v,
+                    DocumentPropertyChange::Framerate(_) => document.framerate = v,
+                    DocumentPropertyChange::BackgroundColor(_) => {}
+                }
+            }
+            Some(OldValue::Color(c)) => {
+                document.background_color = *c;
+            }
+            None => {}
         }
         Ok(())
     }
@@ -113,6 +122,7 @@ impl Action for SetDocumentPropertiesAction {
             DocumentPropertyChange::Height(_) => "canvas height",
             DocumentPropertyChange::Duration(_) => "duration",
             DocumentPropertyChange::Framerate(_) => "framerate",
+            DocumentPropertyChange::BackgroundColor(_) => "background color",
         };
         format!("Set {}", property_name)
     }

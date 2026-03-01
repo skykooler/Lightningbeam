@@ -481,6 +481,19 @@ impl InfopanelPane {
                     }
                 });
 
+                // Background color
+                ui.horizontal(|ui| {
+                    ui.label("Background:");
+                    let bg = document.background_color;
+                    let mut color = [bg.r, bg.g, bg.b];
+                    if ui.color_edit_button_srgb(&mut color).changed() {
+                        let action = SetDocumentPropertiesAction::set_background_color(
+                            ShapeColor::rgb(color[0], color[1], color[2]),
+                        );
+                        shared.pending_actions.push(Box::new(action));
+                    }
+                });
+
                 // Layer count (read-only)
                 ui.horizontal(|ui| {
                     ui.label("Layers:");

@@ -137,6 +137,13 @@ enum TimeDisplayFormat {
     Measures,
 }
 
+/// Type of recording in progress (for stop logic dispatch)
+enum RecordingType {
+    Audio,
+    Midi,
+    Webcam,
+}
+
 pub struct TimelinePane {
     /// Horizontal zoom level (pixels per second)
     pixels_per_second: f32,
@@ -260,7 +267,7 @@ impl TimelinePane {
     }
 
     /// Toggle recording on/off
-    /// In Auto mode, records to the active audio layer
+    /// In Auto mode, records to the active layer (audio or video with camera)
     fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
         if *shared.is_recording {
             // Stop recording
@@ -271,7 +278,7 @@ impl TimelinePane {
         }
     }
 
-    /// Start recording on the active audio layer
+    /// Start recording on the active layer (audio or video with camera)
     fn start_recording(&mut self, shared: &mut SharedPaneState) {
         use lightningbeam_core::clip::{AudioClip, ClipInstance};
 
@@ -279,6 +286,44 @@ impl TimelinePane {
             println!("⚠️  No active layer selected for recording");
             return;
         };
+
+        // Check if this is a video layer with camera enabled
+        let is_video_camera = {
+            let document = shared.action_executor.document();
+            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+            context_layers.iter().copied()
+                .find(|l| l.id() == active_layer_id)
+                .map(|layer| {
+                    if let AnyLayer::Video(v) = layer {
+                        v.camera_enabled
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false)
+        };
+
+        if is_video_camera {
+            // Issue webcam recording start command (processed by main.rs)
+            *shared.webcam_record_command = Some(super::WebcamRecordCommand::Start {
+                layer_id: active_layer_id,
+            });
+            *shared.is_recording = true;
+            *shared.recording_start_time = *shared.playback_time;
+            *shared.recording_layer_id = Some(active_layer_id);
+
+            // Auto-start playback for recording
+            if !*shared.is_playing {
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.play();
+                    *shared.is_playing = true;
+                    println!("▶ Auto-started playback for webcam recording");
+                }
+            }
+            println!("📹 Started webcam recording on layer {}", active_layer_id);
+            return;
+        }
 
         // Get layer type (copy it so we can drop the document borrow before mutating)
         let layer_type = {
@@ -362,32 +407,49 @@ impl TimelinePane {
 
     /// Stop the current recording
     fn stop_recording(&mut self, shared: &mut SharedPaneState) {
-        // Determine if this is MIDI or audio recording by checking the layer type
-        let is_midi_recording = if let Some(layer_id) = *shared.recording_layer_id {
+        // Determine recording type by checking the layer
+        let recording_type = if let Some(layer_id) = *shared.recording_layer_id {
             let context_layers = shared.action_executor.document().context_layers(shared.editing_clip_id.as_ref());
             context_layers.iter().copied()
                 .find(|l| l.id() == layer_id)
                 .map(|layer| {
-                    if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                        matches!(audio_layer.audio_layer_type, lightningbeam_core::layer::AudioLayerType::Midi)
-                    } else {
-                        false
+                    match layer {
+                        lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
+                            if matches!(audio_layer.audio_layer_type, lightningbeam_core::layer::AudioLayerType::Midi) {
+                                RecordingType::Midi
+                            } else {
+                                RecordingType::Audio
+                            }
+                        }
+                        lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled => {
+                            RecordingType::Webcam
+                        }
+                        _ => RecordingType::Audio,
                     }
                 })
-                .unwrap_or(false)
+                .unwrap_or(RecordingType::Audio)
         } else {
-            false
+            RecordingType::Audio
         };
 
-        if let Some(controller_arc) = shared.audio_controller {
-            let mut controller = controller_arc.lock().unwrap();
+        match recording_type {
+            RecordingType::Webcam => {
+                // Issue webcam stop command (processed by main.rs)
+                *shared.webcam_record_command = Some(super::WebcamRecordCommand::Stop);
+                println!("📹 Stopped webcam recording");
+            }
+            _ => {
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
 
-            if is_midi_recording {
-                controller.stop_midi_recording();
-                println!("🎹 Stopped MIDI recording");
-            } else {
-                controller.stop_recording();
-                println!("🎤 Stopped audio recording");
+                    if matches!(recording_type, RecordingType::Midi) {
+                        controller.stop_midi_recording();
+                        println!("🎹 Stopped MIDI recording");
+                    } else {
+                        controller.stop_recording();
+                        println!("🎤 Stopped audio recording");
+                    }
+                }
             }
         }
 
@@ -957,28 +1019,57 @@ impl TimelinePane {
             let is_soloed = layer.soloed();
             let is_locked = layer.locked();
 
-            // Mute button
-            // TODO: Replace with SVG icon (volume-up-fill.svg / volume-mute.svg)
-            let mute_response = ui.scope_builder(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
-                let mute_text = if is_muted { "🔇" } else { "🔊" };
-                let button = egui::Button::new(mute_text)
-                    .fill(if is_muted {
-                        egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100)
-                    } else {
-                        egui::Color32::from_gray(40)
-                    })
-                    .stroke(egui::Stroke::NONE);
-                ui.add(button)
+            // Mute button — or camera toggle for video layers
+            let is_video_layer = matches!(layer, lightningbeam_core::layer::AnyLayer::Video(_));
+            let camera_enabled = if let lightningbeam_core::layer::AnyLayer::Video(v) = layer {
+                v.camera_enabled
+            } else {
+                false
+            };
+
+            let first_btn_response = ui.scope_builder(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
+                if is_video_layer {
+                    // Camera toggle for video layers
+                    let cam_text = if camera_enabled { "📹" } else { "📷" };
+                    let button = egui::Button::new(cam_text)
+                        .fill(if camera_enabled {
+                            egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
+                        } else {
+                            egui::Color32::from_gray(40)
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                } else {
+                    // Mute button for non-video layers
+                    let mute_text = if is_muted { "🔇" } else { "🔊" };
+                    let button = egui::Button::new(mute_text)
+                        .fill(if is_muted {
+                            egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100)
+                        } else {
+                            egui::Color32::from_gray(40)
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                }
             }).inner;
 
-            if mute_response.clicked() {
+            if first_btn_response.clicked() {
                 self.layer_control_clicked = true;
-                pending_actions.push(Box::new(
-                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
-                        layer_id,
-                        lightningbeam_core::actions::LayerProperty::Muted(!is_muted),
-                    )
-                ));
+                if is_video_layer {
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::CameraEnabled(!camera_enabled),
+                        )
+                    ));
+                } else {
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Muted(!is_muted),
+                        )
+                    ));
+                }
             }
 
             // Solo button
