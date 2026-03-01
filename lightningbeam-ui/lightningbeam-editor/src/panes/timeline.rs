@@ -185,6 +185,10 @@ pub struct TimelinePane {
     /// Waveform upload progress: pool_index -> frames uploaded so far.
     /// Tracks chunked GPU uploads across frames to avoid hitches.
     waveform_upload_progress: std::collections::HashMap<usize, usize>,
+
+    /// Cached egui textures for video thumbnail strip rendering.
+    /// Key: (clip_id, thumbnail_timestamp_millis) → TextureHandle
+    video_thumbnail_textures: std::collections::HashMap<(uuid::Uuid, i64), egui::TextureHandle>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -372,6 +376,7 @@ impl TimelinePane {
             context_menu_clip: None,
             time_display_format: TimeDisplayFormat::Seconds,
             waveform_upload_progress: std::collections::HashMap::new(),
+            video_thumbnail_textures: std::collections::HashMap::new(),
         }
     }
 
@@ -1515,11 +1520,15 @@ impl TimelinePane {
         target_format: wgpu::TextureFormat,
         waveform_stereo: bool,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
+        video_manager: &std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
         let painter = ui.painter();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
         let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f64)> = Vec::new();
+
+        // Track visible video clip IDs for texture cache cleanup
+        let mut visible_video_clip_ids: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
 
         // Theme colors for active/inactive layers
         let active_style = theme.style(".timeline-row-active", ui.ctx());
@@ -2319,6 +2328,78 @@ impl TimelinePane {
                             }
                         }
 
+                        // VIDEO THUMBNAIL STRIP: Draw sequence of thumbnails inside clip rect
+                        if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
+                            visible_video_clip_ids.insert(clip_instance.clip_id);
+                            let thumb_display_height = clip_rect.height() - 4.0;
+                            if thumb_display_height > 8.0 {
+                                let video_mgr = video_manager.lock().unwrap();
+                                if let Some((tw, th, _)) = video_mgr.get_thumbnail_at(&clip_instance.clip_id, 0.0) {
+                                    let aspect = tw as f32 / th as f32;
+                                    let thumb_display_width = thumb_display_height * aspect;
+                                    let thumb_step_px = thumb_display_width;
+
+                                    let clip_width = clip_rect.width();
+                                    let num_thumbs = ((clip_width / thumb_step_px).ceil() as usize).max(1);
+
+                                    for i in 0..num_thumbs {
+                                        let x_offset = i as f32 * thumb_step_px;
+                                        if x_offset >= clip_width { break; }
+
+                                        // Map pixel position to content time
+                                        let time_offset = (x_offset as f64 + thumb_display_width as f64 * 0.5)
+                                            / self.pixels_per_second as f64;
+                                        let content_time = clip_instance.trim_start + time_offset;
+
+                                        if let Some((tw, th, rgba_data)) = video_mgr.get_thumbnail_at(
+                                            &clip_instance.clip_id, content_time
+                                        ) {
+                                            let ts_key = (content_time * 1000.0) as i64;
+                                            let cache_key = (clip_instance.clip_id, ts_key);
+
+                                            let texture = self.video_thumbnail_textures
+                                                .entry(cache_key)
+                                                .or_insert_with(|| {
+                                                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                                                        [tw as usize, th as usize],
+                                                        &rgba_data,
+                                                    );
+                                                    ui.ctx().load_texture(
+                                                        format!("vthumb_{}_{}", clip_instance.clip_id, ts_key),
+                                                        image,
+                                                        egui::TextureOptions::LINEAR,
+                                                    )
+                                                });
+
+                                            let full_rect = egui::Rect::from_min_size(
+                                                egui::pos2(clip_rect.min.x + x_offset, clip_rect.min.y + 2.0),
+                                                egui::vec2(thumb_display_width, thumb_display_height),
+                                            );
+                                            let thumb_rect = full_rect.intersect(clip_rect);
+
+                                            if thumb_rect.width() > 2.0 && thumb_rect.height() > 2.0 {
+                                                let uv_min = egui::pos2(
+                                                    (thumb_rect.min.x - full_rect.min.x) / full_rect.width(),
+                                                    (thumb_rect.min.y - full_rect.min.y) / full_rect.height(),
+                                                );
+                                                let uv_max = egui::pos2(
+                                                    (thumb_rect.max.x - full_rect.min.x) / full_rect.width(),
+                                                    (thumb_rect.max.y - full_rect.min.y) / full_rect.height(),
+                                                );
+
+                                                painter.image(
+                                                    texture.id(),
+                                                    thumb_rect,
+                                                    egui::Rect::from_min_max(uv_min, uv_max),
+                                                    egui::Color32::WHITE,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // VIDEO PREVIEW: Collect clip rect for hover detection
                         if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
                             video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, instance_start));
@@ -2416,6 +2497,9 @@ impl TimelinePane {
                 egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
             );
         }
+
+        // Clean up stale video thumbnail textures for clips no longer visible
+        self.video_thumbnail_textures.retain(|&(clip_id, _), _| visible_video_clip_ids.contains(&clip_id));
 
         // Return video clip hover data for processing after input handling
         video_clip_hovers
@@ -3423,7 +3507,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
