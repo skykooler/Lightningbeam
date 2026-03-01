@@ -1679,6 +1679,213 @@ impl TimelinePane {
                     }
                 }
 
+                // Render video thumbnails from the top video child layer
+                // and waveforms from audio child layers inside the collapsed group row
+                {
+                    let span_y_min = y + 10.0;
+                    let span_y_max = y + LAYER_HEIGHT - 10.0;
+                    let span_height = span_y_max - span_y_min;
+                    let thumb_y_max = span_y_min + span_height * (2.0 / 3.0);
+                    let wave_y_min = thumb_y_max;
+
+                    // Find the first (top) video child and draw thumbnails for its clips
+                    if let Some(video_child) = g.children.iter().find(|c| matches!(c, AnyLayer::Video(_))) {
+                        if let AnyLayer::Video(vl) = video_child {
+                            for ci in &vl.clip_instances {
+                                let clip_dur = document.get_clip_duration(&ci.clip_id)
+                                    .unwrap_or_else(|| ci.trim_end.unwrap_or(1.0) - ci.trim_start);
+                                let mut ci_start = ci.effective_start();
+                                if is_move_drag && selection.contains_clip_instance(&ci.id) {
+                                    ci_start = (ci_start + self.drag_offset).max(0.0);
+                                }
+                                let ci_duration = ci.total_duration(clip_dur);
+                                let ci_end = ci_start + ci_duration;
+
+                                let sx = self.time_to_x(ci_start);
+                                let ex = self.time_to_x(ci_end);
+                                if ex < 0.0 || sx > rect.width() { continue; }
+
+                                let ci_rect = egui::Rect::from_min_max(
+                                    egui::pos2((rect.min.x + sx).max(rect.min.x), span_y_min),
+                                    egui::pos2((rect.min.x + ex).min(rect.max.x), thumb_y_max),
+                                );
+
+                                visible_video_clip_ids.insert(ci.clip_id);
+
+                                // Collect for hover tooltip (use full span height as hover target)
+                                let hover_rect = egui::Rect::from_min_max(
+                                    egui::pos2(ci_rect.min.x, span_y_min),
+                                    egui::pos2(ci_rect.max.x, span_y_max),
+                                );
+                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start, ci_start));
+
+                                let thumb_display_height = (thumb_y_max - span_y_min) - 4.0;
+                                if thumb_display_height > 8.0 {
+                                    let video_mgr = video_manager.lock().unwrap();
+                                    if let Some((tw, th, _)) = video_mgr.get_thumbnail_at(&ci.clip_id, 0.0) {
+                                        let aspect = tw as f32 / th as f32;
+                                        let thumb_display_width = thumb_display_height * aspect;
+                                        let ci_width = ci_rect.width();
+                                        let num_thumbs = ((ci_width / thumb_display_width).ceil() as usize).max(1);
+
+                                        for ti in 0..num_thumbs {
+                                            let x_offset = ti as f32 * thumb_display_width;
+                                            if x_offset >= ci_width { break; }
+
+                                            let time_offset = (x_offset as f64 + thumb_display_width as f64 * 0.5)
+                                                / self.pixels_per_second as f64;
+                                            let content_time = ci.trim_start + time_offset;
+
+                                            if let Some((tw, th, rgba_data)) = video_mgr.get_thumbnail_at(&ci.clip_id, content_time) {
+                                                let ts_key = (content_time * 1000.0) as i64;
+                                                let cache_key = (ci.clip_id, ts_key);
+
+                                                let texture = self.video_thumbnail_textures
+                                                    .entry(cache_key)
+                                                    .or_insert_with(|| {
+                                                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                                                            [tw as usize, th as usize],
+                                                            &rgba_data,
+                                                        );
+                                                        ui.ctx().load_texture(
+                                                            format!("vthumb_{}_{}", ci.clip_id, ts_key),
+                                                            image,
+                                                            egui::TextureOptions::LINEAR,
+                                                        )
+                                                    });
+
+                                                let full_rect = egui::Rect::from_min_size(
+                                                    egui::pos2(ci_rect.min.x + x_offset, ci_rect.min.y + 2.0),
+                                                    egui::vec2(thumb_display_width, thumb_display_height),
+                                                );
+                                                let thumb_rect = full_rect.intersect(ci_rect);
+
+                                                if thumb_rect.width() > 2.0 && thumb_rect.height() > 2.0 {
+                                                    let uv_min = egui::pos2(
+                                                        (thumb_rect.min.x - full_rect.min.x) / full_rect.width(),
+                                                        (thumb_rect.min.y - full_rect.min.y) / full_rect.height(),
+                                                    );
+                                                    let uv_max = egui::pos2(
+                                                        (thumb_rect.max.x - full_rect.min.x) / full_rect.width(),
+                                                        (thumb_rect.max.y - full_rect.min.y) / full_rect.height(),
+                                                    );
+
+                                                    painter.image(
+                                                        texture.id(),
+                                                        thumb_rect,
+                                                        egui::Rect::from_min_max(uv_min, uv_max),
+                                                        egui::Color32::WHITE,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Draw waveforms from audio child layers
+                    let screen_size = ui.ctx().content_rect().size();
+                    let waveform_tint = [
+                        bright_teal.r() as f32 / 255.0,
+                        bright_teal.g() as f32 / 255.0,
+                        bright_teal.b() as f32 / 255.0,
+                        bright_teal.a() as f32 / 255.0,
+                    ];
+                    for child in &g.children {
+                        if let AnyLayer::Audio(al) = child {
+                            for ci in &al.clip_instances {
+                                let audio_clip = match document.get_audio_clip(&ci.clip_id) {
+                                    Some(c) => c,
+                                    None => continue,
+                                };
+                                let audio_pool_index = match audio_clip.audio_pool_index() {
+                                    Some(idx) => idx,
+                                    None => continue,
+                                };
+                                let (samples, sr, ch) = match raw_audio_cache.get(&audio_pool_index) {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
+
+                                let total_frames = samples.len() / (*ch).max(1) as usize;
+                                let audio_file_duration = total_frames as f64 / *sr as f64;
+
+                                let clip_dur = audio_clip.duration;
+                                let mut ci_start = ci.effective_start();
+                                if is_move_drag && selection.contains_clip_instance(&ci.id) {
+                                    ci_start = (ci_start + self.drag_offset).max(0.0);
+                                }
+                                let ci_duration = ci.total_duration(clip_dur);
+
+                                let ci_screen_start = rect.min.x + self.time_to_x(ci_start);
+                                let ci_screen_end = ci_screen_start + (ci_duration * self.pixels_per_second as f64) as f32;
+
+                                let waveform_rect = egui::Rect::from_min_max(
+                                    egui::pos2(ci_screen_start.max(rect.min.x), wave_y_min),
+                                    egui::pos2(ci_screen_end.min(rect.max.x), span_y_max),
+                                );
+
+                                if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
+                                    let pending_upload = if waveform_gpu_dirty.contains(&audio_pool_index) {
+                                        let chunk = crate::waveform_gpu::UPLOAD_CHUNK_FRAMES;
+                                        let progress = self.waveform_upload_progress.get(&audio_pool_index).copied().unwrap_or(0);
+                                        let next_end = (progress + chunk).min(total_frames);
+                                        let frame_limit = Some(next_end);
+                                        if next_end >= total_frames {
+                                            waveform_gpu_dirty.remove(&audio_pool_index);
+                                            self.waveform_upload_progress.remove(&audio_pool_index);
+                                        } else {
+                                            self.waveform_upload_progress.insert(audio_pool_index, next_end);
+                                            ui.ctx().request_repaint();
+                                        }
+                                        Some(crate::waveform_gpu::PendingUpload {
+                                            samples: samples.clone(),
+                                            sample_rate: *sr,
+                                            channels: *ch,
+                                            frame_limit,
+                                        })
+                                    } else {
+                                        None
+                                    };
+
+                                    let instance_id = ci.id.as_u128() as u64;
+                                    let callback = crate::waveform_gpu::WaveformCallback {
+                                        pool_index: audio_pool_index,
+                                        segment_index: 0,
+                                        params: crate::waveform_gpu::WaveformParams {
+                                            clip_rect: [waveform_rect.min.x, waveform_rect.min.y, waveform_rect.max.x, waveform_rect.max.y],
+                                            viewport_start_time: self.viewport_start_time as f32,
+                                            pixels_per_second: self.pixels_per_second as f32,
+                                            audio_duration: audio_file_duration as f32,
+                                            sample_rate: *sr as f32,
+                                            clip_start_time: ci_screen_start,
+                                            trim_start: ci.trim_start as f32,
+                                            tex_width: crate::waveform_gpu::tex_width() as f32,
+                                            total_frames: total_frames as f32,
+                                            segment_start_frame: 0.0,
+                                            display_mode: if waveform_stereo { 1.0 } else { 0.0 },
+                                            _pad1: [0.0, 0.0],
+                                            tint_color: waveform_tint,
+                                            screen_size: [screen_size.x, screen_size.y],
+                                            _pad: [0.0, 0.0],
+                                        },
+                                        target_format,
+                                        pending_upload,
+                                        instance_id,
+                                    };
+
+                                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                                        waveform_rect,
+                                        callback,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Separator line at bottom
                 painter.line_segment(
                     [
