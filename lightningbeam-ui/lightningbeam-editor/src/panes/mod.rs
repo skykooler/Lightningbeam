@@ -244,6 +244,13 @@ pub struct SharedPaneState<'a> {
     pub pending_menu_actions: &'a mut Vec<crate::menu::MenuAction>,
     /// Clipboard manager for cut/copy/paste operations
     pub clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
+    // VU meter levels
+    pub input_level: f32,
+    #[allow(dead_code)] // Used by mix meter in main.rs, available to panes
+    pub output_level: f32,
+    pub track_levels: &'a std::collections::HashMap<daw_backend::TrackId, f32>,
+    #[allow(dead_code)] // Available for panes that need reverse track->layer lookup
+    pub track_to_layer_map: &'a std::collections::HashMap<daw_backend::TrackId, Uuid>,
     /// Whether to show waveforms as stacked stereo (true) or combined mono (false)
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads

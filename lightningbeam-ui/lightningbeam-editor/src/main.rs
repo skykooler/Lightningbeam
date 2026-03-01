@@ -814,6 +814,11 @@ struct EditorApp {
     region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     region_select_mode: lightningbeam_core::tool::RegionSelectMode,
 
+    // VU meter levels
+    input_level: f32,
+    output_level: f32,
+    track_levels: HashMap<daw_backend::TrackId, f32>,
+
     /// Cache for MIDI event data (keyed by backend midi_clip_id)
     /// Prevents repeated backend queries for the same MIDI clip
     /// Format: (timestamp, note_number, velocity, is_note_on)
@@ -1057,6 +1062,9 @@ impl EditorApp {
             polygon_sides: 5,                // Default to pentagon
             region_selection: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
+            input_level: 0.0,
+            output_level: 0.0,
+            track_levels: HashMap::new(),
             midi_event_cache: HashMap::new(), // Initialize empty MIDI event cache
             audio_duration_cache: HashMap::new(), // Initialize empty audio duration cache
             audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
@@ -4672,6 +4680,18 @@ impl eframe::App for EditorApp {
                             );
                             ctx.request_repaint();
                         }
+                        AudioEvent::InputLevel(peak) => {
+                            self.input_level = self.input_level.max(peak);
+                        }
+                        AudioEvent::OutputLevel(peak) => {
+                            self.output_level = self.output_level.max(peak);
+                        }
+                        AudioEvent::TrackLevels(levels) => {
+                            for (track_id, peak) in levels {
+                                let entry = self.track_levels.entry(track_id).or_insert(0.0);
+                                *entry = entry.max(peak);
+                            }
+                        }
                         _ => {} // Ignore other events for now
                     }
                 }
@@ -4683,6 +4703,38 @@ impl eframe::App for EditorApp {
             } else {
                 // No events this frame, clear the flag
                 self.audio_events_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        // Update input monitoring based on active layer
+        if let Some(controller) = &self.audio_controller {
+            let should_monitor = self.active_layer_id.map_or(false, |layer_id| {
+                let doc = self.action_executor.document();
+                if let Some(layer) = doc.get_layer(&layer_id) {
+                    matches!(layer, lightningbeam_core::layer::AnyLayer::Audio(a) if a.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled)
+                } else {
+                    false
+                }
+            });
+            if let Ok(mut ctrl) = controller.try_lock() {
+                ctrl.set_input_monitoring(should_monitor);
+            }
+        }
+
+        // Decay VU meter levels (~1.5s full fall at 60fps)
+        {
+            let decay = 0.97f32;
+            self.input_level *= decay;
+            self.output_level *= decay;
+            for level in self.track_levels.values_mut() {
+                *level *= decay;
+            }
+            // Request repaint while any level is visible
+            let any_active = self.input_level > 0.001
+                || self.output_level > 0.001
+                || self.track_levels.values().any(|&v| v > 0.001);
+            if any_active {
+                ctx.request_repaint();
             }
         }
 
@@ -4925,6 +4977,27 @@ impl eframe::App for EditorApp {
             }
         });
 
+        // Mix output VU meter (thin bar below menu)
+        if self.app_mode != AppMode::StartScreen && self.output_level > 0.001 {
+            egui::TopBottomPanel::top("mix_meter").exact_height(4.0).show(ctx, |ui| {
+                let rect = ui.available_rect_before_wrap();
+                let level = self.output_level.min(1.0);
+                let filled_width = rect.width() * level;
+                let color = if level > 0.9 {
+                    egui::Color32::from_rgb(220, 50, 50)
+                } else if level > 0.7 {
+                    egui::Color32::from_rgb(220, 200, 50)
+                } else {
+                    egui::Color32::from_rgb(50, 200, 80)
+                };
+                let filled_rect = egui::Rect::from_min_size(
+                    rect.left_top(),
+                    egui::vec2(filled_width, rect.height()),
+                );
+                ui.painter().rect_filled(filled_rect, 0.0, color);
+            });
+        }
+
         // Render start screen or editor based on app mode
         if self.app_mode == AppMode::StartScreen {
             self.render_start_screen(ctx);
@@ -5075,6 +5148,10 @@ impl eframe::App for EditorApp {
                     target_format: self.target_format,
                     pending_menu_actions: &mut pending_menu_actions,
                     clipboard_manager: &mut self.clipboard_manager,
+                    input_level: self.input_level,
+                    output_level: self.output_level,
+                    track_levels: &self.track_levels,
+                    track_to_layer_map: &self.track_to_layer_map,
                     waveform_stereo: self.config.waveform_stereo,
                     project_generation: &mut self.project_generation,
                     script_to_edit: &mut self.script_to_edit,

@@ -435,6 +435,10 @@ pub struct MidiTrack {
     /// Used to detect when the playhead exits a clip, so we can send all-notes-off.
     #[serde(skip)]
     prev_active_instances: HashSet<MidiClipInstanceId>,
+
+    /// Peak level of last render() call (for VU metering)
+    #[serde(skip, default)]
+    pub peak_level: f32,
 }
 
 impl Clone for MidiTrack {
@@ -452,6 +456,7 @@ impl Clone for MidiTrack {
             next_automation_id: self.next_automation_id,
             live_midi_queue: Vec::new(), // Don't clone live MIDI queue
             prev_active_instances: HashSet::new(),
+            peak_level: 0.0,
         }
     }
 }
@@ -479,6 +484,7 @@ impl MidiTrack {
             next_automation_id: 0,
             live_midi_queue: Vec::new(),
             prev_active_instances: HashSet::new(),
+            peak_level: 0.0,
         }
     }
 
@@ -705,6 +711,10 @@ pub struct AudioTrack {
     /// Pre-allocated buffer for clip rendering (avoids heap allocation per callback)
     #[serde(skip, default)]
     clip_render_buffer: Vec<f32>,
+
+    /// Peak level of last render() call (for VU metering)
+    #[serde(skip, default)]
+    pub peak_level: f32,
 }
 
 impl Clone for AudioTrack {
@@ -721,6 +731,7 @@ impl Clone for AudioTrack {
             effects_graph_preset: self.effects_graph_preset.clone(),
             effects_graph: default_audio_graph(), // Create fresh graph, not cloned
             clip_render_buffer: Vec::new(),
+            peak_level: 0.0,
         }
     }
 }
@@ -764,6 +775,7 @@ impl AudioTrack {
             effects_graph_preset: None,
             effects_graph,
             clip_render_buffer: Vec::new(),
+            peak_level: 0.0,
         }
     }
 
@@ -987,7 +999,7 @@ impl AudioTrack {
         }
 
         // Calculate combined gain
-        let combined_gain = clip.gain * self.volume;
+        let combined_gain = clip.gain;
 
         let mut total_rendered = 0;
 

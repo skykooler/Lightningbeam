@@ -441,13 +441,34 @@ impl Project {
         // Handle audio track vs MIDI track vs group track
         match self.tracks.get_mut(&track_id) {
             Some(TrackNode::Audio(track)) => {
-                // Render audio track directly into output
-                track.render(output, audio_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Render audio track into a temp buffer for peak measurement
+                let mut track_buffer = buffer_pool.acquire();
+                track_buffer.resize(output.len(), 0.0);
+                track_buffer.fill(0.0);
+                track.render(&mut track_buffer, audio_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Accumulate peak level for VU metering (max over meter interval)
+                let buffer_peak = track_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                track.peak_level = track.peak_level.max(buffer_peak);
+                // Mix into output
+                for (out, src) in output.iter_mut().zip(track_buffer.iter()) {
+                    *out += src;
+                }
+                buffer_pool.release(track_buffer);
             }
             Some(TrackNode::Midi(track)) => {
-                // Render MIDI track directly into output
-                // Access midi_clip_pool from self - safe because we only need immutable access
-                track.render(output, &self.midi_clip_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Render MIDI track into a temp buffer for peak measurement
+                let mut track_buffer = buffer_pool.acquire();
+                track_buffer.resize(output.len(), 0.0);
+                track_buffer.fill(0.0);
+                track.render(&mut track_buffer, &self.midi_clip_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Accumulate peak level for VU metering (max over meter interval)
+                let buffer_peak = track_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                track.peak_level = track.peak_level.max(buffer_peak);
+                // Mix into output
+                for (out, src) in output.iter_mut().zip(track_buffer.iter()) {
+                    *out += src;
+                }
+                buffer_pool.release(track_buffer);
             }
             Some(TrackNode::Group(group)) => {
                 // Skip rendering if playhead is outside the metatrack's trim window
@@ -532,6 +553,25 @@ impl Project {
                 }
             }
         }
+    }
+
+    /// Collect per-track peak levels for VU metering and reset accumulators
+    pub fn collect_track_peaks(&mut self) -> Vec<(TrackId, f32)> {
+        let mut levels = Vec::new();
+        for (id, track) in &mut self.tracks {
+            match track {
+                TrackNode::Audio(t) => {
+                    levels.push((*id, t.peak_level));
+                    t.peak_level = 0.0;
+                }
+                TrackNode::Midi(t) => {
+                    levels.push((*id, t.peak_level));
+                    t.peak_level = 0.0;
+                }
+                TrackNode::Group(_) => {}
+            }
+        }
+        levels
     }
 
     /// Stop all notes on all MIDI tracks

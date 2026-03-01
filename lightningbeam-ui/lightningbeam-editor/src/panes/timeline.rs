@@ -1260,6 +1260,9 @@ impl TimelinePane {
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         _document: &lightningbeam_core::document::Document,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
+        layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
+        track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
+        input_level: f32,
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -1659,6 +1662,10 @@ impl TimelinePane {
                 (response, temp_slider_value)
             }).inner;
 
+            // Block layer drag while interacting with the slider
+            if volume_response.0.dragged() || volume_response.0.has_focus() {
+                self.layer_control_clicked = true;
+            }
             if volume_response.0.changed() {
                 self.layer_control_clicked = true;
                 // Map slider position (0.0-1.0) back to volume (0.0-2.0)
@@ -1676,6 +1683,93 @@ impl TimelinePane {
                         lightningbeam_core::actions::LayerProperty::Volume(new_volume),
                     )
                 ));
+            }
+
+            // Input gain slider for sampled audio layers (below volume slider)
+            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer_for_controls {
+                if audio_layer.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled {
+                    let gain_slider_rect = egui::Rect::from_min_size(
+                        egui::pos2(controls_right - slider_width, controls_top + 22.0),
+                        egui::vec2(slider_width, 16.0),
+                    );
+                    let current_gain = audio_layer.layer.input_gain;
+
+                    // Map gain (0.0-4.0) to slider (0.0-1.0): linear
+                    let mut slider_val = (current_gain / 4.0) as f32;
+                    let gain_response = ui.scope_builder(egui::UiBuilder::new().max_rect(gain_slider_rect), |ui| {
+                        let slider = egui::Slider::new(&mut slider_val, 0.0..=1.0f32)
+                            .show_value(false);
+                        ui.add(slider)
+                    }).inner;
+
+                    // Block layer drag while interacting with the slider
+                    if gain_response.dragged() || gain_response.has_focus() {
+                        self.layer_control_clicked = true;
+                    }
+                    if gain_response.changed() {
+                        self.layer_control_clicked = true;
+                        let new_gain = (slider_val * 4.0) as f64;
+                        pending_actions.push(Box::new(
+                            lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                                layer_id,
+                                lightningbeam_core::actions::LayerProperty::InputGain(new_gain),
+                            )
+                        ));
+                    }
+
+                    // Label
+                    let label_rect = egui::Rect::from_min_size(
+                        egui::pos2(gain_slider_rect.min.x - 26.0, controls_top + 22.0),
+                        egui::vec2(24.0, 16.0),
+                    );
+                    ui.painter().text(
+                        label_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Gain",
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::from_gray(140),
+                    );
+                }
+            }
+
+            // Per-layer VU meter bar (4px tall at bottom of header)
+            {
+                // Look up the track level for this layer
+                let mut level = 0.0f32;
+                if let Some(&track_id) = layer_to_track_map.get(&layer_id) {
+                    if let Some(&track_level) = track_levels.get(&track_id) {
+                        level = track_level;
+                    }
+                }
+
+                // For active sampled audio layer, show max of track level and input level
+                let is_active_sampled_audio = active_layer_id.map_or(false, |id| id == layer_id)
+                    && matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Audio(a) if a.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled);
+                if is_active_sampled_audio {
+                    level = level.max(input_level);
+                }
+
+                if level > 0.001 {
+                    let meter_height = 4.0;
+                    let meter_rect = egui::Rect::from_min_size(
+                        egui::pos2(header_rect.min.x, header_rect.max.y - meter_height - 1.0),
+                        egui::vec2(header_rect.width(), meter_height),
+                    );
+                    let clamped = level.min(1.0);
+                    let filled_width = meter_rect.width() * clamped;
+                    let color = if clamped > 0.9 {
+                        egui::Color32::from_rgb(220, 50, 50)
+                    } else if clamped > 0.7 {
+                        egui::Color32::from_rgb(220, 200, 50)
+                    } else {
+                        egui::Color32::from_rgb(50, 200, 80)
+                    };
+                    let filled = egui::Rect::from_min_size(
+                        meter_rect.left_top(),
+                        egui::vec2(filled_width, meter_rect.height()),
+                    );
+                    ui.painter().rect_filled(filled, 0.0, color);
+                }
             }
 
             // Separator line at bottom
@@ -4278,7 +4372,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));

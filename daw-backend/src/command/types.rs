@@ -226,6 +226,12 @@ pub enum Command {
         priority: u8, // 0=Low, 1=Medium, 2=High
     },
 
+    // Input monitoring/gain commands
+    /// Enable or disable input monitoring (mic level metering)
+    SetInputMonitoring(bool),
+    /// Set the input gain multiplier (applied before recording)
+    SetInputGain(f32),
+
     // Async audio import
     /// Import an audio file asynchronously. The engine probes the file format
     /// and either memory-maps it (WAV/AIFF) or sets up stream decode
@@ -332,6 +338,13 @@ pub enum AudioEvent {
         sample_rate: u32,
         channels: u32,
     },
+
+    /// Peak amplitude of mic input (for input monitoring meter)
+    InputLevel(f32),
+    /// Peak amplitude of mix output (for master meter)
+    OutputLevel(f32),
+    /// Per-track playback peak levels
+    TrackLevels(Vec<(TrackId, f32)>),
 
     /// Background waveform decode progress/completion for a compressed audio file.
     /// Internal event — consumed by the engine to update the pool, not forwarded to UI.

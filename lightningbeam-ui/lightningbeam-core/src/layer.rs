@@ -60,6 +60,8 @@ pub trait LayerTrait {
     fn set_locked(&mut self, locked: bool);
 }
 
+fn default_input_gain() -> f64 { 1.0 }
+
 /// Base layer structure
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
@@ -83,6 +85,10 @@ pub struct Layer {
 
     /// Audio volume (1.0 = 100%, affects nested audio layers/clips)
     pub volume: f64,
+
+    /// Input gain for recording (1.0 = unity, range 0.0–4.0)
+    #[serde(default = "default_input_gain")]
+    pub input_gain: f64,
 
     /// Audio mute state
     pub muted: bool,
@@ -108,6 +114,7 @@ impl Layer {
             visible: true,
             opacity: 1.0,
             volume: 1.0,             // 100% volume
+            input_gain: 1.0,
             muted: false,
             soloed: false,
             locked: false,
@@ -125,6 +132,7 @@ impl Layer {
             visible: true,
             opacity: 1.0,
             volume: 1.0,
+            input_gain: 1.0,
             muted: false,
             soloed: false,
             locked: false,

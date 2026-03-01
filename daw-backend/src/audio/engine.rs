@@ -71,6 +71,15 @@ pub struct Engine {
     // Disk reader for streaming playback of compressed files
     disk_reader: Option<crate::audio::disk_reader::DiskReader>,
 
+    // Input monitoring and metering
+    input_monitoring: bool,
+    input_gain: f32,
+    input_level_peak: f32,
+    input_level_counter: usize,
+    output_level_peak: f32,
+    output_level_counter: usize,
+    track_level_counter: usize,
+
     // Callback timing diagnostics (enabled by DAW_AUDIO_DEBUG=1)
     debug_audio: bool,
     callback_count: u64,
@@ -138,6 +147,13 @@ impl Engine {
             metronome: Metronome::new(sample_rate),
             recording_sample_buffer: Vec::with_capacity(4096),
             disk_reader: Some(disk_reader),
+            input_monitoring: false,
+            input_gain: 1.0,
+            input_level_peak: 0.0,
+            input_level_counter: 0,
+            output_level_peak: 0.0,
+            output_level_counter: 0,
+            track_level_counter: 0,
             debug_audio: std::env::var("DAW_AUDIO_DEBUG").map_or(false, |v| v == "1"),
             callback_count: 0,
             timing_worst_total_us: 0,
@@ -345,6 +361,25 @@ impl Engine {
                 self.channels,
             );
 
+            // Compute output peak for master VU meter
+            let output_peak = output.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+            self.output_level_peak = self.output_level_peak.max(output_peak);
+            self.output_level_counter += output.len();
+            let meter_interval = self.sample_rate as usize / 20; // ~50ms
+            if self.output_level_counter >= meter_interval {
+                let _ = self.event_tx.push(AudioEvent::OutputLevel(self.output_level_peak));
+                self.output_level_peak = 0.0;
+                self.output_level_counter = 0;
+            }
+
+            // Send per-track peak levels periodically (~50ms)
+            self.track_level_counter += output.len();
+            if self.track_level_counter >= meter_interval {
+                let levels = self.project.collect_track_peaks();
+                let _ = self.event_tx.push(AudioEvent::TrackLevels(levels));
+                self.track_level_counter = 0;
+            }
+
             // Update playhead (convert total samples to frames)
             self.playhead += (output.len() / self.channels as usize) as u64;
 
@@ -380,72 +415,84 @@ impl Engine {
             self.process_live_midi(output);
         }
 
-        // Process recording if active (independent of playback state)
-        if let Some(recording) = &mut self.recording_state {
+        // Process input monitoring and/or recording (independent of playback state)
+        let is_recording = self.recording_state.is_some();
+        if is_recording || self.input_monitoring {
             if let Some(input_rx) = &mut self.input_rx {
-                // Phase 1: Discard stale samples by popping without storing
-                // (fast — no Vec push, no add_samples overhead)
-                while recording.samples_to_skip > 0 {
-                    match input_rx.pop() {
-                        Ok(_) => recording.samples_to_skip -= 1,
-                        Err(_) => break,
+                // Phase 1: Discard stale samples during recording skip phase
+                if let Some(recording) = &mut self.recording_state {
+                    while recording.samples_to_skip > 0 {
+                        match input_rx.pop() {
+                            Ok(_) => recording.samples_to_skip -= 1,
+                            Err(_) => break,
+                        }
                     }
                 }
 
-                // Phase 2: Pull fresh samples for actual recording
+                // Phase 2: Pull fresh samples
                 self.recording_sample_buffer.clear();
                 while let Ok(sample) = input_rx.pop() {
-                    self.recording_sample_buffer.push(sample);
+                    // Apply input gain
+                    self.recording_sample_buffer.push(sample * self.input_gain);
                 }
 
-                // Add samples to recording
                 if !self.recording_sample_buffer.is_empty() {
-                    // Calculate how many samples will be skipped (stale buffer data)
-                    let skip = if recording.paused {
-                        self.recording_sample_buffer.len()
-                    } else {
-                        recording.samples_to_skip.min(self.recording_sample_buffer.len())
-                    };
+                    // Compute input peak for VU metering
+                    let input_peak = self.recording_sample_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                    self.input_level_peak = self.input_level_peak.max(input_peak);
+                    self.input_level_counter += self.recording_sample_buffer.len();
+                    let meter_interval = self.sample_rate as usize / 20; // ~50ms
+                    if self.input_level_counter >= meter_interval {
+                        let _ = self.event_tx.push(AudioEvent::InputLevel(self.input_level_peak));
+                        self.input_level_peak = 0.0;
+                        self.input_level_counter = 0;
+                    }
 
-                    match recording.add_samples(&self.recording_sample_buffer) {
-                        Ok(_flushed) => {
-                            // Mirror non-skipped samples to UI for live waveform display
-                            if skip < self.recording_sample_buffer.len() {
-                                if let Some(ref mut mirror_tx) = self.recording_mirror_tx {
-                                    for &sample in &self.recording_sample_buffer[skip..] {
-                                        let _ = mirror_tx.push(sample);
+                    // Feed samples to recording if active
+                    if let Some(recording) = &mut self.recording_state {
+                        let skip = if recording.paused {
+                            self.recording_sample_buffer.len()
+                        } else {
+                            recording.samples_to_skip.min(self.recording_sample_buffer.len())
+                        };
+
+                        match recording.add_samples(&self.recording_sample_buffer) {
+                            Ok(_flushed) => {
+                                // Mirror non-skipped samples to UI for live waveform display
+                                if skip < self.recording_sample_buffer.len() {
+                                    if let Some(ref mut mirror_tx) = self.recording_mirror_tx {
+                                        for &sample in &self.recording_sample_buffer[skip..] {
+                                            let _ = mirror_tx.push(sample);
+                                        }
                                     }
                                 }
-                            }
 
-                            // Update clip duration every callback for sample-accurate timing
-                            let duration = recording.duration();
-                            let clip_id = recording.clip_id;
-                            let track_id = recording.track_id;
+                                // Update clip duration every callback for sample-accurate timing
+                                let duration = recording.duration();
+                                let clip_id = recording.clip_id;
+                                let track_id = recording.track_id;
 
-                            // Update clip duration in project as recording progresses
-                            if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
-                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                    // Update both internal_end and external_duration as recording progresses
-                                    clip.internal_end = clip.internal_start + duration;
-                                    clip.external_duration = duration;
+                                // Update clip duration in project as recording progresses
+                                if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                        clip.internal_end = clip.internal_start + duration;
+                                        clip.external_duration = duration;
+                                    }
+                                }
+
+                                // Send progress event periodically (every ~0.1 seconds)
+                                self.recording_progress_counter += self.recording_sample_buffer.len();
+                                if self.recording_progress_counter >= (self.sample_rate as usize / 10) {
+                                    let _ = self.event_tx.push(AudioEvent::RecordingProgress(clip_id, duration));
+                                    self.recording_progress_counter = 0;
                                 }
                             }
-
-                            // Send progress event periodically (every ~0.1 seconds)
-                            self.recording_progress_counter += self.recording_sample_buffer.len();
-                            if self.recording_progress_counter >= (self.sample_rate as usize / 10) {
-                                let _ = self.event_tx.push(AudioEvent::RecordingProgress(clip_id, duration));
-                                self.recording_progress_counter = 0;
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::RecordingError(
+                                    format!("Recording write error: {}", e)
+                                ));
+                                self.recording_state = None;
                             }
-                        }
-                        Err(e) => {
-                            // Recording error occurred
-                            let _ = self.event_tx.push(AudioEvent::RecordingError(
-                                format!("Recording write error: {}", e)
-                            ));
-                            // Stop recording on error
-                            self.recording_state = None;
                         }
                     }
                 }
@@ -1134,6 +1181,14 @@ impl Engine {
 
             Command::SetMetronomeEnabled(enabled) => {
                 self.metronome.set_enabled(enabled);
+            }
+
+            Command::SetInputMonitoring(enabled) => {
+                self.input_monitoring = enabled;
+            }
+
+            Command::SetInputGain(gain) => {
+                self.input_gain = gain;
             }
 
             Command::SetTempo(bpm, time_sig) => {
@@ -2849,6 +2904,16 @@ impl EngineController {
     /// Set track solo state
     pub fn set_track_solo(&mut self, track_id: TrackId, solo: bool) {
         let _ = self.command_tx.push(Command::SetTrackSolo(track_id, solo));
+    }
+
+    /// Enable or disable input monitoring (mic level metering)
+    pub fn set_input_monitoring(&mut self, enabled: bool) {
+        let _ = self.command_tx.push(Command::SetInputMonitoring(enabled));
+    }
+
+    /// Set the input gain multiplier (applied before recording)
+    pub fn set_input_gain(&mut self, gain: f32) {
+        let _ = self.command_tx.push(Command::SetInputGain(gain));
     }
 
     /// Move a clip to a new timeline position (changes external_start)
