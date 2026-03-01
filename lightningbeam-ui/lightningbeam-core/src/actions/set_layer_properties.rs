@@ -12,6 +12,7 @@ use uuid::Uuid;
 #[derive(Clone, Debug)]
 pub enum LayerProperty {
     Volume(f64),
+    InputGain(f64),
     Muted(bool),
     Soloed(bool),
     Locked(bool),
@@ -25,6 +26,7 @@ pub enum LayerProperty {
 #[derive(Clone, Debug)]
 enum OldValue {
     Volume(f64),
+    InputGain(f64),
     Muted(bool),
     Soloed(bool),
     Locked(bool),
@@ -85,6 +87,7 @@ impl Action for SetLayerPropertiesAction {
                 if self.old_values[i].is_none() {
                     self.old_values[i] = Some(match &self.property {
                         LayerProperty::Volume(_) => OldValue::Volume(layer.volume()),
+                        LayerProperty::InputGain(_) => OldValue::InputGain(layer.layer().input_gain),
                         LayerProperty::Muted(_) => OldValue::Muted(layer.muted()),
                         LayerProperty::Soloed(_) => OldValue::Soloed(layer.soloed()),
                         LayerProperty::Locked(_) => OldValue::Locked(layer.locked()),
@@ -104,6 +107,7 @@ impl Action for SetLayerPropertiesAction {
                 // Set new value
                 match &self.property {
                     LayerProperty::Volume(v) => layer.set_volume(*v),
+                    LayerProperty::InputGain(g) => layer.layer_mut().input_gain = *g,
                     LayerProperty::Muted(m) => layer.set_muted(*m),
                     LayerProperty::Soloed(s) => layer.set_soloed(*s),
                     LayerProperty::Locked(l) => layer.set_locked(*l),
@@ -128,6 +132,7 @@ impl Action for SetLayerPropertiesAction {
                 if let Some(old_value) = &self.old_values[i] {
                     match old_value {
                         OldValue::Volume(v) => layer.set_volume(*v),
+                        OldValue::InputGain(g) => layer.layer_mut().input_gain = *g,
                         OldValue::Muted(m) => layer.set_muted(*m),
                         OldValue::Soloed(s) => layer.set_soloed(*s),
                         OldValue::Locked(l) => layer.set_locked(*l),
@@ -159,6 +164,7 @@ impl Action for SetLayerPropertiesAction {
             if let Some(&track_id) = backend.layer_to_track_map.get(&layer_id) {
                 match &self.property {
                     LayerProperty::Volume(v) => controller.set_track_volume(track_id, *v as f32),
+                    LayerProperty::InputGain(g) => controller.set_input_gain(*g as f32),
                     LayerProperty::Muted(m) => controller.set_track_mute(track_id, *m),
                     LayerProperty::Soloed(s) => controller.set_track_solo(track_id, *s),
                     _ => {} // Locked/Opacity/Visible/CameraEnabled are UI-only
@@ -183,6 +189,7 @@ impl Action for SetLayerPropertiesAction {
                 if let Some(old_value) = &self.old_values[i] {
                     match old_value {
                         OldValue::Volume(v) => controller.set_track_volume(track_id, *v as f32),
+                        OldValue::InputGain(g) => controller.set_input_gain(*g as f32),
                         OldValue::Muted(m) => controller.set_track_mute(track_id, *m),
                         OldValue::Soloed(s) => controller.set_track_solo(track_id, *s),
                         _ => {} // Locked/Opacity/Visible are UI-only
@@ -196,6 +203,7 @@ impl Action for SetLayerPropertiesAction {
     fn description(&self) -> String {
         let property_name = match &self.property {
             LayerProperty::Volume(_) => "volume",
+            LayerProperty::InputGain(_) => "input gain",
             LayerProperty::Muted(_) => "mute",
             LayerProperty::Soloed(_) => "solo",
             LayerProperty::Locked(_) => "lock",

@@ -139,11 +139,18 @@ enum TimeDisplayFormat {
     Measures,
 }
 
-/// Type of recording in progress (for stop logic dispatch)
-enum RecordingType {
-    Audio,
-    Midi,
-    Webcam,
+/// State for an in-progress layer header drag-to-reorder operation.
+struct LayerDragState {
+    /// IDs of the layers being dragged (in visual order, top to bottom)
+    layer_ids: Vec<uuid::Uuid>,
+    /// Original parent group IDs for each dragged layer (parallel to layer_ids)
+    source_parent_ids: Vec<Option<uuid::Uuid>>,
+    /// Current gap position in the filtered (dragged-layers-removed) row list
+    gap_row_index: usize,
+    /// Current mouse Y in screen coordinates (for floating header rendering)
+    current_mouse_y: f32,
+    /// Y offset from the top of the topmost dragged row to the mousedown point
+    grab_offset_y: f32,
 }
 
 pub struct TimelinePane {
@@ -190,6 +197,12 @@ pub struct TimelinePane {
     /// Cached egui textures for video thumbnail strip rendering.
     /// Key: (clip_id, thumbnail_timestamp_millis) → TextureHandle
     video_thumbnail_textures: std::collections::HashMap<(uuid::Uuid, i64), egui::TextureHandle>,
+
+    /// Layer header drag-to-reorder state (None if not dragging a layer)
+    layer_drag: Option<LayerDragState>,
+
+    /// Cached mousedown position in header area (for drag threshold detection)
+    header_mousedown_pos: Option<egui::Pos2>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -306,6 +319,43 @@ fn flatten_layer<'a>(
             }
         }
     }
+}
+
+/// Paint a soft drop shadow around a rect using gradient meshes (bottom + right + corner).
+/// Three non-overlapping quads so alpha doesn't double up.
+fn paint_drop_shadow(painter: &egui::Painter, rect: egui::Rect, shadow_size: f32, alpha: u8) {
+    let c = egui::Color32::from_black_alpha(alpha);
+    let t = egui::Color32::TRANSPARENT;
+    let mut mesh = egui::Mesh::default();
+
+    // Bottom edge: straight down, stops at right edge
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.left_bottom(), c);                                      // 0
+    mesh.colored_vertex(rect.right_bottom(), c);                                     // 1
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom() + shadow_size), t);   // 2
+    mesh.colored_vertex(egui::pos2(rect.left(), rect.bottom() + shadow_size), t);    // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    // Right edge: rightward, stops at bottom edge
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.right_top(), c);                                        // 0
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.top()), t);      // 1
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom()), t);   // 2
+    mesh.colored_vertex(rect.right_bottom(), c);                                     // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    // Bottom-right corner: dark at inner corner, transparent at other three
+    let idx = mesh.vertices.len() as u32;
+    mesh.colored_vertex(rect.right_bottom(), c);                                                  // 0
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom()), t);                // 1
+    mesh.colored_vertex(egui::pos2(rect.right() + shadow_size, rect.bottom() + shadow_size), t); // 2
+    mesh.colored_vertex(egui::pos2(rect.right(), rect.bottom() + shadow_size), t);                // 3
+    mesh.add_triangle(idx, idx + 1, idx + 2);
+    mesh.add_triangle(idx, idx + 2, idx + 3);
+
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Shift+click layer selection: toggle a layer in/out of the focus selection,
@@ -430,6 +480,8 @@ impl TimelinePane {
             time_display_format: TimeDisplayFormat::Seconds,
             waveform_upload_progress: std::collections::HashMap::new(),
             video_thumbnail_textures: std::collections::HashMap::new(),
+            layer_drag: None,
+            header_mousedown_pos: None,
         }
     }
 
@@ -459,184 +511,254 @@ impl TimelinePane {
         }
     }
 
-    /// Start recording on the active layer (audio or video with camera)
+    /// Start recording on all selected recordable layers (or the active layer as fallback).
+    /// Groups are recursed into. At most one layer per recording type is recorded to
+    /// (topmost in visual order wins).
     fn start_recording(&mut self, shared: &mut SharedPaneState) {
         use lightningbeam_core::clip::{AudioClip, ClipInstance};
 
-        let Some(active_layer_id) = *shared.active_layer_id else {
-            println!("⚠️  No active layer selected for recording");
-            return;
-        };
-
-        // Check if this is a video layer with camera enabled
-        let is_video_camera = {
-            let document = shared.action_executor.document();
-            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
-            context_layers.iter().copied()
-                .find(|l| l.id() == active_layer_id)
-                .map(|layer| {
-                    if let AnyLayer::Video(v) = layer {
-                        v.camera_enabled
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(false)
-        };
-
-        if is_video_camera {
-            // Issue webcam recording start command (processed by main.rs)
-            *shared.webcam_record_command = Some(super::WebcamRecordCommand::Start {
-                layer_id: active_layer_id,
-            });
-            *shared.is_recording = true;
-            *shared.recording_start_time = *shared.playback_time;
-            *shared.recording_layer_id = Some(active_layer_id);
-
-            // Auto-start playback for recording
-            if !*shared.is_playing {
-                if let Some(controller_arc) = shared.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-                    controller.play();
-                    *shared.is_playing = true;
-                    println!("▶ Auto-started playback for webcam recording");
+        // Step 1: Collect candidate layer IDs from focus selection, falling back to active layer
+        let candidate_ids: Vec<uuid::Uuid> = match shared.focus {
+            lightningbeam_core::selection::FocusSelection::Layers(ref ids) if !ids.is_empty() => {
+                ids.clone()
+            }
+            _ => {
+                if let Some(id) = *shared.active_layer_id {
+                    vec![id]
+                } else {
+                    println!("⚠️  No active layer selected for recording");
+                    return;
                 }
             }
-            println!("📹 Started webcam recording on layer {}", active_layer_id);
+        };
+
+        // Step 2: Resolve layers, recursing into groups to collect recordable leaves.
+        // Categorize by recording type. Use visual ordering (build_timeline_rows) to pick topmost.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum RecordCandidate {
+            AudioSampled,
+            AudioMidi,
+            VideoCamera,
+        }
+
+        let mut candidates: Vec<(uuid::Uuid, RecordCandidate, usize)> = Vec::new(); // (layer_id, type, visual_row_index)
+
+        {
+            let document = shared.action_executor.document();
+            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+            let rows = build_timeline_rows(&context_layers);
+
+            // Helper: collect recordable leaf layer IDs from a layer (recurse into groups)
+            fn collect_recordable_leaves(layer: &AnyLayer, out: &mut Vec<uuid::Uuid>) {
+                match layer {
+                    AnyLayer::Audio(_) => out.push(layer.id()),
+                    AnyLayer::Video(v) if v.camera_enabled => out.push(layer.id()),
+                    AnyLayer::Group(g) => {
+                        for child in &g.children {
+                            collect_recordable_leaves(child, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut leaf_ids: Vec<uuid::Uuid> = Vec::new();
+            for cid in &candidate_ids {
+                if let Some(layer) = context_layers.iter().copied().find(|l| l.id() == *cid) {
+                    collect_recordable_leaves(layer, &mut leaf_ids);
+                } else {
+                    // Try deeper in the tree (for layers inside groups)
+                    if let Some(layer) = document.root.get_child(cid) {
+                        collect_recordable_leaves(layer, &mut leaf_ids);
+                    }
+                }
+            }
+
+            // Deduplicate
+            leaf_ids.sort();
+            leaf_ids.dedup();
+
+            // Categorize and find visual row index for ordering
+            for leaf_id in &leaf_ids {
+                let visual_idx = rows.iter().position(|r| r.layer_id() == *leaf_id).unwrap_or(usize::MAX);
+                if let Some(layer) = document.root.get_child(leaf_id).or_else(|| {
+                    context_layers.iter().copied().find(|l| l.id() == *leaf_id)
+                }) {
+                    let cat = match layer {
+                        AnyLayer::Audio(a) => match a.audio_layer_type {
+                            AudioLayerType::Sampled => Some(RecordCandidate::AudioSampled),
+                            AudioLayerType::Midi => Some(RecordCandidate::AudioMidi),
+                        },
+                        AnyLayer::Video(v) if v.camera_enabled => Some(RecordCandidate::VideoCamera),
+                        _ => None,
+                    };
+                    if let Some(cat) = cat {
+                        candidates.push((*leaf_id, cat, visual_idx));
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            println!("⚠️  No recordable layers in selection");
             return;
         }
 
-        // Get layer type (copy it so we can drop the document borrow before mutating)
-        let layer_type = {
-            let document = shared.action_executor.document();
-            let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
-            let Some(layer) = context_layers.iter().copied().find(|l| l.id() == active_layer_id) else {
-                println!("⚠️  Active layer not found in document");
-                return;
-            };
-            let AnyLayer::Audio(audio_layer) = layer else {
-                println!("⚠️  Active layer is not an audio layer - cannot record");
-                return;
-            };
-            audio_layer.audio_layer_type
-        };
-
-        // Get the backend track ID for this layer
-        let Some(&track_id) = shared.layer_to_track_map.get(&active_layer_id) else {
-            println!("⚠️  No backend track mapped for layer {}", active_layer_id);
-            return;
-        };
-
-        let start_time = *shared.playback_time;
-
-        // Start recording based on layer type
-        if let Some(controller_arc) = shared.audio_controller {
-            let mut controller = controller_arc.lock().unwrap();
-
-            match layer_type {
-                AudioLayerType::Midi => {
-                    // Create backend MIDI clip and start recording
-                    let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
-                    controller.start_midi_recording(track_id, clip_id, start_time);
-                    shared.recording_clips.insert(active_layer_id, clip_id);
-                    println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
-                             track_id, start_time, clip_id);
-
-                    // Drop controller lock before document mutation
-                    drop(controller);
-
-                    // Create document clip + clip instance immediately (clip_id is known synchronously)
-                    let doc_clip = AudioClip::new_midi("Recording...", clip_id, 0.0);
-                    let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
-
-                    let clip_instance = ClipInstance::new(doc_clip_id)
-                        .with_timeline_start(start_time);
-
-                    if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&active_layer_id) {
-                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                            audio_layer.clip_instances.push(clip_instance);
-                        }
-                    }
-
-                    // Initialize empty cache entry for this clip
-                    shared.midi_event_cache.insert(clip_id, Vec::new());
+        // Step 3: Sort by visual position (topmost first) and deduplicate by type
+        candidates.sort_by_key(|c| c.2);
+        let mut seen_sampled = false;
+        let mut seen_midi = false;
+        let mut seen_webcam = false;
+        candidates.retain(|c| {
+            match c.1 {
+                RecordCandidate::AudioSampled => {
+                    if seen_sampled { return false; }
+                    seen_sampled = true;
                 }
-                AudioLayerType::Sampled => {
-                    // For audio recording, backend creates the clip
-                    controller.start_recording(track_id, start_time);
-                    println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
-                    drop(controller);
+                RecordCandidate::AudioMidi => {
+                    if seen_midi { return false; }
+                    seen_midi = true;
+                }
+                RecordCandidate::VideoCamera => {
+                    if seen_webcam { return false; }
+                    seen_webcam = true;
                 }
             }
+            true
+        });
 
-            // Re-acquire lock for playback start
-            if !*shared.is_playing {
+        let start_time = *shared.playback_time;
+        shared.recording_layer_ids.clear();
+
+        // Step 4: Dispatch recording for each candidate
+        for &(layer_id, ref cat, _) in &candidates {
+            match cat {
+                RecordCandidate::VideoCamera => {
+                    *shared.webcam_record_command = Some(super::WebcamRecordCommand::Start {
+                        layer_id,
+                    });
+                    shared.recording_layer_ids.push(layer_id);
+                    println!("📹 Started webcam recording on layer {}", layer_id);
+                }
+                RecordCandidate::AudioSampled => {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            controller.start_recording(track_id, start_time);
+                            println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
+                        }
+                        shared.recording_layer_ids.push(layer_id);
+                    } else {
+                        println!("⚠️  No backend track mapped for layer {}", layer_id);
+                    }
+                }
+                RecordCandidate::AudioMidi => {
+                    if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        if let Some(controller_arc) = shared.audio_controller {
+                            let mut controller = controller_arc.lock().unwrap();
+                            let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
+                            controller.start_midi_recording(track_id, clip_id, start_time);
+                            shared.recording_clips.insert(layer_id, clip_id);
+                            println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
+                                     track_id, start_time, clip_id);
+                        }
+
+                        // Create document clip + clip instance immediately
+                        let doc_clip = AudioClip::new_midi("Recording...",
+                            *shared.recording_clips.get(&layer_id).unwrap_or(&0), 0.0);
+                        let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
+
+                        let clip_instance = ClipInstance::new(doc_clip_id)
+                            .with_timeline_start(start_time);
+
+                        if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                audio_layer.clip_instances.push(clip_instance);
+                            }
+                        }
+
+                        // Initialize empty cache entry
+                        if let Some(&clip_id) = shared.recording_clips.get(&layer_id) {
+                            shared.midi_event_cache.insert(clip_id, Vec::new());
+                        }
+
+                        shared.recording_layer_ids.push(layer_id);
+                    } else {
+                        println!("⚠️  No backend track mapped for layer {}", layer_id);
+                    }
+                }
+            }
+        }
+
+        if shared.recording_layer_ids.is_empty() {
+            println!("⚠️  Failed to start recording on any layer");
+            return;
+        }
+
+        // Auto-start playback if needed
+        if !*shared.is_playing {
+            if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
                 controller.play();
                 *shared.is_playing = true;
                 println!("▶ Auto-started playback for recording");
             }
-
-            // Store recording state
-            *shared.is_recording = true;
-            *shared.recording_start_time = start_time;
-            *shared.recording_layer_id = Some(active_layer_id);
-        } else {
-            println!("⚠️  No audio controller available");
         }
+
+        *shared.is_recording = true;
+        *shared.recording_start_time = start_time;
     }
 
-    /// Stop the current recording
+    /// Stop all active recordings
     fn stop_recording(&mut self, shared: &mut SharedPaneState) {
-        // Determine recording type by checking the layer
-        let recording_type = if let Some(layer_id) = *shared.recording_layer_id {
-            let context_layers = shared.action_executor.document().context_layers(shared.editing_clip_id.as_ref());
-            context_layers.iter().copied()
-                .find(|l| l.id() == layer_id)
-                .map(|layer| {
+        let stop_wall = std::time::Instant::now();
+        eprintln!("[STOP] stop_recording called at {:?}", stop_wall);
+
+        // Determine which recording types are active by checking recording_layer_ids
+        let mut has_audio = false;
+        let mut has_midi = false;
+        let mut has_webcam = false;
+
+        {
+            let document = shared.action_executor.document();
+            for layer_id in shared.recording_layer_ids.iter() {
+                if let Some(layer) = document.root.get_child(layer_id) {
                     match layer {
-                        lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
-                            if matches!(audio_layer.audio_layer_type, lightningbeam_core::layer::AudioLayerType::Midi) {
-                                RecordingType::Midi
-                            } else {
-                                RecordingType::Audio
+                        lightningbeam_core::layer::AnyLayer::Audio(a) => {
+                            match a.audio_layer_type {
+                                lightningbeam_core::layer::AudioLayerType::Sampled => has_audio = true,
+                                lightningbeam_core::layer::AudioLayerType::Midi => has_midi = true,
                             }
                         }
                         lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled => {
-                            RecordingType::Webcam
+                            has_webcam = true;
                         }
-                        _ => RecordingType::Audio,
-                    }
-                })
-                .unwrap_or(RecordingType::Audio)
-        } else {
-            RecordingType::Audio
-        };
-
-        match recording_type {
-            RecordingType::Webcam => {
-                // Issue webcam stop command (processed by main.rs)
-                *shared.webcam_record_command = Some(super::WebcamRecordCommand::Stop);
-                println!("📹 Stopped webcam recording");
-            }
-            _ => {
-                if let Some(controller_arc) = shared.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-
-                    if matches!(recording_type, RecordingType::Midi) {
-                        controller.stop_midi_recording();
-                        println!("🎹 Stopped MIDI recording");
-                    } else {
-                        controller.stop_recording();
-                        println!("🎤 Stopped audio recording");
+                        _ => {}
                     }
                 }
             }
         }
 
-        // Note: Don't clear recording_layer_id here!
-        // The RecordingStopped/MidiRecordingStopped event handler in main.rs
-        // needs it to finalize the clip. It will clear the state after processing.
+        if has_webcam {
+            *shared.webcam_record_command = Some(super::WebcamRecordCommand::Stop);
+            eprintln!("[STOP] Webcam stop command queued at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        if let Some(controller_arc) = shared.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            if has_midi {
+                controller.stop_midi_recording();
+                eprintln!("[STOP] MIDI stop command sent at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+            }
+            if has_audio {
+                controller.stop_recording();
+                eprintln!("[STOP] Audio stop command sent at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+
+        // Note: Don't clear recording_layer_ids here!
+        // The RecordingStopped/MidiRecordingStopped event handlers in main.rs
+        // need them to finalize clips. They will clear the state after processing.
         // Only clear is_recording to update UI state immediately.
         *shared.is_recording = false;
     }
@@ -1141,6 +1263,9 @@ impl TimelinePane {
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
         _document: &lightningbeam_core::document::Document,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
+        layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
+        track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
+        input_level: f32,
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -1163,11 +1288,27 @@ impl TimelinePane {
         let secondary_text_color = egui::Color32::from_gray(150);
 
         // Build virtual row list (accounts for group expansion)
-        let rows = build_timeline_rows(context_layers);
+        let all_rows = build_timeline_rows(context_layers);
+
+        // When dragging layers, filter them out and compute gap-adjusted positions
+        let drag_layer_ids: Vec<uuid::Uuid> = self.layer_drag.as_ref()
+            .map(|d| d.layer_ids.clone()).unwrap_or_default();
+        let drag_count = drag_layer_ids.len();
+        let gap_row_index = self.layer_drag.as_ref().map(|d| d.gap_row_index);
+
+        // Build filtered row list (excluding dragged layers)
+        let rows: Vec<&TimelineRow> = all_rows.iter()
+            .filter(|r| !drag_layer_ids.contains(&r.layer_id()))
+            .collect();
 
         // Draw layer headers from virtual row list
-        for (i, row) in rows.iter().enumerate() {
-            let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+        for (filtered_i, row) in rows.iter().enumerate() {
+            // Compute Y with gap offset: rows at or after the gap shift down by drag_count * LAYER_HEIGHT
+            let visual_i = match gap_row_index {
+                Some(gap) if filtered_i >= gap => filtered_i + drag_count,
+                _ => filtered_i,
+            };
+            let y = rect.min.y + visual_i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
             if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
@@ -1526,6 +1667,10 @@ impl TimelinePane {
                 (response, temp_slider_value)
             }).inner;
 
+            // Block layer drag while interacting with the slider
+            if volume_response.0.dragged() || volume_response.0.has_focus() {
+                self.layer_control_clicked = true;
+            }
             if volume_response.0.changed() {
                 self.layer_control_clicked = true;
                 // Map slider position (0.0-1.0) back to volume (0.0-2.0)
@@ -1545,6 +1690,93 @@ impl TimelinePane {
                 ));
             }
 
+            // Input gain slider for sampled audio layers (below volume slider)
+            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer_for_controls {
+                if audio_layer.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled {
+                    let gain_slider_rect = egui::Rect::from_min_size(
+                        egui::pos2(controls_right - slider_width, controls_top + 22.0),
+                        egui::vec2(slider_width, 16.0),
+                    );
+                    let current_gain = audio_layer.layer.input_gain;
+
+                    // Map gain (0.0-4.0) to slider (0.0-1.0): linear
+                    let mut slider_val = (current_gain / 4.0) as f32;
+                    let gain_response = ui.scope_builder(egui::UiBuilder::new().max_rect(gain_slider_rect), |ui| {
+                        let slider = egui::Slider::new(&mut slider_val, 0.0..=1.0f32)
+                            .show_value(false);
+                        ui.add(slider)
+                    }).inner;
+
+                    // Block layer drag while interacting with the slider
+                    if gain_response.dragged() || gain_response.has_focus() {
+                        self.layer_control_clicked = true;
+                    }
+                    if gain_response.changed() {
+                        self.layer_control_clicked = true;
+                        let new_gain = (slider_val * 4.0) as f64;
+                        pending_actions.push(Box::new(
+                            lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                                layer_id,
+                                lightningbeam_core::actions::LayerProperty::InputGain(new_gain),
+                            )
+                        ));
+                    }
+
+                    // Label
+                    let label_rect = egui::Rect::from_min_size(
+                        egui::pos2(gain_slider_rect.min.x - 26.0, controls_top + 22.0),
+                        egui::vec2(24.0, 16.0),
+                    );
+                    ui.painter().text(
+                        label_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Gain",
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::from_gray(140),
+                    );
+                }
+            }
+
+            // Per-layer VU meter bar (4px tall at bottom of header)
+            {
+                // Look up the track level for this layer
+                let mut level = 0.0f32;
+                if let Some(&track_id) = layer_to_track_map.get(&layer_id) {
+                    if let Some(&track_level) = track_levels.get(&track_id) {
+                        level = track_level;
+                    }
+                }
+
+                // For active sampled audio layer, show max of track level and input level
+                let is_active_sampled_audio = active_layer_id.map_or(false, |id| id == layer_id)
+                    && matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Audio(a) if a.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled);
+                if is_active_sampled_audio {
+                    level = level.max(input_level);
+                }
+
+                if level > 0.001 {
+                    let meter_height = 4.0;
+                    let meter_rect = egui::Rect::from_min_size(
+                        egui::pos2(header_rect.min.x, header_rect.max.y - meter_height - 1.0),
+                        egui::vec2(header_rect.width(), meter_height),
+                    );
+                    let clamped = level.min(1.0);
+                    let filled_width = meter_rect.width() * clamped;
+                    let color = if clamped > 0.9 {
+                        egui::Color32::from_rgb(220, 50, 50)
+                    } else if clamped > 0.7 {
+                        egui::Color32::from_rgb(220, 200, 50)
+                    } else {
+                        egui::Color32::from_rgb(50, 200, 80)
+                    };
+                    let filled = egui::Rect::from_min_size(
+                        meter_rect.left_top(),
+                        egui::vec2(filled_width, meter_rect.height()),
+                    );
+                    ui.painter().rect_filled(filled, 0.0, color);
+                }
+            }
+
             // Separator line at bottom
             ui.painter().line_segment(
                 [
@@ -1553,6 +1785,102 @@ impl TimelinePane {
                 ],
                 egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
             );
+        }
+
+        // Draw floating dragged layer headers at mouse position with drop shadow
+        if let Some(ref drag_state) = self.layer_drag {
+            // Collect the dragged rows in order
+            let dragged_rows: Vec<&TimelineRow> = drag_state.layer_ids.iter()
+                .filter_map(|did| all_rows.iter().find(|r| r.layer_id() == *did))
+                .collect();
+
+            let float_top_y = drag_state.current_mouse_y - drag_state.grab_offset_y;
+
+            for (di, dragged_row) in dragged_rows.iter().enumerate() {
+                let float_y = float_top_y + di as f32 * LAYER_HEIGHT;
+                let float_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, float_y),
+                    egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
+                );
+
+                // Gradient drop shadow
+                paint_drop_shadow(ui.painter(), float_rect, 8.0, 60);
+
+                // Background (active/selected color)
+                ui.painter().rect_filled(float_rect, 0.0, active_color);
+
+                // Layer info
+                let drag_indent = match dragged_row {
+                    TimelineRow::GroupChild { depth, .. } => *depth as f32 * 16.0,
+                    TimelineRow::CollapsedGroup { depth, .. } => *depth as f32 * 16.0,
+                    _ => 0.0,
+                };
+                let (drag_name, drag_type_str, drag_type_color) = match dragged_row {
+                    TimelineRow::Normal(layer) => {
+                        let (lt, tc) = match layer {
+                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                            AnyLayer::Audio(al) => match al.audio_layer_type {
+                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                            },
+                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                            AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(100, 200, 255)),
+                        };
+                        (layer.layer().name.clone(), lt, tc)
+                    }
+                    TimelineRow::CollapsedGroup { group, .. } => {
+                        (group.layer.name.clone(), "Group", egui::Color32::from_rgb(0, 180, 180))
+                    }
+                    TimelineRow::GroupChild { child, .. } => {
+                        let (lt, tc) = match child {
+                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                            AnyLayer::Audio(al) => match al.audio_layer_type {
+                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                            },
+                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                            AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(100, 200, 255)),
+                        };
+                        (child.layer().name.clone(), lt, tc)
+                    }
+                };
+
+                // Color indicator bar
+                let indicator_rect = egui::Rect::from_min_size(
+                    float_rect.min + egui::vec2(drag_indent, 0.0),
+                    egui::vec2(4.0, LAYER_HEIGHT),
+                );
+                ui.painter().rect_filled(indicator_rect, 0.0, drag_type_color);
+
+                // Layer name
+                let name_x = 10.0 + drag_indent;
+                ui.painter().text(
+                    float_rect.min + egui::vec2(name_x, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    &drag_name,
+                    egui::FontId::proportional(14.0),
+                    text_color,
+                );
+
+                // Type label
+                ui.painter().text(
+                    float_rect.min + egui::vec2(name_x, 28.0),
+                    egui::Align2::LEFT_TOP,
+                    drag_type_str,
+                    egui::FontId::proportional(11.0),
+                    secondary_text_color,
+                );
+
+                // Separator line at bottom
+                ui.painter().line_segment(
+                    [egui::pos2(float_rect.min.x, float_rect.max.y), egui::pos2(float_rect.max.x, float_rect.max.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                );
+            }
         }
 
         // Right border for header column
@@ -1607,11 +1935,64 @@ impl TimelinePane {
         }
 
         // Build virtual row list (accounts for group expansion)
-        let rows = build_timeline_rows(context_layers);
+        let all_rows = build_timeline_rows(context_layers);
 
-        // Draw layer rows from virtual row list
-        for (i, row) in rows.iter().enumerate() {
-            let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+        // When dragging layers, compute remapped Y positions:
+        // - Dragged rows render at the gap position
+        // - Non-dragged rows shift around the gap
+        let drag_layer_ids_content: Vec<uuid::Uuid> = self.layer_drag.as_ref()
+            .map(|d| d.layer_ids.clone()).unwrap_or_default();
+        let drag_count_content = drag_layer_ids_content.len();
+        let gap_row_index_content = self.layer_drag.as_ref().map(|d| d.gap_row_index);
+
+        // Pre-compute Y position for each row.
+        // Dragged rows follow the mouse continuously (matching the floating header);
+        // non-dragged rows snap to discrete positions shifted around the gap.
+        let drag_float_top_y: Option<f32> = self.layer_drag.as_ref()
+            .map(|d| d.current_mouse_y - d.grab_offset_y);
+
+        let row_y_positions: Vec<f32> = {
+            let mut positions = Vec::with_capacity(all_rows.len());
+            let mut filtered_i = 0usize;
+            let mut drag_offset = 0usize;
+            for row in all_rows.iter() {
+                if drag_layer_ids_content.contains(&row.layer_id()) {
+                    // Dragged row: continuous Y from mouse position
+                    let base_y = drag_float_top_y.unwrap_or(0.0);
+                    positions.push(base_y + drag_offset as f32 * LAYER_HEIGHT);
+                    drag_offset += 1;
+                } else {
+                    // Non-dragged row: discrete position, shifted around gap
+                    let visual = match gap_row_index_content {
+                        Some(gap) if filtered_i >= gap => filtered_i + drag_count_content,
+                        _ => filtered_i,
+                    };
+                    positions.push(rect.min.y + visual as f32 * LAYER_HEIGHT - self.viewport_scroll_y);
+                    filtered_i += 1;
+                }
+            }
+            positions
+        };
+
+        // Draw non-dragged rows first, then dragged rows on top (so shadow/content overlaps correctly)
+        let draw_order: Vec<usize> = {
+            let mut non_dragged: Vec<usize> = Vec::new();
+            let mut dragged: Vec<usize> = Vec::new();
+            for (i, row) in all_rows.iter().enumerate() {
+                if drag_layer_ids_content.contains(&row.layer_id()) {
+                    dragged.push(i);
+                } else {
+                    non_dragged.push(i);
+                }
+            }
+            non_dragged.extend(dragged);
+            non_dragged
+        };
+
+        for &i in &draw_order {
+            let row = &all_rows[i];
+            let y = row_y_positions[i];
+            let is_being_dragged = drag_layer_ids_content.contains(&row.layer_id());
 
             // Skip if layer is outside visible area
             if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
@@ -1622,6 +2003,11 @@ impl TimelinePane {
                 egui::pos2(rect.min.x, y),
                 egui::vec2(rect.width(), LAYER_HEIGHT),
             );
+
+            // Drop shadow for dragged rows
+            if is_being_dragged {
+                paint_drop_shadow(painter, layer_rect, 8.0, 60);
+            }
 
             let row_layer_id = row.layer_id();
 
@@ -2803,7 +3189,6 @@ impl TimelinePane {
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         editing_clip_id: Option<&uuid::Uuid>,
     ) {
-        // Don't allocate the header area for input - let widgets handle it directly
         // Only allocate content area (ruler + layers) with click and drag
         let content_response = ui.allocate_rect(
             egui::Rect::from_min_size(
@@ -2924,31 +3309,227 @@ impl TimelinePane {
             }
         }
 
-        // Handle layer header selection (only if no control widget was clicked)
-        // Check for clicks in header area using direct input query
-        let header_clicked = ui.input(|i| {
-            i.pointer.button_clicked(egui::PointerButton::Primary) &&
-            i.pointer.interact_pos().map_or(false, |pos| header_rect.contains(pos))
-        });
+        // Layer header drag-to-reorder (manual pointer tracking, no allocate_rect)
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let primary_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+        let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+        let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
-        if header_clicked && !alt_held && !clicked_clip_instance && !self.layer_control_clicked {
-            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
-                let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-
-                // Get the layer at this index (using virtual rows for group support)
-                let header_rows = build_timeline_rows(context_layers);
-                if clicked_layer_index < header_rows.len() {
-                    let layer_id = header_rows[clicked_layer_index].layer_id();
-                    let clicked_parent = header_rows[clicked_layer_index].parent_id();
-                    *active_layer_id = Some(layer_id);
-                    if shift_held {
-                        shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
-                    } else {
-                        *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+        // Handle layer header selection on mousedown (immediate, not on release)
+        if primary_pressed && !alt_held && !self.layer_control_clicked {
+            if let Some(pos) = pointer_pos {
+                if header_rect.contains(pos) {
+                    let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
+                    let header_rows = build_timeline_rows(context_layers);
+                    if clicked_layer_index < header_rows.len() {
+                        let layer_id = header_rows[clicked_layer_index].layer_id();
+                        let clicked_parent = header_rows[clicked_layer_index].parent_id();
+                        let prev_active = *active_layer_id;
+                        *active_layer_id = Some(layer_id);
+                        if shift_held {
+                            // If focus doesn't already contain the previously active layer
+                            // (e.g. it was set by creating a layer rather than clicking),
+                            // seed the selection with it so shift-click extends from it.
+                            if let Some(prev) = prev_active.filter(|id| *id != layer_id) {
+                                let active_in_focus = matches!(
+                                    &focus,
+                                    lightningbeam_core::selection::FocusSelection::Layers(ids) if ids.contains(&prev)
+                                );
+                                if !active_in_focus {
+                                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![prev]);
+                                }
+                            }
+                            shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
+                        } else {
+                            // Only change selection if the clicked layer isn't already selected
+                            let already_selected = match focus {
+                                lightningbeam_core::selection::FocusSelection::Layers(ids) => ids.contains(&layer_id),
+                                _ => false,
+                            };
+                            if !already_selected {
+                                *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+                            }
+                        }
                     }
+                    // Also record for potential drag
+                    self.header_mousedown_pos = Some(pos);
                 }
             }
+        }
+
+        // Start drag after movement threshold (4px)
+        const LAYER_DRAG_THRESHOLD: f32 = 4.0;
+        if self.layer_drag.is_none() && !self.layer_control_clicked {
+            if let (Some(down_pos), Some(cur_pos)) = (self.header_mousedown_pos, pointer_pos) {
+                if primary_down && (cur_pos - down_pos).length() > LAYER_DRAG_THRESHOLD {
+                    let relative_y = down_pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let clicked_index = (relative_y / LAYER_HEIGHT) as usize;
+                    let drag_rows = build_timeline_rows(context_layers);
+                    if clicked_index < drag_rows.len() {
+                        // Collect all selected layer IDs (in visual order)
+                        let selected_ids: Vec<uuid::Uuid> = match focus {
+                            lightningbeam_core::selection::FocusSelection::Layers(ids) => {
+                                // Filter to only IDs present in the row list, in visual order
+                                drag_rows.iter()
+                                    .filter(|r| ids.contains(&r.layer_id()))
+                                    .map(|r| r.layer_id())
+                                    .collect()
+                            }
+                            _ => vec![drag_rows[clicked_index].layer_id()],
+                        };
+                        // If clicked layer isn't in selection, just drag that one
+                        let clicked_id = drag_rows[clicked_index].layer_id();
+                        let layer_ids = if selected_ids.contains(&clicked_id) {
+                            selected_ids
+                        } else {
+                            vec![clicked_id]
+                        };
+
+                        // Find source parent IDs for each dragged layer
+                        let source_parent_ids: Vec<Option<uuid::Uuid>> = layer_ids.iter()
+                            .map(|lid| drag_rows.iter().find(|r| r.layer_id() == *lid).and_then(|r| r.parent_id()))
+                            .collect();
+
+                        // Find the visual index of the first dragged layer
+                        let first_drag_visual_idx = drag_rows.iter()
+                            .position(|r| r.layer_id() == layer_ids[0])
+                            .unwrap_or(0);
+
+                        // Compute gap index in the filtered list
+                        let gap_index = drag_rows.iter()
+                            .take(first_drag_visual_idx)
+                            .filter(|r| !layer_ids.contains(&r.layer_id()))
+                            .count();
+
+                        // Grab offset: ensure the clicked layer stays under the cursor
+                        // in the stacked floating header view
+                        let clicked_row_y = header_rect.min.y + clicked_index as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+                        let clicked_within_drag = layer_ids.iter().position(|id| *id == clicked_id).unwrap_or(0);
+                        let grab_offset = down_pos.y - clicked_row_y + clicked_within_drag as f32 * LAYER_HEIGHT;
+
+                        self.layer_drag = Some(LayerDragState {
+                            layer_ids,
+                            source_parent_ids,
+                            gap_row_index: gap_index,
+                            current_mouse_y: cur_pos.y,
+                            grab_offset_y: grab_offset,
+                        });
+                    }
+                    self.header_mousedown_pos = None; // consumed
+                }
+            }
+        }
+
+        // Update gap position and mouse Y during layer drag
+        if let Some(ref mut drag) = self.layer_drag {
+            if primary_down {
+                if let Some(pos) = pointer_pos {
+                    drag.current_mouse_y = pos.y;
+                    let relative_y = pos.y - drag.grab_offset_y - header_rect.min.y + self.viewport_scroll_y + LAYER_HEIGHT * 0.5;
+                    let all_rows = build_timeline_rows(context_layers);
+                    let filtered_count = all_rows.iter()
+                        .filter(|r| !drag.layer_ids.contains(&r.layer_id()))
+                        .count();
+                    let target = ((relative_y / LAYER_HEIGHT) as usize).min(filtered_count);
+                    drag.gap_row_index = target;
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Drop layers on mouse release
+        if self.layer_drag.is_some() && primary_released {
+            let drag = self.layer_drag.take().unwrap();
+
+            // Build the row list to determine where the gap lands
+            let drop_rows = build_timeline_rows(context_layers);
+            let filtered_rows: Vec<&TimelineRow> = drop_rows.iter()
+                .filter(|r| !drag.layer_ids.contains(&r.layer_id()))
+                .collect();
+
+            // Determine target parent from the row above the gap
+            let new_parent_id = if drag.gap_row_index == 0 {
+                None // top of list = root
+            } else {
+                let row_above = &filtered_rows[drag.gap_row_index.min(filtered_rows.len()) - 1];
+                row_above.parent_id()
+            };
+
+            // Compute insertion index in new parent's children vec AFTER dragged layers are removed.
+            // Get the new parent's children, filter out all dragged layers, find where the
+            // row-above falls in that filtered list.
+            let new_children: Vec<uuid::Uuid> = match new_parent_id {
+                None => context_layers.iter().map(|l| l.id()).collect(),
+                Some(pid) => {
+                    if let Some(AnyLayer::Group(g)) = document.root.get_child(&pid) {
+                        g.children.iter().map(|l| l.id()).collect()
+                    } else {
+                        vec![]
+                    }
+                }
+            };
+            let new_children_filtered: Vec<uuid::Uuid> = new_children.iter()
+                .filter(|id| !drag.layer_ids.contains(id))
+                .copied()
+                .collect();
+
+            let new_base_index = if drag.gap_row_index == 0 {
+                // Gap at top = visually topmost position.
+                // Since timeline reverses children, this is the end of the children vec.
+                new_children_filtered.len()
+            } else {
+                let row_above = &filtered_rows[drag.gap_row_index.min(filtered_rows.len()) - 1];
+                let above_id = row_above.layer_id();
+                if let Some(pos) = new_children_filtered.iter().position(|&id| id == above_id) {
+                    // Insert before it in children vec (visually below = lower children index)
+                    pos
+                } else {
+                    new_children_filtered.len()
+                }
+            };
+
+            // Build layer list: (layer_id, old_parent_id) in visual order
+            let layers: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = drag.layer_ids.iter()
+                .zip(drag.source_parent_ids.iter())
+                .map(|(id, pid)| (*id, *pid))
+                .collect();
+
+            // Only create action if something actually changed
+            let anything_changed = layers.iter().enumerate().any(|(i, (lid, old_pid))| {
+                if *old_pid != new_parent_id {
+                    return true;
+                }
+                // Check if position changed within same parent
+                let old_idx = new_children.iter().position(|id| id == lid);
+                let target_idx_in_original = if new_base_index < new_children_filtered.len() {
+                    // Find where new_children_filtered[new_base_index] sits in original
+                    new_children.iter().position(|id| *id == new_children_filtered[new_base_index])
+                        .map(|p| p + i)
+                } else {
+                    Some(0 + i) // inserting at start of children (end of filtered = start of original)
+                };
+                old_idx != target_idx_in_original
+            });
+
+            if anything_changed {
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::MoveLayerAction::new(
+                        layers,
+                        new_parent_id,
+                        new_base_index,
+                    ),
+                ));
+            }
+        }
+
+        // Clear header mousedown if released without starting a drag
+        if primary_released {
+            self.header_mousedown_pos = None;
+        }
+        // Cancel layer drag if pointer is no longer down
+        if self.layer_drag.is_some() && !primary_down {
+            self.layer_drag = None;
         }
 
         // Cache mouse position on mousedown (before any dragging)
@@ -3344,8 +3925,18 @@ impl TimelinePane {
                     if clicked_layer_index < empty_click_rows.len() {
                         let layer_id = empty_click_rows[clicked_layer_index].layer_id();
                         let clicked_parent = empty_click_rows[clicked_layer_index].parent_id();
+                        let prev_active = *active_layer_id;
                         *active_layer_id = Some(layer_id);
                         if shift_held {
+                            if let Some(prev) = prev_active.filter(|id| *id != layer_id) {
+                                let active_in_focus = matches!(
+                                    &focus,
+                                    lightningbeam_core::selection::FocusSelection::Layers(ids) if ids.contains(&prev)
+                                );
+                                if !active_in_focus {
+                                    *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![prev]);
+                                }
+                            }
                             shift_toggle_layer(focus, layer_id, clicked_parent, &empty_click_rows);
                         } else {
                             selection.clear_clip_instances();
@@ -3656,6 +4247,42 @@ impl PaneRenderer for TimelinePane {
 
             ui.separator();
 
+            // Stereo mix output VU meter (two stacked bars: L on top, R on bottom)
+            {
+                let meter_width = 80.0;
+                let meter_height = 14.0; // total height for both bars + gap
+                let bar_height = 6.0;
+                let gap = 2.0;
+                let (meter_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(meter_width, meter_height),
+                    egui::Sense::hover(),
+                );
+                // Background
+                ui.painter().rect_filled(meter_rect, 2.0, egui::Color32::from_gray(30));
+
+                let levels = [shared.output_level.0.min(1.0), shared.output_level.1.min(1.0)];
+                for (i, &level) in levels.iter().enumerate() {
+                    let bar_y = meter_rect.min.y + i as f32 * (bar_height + gap);
+                    if level > 0.001 {
+                        let filled_width = meter_rect.width() * level;
+                        let color = if level > 0.9 {
+                            egui::Color32::from_rgb(220, 50, 50)
+                        } else if level > 0.7 {
+                            egui::Color32::from_rgb(220, 200, 50)
+                        } else {
+                            egui::Color32::from_rgb(50, 200, 80)
+                        };
+                        let filled_rect = egui::Rect::from_min_size(
+                            egui::pos2(meter_rect.min.x, bar_y),
+                            egui::vec2(filled_width, bar_height),
+                        );
+                        ui.painter().rect_filled(filled_rect, 1.0, color);
+                    }
+                }
+            }
+
+            ui.separator();
+
             // BPM control
             let mut bpm_val = bpm;
             ui.label("BPM:");
@@ -3795,7 +4422,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));

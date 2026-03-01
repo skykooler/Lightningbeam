@@ -32,6 +32,7 @@ pub mod region_split;
 pub mod toggle_group_expansion;
 pub mod group_layers;
 pub mod raster_stroke;
+pub mod move_layer;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -62,3 +63,4 @@ pub use region_split::RegionSplitAction;
 pub use toggle_group_expansion::ToggleGroupExpansionAction;
 pub use group_layers::GroupLayersAction;
 pub use raster_stroke::RasterStrokeAction;
+pub use move_layer::MoveLayerAction;

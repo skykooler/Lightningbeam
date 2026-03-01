@@ -359,12 +359,19 @@ fn capture_thread_main(
     let mut decoded_frame = ffmpeg::frame::Video::empty();
     let mut rgba_frame = ffmpeg::frame::Video::empty();
 
+    // Helper closure: decode current packet, scale, send preview frame, and
+    // optionally encode into the active recorder.  Returns updated frame_count.
+    let row_bytes = (width * 4) as usize;
+
+    let mut stop_result_tx: Option<std::sync::mpsc::Sender<Result<RecordingResult, String>>> = None;
+
     'outer: for (stream_ref, packet) in input.packets() {
         if stream_ref.index() != stream_index {
             continue;
         }
 
-        // Check for commands (non-blocking).
+        // Check for commands BEFORE decoding so that StartRecording takes effect
+        // on the current packet (no lost frame at the start).
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 CaptureCommand::StartRecording {
@@ -384,20 +391,19 @@ fn capture_thread_main(
                     }
                 }
                 CaptureCommand::StopRecording { result_tx } => {
-                    if let Some(rec) = recorder.take() {
-                        let _ = result_tx.send(rec.finish());
-                    } else {
-                        let _ = result_tx.send(Err("Not recording".into()));
-                    }
+                    eprintln!("[WEBCAM stop] StopRecording command received on capture thread");
+                    // Defer stop until AFTER we decode this packet, so the
+                    // current frame is captured before we finalize.
+                    stop_result_tx = Some(result_tx);
                 }
                 CaptureCommand::Shutdown => break 'outer,
             }
         }
 
+        // Decode current packet and process frames.
         decoder.send_packet(&packet).ok();
 
         while decoder.receive_frame(&mut decoded_frame).is_ok() {
-            // Skip initial corrupt frames from v4l2
             if frame_count < SKIP_INITIAL_FRAMES {
                 frame_count += 1;
                 continue;
@@ -407,10 +413,8 @@ fn capture_thread_main(
 
             let timestamp = start_time.elapsed().as_secs_f64();
 
-            // Build tightly-packed RGBA data (remove stride padding).
             let data = rgba_frame.data(0);
             let stride = rgba_frame.stride(0);
-            let row_bytes = (width * 4) as usize;
 
             let rgba_data = if stride == row_bytes {
                 data[..row_bytes * height as usize].to_vec()
@@ -433,12 +437,51 @@ fn capture_thread_main(
             let _ = frame_tx.try_send(frame);
 
             if let Some(ref mut rec) = recorder {
-                if let Err(e) = rec.encode_rgba(&rgba_arc, width, height, frame_count) {
+                if let Err(e) = rec.encode_rgba(&rgba_arc, width, height, timestamp) {
                     eprintln!("[webcam] recording encode error: {e}");
                 }
             }
 
             frame_count += 1;
+        }
+
+        // Now handle deferred StopRecording (after the current packet is decoded).
+        if let Some(result_tx) = stop_result_tx.take() {
+            if let Some(mut rec) = recorder.take() {
+                // Flush any frames still buffered in the decoder.
+                let pre_drain_count = frame_count;
+                decoder.send_eof().ok();
+                while decoder.receive_frame(&mut decoded_frame).is_ok() {
+                    if frame_count < SKIP_INITIAL_FRAMES {
+                        frame_count += 1;
+                        continue;
+                    }
+                    scaler.run(&decoded_frame, &mut rgba_frame).ok();
+                    let timestamp = start_time.elapsed().as_secs_f64();
+                    let data = rgba_frame.data(0);
+                    let stride = rgba_frame.stride(0);
+                    let rgba_data = if stride == row_bytes {
+                        data[..row_bytes * height as usize].to_vec()
+                    } else {
+                        let mut buf = Vec::with_capacity(row_bytes * height as usize);
+                        for y in 0..height as usize {
+                            buf.extend_from_slice(&data[y * stride..y * stride + row_bytes]);
+                        }
+                        buf
+                    };
+                    let _ = rec.encode_rgba(&rgba_data, width, height, timestamp);
+                    frame_count += 1;
+                }
+                eprintln!(
+                    "[WEBCAM stop] drained {} extra frames from decoder (total frames={})",
+                    frame_count - pre_drain_count, frame_count
+                );
+                // Reset the decoder so it can accept new packets for preview.
+                decoder.flush();
+                let _ = result_tx.send(rec.finish());
+            } else {
+                let _ = result_tx.send(Err("Not recording".into()));
+            }
         }
     }
 
@@ -463,6 +506,10 @@ struct FrameRecorder {
     path: PathBuf,
     frame_count: u64,
     fps: f64,
+    /// Timestamp of the first recorded frame (for offsetting PTS to start at 0)
+    first_timestamp: Option<f64>,
+    /// Timestamp of the most recent frame (for computing actual duration)
+    last_timestamp: f64,
 }
 
 impl FrameRecorder {
@@ -510,7 +557,10 @@ impl FrameRecorder {
         encoder.set_width(aligned_width);
         encoder.set_height(aligned_height);
         encoder.set_format(pixel_format);
-        encoder.set_time_base(ffmpeg::Rational(1, fps as i32));
+        // Use microsecond time base for precise timestamp-based PTS.
+        // This avoids speedup artifacts when the camera delivers frames
+        // at irregular intervals (common under CPU load or with USB cameras).
+        encoder.set_time_base(ffmpeg::Rational(1, 1_000_000));
         encoder.set_frame_rate(Some(ffmpeg::Rational(fps as i32, 1)));
 
         if codec_id == ffmpeg::codec::Id::H264 {
@@ -549,6 +599,8 @@ impl FrameRecorder {
             path: path.clone(),
             frame_count: 0,
             fps,
+            first_timestamp: None,
+            last_timestamp: 0.0,
         })
     }
 
@@ -557,7 +609,7 @@ impl FrameRecorder {
         rgba_data: &[u8],
         width: u32,
         height: u32,
-        _global_frame: u64,
+        timestamp: f64,
     ) -> Result<(), String> {
         let mut src_frame =
             ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
@@ -576,8 +628,15 @@ impl FrameRecorder {
             .run(&src_frame, &mut dst_frame)
             .map_err(|e| format!("Scale: {e}"))?;
 
-        dst_frame.set_pts(Some(self.frame_count as i64));
+        // PTS in microseconds from actual capture timestamps.
+        // Time base is 1/1000000, so PTS = elapsed_seconds * 1000000.
+        // This ensures correct playback timing even when the camera delivers
+        // frames at irregular intervals (e.g. under CPU load).
+        let first_ts = *self.first_timestamp.get_or_insert(timestamp);
+        let elapsed_us = ((timestamp - first_ts).max(0.0) * 1_000_000.0) as i64;
+        dst_frame.set_pts(Some(elapsed_us));
         self.frame_count += 1;
+        self.last_timestamp = timestamp;
 
         self.encoder
             .send_frame(&dst_frame)
@@ -616,7 +675,14 @@ impl FrameRecorder {
             .write_trailer()
             .map_err(|e| format!("Write trailer: {e}"))?;
 
-        let duration = self.frame_count as f64 / self.fps;
+        let duration = match self.first_timestamp {
+            Some(first_ts) => self.last_timestamp - first_ts,
+            None => self.frame_count as f64 / self.fps,
+        };
+        eprintln!(
+            "[WEBCAM finish] frames={}, first_ts={:?}, last_ts={:.4}, duration={:.4}s, fps={}",
+            self.frame_count, self.first_timestamp, self.last_timestamp, duration, self.fps,
+        );
         Ok(RecordingResult {
             file_path: self.path,
             duration,

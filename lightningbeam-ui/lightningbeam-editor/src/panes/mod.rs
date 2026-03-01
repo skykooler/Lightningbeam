@@ -57,8 +57,10 @@ pub struct DraggingAsset {
 
 /// Command for webcam recording (issued by timeline, processed by main)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum WebcamRecordCommand {
     /// Start recording on the given video layer
+    // TODO: remove layer_id — recording_layer_ids now tracks which layers are recording
     Start { layer_id: uuid::Uuid },
     /// Stop current webcam recording
     Stop,
@@ -203,7 +205,7 @@ pub struct SharedPaneState<'a> {
     pub is_recording: &'a mut bool,  // Whether recording is currently active
     pub recording_clips: &'a mut std::collections::HashMap<uuid::Uuid, u32>, // layer_id -> clip_id
     pub recording_start_time: &'a mut f64,  // Playback time when recording started
-    pub recording_layer_id: &'a mut Option<uuid::Uuid>,  // Layer being recorded to
+    pub recording_layer_ids: &'a mut Vec<uuid::Uuid>,  // Layers being recorded to
     /// Asset being dragged from Asset Library (for cross-pane drag-and-drop)
     pub dragging_asset: &'a mut Option<DraggingAsset>,
     // Tool-specific options for infopanel
@@ -247,6 +249,12 @@ pub struct SharedPaneState<'a> {
     pub pending_menu_actions: &'a mut Vec<crate::menu::MenuAction>,
     /// Clipboard manager for cut/copy/paste operations
     pub clipboard_manager: &'a mut lightningbeam_core::clipboard::ClipboardManager,
+    // VU meter levels
+    pub input_level: f32,
+    pub output_level: (f32, f32),
+    pub track_levels: &'a std::collections::HashMap<daw_backend::TrackId, f32>,
+    #[allow(dead_code)] // Available for panes that need reverse track->layer lookup
+    pub track_to_layer_map: &'a std::collections::HashMap<daw_backend::TrackId, Uuid>,
     /// Whether to show waveforms as stacked stereo (true) or combined mono (false)
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads

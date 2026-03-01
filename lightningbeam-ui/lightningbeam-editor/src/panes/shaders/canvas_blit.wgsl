@@ -67,17 +67,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // The canvas stores premultiplied linear RGBA.
-    // The srgb_to_linear converter downstream applies the sRGB gamma formula
-    // channel-by-channel without alpha awareness.  To make the round-trip
-    // transparent we pre-encode with linear_to_srgb here:
-    //   canvas (linear premul) → sRGB buffer → srgb_to_linear → linear premul ✓
-    // Without this, srgb_to_linear darkens small premultiplied values
-    // (e.g. white at 10% opacity: 0.1 → 0.01), producing a grey halo.
+    // The downstream pipeline (srgb_to_linear → compositor) expects the sRGB
+    // buffer to contain straight-alpha sRGB, i.e. the same format Vello outputs:
+    //   sRGB buffer: srgb(r_straight), srgb(g_straight), srgb(b_straight), a
+    //   srgb_to_linear: r_straight, g_straight, b_straight, a   (linear straight)
+    //   compositor:  r_straight * a * opacity  (premultiplied, correct)
+    //
+    // Without unpremultiplying, the compositor would double-premultiply:
+    //   src = (premul_r, premul_g, premul_b, a)  → output = premul_r * a = r * a²
+    // which produces a dark halo over transparent regions.
     let c = textureSample(canvas_tex, canvas_sampler, canvas_uv);
+    let inv_a = select(0.0, 1.0 / c.a, c.a > 1e-6);
     return vec4<f32>(
-        linear_to_srgb(c.r),
-        linear_to_srgb(c.g),
-        linear_to_srgb(c.b),
+        linear_to_srgb(c.r * inv_a),
+        linear_to_srgb(c.g * inv_a),
+        linear_to_srgb(c.b * inv_a),
         c.a,
     );
 }
