@@ -119,25 +119,18 @@
     "name": "Drawing/Painting",
     "description": "Minimal UI - just canvas and drawing tools",
     "layout": {
-      "type": "vertical-grid",
-      "percent": 8,
+      "type": "horizontal-grid",
+      "percent": 15,
       "children": [
-        { "type": "pane", "name": "toolbar" },
         {
-          "type": "horizontal-grid",
-          "percent": 85,
+          "type": "vertical-grid",
+          "percent": 30,
           "children": [
-            { "type": "pane", "name": "stage" },
-            {
-              "type": "vertical-grid",
-              "percent": 70,
-              "children": [
-                { "type": "pane", "name": "infopanel" },
-                { "type": "pane", "name": "timelineV2" }
-              ]
-            }
+            { "type": "pane", "name": "toolbar" },
+            { "type": "pane", "name": "infopanel" }
           ]
-        }
+        },
+        { "type": "pane", "name": "stage" }
       ]
     }
   }

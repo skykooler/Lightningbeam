@@ -147,13 +147,19 @@ impl InfopanelPane {
     fn render_tool_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
         let tool = *shared.selected_tool;
 
+        let active_is_raster = shared.active_layer_id
+            .and_then(|id| shared.action_executor.document().get_layer(&id))
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+
+        let is_raster_paint_tool = active_is_raster && matches!(tool, Tool::Draw | Tool::Erase | Tool::Smudge);
+
         // Only show tool options for tools that have options
-        let is_vector_tool = matches!(
+        let is_vector_tool = !active_is_raster && matches!(
             tool,
             Tool::Select | Tool::BezierEdit | Tool::Draw | Tool::Rectangle
             | Tool::Ellipse | Tool::Line | Tool::Polygon
         );
-        let has_options = is_vector_tool || matches!(
+        let has_options = is_vector_tool || is_raster_paint_tool || matches!(
             tool,
             Tool::PaintBucket | Tool::RegionSelect
         );
@@ -162,7 +168,17 @@ impl InfopanelPane {
             return;
         }
 
-        egui::CollapsingHeader::new("Tool Options")
+        let header_label = if is_raster_paint_tool {
+            match tool {
+                Tool::Erase => "Eraser",
+                Tool::Smudge => "Smudge",
+                _ => "Brush",
+            }
+        } else {
+            "Tool Options"
+        };
+
+        egui::CollapsingHeader::new(header_label)
             .id_salt(("tool_options", path))
             .default_open(self.tool_section_open)
             .show(ui, |ui| {
@@ -175,7 +191,7 @@ impl InfopanelPane {
                 }
 
                 match tool {
-                    Tool::Draw => {
+                    Tool::Draw if !is_raster_paint_tool => {
                         // Stroke width
                         ui.horizontal(|ui| {
                             ui.label("Stroke Width:");
@@ -281,6 +297,42 @@ impl InfopanelPane {
                             ).clicked() {
                                 *shared.region_select_mode = RegionSelectMode::Lasso;
                             }
+                        });
+                    }
+
+                    // Raster paint tools
+                    Tool::Draw | Tool::Erase | Tool::Smudge if is_raster_paint_tool => {
+                        ui.horizontal(|ui| {
+                            ui.label("Size:");
+                            ui.add(
+                                egui::Slider::new(shared.brush_radius, 1.0_f32..=200.0)
+                                    .logarithmic(true)
+                                    .suffix(" px"),
+                            );
+                        });
+                        if !matches!(tool, Tool::Smudge) {
+                            ui.horizontal(|ui| {
+                                ui.label("Opacity:");
+                                ui.add(
+                                    egui::Slider::new(shared.brush_opacity, 0.0_f32..=1.0)
+                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                );
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Hardness:");
+                            ui.add(
+                                egui::Slider::new(shared.brush_hardness, 0.0_f32..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Spacing:");
+                            ui.add(
+                                egui::Slider::new(shared.brush_spacing, 0.01_f32..=1.0)
+                                    .logarithmic(true)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                            );
                         });
                     }
 

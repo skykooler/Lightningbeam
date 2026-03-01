@@ -4213,7 +4213,20 @@ impl StagePane {
             return;
         }
 
-        let brush = lightningbeam_core::brush_settings::BrushSettings::default_round_soft();
+        let brush = {
+            use lightningbeam_core::brush_settings::BrushSettings;
+            BrushSettings {
+                radius_log: shared.brush_radius.ln(),
+                hardness: *shared.brush_hardness,
+                opaque: *shared.brush_opacity,
+                dabs_per_radius: *shared.brush_spacing,
+                color_h: 0.0,
+                color_s: 0.0,
+                color_v: 0.0,
+                pressure_radius_gain: 0.3,
+                pressure_opacity_gain: 0.8,
+            }
+        };
 
         let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
             [1.0f32, 1.0, 1.0, 1.0]

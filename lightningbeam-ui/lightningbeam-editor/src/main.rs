@@ -755,6 +755,11 @@ struct EditorApp {
     draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
+    // Raster brush settings
+    brush_radius: f32,   // brush radius in pixels
+    brush_opacity: f32,  // brush opacity 0.0–1.0
+    brush_hardness: f32, // brush hardness 0.0–1.0
+    brush_spacing: f32,  // dabs_per_radius (fraction of radius per dab)
     // Audio engine integration
     #[allow(dead_code)] // Must be kept alive to maintain audio output
     audio_stream: Option<cpal::Stream>,
@@ -1026,6 +1031,10 @@ impl EditorApp {
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
+            brush_radius: 10.0,
+            brush_opacity: 1.0,
+            brush_hardness: 0.5,
+            brush_spacing: 0.1,
             audio_stream,
             audio_controller,
             audio_event_rx,
@@ -5069,6 +5078,10 @@ impl eframe::App for EditorApp {
                     draw_simplify_mode: &mut self.draw_simplify_mode,
                     rdp_tolerance: &mut self.rdp_tolerance,
                     schneider_max_error: &mut self.schneider_max_error,
+                    brush_radius: &mut self.brush_radius,
+                    brush_opacity: &mut self.brush_opacity,
+                    brush_hardness: &mut self.brush_hardness,
+                    brush_spacing: &mut self.brush_spacing,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

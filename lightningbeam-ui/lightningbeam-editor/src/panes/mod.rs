@@ -185,6 +185,11 @@ pub struct SharedPaneState<'a> {
     pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     pub rdp_tolerance: &'a mut f64,
     pub schneider_max_error: &'a mut f64,
+    /// Raster brush settings
+    pub brush_radius: &'a mut f32,
+    pub brush_opacity: &'a mut f32,
+    pub brush_hardness: &'a mut f32,
+    pub brush_spacing: &'a mut f32,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching

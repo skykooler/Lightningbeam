@@ -42,13 +42,11 @@ use crate::raster_layer::{RasterBlendMode, StrokeRecord};
 pub struct StrokeState {
     /// Distance along the path already "consumed" toward the next dab (in pixels)
     pub distance_since_last_dab: f32,
-    /// Accumulated canvas color for smudge mode (RGBA linear, updated each dab)
-    pub smudge_color: [f32; 4],
 }
 
 impl StrokeState {
     pub fn new() -> Self {
-        Self { distance_since_last_dab: 0.0, smudge_color: [0.0; 4] }
+        Self { distance_since_last_dab: 0.0 }
     }
 }
 
@@ -85,12 +83,8 @@ impl BrushEngine {
             if let Some(pt) = stroke.points.first() {
                 let r = stroke.brush_settings.radius_at_pressure(pt.pressure);
                 let o = stroke.brush_settings.opacity_at_pressure(pt.pressure);
-                if matches!(stroke.blend_mode, RasterBlendMode::Smudge) {
-                    // Seed smudge color from canvas at the tap position
-                    state.smudge_color = Self::sample_average(buffer, pt.x, pt.y, r);
-                    Self::render_dab(buffer, pt.x, pt.y, r, stroke.brush_settings.hardness,
-                                     o, state.smudge_color, RasterBlendMode::Normal);
-                } else {
+                // Smudge has no drag direction on a single tap — skip painting
+                if !matches!(stroke.blend_mode, RasterBlendMode::Smudge) {
                     Self::render_dab(buffer, pt.x, pt.y, r, stroke.brush_settings.hardness,
                                      o, stroke.color, stroke.blend_mode);
                 }
@@ -137,16 +131,15 @@ impl BrushEngine {
                 let opacity2 = stroke.brush_settings.opacity_at_pressure(pressure2);
 
                 if matches!(stroke.blend_mode, RasterBlendMode::Smudge) {
-                    // Sample canvas under dab, blend into running smudge color
-                    let sampled = Self::sample_average(buffer, x2, y2, radius2);
-                    const PICK_UP: f32 = 0.15;
-                    for i in 0..4 {
-                        state.smudge_color[i] = state.smudge_color[i] * (1.0 - PICK_UP)
-                            + sampled[i] * PICK_UP;
-                    }
-                    Self::render_dab(buffer, x2, y2, radius2,
-                                     stroke.brush_settings.hardness,
-                                     opacity2, state.smudge_color, RasterBlendMode::Normal);
+                    // Directional warp smudge: each pixel in the dab footprint
+                    // samples from a position offset backwards along the stroke,
+                    // preserving lateral color structure.
+                    let ndx = dx / seg_len;
+                    let ndy = dy / seg_len;
+                    let smudge_dist = (radius2 * stroke.brush_settings.dabs_per_radius).max(1.0);
+                    Self::render_smudge_dab(buffer, x2, y2, radius2,
+                                            stroke.brush_settings.hardness,
+                                            opacity2, ndx, ndy, smudge_dist);
                 } else {
                     Self::render_dab(buffer, x2, y2, radius2,
                                      stroke.brush_settings.hardness,
@@ -235,8 +228,11 @@ impl BrushEngine {
                         (out_r, out_g, out_b, out_a)
                     }
                     RasterBlendMode::Erase => {
-                        // Reduce destination alpha by dab_alpha
-                        let new_a = (dst[3] - dab_alpha).max(0.0);
+                        // Multiplicative erase: each dab removes dab_alpha *fraction* of remaining
+                        // alpha. This prevents dense overlapping dabs from summing past 1.0 and
+                        // fully erasing at low opacity — opacity now controls the per-dab fraction
+                        // removed rather than an absolute amount.
+                        let new_a = dst[3] * (1.0 - dab_alpha);
                         let scale = if dst[3] > 1e-6 { new_a / dst[3] } else { 0.0 };
                         (dst[0] * scale, dst[1] * scale, dst[2] * scale, new_a)
                     }
@@ -250,34 +246,120 @@ impl BrushEngine {
         }
     }
 
-    /// Sample the average RGBA color in a circular region of `radius` around (x, y).
+    /// Render a smudge dab using directional per-pixel warp.
     ///
-    /// Used by smudge to pick up canvas color before painting each dab.
-    fn sample_average(buffer: &RgbaImage, x: f32, y: f32, radius: f32) -> [f32; 4] {
-        let sample_r = (radius * 0.5).max(1.0);
-        let x0 = ((x - sample_r).floor() as i32).max(0) as u32;
-        let y0 = ((y - sample_r).floor() as i32).max(0) as u32;
-        let x1 = ((x + sample_r).ceil() as i32).min(buffer.width() as i32 - 1).max(0) as u32;
-        let y1 = ((y + sample_r).ceil() as i32).min(buffer.height() as i32 - 1).max(0) as u32;
+    /// Each pixel in the dab footprint samples from the canvas at a position offset
+    /// backwards along `(ndx, ndy)` by `smudge_dist` pixels, then blends that
+    /// sampled color over the current pixel weighted by the dab opacity.
+    ///
+    /// Because each pixel samples its own source position, lateral color structure
+    /// is preserved: dragging over a 1-pixel dot with a 20-pixel brush produces a
+    /// narrow streak rather than a uniform smear.
+    ///
+    /// Updates are collected before any writes to avoid read/write aliasing.
+    fn render_smudge_dab(
+        buffer: &mut RgbaImage,
+        x: f32,
+        y: f32,
+        radius: f32,
+        hardness: f32,
+        opacity: f32,
+        ndx: f32,        // normalized stroke direction x
+        ndy: f32,        // normalized stroke direction y
+        smudge_dist: f32,
+    ) {
+        if radius < 0.5 || opacity <= 0.0 {
+            return;
+        }
 
-        let mut sum = [0.0f32; 4];
-        let mut count = 0u32;
+        let hardness = hardness.clamp(1e-3, 1.0);
+        let seg1_offset = 1.0f32;
+        let seg1_slope = -(1.0 / hardness - 1.0);
+        let seg2_offset = hardness / (1.0 - hardness);
+        let seg2_slope = -hardness / (1.0 - hardness);
+
+        let r_fringe = radius + 1.0;
+        let x0 = ((x - r_fringe).floor() as i32).max(0) as u32;
+        let y0 = ((y - r_fringe).floor() as i32).max(0) as u32;
+        let x1 = ((x + r_fringe).ceil() as i32).min(buffer.width() as i32 - 1).max(0) as u32;
+        let y1 = ((y + r_fringe).ceil() as i32).min(buffer.height() as i32 - 1).max(0) as u32;
+
+        let one_over_r2 = 1.0 / (radius * radius);
+
+        // Collect updates before writing to avoid aliasing between source and dest reads
+        let mut updates: Vec<(u32, u32, [u8; 4])> = Vec::new();
+
         for py in y0..=y1 {
             for px in x0..=x1 {
-                let p = buffer.get_pixel(px, py);
-                sum[0] += p[0] as f32 / 255.0;
-                sum[1] += p[1] as f32 / 255.0;
-                sum[2] += p[2] as f32 / 255.0;
-                sum[3] += p[3] as f32 / 255.0;
-                count += 1;
+                let fdx = px as f32 + 0.5 - x;
+                let fdy = py as f32 + 0.5 - y;
+                let rr = (fdx * fdx + fdy * fdy) * one_over_r2;
+
+                if rr > 1.0 {
+                    continue;
+                }
+
+                let opa_weight = if rr <= hardness {
+                    seg1_offset + rr * seg1_slope
+                } else {
+                    seg2_offset + rr * seg2_slope
+                }
+                .clamp(0.0, 1.0);
+
+                let alpha = opa_weight * opacity;
+                if alpha <= 0.0 {
+                    continue;
+                }
+
+                // Sample from one dab-spacing behind the current position along stroke
+                let src_x = px as f32 + 0.5 - ndx * smudge_dist;
+                let src_y = py as f32 + 0.5 - ndy * smudge_dist;
+                let src = Self::sample_bilinear(buffer, src_x, src_y);
+
+                let dst = buffer.get_pixel(px, py);
+                let da = 1.0 - alpha;
+                let out = [
+                    ((alpha * src[0] + da * dst[0] as f32 / 255.0).clamp(0.0, 1.0) * 255.0) as u8,
+                    ((alpha * src[1] + da * dst[1] as f32 / 255.0).clamp(0.0, 1.0) * 255.0) as u8,
+                    ((alpha * src[2] + da * dst[2] as f32 / 255.0).clamp(0.0, 1.0) * 255.0) as u8,
+                    ((alpha * src[3] + da * dst[3] as f32 / 255.0).clamp(0.0, 1.0) * 255.0) as u8,
+                ];
+                updates.push((px, py, out));
             }
         }
-        if count > 0 {
-            let n = count as f32;
-            [sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n]
-        } else {
-            [0.0; 4]
+
+        for (px, py, rgba) in updates {
+            let p = buffer.get_pixel_mut(px, py);
+            p[0] = rgba[0];
+            p[1] = rgba[1];
+            p[2] = rgba[2];
+            p[3] = rgba[3];
         }
+    }
+
+    /// Bilinearly sample a floating-point position from the buffer, clamped to bounds.
+    fn sample_bilinear(buffer: &RgbaImage, x: f32, y: f32) -> [f32; 4] {
+        let w = buffer.width() as i32;
+        let h = buffer.height() as i32;
+        let x0 = (x.floor() as i32).clamp(0, w - 1);
+        let y0 = (y.floor() as i32).clamp(0, h - 1);
+        let x1 = (x0 + 1).min(w - 1);
+        let y1 = (y0 + 1).min(h - 1);
+        let fx = (x - x0 as f32).clamp(0.0, 1.0);
+        let fy = (y - y0 as f32).clamp(0.0, 1.0);
+
+        let p00 = buffer.get_pixel(x0 as u32, y0 as u32);
+        let p10 = buffer.get_pixel(x1 as u32, y0 as u32);
+        let p01 = buffer.get_pixel(x0 as u32, y1 as u32);
+        let p11 = buffer.get_pixel(x1 as u32, y1 as u32);
+
+        let mut out = [0.0f32; 4];
+        for i in 0..4 {
+            let top = p00[i] as f32 * (1.0 - fx) + p10[i] as f32 * fx;
+            let bot = p01[i] as f32 * (1.0 - fx) + p11[i] as f32 * fx;
+            out[i] = (top * (1.0 - fy) + bot * fy) / 255.0;
+        }
+        out
     }
 }
 
