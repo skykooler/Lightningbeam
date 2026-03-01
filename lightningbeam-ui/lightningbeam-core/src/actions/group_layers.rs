@@ -68,8 +68,13 @@ impl Action for GroupLayersAction {
         }
         indices.sort();
 
-        // Record the insert position (topmost selected layer)
-        let insert_index = indices[0];
+        // The timeline displays layers in reverse order (highest index = visually on top).
+        // Insert the group at the highest selected index so it appears where the
+        // topmost visual layer was. After removing N layers before that position,
+        // the actual insert index shifts down by the count of removed layers below it.
+        let highest_index = *indices.last().unwrap();
+        let removals_before_highest = indices.iter().filter(|&&i| i < highest_index).count();
+        let insert_index = highest_index - removals_before_highest;
         self.insert_index = Some(insert_index);
 
         // Remove layers back-to-front to preserve indices
@@ -84,11 +89,12 @@ impl Action for GroupLayersAction {
         // Build the new GroupLayer with children in their original order
         let mut group = GroupLayer::new("Group");
         group.layer.id = self.group_id;
+        group.expanded = false;
         for (_, layer) in &self.removed_layers {
             group.add_child(layer.clone());
         }
 
-        // Insert the group at the topmost position
+        // Insert the group at the computed position
         let children = get_parent_children(document, self.parent_group_id)?;
         children.insert(insert_index, AnyLayer::Group(group));
 
