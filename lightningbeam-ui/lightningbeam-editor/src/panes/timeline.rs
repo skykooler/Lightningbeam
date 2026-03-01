@@ -145,6 +145,20 @@ enum RecordingType {
     Webcam,
 }
 
+/// State for an in-progress layer header drag-to-reorder operation.
+struct LayerDragState {
+    /// IDs of the layers being dragged (in visual order, top to bottom)
+    layer_ids: Vec<uuid::Uuid>,
+    /// Original parent group IDs for each dragged layer (parallel to layer_ids)
+    source_parent_ids: Vec<Option<uuid::Uuid>>,
+    /// Current gap position in the filtered (dragged-layers-removed) row list
+    gap_row_index: usize,
+    /// Current mouse Y in screen coordinates (for floating header rendering)
+    current_mouse_y: f32,
+    /// Y offset from the top of the topmost dragged row to the mousedown point
+    grab_offset_y: f32,
+}
+
 pub struct TimelinePane {
     /// Horizontal zoom level (pixels per second)
     pixels_per_second: f32,
@@ -189,6 +203,12 @@ pub struct TimelinePane {
     /// Cached egui textures for video thumbnail strip rendering.
     /// Key: (clip_id, thumbnail_timestamp_millis) → TextureHandle
     video_thumbnail_textures: std::collections::HashMap<(uuid::Uuid, i64), egui::TextureHandle>,
+
+    /// Layer header drag-to-reorder state (None if not dragging a layer)
+    layer_drag: Option<LayerDragState>,
+
+    /// Cached mousedown position in header area (for drag threshold detection)
+    header_mousedown_pos: Option<egui::Pos2>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -428,6 +448,8 @@ impl TimelinePane {
             time_display_format: TimeDisplayFormat::Seconds,
             waveform_upload_progress: std::collections::HashMap::new(),
             video_thumbnail_textures: std::collections::HashMap::new(),
+            layer_drag: None,
+            header_mousedown_pos: None,
         }
     }
 
@@ -1160,11 +1182,27 @@ impl TimelinePane {
         let secondary_text_color = egui::Color32::from_gray(150);
 
         // Build virtual row list (accounts for group expansion)
-        let rows = build_timeline_rows(context_layers);
+        let all_rows = build_timeline_rows(context_layers);
+
+        // When dragging layers, filter them out and compute gap-adjusted positions
+        let drag_layer_ids: Vec<uuid::Uuid> = self.layer_drag.as_ref()
+            .map(|d| d.layer_ids.clone()).unwrap_or_default();
+        let drag_count = drag_layer_ids.len();
+        let gap_row_index = self.layer_drag.as_ref().map(|d| d.gap_row_index);
+
+        // Build filtered row list (excluding dragged layers)
+        let rows: Vec<&TimelineRow> = all_rows.iter()
+            .filter(|r| !drag_layer_ids.contains(&r.layer_id()))
+            .collect();
 
         // Draw layer headers from virtual row list
-        for (i, row) in rows.iter().enumerate() {
-            let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+        for (filtered_i, row) in rows.iter().enumerate() {
+            // Compute Y with gap offset: rows at or after the gap shift down by drag_count * LAYER_HEIGHT
+            let visual_i = match gap_row_index {
+                Some(gap) if filtered_i >= gap => filtered_i + drag_count,
+                _ => filtered_i,
+            };
+            let y = rect.min.y + visual_i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
             if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
@@ -1550,6 +1588,101 @@ impl TimelinePane {
             );
         }
 
+        // Draw floating dragged layer headers at mouse position with drop shadow
+        if let Some(ref drag_state) = self.layer_drag {
+            // Collect the dragged rows in order
+            let dragged_rows: Vec<&TimelineRow> = drag_state.layer_ids.iter()
+                .filter_map(|did| all_rows.iter().find(|r| r.layer_id() == *did))
+                .collect();
+
+            let float_top_y = drag_state.current_mouse_y - drag_state.grab_offset_y;
+
+            for (di, dragged_row) in dragged_rows.iter().enumerate() {
+                let float_y = float_top_y + di as f32 * LAYER_HEIGHT;
+                let float_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, float_y),
+                    egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
+                );
+
+                // Drop shadow (offset down-right, semi-transparent black)
+                let shadow_rect = float_rect.translate(egui::vec2(3.0, 4.0));
+                ui.painter().rect_filled(shadow_rect, 2.0, egui::Color32::from_black_alpha(80));
+
+                // Background (active/selected color)
+                ui.painter().rect_filled(float_rect, 0.0, active_color);
+
+                // Layer info
+                let drag_indent = match dragged_row {
+                    TimelineRow::GroupChild { depth, .. } => *depth as f32 * 16.0,
+                    TimelineRow::CollapsedGroup { depth, .. } => *depth as f32 * 16.0,
+                    _ => 0.0,
+                };
+                let (drag_name, drag_type_str, drag_type_color) = match dragged_row {
+                    TimelineRow::Normal(layer) => {
+                        let (lt, tc) = match layer {
+                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                            AnyLayer::Audio(al) => match al.audio_layer_type {
+                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                            },
+                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                        };
+                        (layer.layer().name.clone(), lt, tc)
+                    }
+                    TimelineRow::CollapsedGroup { group, .. } => {
+                        (group.layer.name.clone(), "Group", egui::Color32::from_rgb(0, 180, 180))
+                    }
+                    TimelineRow::GroupChild { child, .. } => {
+                        let (lt, tc) = match child {
+                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+                            AnyLayer::Audio(al) => match al.audio_layer_type {
+                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+                            },
+                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+                        };
+                        (child.layer().name.clone(), lt, tc)
+                    }
+                };
+
+                // Color indicator bar
+                let indicator_rect = egui::Rect::from_min_size(
+                    float_rect.min + egui::vec2(drag_indent, 0.0),
+                    egui::vec2(4.0, LAYER_HEIGHT),
+                );
+                ui.painter().rect_filled(indicator_rect, 0.0, drag_type_color);
+
+                // Layer name
+                let name_x = 10.0 + drag_indent;
+                ui.painter().text(
+                    float_rect.min + egui::vec2(name_x, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    &drag_name,
+                    egui::FontId::proportional(14.0),
+                    text_color,
+                );
+
+                // Type label
+                ui.painter().text(
+                    float_rect.min + egui::vec2(name_x, 28.0),
+                    egui::Align2::LEFT_TOP,
+                    drag_type_str,
+                    egui::FontId::proportional(11.0),
+                    secondary_text_color,
+                );
+
+                // Separator line at bottom
+                ui.painter().line_segment(
+                    [egui::pos2(float_rect.min.x, float_rect.max.y), egui::pos2(float_rect.max.x, float_rect.max.y)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                );
+            }
+        }
+
         // Right border for header column
         ui.painter().line_segment(
             [
@@ -1602,11 +1735,25 @@ impl TimelinePane {
         }
 
         // Build virtual row list (accounts for group expansion)
-        let rows = build_timeline_rows(context_layers);
+        let all_rows = build_timeline_rows(context_layers);
+
+        // When dragging layers, filter them out and compute gap-adjusted positions
+        let drag_layer_ids_content: Vec<uuid::Uuid> = self.layer_drag.as_ref()
+            .map(|d| d.layer_ids.clone()).unwrap_or_default();
+        let drag_count_content = drag_layer_ids_content.len();
+        let gap_row_index_content = self.layer_drag.as_ref().map(|d| d.gap_row_index);
+
+        let rows: Vec<&TimelineRow> = all_rows.iter()
+            .filter(|r| !drag_layer_ids_content.contains(&r.layer_id()))
+            .collect();
 
         // Draw layer rows from virtual row list
-        for (i, row) in rows.iter().enumerate() {
-            let y = rect.min.y + i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+        for (filtered_i, row) in rows.iter().enumerate() {
+            let visual_i = match gap_row_index_content {
+                Some(gap) if filtered_i >= gap => filtered_i + drag_count_content,
+                _ => filtered_i,
+            };
+            let y = rect.min.y + visual_i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
 
             // Skip if layer is outside visible area
             if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
@@ -2766,6 +2913,18 @@ impl TimelinePane {
             );
         }
 
+        // Draw gap slots in content area for layer drag (matching active row style)
+        if let Some(gap) = gap_row_index_content {
+            for di in 0..drag_count_content {
+                let gap_y = rect.min.y + (gap + di) as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+                let gap_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x, gap_y),
+                    egui::vec2(rect.width(), LAYER_HEIGHT),
+                );
+                painter.rect_filled(gap_rect, 0.0, active_color);
+            }
+        }
+
         // Clean up stale video thumbnail textures for clips no longer visible
         self.video_thumbnail_textures.retain(|&(clip_id, _), _| visible_video_clip_ids.contains(&clip_id));
 
@@ -2793,7 +2952,6 @@ impl TimelinePane {
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         editing_clip_id: Option<&uuid::Uuid>,
     ) {
-        // Don't allocate the header area for input - let widgets handle it directly
         // Only allocate content area (ruler + layers) with click and drag
         let content_response = ui.allocate_rect(
             egui::Rect::from_min_size(
@@ -2913,31 +3071,214 @@ impl TimelinePane {
             }
         }
 
-        // Handle layer header selection (only if no control widget was clicked)
-        // Check for clicks in header area using direct input query
-        let header_clicked = ui.input(|i| {
-            i.pointer.button_clicked(egui::PointerButton::Primary) &&
-            i.pointer.interact_pos().map_or(false, |pos| header_rect.contains(pos))
-        });
+        // Layer header drag-to-reorder (manual pointer tracking, no allocate_rect)
+        let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+        let primary_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+        let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+        let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
-        if header_clicked && !alt_held && !clicked_clip_instance && !self.layer_control_clicked {
-            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
-                let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-
-                // Get the layer at this index (using virtual rows for group support)
-                let header_rows = build_timeline_rows(context_layers);
-                if clicked_layer_index < header_rows.len() {
-                    let layer_id = header_rows[clicked_layer_index].layer_id();
-                    let clicked_parent = header_rows[clicked_layer_index].parent_id();
-                    *active_layer_id = Some(layer_id);
-                    if shift_held {
-                        shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
-                    } else {
-                        *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+        // Handle layer header selection on mousedown (immediate, not on release)
+        if primary_pressed && !alt_held && !self.layer_control_clicked {
+            if let Some(pos) = pointer_pos {
+                if header_rect.contains(pos) {
+                    let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let clicked_layer_index = (relative_y / LAYER_HEIGHT) as usize;
+                    let header_rows = build_timeline_rows(context_layers);
+                    if clicked_layer_index < header_rows.len() {
+                        let layer_id = header_rows[clicked_layer_index].layer_id();
+                        let clicked_parent = header_rows[clicked_layer_index].parent_id();
+                        *active_layer_id = Some(layer_id);
+                        if shift_held {
+                            shift_toggle_layer(focus, layer_id, clicked_parent, &header_rows);
+                        } else {
+                            // Only change selection if the clicked layer isn't already selected
+                            let already_selected = match focus {
+                                lightningbeam_core::selection::FocusSelection::Layers(ids) => ids.contains(&layer_id),
+                                _ => false,
+                            };
+                            if !already_selected {
+                                *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
+                            }
+                        }
                     }
+                    // Also record for potential drag
+                    self.header_mousedown_pos = Some(pos);
                 }
             }
+        }
+
+        // Start drag after movement threshold (4px)
+        const LAYER_DRAG_THRESHOLD: f32 = 4.0;
+        if self.layer_drag.is_none() && !self.layer_control_clicked {
+            if let (Some(down_pos), Some(cur_pos)) = (self.header_mousedown_pos, pointer_pos) {
+                if primary_down && (cur_pos - down_pos).length() > LAYER_DRAG_THRESHOLD {
+                    let relative_y = down_pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let clicked_index = (relative_y / LAYER_HEIGHT) as usize;
+                    let drag_rows = build_timeline_rows(context_layers);
+                    if clicked_index < drag_rows.len() {
+                        // Collect all selected layer IDs (in visual order)
+                        let selected_ids: Vec<uuid::Uuid> = match focus {
+                            lightningbeam_core::selection::FocusSelection::Layers(ids) => {
+                                // Filter to only IDs present in the row list, in visual order
+                                drag_rows.iter()
+                                    .filter(|r| ids.contains(&r.layer_id()))
+                                    .map(|r| r.layer_id())
+                                    .collect()
+                            }
+                            _ => vec![drag_rows[clicked_index].layer_id()],
+                        };
+                        // If clicked layer isn't in selection, just drag that one
+                        let clicked_id = drag_rows[clicked_index].layer_id();
+                        let layer_ids = if selected_ids.contains(&clicked_id) {
+                            selected_ids
+                        } else {
+                            vec![clicked_id]
+                        };
+
+                        // Find source parent IDs for each dragged layer
+                        let source_parent_ids: Vec<Option<uuid::Uuid>> = layer_ids.iter()
+                            .map(|lid| drag_rows.iter().find(|r| r.layer_id() == *lid).and_then(|r| r.parent_id()))
+                            .collect();
+
+                        // Find the visual index of the first dragged layer
+                        let first_drag_visual_idx = drag_rows.iter()
+                            .position(|r| r.layer_id() == layer_ids[0])
+                            .unwrap_or(0);
+
+                        // Compute gap index in the filtered list
+                        let gap_index = drag_rows.iter()
+                            .take(first_drag_visual_idx)
+                            .filter(|r| !layer_ids.contains(&r.layer_id()))
+                            .count();
+
+                        // Grab offset: ensure the clicked layer stays under the cursor
+                        // in the stacked floating header view
+                        let clicked_row_y = header_rect.min.y + clicked_index as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+                        let clicked_within_drag = layer_ids.iter().position(|id| *id == clicked_id).unwrap_or(0);
+                        let grab_offset = down_pos.y - clicked_row_y + clicked_within_drag as f32 * LAYER_HEIGHT;
+
+                        self.layer_drag = Some(LayerDragState {
+                            layer_ids,
+                            source_parent_ids,
+                            gap_row_index: gap_index,
+                            current_mouse_y: cur_pos.y,
+                            grab_offset_y: grab_offset,
+                        });
+                    }
+                    self.header_mousedown_pos = None; // consumed
+                }
+            }
+        }
+
+        // Update gap position and mouse Y during layer drag
+        if let Some(ref mut drag) = self.layer_drag {
+            if primary_down {
+                if let Some(pos) = pointer_pos {
+                    drag.current_mouse_y = pos.y;
+                    let relative_y = pos.y - header_rect.min.y + self.viewport_scroll_y;
+                    let all_rows = build_timeline_rows(context_layers);
+                    let filtered_count = all_rows.iter()
+                        .filter(|r| !drag.layer_ids.contains(&r.layer_id()))
+                        .count();
+                    let target = ((relative_y / LAYER_HEIGHT) as usize).min(filtered_count);
+                    drag.gap_row_index = target;
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // Drop layers on mouse release
+        if self.layer_drag.is_some() && primary_released {
+            let drag = self.layer_drag.take().unwrap();
+
+            // Build the row list to determine where the gap lands
+            let drop_rows = build_timeline_rows(context_layers);
+            let filtered_rows: Vec<&TimelineRow> = drop_rows.iter()
+                .filter(|r| !drag.layer_ids.contains(&r.layer_id()))
+                .collect();
+
+            // Determine target parent from the row above the gap
+            let new_parent_id = if drag.gap_row_index == 0 {
+                None // top of list = root
+            } else {
+                let row_above = &filtered_rows[drag.gap_row_index.min(filtered_rows.len()) - 1];
+                row_above.parent_id()
+            };
+
+            // Compute insertion index in new parent's children vec AFTER dragged layers are removed.
+            // Get the new parent's children, filter out all dragged layers, find where the
+            // row-above falls in that filtered list.
+            let new_children: Vec<uuid::Uuid> = match new_parent_id {
+                None => context_layers.iter().map(|l| l.id()).collect(),
+                Some(pid) => {
+                    if let Some(AnyLayer::Group(g)) = document.root.get_child(&pid) {
+                        g.children.iter().map(|l| l.id()).collect()
+                    } else {
+                        vec![]
+                    }
+                }
+            };
+            let new_children_filtered: Vec<uuid::Uuid> = new_children.iter()
+                .filter(|id| !drag.layer_ids.contains(id))
+                .copied()
+                .collect();
+
+            let new_base_index = if drag.gap_row_index == 0 {
+                // Gap at top = visually topmost position.
+                // Since timeline reverses children, this is the end of the children vec.
+                new_children_filtered.len()
+            } else {
+                let row_above = &filtered_rows[drag.gap_row_index.min(filtered_rows.len()) - 1];
+                let above_id = row_above.layer_id();
+                if let Some(pos) = new_children_filtered.iter().position(|&id| id == above_id) {
+                    // Insert before it in children vec (visually below = lower children index)
+                    pos
+                } else {
+                    new_children_filtered.len()
+                }
+            };
+
+            // Build layer list: (layer_id, old_parent_id) in visual order
+            let layers: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = drag.layer_ids.iter()
+                .zip(drag.source_parent_ids.iter())
+                .map(|(id, pid)| (*id, *pid))
+                .collect();
+
+            // Only create action if something actually changed
+            let anything_changed = layers.iter().enumerate().any(|(i, (lid, old_pid))| {
+                if *old_pid != new_parent_id {
+                    return true;
+                }
+                // Check if position changed within same parent
+                let old_idx = new_children.iter().position(|id| id == lid);
+                let target_idx_in_original = if new_base_index < new_children_filtered.len() {
+                    // Find where new_children_filtered[new_base_index] sits in original
+                    new_children.iter().position(|id| *id == new_children_filtered[new_base_index])
+                        .map(|p| p + i)
+                } else {
+                    Some(0 + i) // inserting at start of children (end of filtered = start of original)
+                };
+                old_idx != target_idx_in_original
+            });
+
+            if anything_changed {
+                pending_actions.push(Box::new(
+                    lightningbeam_core::actions::MoveLayerAction::new(
+                        layers,
+                        new_parent_id,
+                        new_base_index,
+                    ),
+                ));
+            }
+        }
+
+        // Clear header mousedown if released without starting a drag
+        if primary_released {
+            self.header_mousedown_pos = None;
+        }
+        // Cancel layer drag if pointer is no longer down
+        if self.layer_drag.is_some() && !primary_down {
+            self.layer_drag = None;
         }
 
         // Cache mouse position on mousedown (before any dragging)

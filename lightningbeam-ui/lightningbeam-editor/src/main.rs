@@ -6016,7 +6016,7 @@ fn render_pane(
             }
 
             // Icon
-            if let Some(icon) = ctx.icon_cache.get_or_load(tab_type, ui.ctx()) {
+            if let Some(icon) = ctx.shared.icon_cache.get_or_load(tab_type, ui.ctx()) {
                 let icon_texture_id = icon.id();
                 ui.painter().image(
                     icon_texture_id,
