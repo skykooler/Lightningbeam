@@ -2284,6 +2284,10 @@ pub struct StagePane {
     /// and updating raw_pixels, so the canvas lives one extra composite frame to
     /// avoid a flash of the stale Vello scene.
     pending_canvas_removal: Option<uuid::Uuid>,
+    /// Selection outline saved at stroke mouse-down for post-readback pixel masking.
+    /// Pixels outside the selection are restored from `buffer_before` so strokes
+    /// only affect the area inside the selection outline.
+    stroke_clip_selection: Option<lightningbeam_core::selection::RasterSelection>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2405,6 +2409,7 @@ impl StagePane {
             pending_undo_before: None,
             painting_canvas: None,
             pending_canvas_removal: None,
+            stroke_clip_selection: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -4434,6 +4439,63 @@ impl StagePane {
         }
     }
 
+    /// Lift the pixels enclosed by the current `raster_selection` into a
+    /// `RasterFloatingSelection`, punching a transparent hole in `raw_pixels`.
+    ///
+    /// Call this immediately after a marquee / lasso selection is finalized so
+    /// that all downstream operations (drag-move, copy, cut, stroke-masking)
+    /// see a consistent `raster_floating` whenever a selection is active.
+    fn lift_selection_to_float(shared: &mut SharedPaneState) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::selection::RasterFloatingSelection;
+
+        // Clone the selection before any mutable borrows.
+        let Some(sel) = shared.selection.raster_selection.clone() else { return };
+        let Some(layer_id) = *shared.active_layer_id else { return };
+        let time = *shared.playback_time;
+
+        // Commit any existing float first (clears raster_selection — re-set below).
+        Self::commit_raster_floating_now(shared);
+
+        let doc = shared.action_executor.document_mut();
+        let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) else { return };
+        let Some(kf) = rl.keyframe_at_mut(time) else { return };
+
+        let canvas_before = kf.raw_pixels.clone();
+        let (x0, y0, x1, y1) = sel.bounding_rect();
+        let w = (x1 - x0).max(0) as u32;
+        let h = (y1 - y0).max(0) as u32;
+        if w == 0 || h == 0 { return; }
+
+        let mut float_pixels = vec![0u8; (w * h * 4) as usize];
+        for row in 0..h {
+            let sy = y0 + row as i32;
+            if sy < 0 || sy >= kf.height as i32 { continue; }
+            for col in 0..w {
+                let sx = x0 + col as i32;
+                if sx < 0 || sx >= kf.width as i32 { continue; }
+                if !sel.contains_pixel(sx, sy) { continue; }
+                let si = ((sy as u32 * kf.width + sx as u32) * 4) as usize;
+                let di = ((row * w + col) * 4) as usize;
+                float_pixels[di..di + 4].copy_from_slice(&kf.raw_pixels[si..si + 4]);
+                kf.raw_pixels[si..si + 4].fill(0);
+            }
+        }
+
+        // Re-set selection (commit_raster_floating_now cleared it) and create float.
+        shared.selection.raster_selection = Some(sel);
+        shared.selection.raster_floating = Some(RasterFloatingSelection {
+            pixels: float_pixels,
+            width: w,
+            height: h,
+            x: x0,
+            y: y0,
+            layer_id,
+            time,
+            canvas_before,
+        });
+    }
+
     /// `self.pending_raster_dabs` for dispatch by `VelloCallback::prepare()`.
     ///
     /// The actual pixel rendering happens on the GPU (compute shader).  The CPU
@@ -4490,6 +4552,10 @@ impl StagePane {
         // Mouse down: capture buffer_before, start stroke, compute first dab
         // ----------------------------------------------------------------
         if self.rsp_drag_started(response) || self.rsp_clicked(response) {
+            // Save selection BEFORE commit clears it — used after readback to
+            // mask the stroke result so only pixels inside the outline change.
+            self.stroke_clip_selection = shared.selection.raster_selection.clone();
+
             // Commit any floating selection synchronously so buffer_before and
             // the GPU canvas initial upload see the fully-composited canvas.
             Self::commit_raster_floating_now(shared);
@@ -4695,42 +4761,88 @@ impl StagePane {
         let (canvas_w, canvas_h) = (kf.width as i32, kf.height as i32);
 
         if self.rsp_drag_started(response) {
-            Self::commit_raster_floating_now(shared);
             let (px, py) = (world_pos.x as i32, world_pos.y as i32);
-            *shared.tool_state = ToolState::DrawingRasterMarquee {
-                start: (px, py),
-                current: (px, py),
-            };
+            let inside = shared.selection.raster_selection
+                .as_ref()
+                .map_or(false, |sel| sel.contains_pixel(px, py));
+
+            if inside {
+                // Drag inside the selection — move it (and any floating pixels).
+                // As a safety net, lift the selection if no float exists yet.
+                if shared.selection.raster_floating.is_none() {
+                    Self::lift_selection_to_float(shared);
+                }
+                *shared.tool_state = ToolState::MovingRasterSelection { last: (px, py) };
+            } else {
+                // Drag outside — start a new marquee (commit any floating first).
+                Self::commit_raster_floating_now(shared);
+                *shared.tool_state = ToolState::DrawingRasterMarquee {
+                    start: (px, py),
+                    current: (px, py),
+                };
+            }
         }
 
         if self.rsp_dragged(response) {
-            if let ToolState::DrawingRasterMarquee { start, ref mut current } = *shared.tool_state {
-                let (px, py) = (world_pos.x as i32, world_pos.y as i32);
-                *current = (px, py);
-                let (x0, x1) = (start.0.min(px).max(0), start.0.max(px).min(canvas_w));
-                let (y0, y1) = (start.1.min(py).max(0), start.1.max(py).min(canvas_h));
-                shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+            let (px, py) = (world_pos.x as i32, world_pos.y as i32);
+            match *shared.tool_state {
+                ToolState::DrawingRasterMarquee { start, ref mut current } => {
+                    *current = (px, py);
+                    let (x0, x1) = (start.0.min(px).max(0), start.0.max(px).min(canvas_w));
+                    let (y0, y1) = (start.1.min(py).max(0), start.1.max(py).min(canvas_h));
+                    shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                }
+                ToolState::MovingRasterSelection { ref mut last } => {
+                    let (dx, dy) = (px - last.0, py - last.1);
+                    *last = (px, py);
+                    // Shift the marquee.
+                    if let Some(ref mut sel) = shared.selection.raster_selection {
+                        *sel = match sel {
+                            RasterSelection::Rect(x0, y0, x1, y1) =>
+                                RasterSelection::Rect(*x0 + dx, *y0 + dy, *x1 + dx, *y1 + dy),
+                            RasterSelection::Lasso(pts) =>
+                                RasterSelection::Lasso(pts.iter().map(|(x, y)| (x + dx, y + dy)).collect()),
+                        };
+                    }
+                    // Shift floating pixels if any.
+                    if let Some(ref mut float) = shared.selection.raster_floating {
+                        float.x += dx;
+                        float.y += dy;
+                    }
+                }
+                _ => {}
             }
         }
 
         if self.rsp_drag_stopped(response) {
-            if let ToolState::DrawingRasterMarquee { start, current } = *shared.tool_state {
-                let (x0, x1) = (start.0.min(current.0).max(0), start.0.max(current.0).min(canvas_w));
-                let (y0, y1) = (start.1.min(current.1).max(0), start.1.max(current.1).min(canvas_h));
-                shared.selection.raster_selection = if x1 > x0 && y1 > y0 {
-                    Some(RasterSelection::Rect(x0, y0, x1, y1))
-                } else {
-                    None
-                };
-                *shared.tool_state = ToolState::Idle;
+            match *shared.tool_state {
+                ToolState::DrawingRasterMarquee { start, current } => {
+                    let (x0, x1) = (start.0.min(current.0).max(0), start.0.max(current.0).min(canvas_w));
+                    let (y0, y1) = (start.1.min(current.1).max(0), start.1.max(current.1).min(canvas_h));
+                    if x1 > x0 && y1 > y0 {
+                        shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                        Self::lift_selection_to_float(shared);
+                    } else {
+                        shared.selection.raster_selection = None;
+                    }
+                }
+                ToolState::MovingRasterSelection { .. } => {}
+                _ => {}
             }
+            *shared.tool_state = ToolState::Idle;
         }
 
         if self.rsp_clicked(response) {
-            // A click with no drag: commit float (clicked() fires on release, so
-            // drag_started() may not have fired) then clear the selection.
-            Self::commit_raster_floating_now(shared);
-            shared.selection.raster_selection = None;
+            // A click with no drag: if outside the selection, commit any float and
+            // clear; if inside, do nothing (preserves the selection).
+            let (px, py) = (world_pos.x as i32, world_pos.y as i32);
+            let inside = shared.selection.raster_selection
+                .as_ref()
+                .map_or(false, |sel| sel.contains_pixel(px, py));
+            if !inside {
+                Self::commit_raster_floating_now(shared);
+                shared.selection.raster_selection = None;
+            }
             *shared.tool_state = ToolState::Idle;
         }
 
@@ -4778,11 +4890,12 @@ impl StagePane {
 
         if self.rsp_drag_stopped(response) {
             if let ToolState::DrawingRasterLasso { ref points } = *shared.tool_state {
-                shared.selection.raster_selection = if points.len() >= 3 {
-                    Some(RasterSelection::Lasso(points.clone()))
+                if points.len() >= 3 {
+                    shared.selection.raster_selection = Some(RasterSelection::Lasso(points.clone()));
+                    Self::lift_selection_to_float(shared);
                 } else {
-                    None
-                };
+                    shared.selection.raster_selection = None;
+                }
             }
             *shared.tool_state = ToolState::Idle;
         }
@@ -7427,11 +7540,28 @@ impl PaneRenderer for StagePane {
             if let Some(readback) = results.remove(&self.instance_id) {
                 if let Some((layer_id, time, w, h, buffer_before)) = self.pending_undo_before.take() {
                     use lightningbeam_core::actions::RasterStrokeAction;
+                    // If a selection was active at stroke-start, restore any pixels
+                    // outside the selection outline to their pre-stroke values.
+                    let canvas_after = match self.stroke_clip_selection.take() {
+                        None => readback.pixels,
+                        Some(sel) => {
+                            let mut masked = readback.pixels;
+                            for y in 0..h {
+                                for x in 0..w {
+                                    if !sel.contains_pixel(x as i32, y as i32) {
+                                        let i = ((y * w + x) * 4) as usize;
+                                        masked[i..i + 4].copy_from_slice(&buffer_before[i..i + 4]);
+                                    }
+                                }
+                            }
+                            masked
+                        }
+                    };
                     let action = RasterStrokeAction::new(
                         layer_id,
                         time,
                         buffer_before,
-                        readback.pixels.clone(),
+                        canvas_after,
                         w,
                         h,
                     );

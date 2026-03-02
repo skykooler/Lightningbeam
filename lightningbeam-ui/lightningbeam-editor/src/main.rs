@@ -1963,27 +1963,62 @@ impl EditorApp {
         kf.raw_pixels = float.canvas_before;
     }
 
+    /// Drop (discard) the floating selection keeping the hole punched in the
+    /// canvas.  Records a `RasterStrokeAction` for undo.  Used by cut (Ctrl+X).
+    fn drop_raster_float(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterStrokeAction;
+
+        let Some(float) = self.selection.raster_floating.take() else { return };
+        self.selection.raster_selection = None;
+
+        let doc = self.action_executor.document_mut();
+        let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&float.layer_id) else { return };
+        let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
+        // raw_pixels already has the hole; record the undo action.
+        let canvas_after = kf.raw_pixels.clone();
+        let (w, h) = (kf.width, kf.height);
+        let action = RasterStrokeAction::new(
+            float.layer_id, float.time,
+            float.canvas_before, canvas_after,
+            w, h,
+        );
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("drop_raster_float: {e}");
+        }
+    }
+
     /// Copy the current selection to the clipboard
     fn clipboard_copy_selection(&mut self) {
         use lightningbeam_core::clipboard::{ClipboardContent, ClipboardLayerType};
         use lightningbeam_core::layer::AnyLayer;
 
-        // Raster selection takes priority when on a raster layer
-        if let (Some(layer_id), Some(raster_sel)) = (
-            self.active_layer_id,
-            self.selection.raster_selection.as_ref(),
-        ) {
+        // Raster selection takes priority when on a raster layer.
+        // If a floating selection exists (auto-lifted pixels), read directly from
+        // the float so we get exactly the lifted pixels.
+        if let Some(layer_id) = self.active_layer_id {
             let document = self.action_executor.document();
-            if let Some(AnyLayer::Raster(rl)) = document.get_layer(&layer_id) {
-                if let Some(kf) = rl.keyframe_at(self.playback_time) {
-                    let (pixels, w, h) = Self::extract_raster_selection(
-                        &kf.raw_pixels, kf.width, kf.height, raster_sel,
-                    );
+            if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
+                if let Some(float) = &self.selection.raster_floating {
                     self.clipboard_manager.copy(ClipboardContent::RasterPixels {
-                        pixels, width: w, height: h,
+                        pixels: float.pixels.clone(),
+                        width: float.width,
+                        height: float.height,
                     });
+                    return;
+                } else if let Some(raster_sel) = self.selection.raster_selection.as_ref() {
+                    if let Some(AnyLayer::Raster(rl)) = document.get_layer(&layer_id) {
+                        if let Some(kf) = rl.keyframe_at(self.playback_time) {
+                            let (pixels, w, h) = Self::extract_raster_selection(
+                                &kf.raw_pixels, kf.width, kf.height, raster_sel,
+                            );
+                            self.clipboard_manager.copy(ClipboardContent::RasterPixels {
+                                pixels, width: w, height: h,
+                            });
+                        }
+                    }
+                    return;
                 }
-                return;
             }
         }
 
@@ -2062,15 +2097,24 @@ impl EditorApp {
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::actions::RasterStrokeAction;
 
-        // Raster: commit any floating selection first, then erase the marquee region
+        // Raster: if a floating selection exists (auto-lifted), just drop it
+        // (keeps the hole).  Otherwise commit any float then erase the marquee region.
+        if let Some(layer_id) = self.active_layer_id {
+            let document = self.action_executor.document();
+            if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
+                if self.selection.raster_floating.is_some() {
+                    self.drop_raster_float();
+                    return;
+                }
+            }
+        }
+
         if let (Some(layer_id), Some(raster_sel)) = (
             self.active_layer_id,
             self.selection.raster_selection.clone(),
         ) {
             let document = self.action_executor.document();
             if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
-                // Committing a floating selection before erasing ensures any
-                // prior paste is baked in before we punch the new hole.
                 self.commit_raster_floating();
 
                 let document = self.action_executor.document_mut();
@@ -2314,6 +2358,13 @@ impl EditorApp {
             }
             ClipboardContent::RasterPixels { pixels, width, height } => {
                 let Some(layer_id) = self.active_layer_id else { return };
+
+                // Commit any pre-existing floating selection FIRST so that
+                // canvas_before captures the fully-composited state (not the
+                // pre-commit state, which would corrupt the undo snapshot).
+                self.commit_raster_floating();
+
+                // Re-borrow the document after commit to get post-commit state.
                 let document = self.action_executor.document();
                 let layer = document.get_layer(&layer_id);
                 let Some(AnyLayer::Raster(rl)) = layer else { return };
@@ -2326,14 +2377,11 @@ impl EditorApp {
                     .map(|s| { let (x0, y0, _, _) = s.bounding_rect(); (x0, y0) })
                     .unwrap_or((0, 0));
 
-                // Snapshot canvas before for undo on commit / restore on cancel.
+                // Snapshot canvas AFTER commit for correct undo on commit / restore on cancel.
                 let canvas_before = kf.raw_pixels.clone();
                 let canvas_w = kf.width;
                 let canvas_h = kf.height;
                 drop(kf); // release immutable borrow before taking mutable
-
-                // Commit any pre-existing floating selection before creating a new one.
-                self.commit_raster_floating();
 
                 use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
                 self.selection.raster_floating = Some(RasterFloatingSelection {
@@ -5821,17 +5869,21 @@ impl eframe::App for EditorApp {
             // Event::Copy/Cut/Paste instead of regular key events, so
             // check_shortcuts won't see them via key_pressed().
             // Skip if a pane (e.g. piano roll) already handled the clipboard event.
+            let mut clipboard_handled = clipboard_consumed;
             if !clipboard_consumed {
                 for event in &i.events {
                     match event {
                         egui::Event::Copy => {
                             self.handle_menu_action(MenuAction::Copy);
+                            clipboard_handled = true;
                         }
                         egui::Event::Cut => {
                             self.handle_menu_action(MenuAction::Cut);
+                            clipboard_handled = true;
                         }
                         egui::Event::Paste(_) => {
                             self.handle_menu_action(MenuAction::Paste);
+                            clipboard_handled = true;
                         }
                         // When text/plain is absent from the system clipboard egui-winit
                         // falls through to a Key event instead of Event::Paste.
@@ -5842,6 +5894,7 @@ impl eframe::App for EditorApp {
                             ..
                         } if modifiers.ctrl || modifiers.command => {
                             self.handle_menu_action(MenuAction::Paste);
+                            clipboard_handled = true;
                         }
                         _ => {}
                     }
@@ -5850,10 +5903,15 @@ impl eframe::App for EditorApp {
 
             // Check menu shortcuts that use modifiers (Cmd+S, etc.) - allow even when typing
             // But skip shortcuts without modifiers when keyboard input is claimed (e.g., virtual piano)
+            // Also skip clipboard actions (Copy/Cut/Paste) if already handled above to prevent
+            // double-firing when egui emits both Event::Key{V} and key_pressed(V) is true.
             if let Some(action) = MenuSystem::check_shortcuts(i, Some(&self.keymap)) {
+                let is_clipboard = matches!(action, MenuAction::Copy | MenuAction::Cut | MenuAction::Paste);
                 // Only trigger if keyboard isn't claimed OR the shortcut uses modifiers
                 if !wants_keyboard || i.modifiers.ctrl || i.modifiers.command || i.modifiers.alt || i.modifiers.shift {
-                    self.handle_menu_action(action);
+                    if !(is_clipboard && clipboard_handled) {
+                        self.handle_menu_action(action);
+                    }
                 }
             }
 

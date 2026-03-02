@@ -88,6 +88,13 @@ pub enum ToolState {
         current: (i32, i32),
     },
 
+    /// Moving an existing raster selection (and its floating pixels, if any).
+    MovingRasterSelection {
+        /// Canvas position of the pointer at the last processed event, used to
+        /// compute per-frame deltas.
+        last: (i32, i32),
+    },
+
     /// Dragging selected objects
     DraggingSelection {
         start_pos: Point,
