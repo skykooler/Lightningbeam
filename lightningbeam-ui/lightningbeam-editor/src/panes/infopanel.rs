@@ -302,6 +302,14 @@ impl InfopanelPane {
 
                     // Raster paint tools
                     Tool::Draw | Tool::Erase | Tool::Smudge if is_raster_paint_tool => {
+                        // Color source toggle (Draw tool only)
+                        if matches!(tool, Tool::Draw) {
+                            ui.horizontal(|ui| {
+                                ui.label("Color:");
+                                ui.selectable_value(shared.brush_use_fg, true, "FG");
+                                ui.selectable_value(shared.brush_use_fg, false, "BG");
+                            });
+                        }
                         ui.horizontal(|ui| {
                             ui.label("Size:");
                             ui.add(
@@ -374,20 +382,9 @@ impl InfopanelPane {
                     ui.label("Fill:");
                     match info.fill_color {
                         Some(Some(color)) => {
-                            let mut egui_color = egui::Color32::from_rgba_unmultiplied(
-                                color.r, color.g, color.b, color.a,
-                            );
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut egui_color,
-                                egui::color_picker::Alpha::OnlyBlend,
-                            ).changed() {
-                                let new_color = ShapeColor {
-                                    r: egui_color.r(),
-                                    g: egui_color.g(),
-                                    b: egui_color.b(),
-                                    a: egui_color.a(),
-                                };
+                            let mut rgba = [color.r, color.g, color.b, color.a];
+                            if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
+                                let new_color = ShapeColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
                                 let action = SetShapePropertiesAction::set_fill_color(
                                     layer_id, time, face_ids.clone(), Some(new_color),
                                 );
@@ -408,20 +405,9 @@ impl InfopanelPane {
                     ui.label("Stroke:");
                     match info.stroke_color {
                         Some(Some(color)) => {
-                            let mut egui_color = egui::Color32::from_rgba_unmultiplied(
-                                color.r, color.g, color.b, color.a,
-                            );
-                            if egui::color_picker::color_edit_button_srgba(
-                                ui,
-                                &mut egui_color,
-                                egui::color_picker::Alpha::OnlyBlend,
-                            ).changed() {
-                                let new_color = ShapeColor {
-                                    r: egui_color.r(),
-                                    g: egui_color.g(),
-                                    b: egui_color.b(),
-                                    a: egui_color.a(),
-                                };
+                            let mut rgba = [color.r, color.g, color.b, color.a];
+                            if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
+                                let new_color = ShapeColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
                                 let action = SetShapePropertiesAction::set_stroke_color(
                                     layer_id, time, edge_ids.clone(), Some(new_color),
                                 );
@@ -538,14 +524,14 @@ impl InfopanelPane {
                     }
                 });
 
-                // Background color
+                // Background color (with alpha)
                 ui.horizontal(|ui| {
                     ui.label("Background:");
                     let bg = document.background_color;
-                    let mut color = [bg.r, bg.g, bg.b];
-                    if ui.color_edit_button_srgb(&mut color).changed() {
+                    let mut color = [bg.r, bg.g, bg.b, bg.a];
+                    if ui.color_edit_button_srgba_unmultiplied(&mut color).changed() {
                         let action = SetDocumentPropertiesAction::set_background_color(
-                            ShapeColor::rgb(color[0], color[1], color[2]),
+                            ShapeColor::rgba(color[0], color[1], color[2], color[3]),
                         );
                         shared.pending_actions.push(Box::new(action));
                     }

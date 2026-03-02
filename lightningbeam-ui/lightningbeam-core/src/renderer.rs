@@ -438,10 +438,38 @@ pub fn render_document_with_transform(
 /// Draw the document background
 fn render_background(document: &Document, scene: &mut Scene, base_transform: Affine) {
     let background_rect = Rect::new(0.0, 0.0, document.width, document.height);
+    let bg = &document.background_color;
 
-    // Convert our ShapeColor to vello's peniko Color
-    let background_color = document.background_color.to_peniko();
+    // Draw checkerboard behind transparent backgrounds
+    if bg.a < 255 {
+        use vello::peniko::{Blob, Color, Extend, ImageAlphaType, ImageData, ImageQuality};
+        // 2x2 pixel checkerboard pattern: light/dark alternating
+        let light: [u8; 4] = [204, 204, 204, 255];
+        let dark: [u8; 4] = [170, 170, 170, 255];
+        let pixels: Vec<u8> = [light, dark, dark, light].concat();
+        let image_data = ImageData {
+            data: Blob::from(pixels),
+            format: ImageFormat::Rgba8,
+            width: 2,
+            height: 2,
+            alpha_type: ImageAlphaType::AlphaPremultiplied,
+        };
+        let brush = ImageBrush::new(image_data)
+            .with_extend(Extend::Repeat)
+            .with_quality(ImageQuality::Low);
+        // Scale each pixel to 16x16 document units
+        let brush_transform = Affine::scale(16.0);
+        scene.fill(
+            Fill::NonZero,
+            base_transform,
+            &brush,
+            Some(brush_transform),
+            &background_rect,
+        );
+    }
 
+    // Draw the background color on top (alpha-blended)
+    let background_color = bg.to_peniko();
     scene.fill(
         Fill::NonZero,
         base_transform,

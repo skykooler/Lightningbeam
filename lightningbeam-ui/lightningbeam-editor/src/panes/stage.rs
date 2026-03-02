@@ -4482,7 +4482,7 @@ impl StagePane {
         let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
             [1.0f32, 1.0, 1.0, 1.0]
         } else {
-            let c = *shared.stroke_color;
+            let c = if *shared.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
             [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, c.a() as f32 / 255.0]
         };
 
