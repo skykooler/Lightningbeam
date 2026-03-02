@@ -205,19 +205,49 @@ impl PaneRenderer for ToolbarPane {
         let color_row_width = fill_label_width + color_button_size + button_spacing;
         let color_x = rect.left() + (rect.width() - color_row_width) / 2.0;
 
-        // For raster layers show a single "Color" swatch (brush paint color = stroke_color).
-        // For vector layers show Fill + Stroke.
-        if !is_raster {
-            // Fill color label
+        // Two color swatches:
+        // Stroke/FG always on top, Fill/BG always on bottom.
+        // Raster layers label them "FG" / "BG"; vector layers label them "Stroke" / "Fill".
+        {
+            let stroke_label = if is_raster { "FG" } else { "Stroke" };
             ui.painter().text(
                 egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
                 egui::Align2::CENTER_CENTER,
-                "Fill",
+                stroke_label,
                 egui::FontId::proportional(14.0),
                 egui::Color32::from_gray(200),
             );
 
-            // Fill color button
+            let stroke_button_rect = egui::Rect::from_min_size(
+                egui::pos2(color_x + fill_label_width + button_spacing, y),
+                egui::vec2(color_button_size, color_button_size),
+            );
+            let stroke_button_id = ui.id().with(("stroke_color_button", path));
+            let stroke_response = ui.interact(stroke_button_rect, stroke_button_id, egui::Sense::click());
+            draw_color_button(ui, stroke_button_rect, *shared.stroke_color);
+            egui::containers::Popup::from_toggle_button_response(&stroke_response)
+                .show(|ui| {
+                    ui.spacing_mut().slider_width = 275.0;
+                    let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
+                    if changed {
+                        *shared.active_color_mode = super::ColorMode::Stroke;
+                    }
+                });
+
+            y += color_button_size + button_spacing;
+        }
+
+        // Fill/BG color swatch
+        {
+            let fill_label = if is_raster { "BG" } else { "Fill" };
+            ui.painter().text(
+                egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
+                egui::Align2::CENTER_CENTER,
+                fill_label,
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_gray(200),
+            );
+
             let fill_button_rect = egui::Rect::from_min_size(
                 egui::pos2(color_x + fill_label_width + button_spacing, y),
                 egui::vec2(color_button_size, color_button_size),
@@ -227,40 +257,13 @@ impl PaneRenderer for ToolbarPane {
             draw_color_button(ui, fill_button_rect, *shared.fill_color);
             egui::containers::Popup::from_toggle_button_response(&fill_response)
                 .show(|ui| {
+                    ui.spacing_mut().slider_width = 275.0;
                     let changed = egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
                     if changed {
                         *shared.active_color_mode = super::ColorMode::Fill;
                     }
                 });
-
-            y += color_button_size + button_spacing;
         }
-
-        // Stroke/brush color label
-        let stroke_label = if is_raster { "Color" } else { "Stroke" };
-        ui.painter().text(
-            egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
-            egui::Align2::CENTER_CENTER,
-            stroke_label,
-            egui::FontId::proportional(14.0),
-            egui::Color32::from_gray(200),
-        );
-
-        // Stroke color button
-        let stroke_button_rect = egui::Rect::from_min_size(
-            egui::pos2(color_x + fill_label_width + button_spacing, y),
-            egui::vec2(color_button_size, color_button_size),
-        );
-        let stroke_button_id = ui.id().with(("stroke_color_button", path));
-        let stroke_response = ui.interact(stroke_button_rect, stroke_button_id, egui::Sense::click());
-        draw_color_button(ui, stroke_button_rect, *shared.stroke_color);
-        egui::containers::Popup::from_toggle_button_response(&stroke_response)
-            .show(|ui| {
-                let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
-                if changed {
-                    *shared.active_color_mode = super::ColorMode::Stroke;
-                }
-            });
         } // end color pickers
     }
 
