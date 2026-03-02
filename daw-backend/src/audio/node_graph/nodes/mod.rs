@@ -1,4 +1,5 @@
 mod amp_sim;
+pub mod bundled_models;
 mod adsr;
 mod arpeggiator;
 mod audio_input;

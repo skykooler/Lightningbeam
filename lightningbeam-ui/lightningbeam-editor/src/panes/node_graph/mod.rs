@@ -2499,42 +2499,14 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                     .collect();
                 self.user_state.available_scripts.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
 
-                // Bundled NAM models — discover once and cache
+                // Bundled NAM models — populate from embedded registry
                 if self.user_state.available_nam_models.is_empty() {
-                    let bundled_dirs = [
-                        std::env::current_exe().ok()
-                            .and_then(|p| p.parent().map(|d| d.join("models")))
-                            .unwrap_or_default(),
-                        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                            .join("../../vendor/NeuralAudio/Utils/Models"),
-                    ];
-                    for dir in &bundled_dirs {
-                        if let Ok(canon) = dir.canonicalize() {
-                            if canon.is_dir() {
-                                for entry in std::fs::read_dir(&canon).into_iter().flatten().flatten() {
-                                    let path = entry.path();
-                                    if path.extension().map_or(false, |e| e == "nam") {
-                                        let stem = path.file_stem()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                            .unwrap_or_default();
-                                        // Skip LSTM variants (performance alternates, not separate amps)
-                                        if stem.ends_with("-LSTM") {
-                                            continue;
-                                        }
-                                        // Clean up display name: remove "-WaveNet" suffix
-                                        let name = stem.strip_suffix("-WaveNet")
-                                            .unwrap_or(&stem)
-                                            .to_string();
-                                        self.user_state.available_nam_models.push(NamModelInfo {
-                                            name,
-                                            path: path.to_string_lossy().to_string(),
-                                            is_bundled: true,
-                                        });
-                                    }
-                                }
-                                break; // use first directory found
-                            }
-                        }
+                    for name in daw_backend::audio::node_graph::nodes::bundled_models::bundled_model_names() {
+                        self.user_state.available_nam_models.push(NamModelInfo {
+                            name: name.to_string(),
+                            path: format!("bundled:{}", name),
+                            is_bundled: true,
+                        });
                     }
                     self.user_state.available_nam_models.sort_by(|a, b| a.name.cmp(&b.name));
                 }

@@ -515,6 +515,8 @@ impl NodeTemplateTrait for NodeTemplate {
                     ValueType::float_param(0.7, 0.0, 1.0, "", 2, None), InputParamKind::ConstantOnly, true);
                 graph.add_input_param(node_id, "Release".into(), DataType::CV,
                     ValueType::float_param(0.2, 0.001, 5.0, " s", 3, None), InputParamKind::ConstantOnly, true);
+                graph.add_input_param(node_id, "Curve".into(), DataType::CV,
+                    ValueType::float_param(0.0, 0.0, 1.0, "", 4, Some(&["Linear", "Exponential"])), InputParamKind::ConstantOnly, true);
                 graph.add_output_param(node_id, "Envelope Out".into(), DataType::CV);
             }
             NodeTemplate::Lfo => {
