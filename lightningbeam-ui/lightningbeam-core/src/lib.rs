@@ -43,6 +43,7 @@ pub mod file_types;
 pub mod file_io;
 pub mod export;
 pub mod clipboard;
+pub(crate) mod clipboard_platform;
 pub mod region_select;
 pub mod dcel2;
 pub use dcel2 as dcel;

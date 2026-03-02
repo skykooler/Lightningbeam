@@ -1973,7 +1973,6 @@ impl EditorApp {
                     let (pixels, w, h) = Self::extract_raster_selection(
                         &kf.raw_pixels, kf.width, kf.height, raster_sel,
                     );
-                    self.clipboard_manager.try_set_raster_image(&pixels, w, h);
                     self.clipboard_manager.copy(ClipboardContent::RasterPixels {
                         pixels, width: w, height: h,
                     });
@@ -2294,29 +2293,15 @@ impl EditorApp {
                     self.selection.add_clip_instance(id);
                 }
             }
-            ClipboardContent::Shapes { shapes } => {
-                let active_layer_id = match self.active_layer_id {
-                    Some(id) => id,
-                    None => return,
-                };
-
-                // Add shapes to the active vector layer's keyframe
-                let document = self.action_executor.document_mut();
-                let layer = match document.get_layer_mut(&active_layer_id) {
-                    Some(l) => l,
-                    None => return,
-                };
-
-                let vector_layer = match layer {
-                    AnyLayer::Vector(vl) => vl,
-                    _ => {
-                        eprintln!("Cannot paste shapes: not a vector layer");
-                        return;
-                    }
-                };
-
-                // TODO: DCEL - paste shapes not yet implemented
-                let _ = (vector_layer, shapes);
+            ClipboardContent::VectorGeometry { .. } => {
+                // TODO (Phase 2): paste DCEL subgraph once vector serialization is defined.
+            }
+            ClipboardContent::Layers { .. } => {
+                // TODO: insert copied layers as siblings at the current selection point.
+            }
+            ClipboardContent::AudioNodes { .. } => {
+                // TODO: add nodes to the target layer's audio graph with new IDs and
+                // sync to the DAW backend.
             }
             ClipboardContent::MidiNotes { .. } => {
                 // MIDI notes are pasted directly in the piano roll pane, not here
@@ -2324,7 +2309,8 @@ impl EditorApp {
             ClipboardContent::RasterPixels { pixels, width, height } => {
                 let Some(layer_id) = self.active_layer_id else { return };
                 let document = self.action_executor.document();
-                let Some(AnyLayer::Raster(rl)) = document.get_layer(&layer_id) else { return };
+                let layer = document.get_layer(&layer_id);
+                let Some(AnyLayer::Raster(rl)) = layer else { return };
                 let Some(kf) = rl.keyframe_at(self.playback_time) else { return };
 
                 // Paste position: top-left of the current raster selection if any,
