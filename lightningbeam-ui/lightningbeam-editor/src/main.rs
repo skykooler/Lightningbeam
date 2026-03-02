@@ -2772,6 +2772,13 @@ impl EditorApp {
 
             // Edit menu
             MenuAction::Undo => {
+                // An uncommitted floating selection (paste not yet merged) lives
+                // outside the action stack.  Cancelling it IS the undo — dismiss
+                // it and don't pop anything from the stack.
+                if self.selection.raster_floating.is_some() {
+                    self.cancel_raster_floating();
+                    return;
+                }
                 let undo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
