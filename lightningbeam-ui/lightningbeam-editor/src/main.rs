@@ -1417,7 +1417,8 @@ impl EditorApp {
             5 => {
                 // Painting focus -> RasterLayer
                 use lightningbeam_core::raster_layer::RasterLayer;
-                let layer = RasterLayer::new("Raster 1");
+                let mut layer = RasterLayer::new("Raster 1");
+                layer.ensure_keyframe_at(self.playback_time, document.width as u32, document.height as u32);
                 document.root.add_child(AnyLayer::Raster(layer))
             }
             _ => {
@@ -1924,6 +1925,11 @@ impl EditorApp {
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
         let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
 
+        // Ensure the canvas is allocated (empty Vec = blank transparent canvas).
+        let expected = (kf.width * kf.height * 4) as usize;
+        if kf.raw_pixels.len() != expected {
+            kf.raw_pixels.resize(expected, 0);
+        }
         Self::composite_over(
             &mut kf.raw_pixels, kf.width, kf.height,
             &float.pixels, float.width, float.height,
@@ -3092,7 +3098,11 @@ impl EditorApp {
                 let layer_number = context_layers.len() + 1;
                 let layer_name = format!("Raster {}", layer_number);
 
-                let layer = RasterLayer::new(layer_name);
+                let doc = self.action_executor.document();
+                let (doc_w, doc_h) = (doc.width as u32, doc.height as u32);
+                drop(doc);
+                let mut layer = RasterLayer::new(layer_name);
+                layer.ensure_keyframe_at(self.playback_time, doc_w, doc_h);
                 let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Raster(layer))
                     .with_target_clip(editing_clip_id);
                 let _ = self.action_executor.execute(Box::new(action));
