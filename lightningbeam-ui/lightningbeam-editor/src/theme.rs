@@ -269,14 +269,6 @@ struct Rule {
     style: Style,
 }
 
-/// Resolved style with provenance information (for CSS inspector)
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedStyle {
-    pub style: Style,
-    /// property_name -> selector that provided it
-    pub provenance: HashMap<String, String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct Theme {
     light_variables: HashMap<String, String>,
@@ -508,74 +500,6 @@ impl Theme {
         // Cache the result
         self.cache.borrow_mut().insert(cache_key, result.clone());
         result
-    }
-
-    /// Resolve with provenance info (for CSS inspector debug overlay)
-    pub fn resolve_with_provenance(&self, context: &[&str], ctx: &egui::Context) -> ResolvedStyle {
-        let is_dark = self.is_dark(ctx);
-        let rules = if is_dark { &self.dark_rules } else { &self.light_rules };
-
-        let mut matching: Vec<&Rule> = rules
-            .iter()
-            .filter(|r| r.selector.matches(context))
-            .collect();
-
-        matching.sort_by_key(|r| r.selector.specificity);
-
-        let mut result = Style::default();
-        let mut provenance = HashMap::new();
-
-        for rule in &matching {
-            let selector_str = rule.selector.parts.join(" ");
-            let s = &rule.style;
-
-            if s.background.is_some() {
-                result.background = s.background.clone();
-                provenance.insert("background".to_string(), selector_str.clone());
-            }
-            if s.border_color.is_some() {
-                result.border_color = s.border_color;
-                provenance.insert("border-color".to_string(), selector_str.clone());
-            }
-            if s.border_width.is_some() {
-                result.border_width = s.border_width;
-                provenance.insert("border-width".to_string(), selector_str.clone());
-            }
-            if s.border_radius.is_some() {
-                result.border_radius = s.border_radius;
-                provenance.insert("border-radius".to_string(), selector_str.clone());
-            }
-            if s.text_color.is_some() {
-                result.text_color = s.text_color;
-                provenance.insert("color".to_string(), selector_str.clone());
-            }
-            if s.width.is_some() {
-                result.width = s.width;
-                provenance.insert("width".to_string(), selector_str.clone());
-            }
-            if s.height.is_some() {
-                result.height = s.height;
-                provenance.insert("height".to_string(), selector_str.clone());
-            }
-            if s.padding.is_some() {
-                result.padding = s.padding;
-                provenance.insert("padding".to_string(), selector_str.clone());
-            }
-            if s.margin.is_some() {
-                result.margin = s.margin;
-                provenance.insert("margin".to_string(), selector_str.clone());
-            }
-            if s.font_size.is_some() {
-                result.font_size = s.font_size;
-                provenance.insert("font-size".to_string(), selector_str.clone());
-            }
-            if s.opacity.is_some() {
-                result.opacity = s.opacity;
-                provenance.insert("opacity".to_string(), selector_str.clone());
-            }
-        }
-
-        ResolvedStyle { style: result, provenance }
     }
 
     /// Convenience: resolve and extract background color with fallback

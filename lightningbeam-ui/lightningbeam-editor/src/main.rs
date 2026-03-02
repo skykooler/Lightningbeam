@@ -5378,7 +5378,6 @@ impl eframe::App for EditorApp {
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
         let mut clipboard_consumed = false;
-        let mut css_debug_regions: Vec<panes::CssDebugRegion> = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
 
@@ -5522,8 +5521,6 @@ impl eframe::App for EditorApp {
                     commit_raster_floating_if_any: &mut self.commit_raster_floating_if_any,
                     pending_node_group: &mut self.pending_node_group,
                     pending_node_ungroup: &mut self.pending_node_ungroup,
-                    css_debug_regions: &mut css_debug_regions,
-                    css_debug_overlay: self.debug_overlay_visible,
                     #[cfg(debug_assertions)]
                     test_mode: &mut self.test_mode,
                     #[cfg(debug_assertions)]
@@ -6014,54 +6011,6 @@ impl eframe::App for EditorApp {
             );
             debug_overlay::render_debug_overlay(ctx, &stats);
 
-            // CSS Inspector: show CSS context for element under cursor
-            if !css_debug_regions.is_empty() {
-                if let Some(pointer_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                    // Find the smallest region containing the pointer
-                    let mut best: Option<&panes::CssDebugRegion> = None;
-                    for region in &css_debug_regions {
-                        if region.rect.contains(pointer_pos) {
-                            if best.map_or(true, |b| region.rect.area() < b.rect.area()) {
-                                best = Some(region);
-                            }
-                        }
-                    }
-                    if let Some(region) = best {
-                        let painter = ctx.layer_painter(egui::LayerId::new(
-                            egui::Order::Tooltip,
-                            egui::Id::new("css_inspector"),
-                        ));
-                        // Highlight border
-                        painter.rect_stroke(
-                            region.rect,
-                            0.0,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 200, 255)),
-                            egui::StrokeKind::Outside,
-                        );
-                        // Tooltip with CSS context
-                        let context_str = region.context.join(" ");
-                        let resolved = self.theme.resolve_with_provenance(&region.context.iter().map(|s| *s).collect::<Vec<_>>(), ctx);
-                        let mut tooltip_lines = vec![context_str];
-                        for (prop, sel) in &resolved.provenance {
-                            tooltip_lines.push(format!("{}: (from {})", prop, sel));
-                        }
-                        let tooltip_text = tooltip_lines.join("\n");
-
-                        let tooltip_pos = pointer_pos + egui::vec2(16.0, 16.0);
-                        let galley = painter.layout_no_wrap(
-                            tooltip_text,
-                            egui::FontId::monospace(11.0),
-                            egui::Color32::from_rgb(200, 240, 255),
-                        );
-                        let tooltip_rect = egui::Rect::from_min_size(
-                            tooltip_pos,
-                            galley.size() + egui::vec2(12.0, 8.0),
-                        );
-                        painter.rect_filled(tooltip_rect, 4.0, egui::Color32::from_black_alpha(220));
-                        painter.galley(tooltip_pos + egui::vec2(6.0, 4.0), galley, egui::Color32::WHITE);
-                    }
-                }
-            }
         }
 
         // Render custom cursor overlay (on top of everything including debug overlay)
@@ -6399,9 +6348,9 @@ fn render_pane(
     ui.painter().rect_filled(header_rect, 0.0, header_bg);
 
     // Draw content background
-    let bg_color = if let Some(pane_type) = pane_type {
-        let pane_id = pane_type_css_id(pane_type);
-        ctx.shared.theme.bg_color(&[pane_id, ".pane-content"], ui.ctx(), pane_color(pane_type))
+    let pane_id = pane_type.map(pane_type_css_id);
+    let bg_color = if let Some(pane_id) = pane_id {
+        ctx.shared.theme.bg_color(&[pane_id, ".pane-content"], ui.ctx(), pane_color(pane_type.unwrap()))
     } else {
         egui::Color32::from_rgb(40, 40, 40)
     };
