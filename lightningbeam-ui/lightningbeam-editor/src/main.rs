@@ -5816,6 +5816,16 @@ impl eframe::App for EditorApp {
                         egui::Event::Paste(_) => {
                             self.handle_menu_action(MenuAction::Paste);
                         }
+                        // When text/plain is absent from the system clipboard egui-winit
+                        // falls through to a Key event instead of Event::Paste.
+                        egui::Event::Key {
+                            key: egui::Key::V,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } if modifiers.ctrl || modifiers.command => {
+                            self.handle_menu_action(MenuAction::Paste);
+                        }
                         _ => {}
                     }
                 }

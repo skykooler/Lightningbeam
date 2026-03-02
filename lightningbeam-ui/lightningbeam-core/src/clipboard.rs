@@ -37,9 +37,6 @@ use uuid::Uuid;
 /// MIME type used for cross-process Lightningbeam clipboard data.
 pub const LIGHTNINGBEAM_MIME: &str = "application/x-lightningbeam";
 
-/// JSON text-clipboard prefix (arboard fallback).
-const CLIPBOARD_PREFIX: &str = "LIGHTNINGBEAM_CLIPBOARD:";
-
 // ─────────────────────────────── Layer type tag ─────────────────────────────
 
 /// Layer type tag for clipboard — tells paste where clip instances can go.
@@ -460,15 +457,32 @@ fn regen_any_layer(layer: &AnyLayer, id_map: &mut HashMap<Uuid, Uuid>) -> AnyLay
     }
 }
 
-// ──────────────────────────── PNG encoding helper ────────────────────────────
+// ──────────────────────── Pixel format conversion helpers ────────────────────
 
-/// Encode sRGB premultiplied RGBA pixels as PNG bytes.
-///
-/// Returns `None` on encoding failure (logged to stderr).
-pub(crate) fn encode_raster_as_png(pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    use image::RgbaImage;
-    // Un-premultiply before encoding (same as try_set_raster_image).
-    let straight: Vec<u8> = pixels
+/// Convert straight-alpha RGBA bytes to premultiplied RGBA.
+fn straight_to_premul(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let a = p[3];
+            if a == 0 {
+                [0u8, 0, 0, 0]
+            } else {
+                let scale = a as f32 / 255.0;
+                [
+                    (p[0] as f32 * scale).round() as u8,
+                    (p[1] as f32 * scale).round() as u8,
+                    (p[2] as f32 * scale).round() as u8,
+                    a,
+                ]
+            }
+        })
+        .collect()
+}
+
+/// Convert premultiplied RGBA bytes to straight-alpha RGBA.
+fn premul_to_straight(bytes: &[u8]) -> Vec<u8> {
+    bytes
         .chunks_exact(4)
         .flat_map(|p| {
             let a = p[3];
@@ -484,8 +498,17 @@ pub(crate) fn encode_raster_as_png(pixels: &[u8], width: u32, height: u32) -> Op
                 ]
             }
         })
-        .collect();
-    let img = RgbaImage::from_raw(width, height, straight)?;
+        .collect()
+}
+
+// ──────────────────────────── PNG encoding helper ────────────────────────────
+
+/// Encode sRGB premultiplied RGBA pixels as PNG bytes.
+///
+/// Returns `None` on encoding failure (logged to stderr).
+pub(crate) fn encode_raster_as_png(pixels: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    use image::RgbaImage;
+    let img = RgbaImage::from_raw(width, height, premul_to_straight(pixels))?;
     match crate::brush_engine::encode_png(&img) {
         Ok(bytes) => Some(bytes),
         Err(e) => {
@@ -526,74 +549,42 @@ impl ClipboardManager {
             }
         }
 
-        // Ordering note: on macOS/Windows arboard must go first because set_text()
-        // calls clearContents/EmptyClipboard, after which clipboard_platform::set()
-        // appends the custom types.  On Linux the order is reversed so that arboard
-        // ends up as the final clipboard owner with text/plain available — egui reads
-        // text/plain to generate Event::Paste for Ctrl+V.
-        //
-        // try_set_raster_image() is intentionally omitted: it calls arboard.set_image()
-        // which calls clearContents again, wiping the text and custom types we just set.
-        // The image/png entry in `entries` covers external-app image interop instead.
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: platform first, then arboard.set_text() becomes the final owner.
-            clipboard_platform::set(
-                &entries.iter().map(|(m, d)| (*m, d.as_slice())).collect::<Vec<_>>(),
-            );
-            if let Some(sys) = self.system.as_mut() {
-                let _ = sys.set_text(format!("{}{}", CLIPBOARD_PREFIX, json));
-            }
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            // macOS/Windows: arboard first (clears clipboard), then append custom types.
-            if let Some(sys) = self.system.as_mut() {
-                let _ = sys.set_text(format!("{}{}", CLIPBOARD_PREFIX, json));
-            }
-            clipboard_platform::set(
-                &entries.iter().map(|(m, d)| (*m, d.as_slice())).collect::<Vec<_>>(),
-            );
-        }
+        clipboard_platform::set(
+            &entries.iter().map(|(m, d)| (*m, d.as_slice())).collect::<Vec<_>>(),
+        );
 
         self.internal = Some(content);
     }
 
     /// Try to paste content.
     ///
-    /// Priority:
-    /// 1. Internal cache (same-process fast path).
-    /// 2. Platform custom MIME type (cross-process LB → LB).
-    /// 3. arboard text fallback (terminals, remote desktops, older LB builds).
+    /// Checks the platform custom MIME type first.  If our content is still on
+    /// the clipboard the internal cache is returned (avoids re-deserializing).
+    /// If another app has taken the clipboard since we last copied, the internal
+    /// cache is cleared and `None` is returned so the caller can try other
+    /// sources (e.g. `try_get_raster_image`).
     pub fn paste(&mut self) -> Option<ClipboardContent> {
-        // 1. Internal cache.
-        if let Some(content) = &self.internal {
-            return Some(content.clone());
-        }
-
-        // 2. Platform custom MIME type.
-        if let Some((_, data)) = clipboard_platform::get(&[LIGHTNINGBEAM_MIME]) {
-            if let Ok(s) = std::str::from_utf8(&data) {
-                if let Ok(content) = serde_json::from_str::<ClipboardContent>(s) {
-                    return Some(content);
+        match clipboard_platform::get(&[LIGHTNINGBEAM_MIME]) {
+            Some((_, data)) => {
+                // Our MIME type is still on the clipboard — prefer the internal
+                // cache to avoid a round-trip through JSON.
+                if let Some(content) = &self.internal {
+                    return Some(content.clone());
                 }
-            }
-        }
-
-        // 3. arboard text fallback.
-        if let Some(sys) = self.system.as_mut() {
-            if let Ok(text) = sys.get_text() {
-                if let Some(json) = text.strip_prefix(CLIPBOARD_PREFIX) {
-                    if let Ok(content) = serde_json::from_str::<ClipboardContent>(json) {
+                // Cross-process paste (internal cache absent): deserialize.
+                if let Ok(s) = std::str::from_utf8(&data) {
+                    if let Ok(content) = serde_json::from_str::<ClipboardContent>(s) {
                         return Some(content);
                     }
                 }
+                None
+            }
+            None => {
+                // Another app owns the clipboard — internal cache is stale.
+                self.internal = None;
+                None
             }
         }
-
-        None
     }
 
     /// Copy raster pixels to the system clipboard as an image.
@@ -602,23 +593,7 @@ impl ClipboardManager {
     /// Converts to straight-alpha RGBA8 for arboard.  Silently ignores errors.
     pub fn try_set_raster_image(&mut self, pixels: &[u8], width: u32, height: u32) {
         let Some(system) = self.system.as_mut() else { return };
-        let straight: Vec<u8> = pixels
-            .chunks_exact(4)
-            .flat_map(|p| {
-                let a = p[3];
-                if a == 0 {
-                    [0u8, 0, 0, 0]
-                } else {
-                    let inv = 255.0 / a as f32;
-                    [
-                        (p[0] as f32 * inv).round().min(255.0) as u8,
-                        (p[1] as f32 * inv).round().min(255.0) as u8,
-                        (p[2] as f32 * inv).round().min(255.0) as u8,
-                        a,
-                    ]
-                }
-            })
-            .collect();
+        let straight = premul_to_straight(pixels);
         let img = arboard::ImageData {
             width: width as usize,
             height: height as usize,
@@ -632,40 +607,34 @@ impl ClipboardManager {
     /// Returns sRGB-encoded premultiplied RGBA pixels on success, or `None` if
     /// no image is available.  Silently ignores errors.
     pub fn try_get_raster_image(&mut self) -> Option<(Vec<u8>, u32, u32)> {
-        let img = self.system.as_mut()?.get_image().ok()?;
-        let width = img.width as u32;
-        let height = img.height as u32;
-        let premul: Vec<u8> = img
-            .bytes
-            .chunks_exact(4)
-            .flat_map(|p| {
-                let a = p[3];
-                if a == 0 {
-                    [0u8, 0, 0, 0]
-                } else {
-                    let scale = a as f32 / 255.0;
-                    [
-                        (p[0] as f32 * scale).round() as u8,
-                        (p[1] as f32 * scale).round() as u8,
-                        (p[2] as f32 * scale).round() as u8,
-                        a,
-                    ]
-                }
-            })
-            .collect();
-        Some((premul, width, height))
+        // On Linux arboard's get_image() does not reliably read clipboard images
+        // set by other apps on Wayland.  Use clipboard_platform (wl-clipboard-rs /
+        // x11-clipboard) to read the raw image bytes then decode with the image crate.
+        #[cfg(target_os = "linux")]
+        {
+            let (_, data) = clipboard_platform::get(&[
+                "image/png",
+                "image/jpeg",
+                "image/bmp",
+                "image/tiff",
+            ])?;
+            let img = image::load_from_memory(&data).ok()?.into_rgba8();
+            let (width, height) = img.dimensions();
+            let premul = straight_to_premul(img.as_raw());
+            return Some((premul, width, height));
+        }
+
+        // macOS / Windows: arboard handles image clipboard natively.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let img = self.system.as_mut()?.get_image().ok()?;
+            let premul = straight_to_premul(&img.bytes);
+            Some((premul, img.width as u32, img.height as u32))
+        }
     }
 
     /// Check if there is content available to paste.
-    pub fn has_content(&mut self) -> bool {
-        if self.internal.is_some() {
-            return true;
-        }
-        if let Some(sys) = self.system.as_mut() {
-            if let Ok(text) = sys.get_text() {
-                return text.starts_with(CLIPBOARD_PREFIX);
-            }
-        }
-        false
+    pub fn has_content(&self) -> bool {
+        self.internal.is_some()
     }
 }
