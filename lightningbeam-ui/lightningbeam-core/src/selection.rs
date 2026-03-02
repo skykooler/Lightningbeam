@@ -82,6 +82,10 @@ pub struct RasterFloatingSelection {
     /// undo (via `RasterStrokeAction`) when the float is committed, and for
     /// Cancel (Escape) to restore the canvas without creating an undo entry.
     pub canvas_before: Vec<u8>,
+    /// Key for this float's GPU canvas in `GpuBrushEngine::canvases`.
+    /// Allows painting strokes directly onto the float buffer (B) without
+    /// touching the layer canvas (A).
+    pub canvas_id: Uuid,
 }
 
 /// Tracks the most recently selected thing(s) across the entire document.

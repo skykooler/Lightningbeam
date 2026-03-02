@@ -512,6 +512,8 @@ pub struct CanvasBlitPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bg_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
+    /// Nearest-neighbour sampler used for the selection mask texture.
+    pub mask_sampler: wgpu::Sampler,
 }
 
 /// Camera parameters uniform for canvas_blit.wgsl.
@@ -565,6 +567,24 @@ impl CanvasBlitPipeline {
                             has_dynamic_offset: false,
                             min_binding_size:  None,
                         },
+                        count: None,
+                    },
+                    // Binding 3: selection mask texture (R8Unorm; 1×1 white = no mask)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled:   false,
+                        },
+                        count: None,
+                    },
+                    // Binding 4: nearest sampler for mask (sharp selection edges)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -621,12 +641,25 @@ impl CanvasBlitPipeline {
             ..Default::default()
         });
 
-        Self { pipeline, bg_layout, sampler }
+        let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:          Some("canvas_mask_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter:     wgpu::FilterMode::Nearest,
+            min_filter:     wgpu::FilterMode::Nearest,
+            mipmap_filter:  wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Self { pipeline, bg_layout, sampler, mask_sampler }
     }
 
     /// Render the canvas texture into `target_view` (Rgba8Unorm) with the given camera.
     ///
     /// `target_view` is cleared to transparent before writing.
+    /// `mask_view` is an R8Unorm texture in canvas-pixel space: 255 = keep, 0 = discard.
+    /// Pass `None` to use the built-in 1×1 all-white default (no masking).
     pub fn blit(
         &self,
         device:      &wgpu::Device,
@@ -634,7 +667,40 @@ impl CanvasBlitPipeline {
         canvas_view: &wgpu::TextureView,
         target_view: &wgpu::TextureView,
         camera:      &CameraParams,
+        mask_view:   Option<&wgpu::TextureView>,
     ) {
+        // When no mask is provided, create a temporary 1×1 all-white texture.
+        // (queue is already available here, unlike in new())
+        let tmp_mask_tex;
+        let tmp_mask_view;
+        let mask_view: &wgpu::TextureView = match mask_view {
+            Some(v) => v,
+            None => {
+                tmp_mask_tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("canvas_default_mask"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::R8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tmp_mask_tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &[255u8],
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
+                    wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                );
+                tmp_mask_view = tmp_mask_tex.create_view(&Default::default());
+                &tmp_mask_view
+            }
+        };
         // Upload camera params
         let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label:              Some("canvas_blit_cam_buf"),
@@ -659,6 +725,14 @@ impl CanvasBlitPipeline {
                 wgpu::BindGroupEntry {
                     binding:  2,
                     resource: cam_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  3,
+                    resource: wgpu::BindingResource::TextureView(mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  4,
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
                 },
             ],
         });

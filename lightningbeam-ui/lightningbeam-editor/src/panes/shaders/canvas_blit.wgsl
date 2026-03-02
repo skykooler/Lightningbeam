@@ -21,6 +21,10 @@ struct CameraParams {
 @group(0) @binding(0) var canvas_tex:     texture_2d<f32>;
 @group(0) @binding(1) var canvas_sampler: sampler;
 @group(0) @binding(2) var<uniform> camera: CameraParams;
+/// Selection mask: R8Unorm, 255 = inside selection (keep), 0 = outside (discard).
+/// A 1×1 all-white texture is bound when no selection is active.
+@group(0) @binding(3) var mask_tex:     texture_2d<f32>;
+@group(0) @binding(4) var mask_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -77,11 +81,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     //   src = (premul_r, premul_g, premul_b, a)  → output = premul_r * a = r * a²
     // which produces a dark halo over transparent regions.
     let c = textureSample(canvas_tex, canvas_sampler, canvas_uv);
+    let mask = textureSample(mask_tex, mask_sampler, canvas_uv).r;
+    let masked_a = c.a * mask;
     let inv_a = select(0.0, 1.0 / c.a, c.a > 1e-6);
     return vec4<f32>(
         linear_to_srgb(c.r * inv_a),
         linear_to_srgb(c.g * inv_a),
         linear_to_srgb(c.b * inv_a),
-        c.a,
+        masked_a,
     );
 }
