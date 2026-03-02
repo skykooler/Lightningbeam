@@ -153,6 +153,7 @@ impl VirtualPianoPane {
         &self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        shared: &SharedPaneState,
         visible_start: u8,
         visible_end: u8,
         white_key_width: f32,
@@ -173,15 +174,16 @@ impl VirtualPianoPane {
                 egui::vec2(white_key_width - 1.0, white_key_height),
             );
             let color = if self.pressed_notes.contains(&note) {
-                egui::Color32::from_rgb(100, 150, 255)
+                shared.theme.bg_color(&[".piano-white-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))
             } else {
-                egui::Color32::WHITE
+                shared.theme.bg_color(&[".piano-white-key"], ui.ctx(), egui::Color32::WHITE)
             };
             ui.painter().rect_filled(key_rect, 2.0, color);
+            let border = shared.theme.border_color(&[".piano-white-key"], ui.ctx(), egui::Color32::BLACK);
             ui.painter().rect_stroke(
                 key_rect,
                 2.0,
-                egui::Stroke::new(1.0, egui::Color32::BLACK),
+                egui::Stroke::new(1.0, border),
                 egui::StrokeKind::Middle,
             );
             white_pos += 1.0;
@@ -204,9 +206,9 @@ impl VirtualPianoPane {
                 egui::vec2(black_key_width, black_key_height),
             );
             let color = if self.pressed_notes.contains(&note) {
-                egui::Color32::from_rgb(50, 100, 200)
+                shared.theme.bg_color(&[".piano-black-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(50, 100, 200))
             } else {
-                egui::Color32::BLACK
+                shared.theme.bg_color(&[".piano-black-key"], ui.ctx(), egui::Color32::BLACK)
             };
             ui.painter().rect_filled(key_rect, 2.0, color);
         }
@@ -232,7 +234,7 @@ impl VirtualPianoPane {
                     self.send_note_off(note, shared);
                 }
             }
-            self.render_keyboard_visual_only(ui, rect, visible_start, visible_end, white_key_width, offset_x, white_key_height, black_key_width, black_key_height);
+            self.render_keyboard_visual_only(ui, rect, shared, visible_start, visible_end, white_key_width, offset_x, white_key_height, black_key_width, black_key_height);
             return;
         }
 
@@ -303,16 +305,17 @@ impl VirtualPianoPane {
             let is_pressed = self.pressed_notes.contains(&note) ||
                              (!black_key_interacted && pointer_over_key && pointer_down);
             let color = if is_pressed {
-                egui::Color32::from_rgb(100, 150, 255) // Blue when pressed
+                shared.theme.bg_color(&[".piano-white-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))
             } else {
-                egui::Color32::WHITE
+                shared.theme.bg_color(&[".piano-white-key"], ui.ctx(), egui::Color32::WHITE)
             };
 
             ui.painter().rect_filled(key_rect, 2.0, color);
+            let border = shared.theme.border_color(&[".piano-white-key"], ui.ctx(), egui::Color32::BLACK);
             ui.painter().rect_stroke(
                 key_rect,
                 2.0,
-                egui::Stroke::new(1.0, egui::Color32::BLACK),
+                egui::Stroke::new(1.0, border),
                 egui::StrokeKind::Middle,
             );
 
@@ -386,9 +389,9 @@ impl VirtualPianoPane {
             let is_pressed = self.pressed_notes.contains(&note) ||
                              (pointer_over_key && pointer_down);
             let color = if is_pressed {
-                egui::Color32::from_rgb(50, 100, 200) // Darker blue when pressed
+                shared.theme.bg_color(&[".piano-black-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(50, 100, 200))
             } else {
-                egui::Color32::BLACK
+                shared.theme.bg_color(&[".piano-black-key"], ui.ctx(), egui::Color32::BLACK)
             };
 
             ui.painter().rect_filled(key_rect, 2.0, color);
@@ -670,6 +673,7 @@ impl VirtualPianoPane {
         &self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
+        shared: &SharedPaneState,
         visible_start: u8,
         visible_end: u8,
         white_key_width: f32,
@@ -707,9 +711,9 @@ impl VirtualPianoPane {
                 // Check if key is currently pressed
                 let is_pressed = self.pressed_notes.contains(&note);
                 let color = if is_pressed {
-                    egui::Color32::BLACK
+                    shared.theme.text_color(&[".piano-white-key", ".pressed"], ui.ctx(), egui::Color32::BLACK)
                 } else {
-                    egui::Color32::from_gray(51) // #333333
+                    shared.theme.text_color(&[".piano-white-key"], ui.ctx(), egui::Color32::from_gray(51))
                 };
 
                 ui.painter().text(
@@ -748,9 +752,9 @@ impl VirtualPianoPane {
 
                 let is_pressed = self.pressed_notes.contains(&note);
                 let color = if is_pressed {
-                    egui::Color32::WHITE
+                    shared.theme.text_color(&[".piano-black-key", ".pressed"], ui.ctx(), egui::Color32::WHITE)
                 } else {
-                    egui::Color32::from_rgba_premultiplied(255, 255, 255, 178) // rgba(255,255,255,0.7)
+                    shared.theme.text_color(&[".piano-black-key"], ui.ctx(), egui::Color32::from_rgba_premultiplied(255, 255, 255, 178))
                 };
 
                 ui.painter().text(
@@ -766,7 +770,7 @@ impl VirtualPianoPane {
 }
 
 impl PaneRenderer for VirtualPianoPane {
-    fn render_header(&mut self, ui: &mut egui::Ui, _shared: &mut SharedPaneState) -> bool {
+    fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
         ui.horizontal(|ui| {
             ui.label("Octave Shift:");
             if ui.button("-").clicked() && self.octave_offset > -2 {
@@ -795,9 +799,13 @@ impl PaneRenderer for VirtualPianoPane {
             // Sustain pedal indicator
             ui.label("Sustain:");
             let sustain_text = if self.sustain_active {
-                egui::RichText::new("ON").color(egui::Color32::from_rgb(100, 200, 100))
+                egui::RichText::new("ON").color(
+                    shared.theme.text_color(&[".sustain-indicator", ".active"], ui.ctx(), egui::Color32::from_rgb(100, 200, 100))
+                )
             } else {
-                egui::RichText::new("OFF").color(egui::Color32::GRAY)
+                egui::RichText::new("OFF").color(
+                    shared.theme.text_color(&[".sustain-indicator"], ui.ctx(), egui::Color32::GRAY)
+                )
             };
             ui.label(sustain_text);
 
@@ -863,7 +871,7 @@ impl PaneRenderer for VirtualPianoPane {
         self.render_keyboard(ui, rect, shared);
 
         // Render keyboard labels on top
-        self.render_key_labels(ui, rect, visible_start, visible_end, white_key_width, offset_x);
+        self.render_key_labels(ui, rect, shared, visible_start, visible_end, white_key_width, offset_x);
     }
 
     fn name(&self) -> &str {

@@ -338,7 +338,7 @@ impl PaneRenderer for PresetBrowserPane {
 
         // Background
         let bg_style = shared.theme.style(".pane-content", ui.ctx());
-        let bg_color = bg_style.background_color.unwrap_or(egui::Color32::from_rgb(47, 47, 47));
+        let bg_color = bg_style.background_color().unwrap_or(egui::Color32::from_rgb(47, 47, 47));
         ui.painter().rect_filled(rect, 0.0, bg_color);
 
         let text_color = shared.theme.style(".text-primary", ui.ctx())

@@ -462,6 +462,21 @@ fn find_sampled_audio_track_for_clip(
     None
 }
 
+/// Get layer type display name and color for an AnyLayer
+fn layer_type_info(layer: &AnyLayer) -> (&'static str, egui::Color32) {
+    match layer {
+        AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
+        AnyLayer::Audio(al) => match al.audio_layer_type {
+            AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
+            AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
+        },
+        AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
+        AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
+        AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
+        AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
+    }
+}
+
 impl TimelinePane {
     pub fn new() -> Self {
         Self {
@@ -1008,7 +1023,7 @@ impl TimelinePane {
 
         // Background
         let bg_style = theme.style(".timeline-background", ui.ctx());
-        let bg_color = bg_style.background_color.unwrap_or(egui::Color32::from_rgb(34, 34, 34));
+        let bg_color = bg_style.background_color().unwrap_or(egui::Color32::from_rgb(34, 34, 34));
         painter.rect_filled(rect, 0.0, bg_color);
 
         let text_style = theme.style(".text-primary", ui.ctx());
@@ -1027,7 +1042,7 @@ impl TimelinePane {
                         painter.line_segment(
                             [rect.min + egui::vec2(x, rect.height() - 10.0),
                              rect.min + egui::vec2(x, rect.height())],
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(100)),
+                            egui::Stroke::new(1.0, theme.text_color(&["#timeline", ".ruler-tick"], ui.ctx(), egui::Color32::from_gray(100))),
                         );
                         painter.text(
                             rect.min + egui::vec2(x + 2.0, 5.0), egui::Align2::LEFT_TOP,
@@ -1041,7 +1056,7 @@ impl TimelinePane {
                             painter.line_segment(
                                 [rect.min + egui::vec2(minor_x, rect.height() - 5.0),
                                  rect.min + egui::vec2(minor_x, rect.height())],
-                                egui::Stroke::new(1.0, egui::Color32::from_gray(60)),
+                                egui::Stroke::new(1.0, theme.text_color(&["#timeline", ".ruler-tick-minor"], ui.ctx(), egui::Color32::from_gray(60))),
                             );
                         }
                     }
@@ -1111,7 +1126,7 @@ impl TimelinePane {
         if x >= 0.0 && x <= rect.width() {
             let painter = ui.painter();
             let scrubber_style = theme.style(".timeline-scrubber", ui.ctx());
-            let scrubber_color = scrubber_style.background_color.unwrap_or(egui::Color32::from_rgb(204, 34, 34));
+            let scrubber_color = scrubber_style.background_color().unwrap_or(egui::Color32::from_rgb(204, 34, 34));
 
             // Red vertical line
             painter.line_segment(
@@ -1159,7 +1174,7 @@ impl TimelinePane {
 
         // Get note color from theme CSS (fallback to black)
         let note_style = theme.style(".timeline-midi-note", ctx);
-        let note_color = note_style.background_color.unwrap_or(egui::Color32::BLACK);
+        let note_color = note_style.background_color().unwrap_or(egui::Color32::BLACK);
 
         // Build a map of active notes (note_number -> note_on_timestamp)
         // to calculate durations when we encounter note-offs
@@ -1269,7 +1284,7 @@ impl TimelinePane {
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
-        let header_bg = header_style.background_color.unwrap_or(egui::Color32::from_rgb(17, 17, 17));
+        let header_bg = header_style.background_color().unwrap_or(egui::Color32::from_rgb(17, 17, 17));
         ui.painter().rect_filled(
             rect,
             0.0,
@@ -1279,13 +1294,14 @@ impl TimelinePane {
         // Theme colors for active/inactive layers
         let active_style = theme.style(".timeline-layer-active", ui.ctx());
         let inactive_style = theme.style(".timeline-layer-inactive", ui.ctx());
-        let active_color = active_style.background_color.unwrap_or(egui::Color32::from_rgb(79, 79, 79));
-        let inactive_color = inactive_style.background_color.unwrap_or(egui::Color32::from_rgb(51, 51, 51));
+        let active_color = active_style.background_color().unwrap_or(egui::Color32::from_rgb(79, 79, 79));
+        let inactive_color = inactive_style.background_color().unwrap_or(egui::Color32::from_rgb(51, 51, 51));
 
         // Get text color from theme
         let text_style = theme.style(".text-primary", ui.ctx());
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
-        let secondary_text_color = egui::Color32::from_gray(150);
+        let secondary_style = theme.style(".text-secondary", ui.ctx());
+        let secondary_text_color = secondary_style.text_color.unwrap_or(egui::Color32::from_gray(150));
 
         // Build virtual row list (accounts for group expansion)
         let all_rows = build_timeline_rows(context_layers);
@@ -1331,35 +1347,15 @@ impl TimelinePane {
             let (layer_id, layer_name, layer_type, type_color) = match row {
                 TimelineRow::Normal(layer) => {
                     let data = layer.layer();
-                    let (lt, tc) = match layer {
-                        AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
-                        AnyLayer::Audio(al) => match al.audio_layer_type {
-                            AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
-                            AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
-                        },
-                        AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
-                        AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
-                        AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
-                        AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
-                    };
+                    let (lt, tc) = layer_type_info(layer);
                     (layer.id(), data.name.clone(), lt, tc)
                 }
                 TimelineRow::CollapsedGroup { group, .. } => {
-                    (group.layer.id, group.layer.name.clone(), "Group", egui::Color32::from_rgb(0, 180, 180))
+                    (group.layer.id, group.layer.name.clone(), "Group", theme.bg_color(&["#timeline", ".layer-type-group"], ui.ctx(), egui::Color32::from_rgb(0, 180, 180)))
                 }
                 TimelineRow::GroupChild { child, .. } => {
                     let data = child.layer();
-                    let (lt, tc) = match child {
-                        AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
-                        AnyLayer::Audio(al) => match al.audio_layer_type {
-                            AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
-                            AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
-                        },
-                        AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
-                        AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
-                        AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
-                        AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
-                    };
+                    let (lt, tc) = layer_type_info(child);
                     (child.id(), data.name.clone(), lt, tc)
                 }
             };
@@ -1388,7 +1384,7 @@ impl TimelinePane {
                 let group_color = match row {
                     TimelineRow::GroupChild { .. } | TimelineRow::CollapsedGroup { .. } => {
                         // Solid dark teal for the group gutter
-                        egui::Color32::from_rgb(0, 50, 50)
+                        theme.bg_color(&["#timeline", ".group-gutter"], ui.ctx(), egui::Color32::from_rgb(0, 50, 50))
                     }
                     _ => header_bg,
                 };
@@ -1399,7 +1395,7 @@ impl TimelinePane {
                     egui::pos2(header_rect.min.x + indent - 2.0, y),
                     egui::vec2(2.0, LAYER_HEIGHT),
                 );
-                ui.painter().rect_filled(accent_rect, 0.0, egui::Color32::from_rgb(0, 180, 180));
+                ui.painter().rect_filled(accent_rect, 0.0, theme.bg_color(&["#timeline", ".group-accent"], ui.ctx(), egui::Color32::from_rgb(0, 180, 180)));
 
                 // Draw collapse triangle on first child row (painted, not text)
                 if let TimelineRow::GroupChild { show_collapse: true, .. } = row {
@@ -1412,7 +1408,7 @@ impl TimelinePane {
                         egui::pos2(cx + s, cy - s * 0.6),
                         egui::pos2(cx, cy + s * 0.6),
                     ];
-                    ui.painter().add(egui::Shape::convex_polygon(tri, egui::Color32::from_gray(180), egui::Stroke::NONE));
+                    ui.painter().add(egui::Shape::convex_polygon(tri, theme.text_color(&["#timeline", ".collapse-triangle"], ui.ctx(), egui::Color32::from_gray(180)), egui::Stroke::NONE));
                 }
 
                 // Make the ENTIRE gutter clickable for collapse on any GroupChild row
@@ -1448,7 +1444,7 @@ impl TimelinePane {
                     egui::pos2(cx - s * 0.6, cy + s),
                     egui::pos2(cx + s * 0.6, cy),
                 ];
-                ui.painter().add(egui::Shape::convex_polygon(tri, egui::Color32::from_gray(180), egui::Stroke::NONE));
+                ui.painter().add(egui::Shape::convex_polygon(tri, theme.text_color(&["#timeline", ".collapse-triangle"], ui.ctx(), egui::Color32::from_gray(180)), egui::Stroke::NONE));
 
                 // Clickable area for expand
                 let chevron_rect = egui::Rect::from_min_size(
@@ -1562,9 +1558,9 @@ impl TimelinePane {
                     let cam_text = if camera_enabled { "📹" } else { "📷" };
                     let button = egui::Button::new(cam_text)
                         .fill(if camera_enabled {
-                            egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
+                            theme.bg_color(&["#timeline", ".btn-toggle", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
                         } else {
-                            egui::Color32::from_gray(40)
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                         })
                         .stroke(egui::Stroke::NONE);
                     ui.add(button)
@@ -1573,9 +1569,9 @@ impl TimelinePane {
                     let mute_text = if is_muted { "🔇" } else { "🔊" };
                     let button = egui::Button::new(mute_text)
                         .fill(if is_muted {
-                            egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100)
+                            theme.bg_color(&["#timeline", ".btn-mute", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100))
                         } else {
-                            egui::Color32::from_gray(40)
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                         })
                         .stroke(egui::Stroke::NONE);
                     ui.add(button)
@@ -1606,9 +1602,9 @@ impl TimelinePane {
             let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
                 let button = egui::Button::new("🎧")
                     .fill(if is_soloed {
-                        egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100)
+                        theme.bg_color(&["#timeline", ".btn-solo", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
                     } else {
-                        egui::Color32::from_gray(40)
+                        theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                     })
                     .stroke(egui::Stroke::NONE);
                 ui.add(button)
@@ -1630,9 +1626,9 @@ impl TimelinePane {
                 let lock_text = if is_locked { "🔒" } else { "🔓" };
                 let button = egui::Button::new(lock_text)
                     .fill(if is_locked {
-                        egui::Color32::from_rgba_unmultiplied(200, 150, 100, 100)
+                        theme.bg_color(&["#timeline", ".btn-lock", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(200, 150, 100, 100))
                     } else {
-                        egui::Color32::from_gray(40)
+                        theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                     })
                     .stroke(egui::Stroke::NONE);
                 ui.add(button)
@@ -1732,7 +1728,7 @@ impl TimelinePane {
                         egui::Align2::CENTER_CENTER,
                         "Gain",
                         egui::FontId::proportional(9.0),
-                        egui::Color32::from_gray(140),
+                        theme.text_color(&["#timeline", ".gain-label"], ui.ctx(), egui::Color32::from_gray(140)),
                     );
                 }
             }
@@ -1763,11 +1759,11 @@ impl TimelinePane {
                     let clamped = level.min(1.0);
                     let filled_width = meter_rect.width() * clamped;
                     let color = if clamped > 0.9 {
-                        egui::Color32::from_rgb(220, 50, 50)
+                        theme.bg_color(&["#timeline", ".vu-meter", ".clip"], ui.ctx(), egui::Color32::from_rgb(220, 50, 50))
                     } else if clamped > 0.7 {
-                        egui::Color32::from_rgb(220, 200, 50)
+                        theme.bg_color(&["#timeline", ".vu-meter", ".warn"], ui.ctx(), egui::Color32::from_rgb(220, 200, 50))
                     } else {
-                        egui::Color32::from_rgb(50, 200, 80)
+                        theme.bg_color(&["#timeline", ".vu-meter", ".normal"], ui.ctx(), egui::Color32::from_rgb(50, 200, 80))
                     };
                     let filled = egui::Rect::from_min_size(
                         meter_rect.left_top(),
@@ -1783,7 +1779,7 @@ impl TimelinePane {
                     egui::pos2(header_rect.min.x, header_rect.max.y),
                     egui::pos2(header_rect.max.x, header_rect.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
             );
         }
 
@@ -1817,34 +1813,14 @@ impl TimelinePane {
                 };
                 let (drag_name, drag_type_str, drag_type_color) = match dragged_row {
                     TimelineRow::Normal(layer) => {
-                        let (lt, tc) = match layer {
-                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
-                            AnyLayer::Audio(al) => match al.audio_layer_type {
-                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
-                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
-                            },
-                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
-                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
-                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
-                            AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(100, 200, 255)),
-                        };
+                        let (lt, tc) = layer_type_info(layer);
                         (layer.layer().name.clone(), lt, tc)
                     }
                     TimelineRow::CollapsedGroup { group, .. } => {
-                        (group.layer.name.clone(), "Group", egui::Color32::from_rgb(0, 180, 180))
+                        (group.layer.name.clone(), "Group", theme.bg_color(&["#timeline", ".layer-type-group"], ui.ctx(), egui::Color32::from_rgb(0, 180, 180)))
                     }
                     TimelineRow::GroupChild { child, .. } => {
-                        let (lt, tc) = match child {
-                            AnyLayer::Vector(_) => ("Vector", egui::Color32::from_rgb(255, 180, 100)),
-                            AnyLayer::Audio(al) => match al.audio_layer_type {
-                                AudioLayerType::Midi => ("MIDI", egui::Color32::from_rgb(100, 255, 150)),
-                                AudioLayerType::Sampled => ("Audio", egui::Color32::from_rgb(100, 180, 255)),
-                            },
-                            AnyLayer::Video(_) => ("Video", egui::Color32::from_rgb(180, 100, 255)),
-                            AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
-                            AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
-                            AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(100, 200, 255)),
-                        };
+                        let (lt, tc) = layer_type_info(child);
                         (child.layer().name.clone(), lt, tc)
                     }
                 };
@@ -1878,7 +1854,7 @@ impl TimelinePane {
                 // Separator line at bottom
                 ui.painter().line_segment(
                     [egui::pos2(float_rect.min.x, float_rect.max.y), egui::pos2(float_rect.max.x, float_rect.max.y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                    egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
                 );
             }
         }
@@ -1889,7 +1865,7 @@ impl TimelinePane {
                 egui::pos2(rect.max.x, rect.min.y),
                 egui::pos2(rect.max.x, rect.max.y),
             ],
-            egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+            egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
         );
     }
 
@@ -1923,8 +1899,8 @@ impl TimelinePane {
         // Theme colors for active/inactive layers
         let active_style = theme.style(".timeline-row-active", ui.ctx());
         let inactive_style = theme.style(".timeline-row-inactive", ui.ctx());
-        let active_color = active_style.background_color.unwrap_or(egui::Color32::from_rgb(85, 85, 85));
-        let inactive_color = inactive_style.background_color.unwrap_or(egui::Color32::from_rgb(136, 136, 136));
+        let active_color = active_style.background_color().unwrap_or(egui::Color32::from_rgb(85, 85, 85));
+        let inactive_color = inactive_style.background_color().unwrap_or(egui::Color32::from_rgb(136, 136, 136));
 
         // Build a map of clip_instance_id -> InstanceGroup for linked clip previews
         let mut instance_to_group: std::collections::HashMap<uuid::Uuid, &lightningbeam_core::instance_group::InstanceGroup> = std::collections::HashMap::new();
@@ -2038,7 +2014,7 @@ impl TimelinePane {
                             painter.line_segment(
                                 [egui::pos2(rect.min.x + x, y),
                                  egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
-                                egui::Stroke::new(1.0, egui::Color32::from_gray(30)),
+                                egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".grid-line"], ui.ctx(), egui::Color32::from_gray(30))),
                             );
                         }
                         time += interval;
@@ -2058,7 +2034,7 @@ impl TimelinePane {
                         painter.line_segment(
                             [egui::pos2(rect.min.x + x, y),
                              egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
-                            egui::Stroke::new(if is_measure_boundary { 1.5 } else { 1.0 }, egui::Color32::from_gray(gray)),
+                            egui::Stroke::new(if is_measure_boundary { 1.5 } else { 1.0 }, theme.border_color(&["#timeline", ".grid-line"], ui.ctx(), egui::Color32::from_gray(gray))),
                         );
                     }
                 }
@@ -2102,14 +2078,14 @@ impl TimelinePane {
                 let any_selected = child_clips.iter().any(|(_, ci)| selection.contains_clip_instance(&ci.id));
                 // Draw each merged span as a teal bar (brighter when selected)
                 let teal = if any_selected {
-                    egui::Color32::from_rgb(30, 190, 190)
+                    theme.bg_color(&["#timeline", ".group-bar", ".selected"], ui.ctx(), egui::Color32::from_rgb(30, 190, 190))
                 } else {
-                    egui::Color32::from_rgb(0, 150, 150)
+                    theme.bg_color(&["#timeline", ".group-bar"], ui.ctx(), egui::Color32::from_rgb(0, 150, 150))
                 };
                 let bright_teal = if any_selected {
-                    egui::Color32::from_rgb(150, 255, 255)
+                    theme.text_color(&["#timeline", ".group-bar", ".selected"], ui.ctx(), egui::Color32::from_rgb(150, 255, 255))
                 } else {
-                    egui::Color32::from_rgb(100, 220, 220)
+                    theme.text_color(&["#timeline", ".group-bar"], ui.ctx(), egui::Color32::from_rgb(100, 220, 220))
                 };
                 for (s, e) in &merged {
                     let sx = self.time_to_x(*s);
@@ -2344,7 +2320,7 @@ impl TimelinePane {
                         egui::pos2(layer_rect.min.x, layer_rect.max.y),
                         egui::pos2(layer_rect.max.x, layer_rect.max.y),
                     ],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                    egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
                 );
                 continue; // Skip normal clip rendering for collapsed groups
             }
@@ -2641,39 +2617,15 @@ impl TimelinePane {
                         let visible_end_x = end_x.min(rect.width());
 
                         // Choose color based on layer type
-                        let (clip_color, bright_color) = match layer {
-                            lightningbeam_core::layer::AnyLayer::Vector(_) => (
-                                egui::Color32::from_rgb(220, 150, 80), // Orange
-                                egui::Color32::from_rgb(255, 210, 150), // Bright orange
-                            ),
-                            lightningbeam_core::layer::AnyLayer::Audio(audio_layer) => {
-                                match audio_layer.audio_layer_type {
-                                    lightningbeam_core::layer::AudioLayerType::Midi => (
-                                        egui::Color32::from_rgb(100, 200, 150), // Green
-                                        egui::Color32::from_rgb(150, 255, 200), // Bright green
-                                    ),
-                                    lightningbeam_core::layer::AudioLayerType::Sampled => (
-                                        egui::Color32::from_rgb(80, 150, 220), // Blue
-                                        egui::Color32::from_rgb(150, 210, 255), // Bright blue
-                                    ),
-                                }
-                            }
-                            lightningbeam_core::layer::AnyLayer::Video(_) => (
-                                egui::Color32::from_rgb(150, 80, 220), // Purple
-                                egui::Color32::from_rgb(200, 150, 255), // Bright purple
-                            ),
-                            lightningbeam_core::layer::AnyLayer::Effect(_) => (
-                                egui::Color32::from_rgb(220, 80, 160), // Pink
-                                egui::Color32::from_rgb(255, 120, 200), // Bright pink
-                            ),
-                            lightningbeam_core::layer::AnyLayer::Group(_) => (
-                                egui::Color32::from_rgb(0, 150, 150), // Teal
-                                egui::Color32::from_rgb(100, 220, 220), // Bright teal
-                            ),
-                            lightningbeam_core::layer::AnyLayer::Raster(_) => (
-                                egui::Color32::from_rgb(160, 100, 200), // Purple/violet
-                                egui::Color32::from_rgb(200, 160, 240), // Bright purple/violet
-                            ),
+                        let (clip_color, bright_color) = {
+                            let (_, base_color) = layer_type_info(layer);
+                            // Derive bright version by lightening each channel
+                            let bright = egui::Color32::from_rgb(
+                                (base_color.r() as u16 + 80).min(255) as u8,
+                                (base_color.g() as u16 + 60).min(255) as u8,
+                                (base_color.b() as u16 + 70).min(255) as u8,
+                            );
+                            (base_color, bright)
                         };
 
                         let (row, total_rows) = clip_stacking[clip_instance_index];
@@ -3142,11 +3094,11 @@ impl TimelinePane {
                             egui::pos2(cx, cy + size),
                             egui::pos2(cx - size, cy),
                         ];
-                        let color = egui::Color32::from_rgb(255, 220, 100);
+                        let color = theme.bg_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(255, 220, 100));
                         painter.add(egui::Shape::convex_polygon(
                             diamond.to_vec(),
                             color,
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 150, 50)),
+                            egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
                         ));
                     }
                 }
@@ -3158,7 +3110,7 @@ impl TimelinePane {
                     egui::pos2(layer_rect.min.x, layer_rect.max.y),
                     egui::pos2(layer_rect.max.x, layer_rect.max.y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(20)),
+                egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
             );
         }
 
@@ -4258,7 +4210,7 @@ impl PaneRenderer for TimelinePane {
                     egui::Sense::hover(),
                 );
                 // Background
-                ui.painter().rect_filled(meter_rect, 2.0, egui::Color32::from_gray(30));
+                ui.painter().rect_filled(meter_rect, 2.0, shared.theme.bg_color(&["#timeline", ".vu-meter-bg"], ui.ctx(), egui::Color32::from_gray(30)));
 
                 let levels = [shared.output_level.0.min(1.0), shared.output_level.1.min(1.0)];
                 for (i, &level) in levels.iter().enumerate() {
@@ -4266,11 +4218,11 @@ impl PaneRenderer for TimelinePane {
                     if level > 0.001 {
                         let filled_width = meter_rect.width() * level;
                         let color = if level > 0.9 {
-                            egui::Color32::from_rgb(220, 50, 50)
+                            shared.theme.bg_color(&["#timeline", ".vu-meter", ".clip"], ui.ctx(), egui::Color32::from_rgb(220, 50, 50))
                         } else if level > 0.7 {
-                            egui::Color32::from_rgb(220, 200, 50)
+                            shared.theme.bg_color(&["#timeline", ".vu-meter", ".warn"], ui.ctx(), egui::Color32::from_rgb(220, 200, 50))
                         } else {
-                            egui::Color32::from_rgb(50, 200, 80)
+                            shared.theme.bg_color(&["#timeline", ".vu-meter", ".normal"], ui.ctx(), egui::Color32::from_rgb(50, 200, 80))
                         };
                         let filled_rect = egui::Rect::from_min_size(
                             egui::pos2(meter_rect.min.x, bar_y),
@@ -4413,7 +4365,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render spacer above layer headers (same height as ruler)
         let spacer_style = shared.theme.style(".timeline-spacer", ui.ctx());
-        let spacer_bg = spacer_style.background_color.unwrap_or(egui::Color32::from_rgb(17, 17, 17));
+        let spacer_bg = spacer_style.background_color().unwrap_or(egui::Color32::from_rgb(17, 17, 17));
         ui.painter().rect_filled(
             header_ruler_spacer,
             0.0,

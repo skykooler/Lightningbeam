@@ -141,6 +141,12 @@ pub fn find_sampled_audio_track(document: &lightningbeam_core::document::Documen
     None
 }
 
+/// CSS debug region for the CSS inspector overlay (F3)
+pub struct CssDebugRegion {
+    pub rect: egui::Rect,
+    pub context: Vec<&'static str>,
+}
+
 /// Shared state that all panes can access
 pub struct SharedPaneState<'a> {
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
@@ -285,6 +291,10 @@ pub struct SharedPaneState<'a> {
     pub pending_node_group: &'a mut bool,
     /// Set by MenuAction::Group (ungroup variant) when focus is Nodes — consumed by node graph pane
     pub pending_node_ungroup: &'a mut bool,
+    /// CSS debug regions for the CSS inspector overlay (F3)
+    pub css_debug_regions: &'a mut Vec<CssDebugRegion>,
+    /// Whether the CSS debug overlay is active
+    pub css_debug_overlay: bool,
     /// Test mode state for event recording (debug builds only)
     #[cfg(debug_assertions)]
     pub test_mode: &'a mut crate::test_mode::TestModeState,

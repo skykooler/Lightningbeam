@@ -744,7 +744,8 @@ impl PaneRenderer for ShaderEditorPane {
         }
 
         // Background
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(25, 25, 30));
+        let bg = shared.theme.bg_color(&["#shader-editor", ".pane-content"], ui.ctx(), egui::Color32::from_rgb(25, 25, 30));
+        ui.painter().rect_filled(rect, 0.0, bg);
 
         let content_rect = rect.shrink(8.0);
         let mut content_ui = ui.new_child(

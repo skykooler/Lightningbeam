@@ -22,22 +22,20 @@ impl PaneRenderer for OutlinerPane {
         ui: &mut egui::Ui,
         rect: egui::Rect,
         _path: &NodePath,
-        _shared: &mut SharedPaneState,
+        shared: &mut SharedPaneState,
     ) {
         // Placeholder rendering
-        ui.painter().rect_filled(
-            rect,
-            0.0,
-            egui::Color32::from_rgb(40, 50, 30),
-        );
+        let bg = shared.theme.bg_color(&["#outliner", ".pane-content"], ui.ctx(), egui::Color32::from_rgb(40, 50, 30));
+        ui.painter().rect_filled(rect, 0.0, bg);
 
         let text = "Outliner\n(TODO: Implement layer tree)";
+        let text_color = shared.theme.text_color(&["#outliner", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(150));
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             text,
             egui::FontId::proportional(16.0),
-            egui::Color32::from_gray(150),
+            text_color,
         );
     }
 
