@@ -6,6 +6,7 @@
 use eframe::egui;
 use lightningbeam_core::layer::{AnyLayer, LayerType};
 use lightningbeam_core::tool::{Tool, RegionSelectMode};
+use crate::keymap::tool_app_action;
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
 /// Toolbar pane state
@@ -163,15 +164,20 @@ impl PaneRenderer for ToolbarPane {
                 );
             }
 
-            // Show tooltip with tool name and shortcut (consumes response)
+            // Show tooltip with tool name and shortcut (consumes response).
+            // Hint text is pulled from the live keymap so it reflects user remappings.
+            let hint = tool_app_action(*tool)
+                .and_then(|action| shared.keymap.get(action))
+                .map(|s| format!(" ({})", s.hint_text()))
+                .unwrap_or_default();
             let tooltip = if *tool == Tool::RegionSelect {
                 let mode = match *shared.region_select_mode {
                     RegionSelectMode::Rectangle => "Rectangle",
                     RegionSelectMode::Lasso => "Lasso",
                 };
-                format!("{} - {} ({})\nRight-click for options", tool.display_name(), mode, tool.shortcut_hint())
+                format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
             } else {
-                format!("{} ({})", tool.display_name(), tool.shortcut_hint())
+                format!("{}{}", tool.display_name(), hint)
             };
             response.on_hover_text(tooltip);
 

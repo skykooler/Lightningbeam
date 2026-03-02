@@ -94,6 +94,10 @@ pub enum AppAction {
     ToolBezierEdit,
     ToolText,
     ToolRegionSelect,
+    ToolErase,
+    ToolSmudge,
+    ToolSelectLasso,
+    ToolSplit,
 
     // === Global shortcuts ===
     TogglePlayPause,
@@ -142,7 +146,8 @@ impl AppAction {
             Self::ToolSelect | Self::ToolDraw | Self::ToolTransform |
             Self::ToolRectangle | Self::ToolEllipse | Self::ToolPaintBucket |
             Self::ToolEyedropper | Self::ToolLine | Self::ToolPolygon |
-            Self::ToolBezierEdit | Self::ToolText | Self::ToolRegionSelect => "Tools",
+            Self::ToolBezierEdit | Self::ToolText | Self::ToolRegionSelect |
+            Self::ToolErase | Self::ToolSmudge | Self::ToolSelectLasso | Self::ToolSplit => "Tools",
 
             Self::TogglePlayPause | Self::CancelAction |
             Self::ToggleDebugOverlay => "Global",
@@ -234,6 +239,10 @@ impl AppAction {
             Self::ToolBezierEdit => "Bezier Edit Tool",
             Self::ToolText => "Text Tool",
             Self::ToolRegionSelect => "Region Select Tool",
+            Self::ToolErase => "Erase Tool",
+            Self::ToolSmudge => "Smudge Tool",
+            Self::ToolSelectLasso => "Lasso Select Tool",
+            Self::ToolSplit => "Split Tool",
             Self::TogglePlayPause => "Toggle Play/Pause",
             Self::CancelAction => "Cancel / Escape",
             Self::ToggleDebugOverlay => "Toggle Debug Overlay",
@@ -271,6 +280,7 @@ impl AppAction {
             Self::ToolRectangle, Self::ToolEllipse, Self::ToolPaintBucket,
             Self::ToolEyedropper, Self::ToolLine, Self::ToolPolygon,
             Self::ToolBezierEdit, Self::ToolText, Self::ToolRegionSelect,
+            Self::ToolErase, Self::ToolSmudge, Self::ToolSelectLasso, Self::ToolSplit,
             Self::TogglePlayPause, Self::CancelAction, Self::ToggleDebugOverlay,
             #[cfg(debug_assertions)]
             Self::ToggleTestMode,
@@ -415,6 +425,30 @@ impl AppAction {
     }
 }
 
+/// Return the `AppAction` that activates the given tool, if one exists.
+/// `Tool::Split` has no tool-shortcut action (it's triggered via the menu).
+pub fn tool_app_action(tool: lightningbeam_core::tool::Tool) -> Option<AppAction> {
+    use lightningbeam_core::tool::Tool;
+    Some(match tool {
+        Tool::Select      => AppAction::ToolSelect,
+        Tool::Draw        => AppAction::ToolDraw,
+        Tool::Transform   => AppAction::ToolTransform,
+        Tool::Rectangle   => AppAction::ToolRectangle,
+        Tool::Ellipse     => AppAction::ToolEllipse,
+        Tool::PaintBucket => AppAction::ToolPaintBucket,
+        Tool::Eyedropper  => AppAction::ToolEyedropper,
+        Tool::Line        => AppAction::ToolLine,
+        Tool::Polygon     => AppAction::ToolPolygon,
+        Tool::BezierEdit  => AppAction::ToolBezierEdit,
+        Tool::Text        => AppAction::ToolText,
+        Tool::RegionSelect => AppAction::ToolRegionSelect,
+        Tool::Erase       => AppAction::ToolErase,
+        Tool::Smudge      => AppAction::ToolSmudge,
+        Tool::SelectLasso => AppAction::ToolSelectLasso,
+        Tool::Split       => AppAction::ToolSplit,
+    })
+}
+
 // === Default bindings ===
 
 /// Build the complete default bindings map from the current hardcoded shortcuts
@@ -459,7 +493,11 @@ pub fn all_defaults() -> HashMap<AppAction, Option<Shortcut>> {
     defaults.insert(AppAction::ToolPolygon,      Some(Shortcut::new(ShortcutKey::G, nc, ns, na)));
     defaults.insert(AppAction::ToolBezierEdit,   Some(Shortcut::new(ShortcutKey::A, nc, ns, na)));
     defaults.insert(AppAction::ToolText,         Some(Shortcut::new(ShortcutKey::T, nc, ns, na)));
-    defaults.insert(AppAction::ToolRegionSelect, Some(Shortcut::new(ShortcutKey::S, nc, ns, na)));
+    defaults.insert(AppAction::ToolRegionSelect,  Some(Shortcut::new(ShortcutKey::S, nc, ns, na)));
+    defaults.insert(AppAction::ToolErase,         Some(Shortcut::new(ShortcutKey::X, nc, ns, na)));
+    defaults.insert(AppAction::ToolSmudge,        Some(Shortcut::new(ShortcutKey::U, nc, ns, na)));
+    defaults.insert(AppAction::ToolSelectLasso,   Some(Shortcut::new(ShortcutKey::F, nc, ns, na)));
+    defaults.insert(AppAction::ToolSplit,         Some(Shortcut::new(ShortcutKey::C, nc, ns, na)));
 
     // Global shortcuts
     defaults.insert(AppAction::TogglePlayPause,    Some(Shortcut::new(ShortcutKey::Space, nc, ns, na)));

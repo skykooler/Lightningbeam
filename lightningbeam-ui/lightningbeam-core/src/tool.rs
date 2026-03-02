@@ -41,6 +41,8 @@ pub enum Tool {
     Erase,
     /// Smudge tool - smudge/blend raster pixels
     Smudge,
+    /// Lasso select tool - freehand selection on raster layers
+    SelectLasso,
 }
 
 /// Region select mode
@@ -73,6 +75,17 @@ pub enum ToolState {
     /// Drawing a raster paint stroke
     DrawingRasterStroke {
         points: Vec<crate::raster_layer::StrokePoint>,
+    },
+
+    /// Drawing a freehand lasso selection on a raster layer
+    DrawingRasterLasso {
+        points: Vec<(i32, i32)>,
+    },
+
+    /// Drawing a rectangular marquee selection on a raster layer
+    DrawingRasterMarquee {
+        start: (i32, i32),
+        current: (i32, i32),
     },
 
     /// Dragging selected objects
@@ -224,6 +237,7 @@ impl Tool {
             Tool::Split => "Split",
             Tool::Erase => "Erase",
             Tool::Smudge => "Smudge",
+            Tool::SelectLasso => "Lasso Select",
         }
     }
 
@@ -245,6 +259,7 @@ impl Tool {
             Tool::Split => "split.svg",
             Tool::Erase => "erase.svg",
             Tool::Smudge => "smudge.svg",
+            Tool::SelectLasso => "lasso.svg",
         }
     }
 
@@ -272,29 +287,9 @@ impl Tool {
         match layer_type {
             None | Some(LayerType::Vector) => Tool::all(),
             Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split],
-            Some(LayerType::Raster) => &[Tool::Select, Tool::Draw, Tool::Erase, Tool::Smudge, Tool::Eyedropper],
+            Some(LayerType::Raster) => &[Tool::Select, Tool::SelectLasso, Tool::Draw, Tool::Erase, Tool::Smudge, Tool::Eyedropper],
             _ => &[Tool::Select],
         }
     }
 
-    /// Get keyboard shortcut hint
-    pub fn shortcut_hint(self) -> &'static str {
-        match self {
-            Tool::Select => "V",
-            Tool::Draw => "P",
-            Tool::Transform => "Q",
-            Tool::Rectangle => "R",
-            Tool::Ellipse => "E",
-            Tool::PaintBucket => "B",
-            Tool::Eyedropper => "I",
-            Tool::Line => "L",
-            Tool::Polygon => "G",
-            Tool::BezierEdit => "A",
-            Tool::Text => "T",
-            Tool::RegionSelect => "S",
-            Tool::Split => "C",
-            Tool::Erase => "X",
-            Tool::Smudge => "U",
-        }
-    }
 }

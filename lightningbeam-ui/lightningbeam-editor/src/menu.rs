@@ -44,6 +44,62 @@ pub enum ShortcutKey {
 }
 
 impl ShortcutKey {
+    /// Convert to the corresponding `egui::Key`.
+    ///
+    /// Note: we maintain our own `ShortcutKey` enum rather than using `egui::Key` directly
+    /// because `egui::Key` only implements `serde::{Serialize, Deserialize}` behind the
+    /// `serde` cargo feature, which we do not enable for egui. Enabling it would couple
+    /// our persisted config format to egui's internal variant names, which could change
+    /// between egui version upgrades and silently break user keybind files. `ShortcutKey`
+    /// gives us a stable, self-owned serialization surface. The tradeoff is this one
+    /// exhaustive mapping; the display and input-matching methods below both delegate to
+    /// `egui::Key` so there is no further duplication.
+    pub fn to_egui_key(self) -> egui::Key {
+        match self {
+            Self::A => egui::Key::A, Self::B => egui::Key::B, Self::C => egui::Key::C,
+            Self::D => egui::Key::D, Self::E => egui::Key::E, Self::F => egui::Key::F,
+            Self::G => egui::Key::G, Self::H => egui::Key::H, Self::I => egui::Key::I,
+            Self::J => egui::Key::J, Self::K => egui::Key::K, Self::L => egui::Key::L,
+            Self::M => egui::Key::M, Self::N => egui::Key::N, Self::O => egui::Key::O,
+            Self::P => egui::Key::P, Self::Q => egui::Key::Q, Self::R => egui::Key::R,
+            Self::S => egui::Key::S, Self::T => egui::Key::T, Self::U => egui::Key::U,
+            Self::V => egui::Key::V, Self::W => egui::Key::W, Self::X => egui::Key::X,
+            Self::Y => egui::Key::Y, Self::Z => egui::Key::Z,
+            Self::Num0 => egui::Key::Num0, Self::Num1 => egui::Key::Num1,
+            Self::Num2 => egui::Key::Num2, Self::Num3 => egui::Key::Num3,
+            Self::Num4 => egui::Key::Num4, Self::Num5 => egui::Key::Num5,
+            Self::Num6 => egui::Key::Num6, Self::Num7 => egui::Key::Num7,
+            Self::Num8 => egui::Key::Num8, Self::Num9 => egui::Key::Num9,
+            Self::F1 => egui::Key::F1,   Self::F2 => egui::Key::F2,
+            Self::F3 => egui::Key::F3,   Self::F4 => egui::Key::F4,
+            Self::F5 => egui::Key::F5,   Self::F6 => egui::Key::F6,
+            Self::F7 => egui::Key::F7,   Self::F8 => egui::Key::F8,
+            Self::F9 => egui::Key::F9,   Self::F10 => egui::Key::F10,
+            Self::F11 => egui::Key::F11, Self::F12 => egui::Key::F12,
+            Self::ArrowUp => egui::Key::ArrowUp, Self::ArrowDown => egui::Key::ArrowDown,
+            Self::ArrowLeft => egui::Key::ArrowLeft, Self::ArrowRight => egui::Key::ArrowRight,
+            Self::Comma => egui::Key::Comma, Self::Minus => egui::Key::Minus,
+            Self::Equals => egui::Key::Equals, Self::Plus => egui::Key::Plus,
+            Self::BracketLeft => egui::Key::OpenBracket,
+            Self::BracketRight => egui::Key::CloseBracket,
+            Self::Semicolon => egui::Key::Semicolon, Self::Quote => egui::Key::Quote,
+            Self::Period => egui::Key::Period, Self::Slash => egui::Key::Slash,
+            Self::Backtick => egui::Key::Backtick,
+            Self::Space => egui::Key::Space, Self::Escape => egui::Key::Escape,
+            Self::Enter => egui::Key::Enter, Self::Tab => egui::Key::Tab,
+            Self::Backspace => egui::Key::Backspace, Self::Delete => egui::Key::Delete,
+            Self::Home => egui::Key::Home, Self::End => egui::Key::End,
+            Self::PageUp => egui::Key::PageUp, Self::PageDown => egui::Key::PageDown,
+        }
+    }
+
+    /// Short human-readable name for this key (e.g. "A", "F1", "Delete").
+    /// Delegates to `egui::Key::name()` so the strings stay consistent with
+    /// what egui itself would display.
+    pub fn display_name(self) -> &'static str {
+        self.to_egui_key().name()
+    }
+
     /// Try to convert an egui Key to a ShortcutKey
     pub fn from_egui_key(key: egui::Key) -> Option<Self> {
         Some(match key {
@@ -88,6 +144,16 @@ impl ShortcutKey {
 impl Shortcut {
     pub const fn new(key: ShortcutKey, ctrl: bool, shift: bool, alt: bool) -> Self {
         Self { key, ctrl, shift, alt }
+    }
+
+    /// Short hint string suitable for tool tooltips (e.g. "F", "Ctrl+S").
+    pub fn hint_text(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.ctrl  { parts.push("Ctrl"); }
+        if self.shift { parts.push("Shift"); }
+        if self.alt   { parts.push("Alt"); }
+        parts.push(self.key.display_name());
+        parts.join("+")
     }
 
     /// Convert to muda Accelerator
@@ -198,84 +264,7 @@ impl Shortcut {
             return false;
         }
 
-        // Check key
-        let key = match self.key {
-            ShortcutKey::A => egui::Key::A,
-            ShortcutKey::B => egui::Key::B,
-            ShortcutKey::C => egui::Key::C,
-            ShortcutKey::D => egui::Key::D,
-            ShortcutKey::E => egui::Key::E,
-            ShortcutKey::F => egui::Key::F,
-            ShortcutKey::G => egui::Key::G,
-            ShortcutKey::H => egui::Key::H,
-            ShortcutKey::I => egui::Key::I,
-            ShortcutKey::J => egui::Key::J,
-            ShortcutKey::K => egui::Key::K,
-            ShortcutKey::L => egui::Key::L,
-            ShortcutKey::M => egui::Key::M,
-            ShortcutKey::N => egui::Key::N,
-            ShortcutKey::O => egui::Key::O,
-            ShortcutKey::P => egui::Key::P,
-            ShortcutKey::Q => egui::Key::Q,
-            ShortcutKey::R => egui::Key::R,
-            ShortcutKey::S => egui::Key::S,
-            ShortcutKey::T => egui::Key::T,
-            ShortcutKey::U => egui::Key::U,
-            ShortcutKey::V => egui::Key::V,
-            ShortcutKey::W => egui::Key::W,
-            ShortcutKey::X => egui::Key::X,
-            ShortcutKey::Y => egui::Key::Y,
-            ShortcutKey::Z => egui::Key::Z,
-            ShortcutKey::Num0 => egui::Key::Num0,
-            ShortcutKey::Num1 => egui::Key::Num1,
-            ShortcutKey::Num2 => egui::Key::Num2,
-            ShortcutKey::Num3 => egui::Key::Num3,
-            ShortcutKey::Num4 => egui::Key::Num4,
-            ShortcutKey::Num5 => egui::Key::Num5,
-            ShortcutKey::Num6 => egui::Key::Num6,
-            ShortcutKey::Num7 => egui::Key::Num7,
-            ShortcutKey::Num8 => egui::Key::Num8,
-            ShortcutKey::Num9 => egui::Key::Num9,
-            ShortcutKey::F1 => egui::Key::F1,
-            ShortcutKey::F2 => egui::Key::F2,
-            ShortcutKey::F3 => egui::Key::F3,
-            ShortcutKey::F4 => egui::Key::F4,
-            ShortcutKey::F5 => egui::Key::F5,
-            ShortcutKey::F6 => egui::Key::F6,
-            ShortcutKey::F7 => egui::Key::F7,
-            ShortcutKey::F8 => egui::Key::F8,
-            ShortcutKey::F9 => egui::Key::F9,
-            ShortcutKey::F10 => egui::Key::F10,
-            ShortcutKey::F11 => egui::Key::F11,
-            ShortcutKey::F12 => egui::Key::F12,
-            ShortcutKey::ArrowUp => egui::Key::ArrowUp,
-            ShortcutKey::ArrowDown => egui::Key::ArrowDown,
-            ShortcutKey::ArrowLeft => egui::Key::ArrowLeft,
-            ShortcutKey::ArrowRight => egui::Key::ArrowRight,
-            ShortcutKey::Comma => egui::Key::Comma,
-            ShortcutKey::Minus => egui::Key::Minus,
-            ShortcutKey::Equals => egui::Key::Equals,
-            ShortcutKey::Plus => egui::Key::Plus,
-            ShortcutKey::BracketLeft => egui::Key::OpenBracket,
-            ShortcutKey::BracketRight => egui::Key::CloseBracket,
-            ShortcutKey::Semicolon => egui::Key::Semicolon,
-            ShortcutKey::Quote => egui::Key::Quote,
-            ShortcutKey::Period => egui::Key::Period,
-            ShortcutKey::Slash => egui::Key::Slash,
-            ShortcutKey::Backtick => egui::Key::Backtick,
-            ShortcutKey::Space => egui::Key::Space,
-            ShortcutKey::Escape => egui::Key::Escape,
-            ShortcutKey::Enter => egui::Key::Enter,
-            ShortcutKey::Tab => egui::Key::Tab,
-            ShortcutKey::Backspace => egui::Key::Backspace,
-            ShortcutKey::Delete => egui::Key::Delete,
-            ShortcutKey::Home => egui::Key::Home,
-            ShortcutKey::End => egui::Key::End,
-            ShortcutKey::PageUp => egui::Key::PageUp,
-            ShortcutKey::PageDown => egui::Key::PageDown,
-        };
-
-        input.key_pressed(key)
+        input.key_pressed(self.key.to_egui_key())
     }
 }
 
@@ -954,39 +943,7 @@ impl MenuSystem {
             parts.push("Alt");
         }
 
-        let key_name = match shortcut.key {
-            ShortcutKey::A => "A", ShortcutKey::B => "B", ShortcutKey::C => "C",
-            ShortcutKey::D => "D", ShortcutKey::E => "E", ShortcutKey::F => "F",
-            ShortcutKey::G => "G", ShortcutKey::H => "H", ShortcutKey::I => "I",
-            ShortcutKey::J => "J", ShortcutKey::K => "K", ShortcutKey::L => "L",
-            ShortcutKey::M => "M", ShortcutKey::N => "N", ShortcutKey::O => "O",
-            ShortcutKey::P => "P", ShortcutKey::Q => "Q", ShortcutKey::R => "R",
-            ShortcutKey::S => "S", ShortcutKey::T => "T", ShortcutKey::U => "U",
-            ShortcutKey::V => "V", ShortcutKey::W => "W", ShortcutKey::X => "X",
-            ShortcutKey::Y => "Y", ShortcutKey::Z => "Z",
-            ShortcutKey::Num0 => "0", ShortcutKey::Num1 => "1", ShortcutKey::Num2 => "2",
-            ShortcutKey::Num3 => "3", ShortcutKey::Num4 => "4", ShortcutKey::Num5 => "5",
-            ShortcutKey::Num6 => "6", ShortcutKey::Num7 => "7", ShortcutKey::Num8 => "8",
-            ShortcutKey::Num9 => "9",
-            ShortcutKey::F1 => "F1", ShortcutKey::F2 => "F2", ShortcutKey::F3 => "F3",
-            ShortcutKey::F4 => "F4", ShortcutKey::F5 => "F5", ShortcutKey::F6 => "F6",
-            ShortcutKey::F7 => "F7", ShortcutKey::F8 => "F8", ShortcutKey::F9 => "F9",
-            ShortcutKey::F10 => "F10", ShortcutKey::F11 => "F11", ShortcutKey::F12 => "F12",
-            ShortcutKey::ArrowUp => "Up", ShortcutKey::ArrowDown => "Down",
-            ShortcutKey::ArrowLeft => "Left", ShortcutKey::ArrowRight => "Right",
-            ShortcutKey::Comma => ",", ShortcutKey::Minus => "-",
-            ShortcutKey::Equals => "=", ShortcutKey::Plus => "+",
-            ShortcutKey::BracketLeft => "[", ShortcutKey::BracketRight => "]",
-            ShortcutKey::Semicolon => ";", ShortcutKey::Quote => "'",
-            ShortcutKey::Period => ".", ShortcutKey::Slash => "/",
-            ShortcutKey::Backtick => "`",
-            ShortcutKey::Space => "Space", ShortcutKey::Escape => "Esc",
-            ShortcutKey::Enter => "Enter", ShortcutKey::Tab => "Tab",
-            ShortcutKey::Backspace => "Backspace", ShortcutKey::Delete => "Del",
-            ShortcutKey::Home => "Home", ShortcutKey::End => "End",
-            ShortcutKey::PageUp => "PgUp", ShortcutKey::PageDown => "PgDn",
-        };
-        parts.push(key_name);
+        parts.push(shortcut.key.display_name());
 
         parts.join("+")
     }

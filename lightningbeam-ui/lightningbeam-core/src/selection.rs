@@ -8,6 +8,82 @@ use std::collections::HashSet;
 use uuid::Uuid;
 use vello::kurbo::{Affine, BezPath};
 
+/// Shape of a raster pixel selection, in canvas pixel coordinates.
+#[derive(Clone, Debug)]
+pub enum RasterSelection {
+    /// Axis-aligned rectangle: (x0, y0, x1, y1), x1 >= x0, y1 >= y0.
+    Rect(i32, i32, i32, i32),
+    /// Closed freehand lasso polygon.
+    Lasso(Vec<(i32, i32)>),
+}
+
+impl RasterSelection {
+    /// Bounding box as (x0, y0, x1, y1).
+    pub fn bounding_rect(&self) -> (i32, i32, i32, i32) {
+        match self {
+            Self::Rect(x0, y0, x1, y1) => (*x0, *y0, *x1, *y1),
+            Self::Lasso(pts) => {
+                let x0 = pts.iter().map(|p| p.0).min().unwrap_or(0);
+                let y0 = pts.iter().map(|p| p.1).min().unwrap_or(0);
+                let x1 = pts.iter().map(|p| p.0).max().unwrap_or(0);
+                let y1 = pts.iter().map(|p| p.1).max().unwrap_or(0);
+                (x0, y0, x1, y1)
+            }
+        }
+    }
+
+    /// Returns true if the given canvas pixel is inside the selection.
+    pub fn contains_pixel(&self, px: i32, py: i32) -> bool {
+        match self {
+            Self::Rect(x0, y0, x1, y1) => px >= *x0 && px < *x1 && py >= *y0 && py < *y1,
+            Self::Lasso(pts) => point_in_polygon(px, py, pts),
+        }
+    }
+}
+
+/// Even-odd point-in-polygon test for integer coordinates.
+fn point_in_polygon(px: i32, py: i32, polygon: &[(i32, i32)]) -> bool {
+    let n = polygon.len();
+    if n < 3 { return false; }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (polygon[i].0 as f64, polygon[i].1 as f64);
+        let (xj, yj) = (polygon[j].0 as f64, polygon[j].1 as f64);
+        let x = px as f64;
+        let y = py as f64;
+        if ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// A pasted or cut selection that floats above the canvas until committed.
+///
+/// While a floating selection is alive `raw_pixels` on the target keyframe is
+/// left in a "pre-composite" state (hole punched for cut, unchanged for copy).
+/// The floating pixels are rendered as an overlay.  Committing composites them
+/// into `raw_pixels` and records a `RasterStrokeAction` for undo.
+#[derive(Clone, Debug)]
+pub struct RasterFloatingSelection {
+    /// sRGB-encoded premultiplied RGBA, width × height × 4 bytes.
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Top-left position in canvas pixel coordinates.
+    pub x: i32,
+    pub y: i32,
+    /// Which raster layer and keyframe this float belongs to.
+    pub layer_id: Uuid,
+    pub time: f64,
+    /// Snapshot of `raw_pixels` before the cut/paste was initiated, used for
+    /// undo (via `RasterStrokeAction`) when the float is committed, and for
+    /// Cancel (Escape) to restore the canvas without creating an undo entry.
+    pub canvas_before: Vec<u8>,
+}
+
 /// Tracks the most recently selected thing(s) across the entire document.
 ///
 /// Lightweight overlay on top of per-domain selection state. Tells consumers
@@ -69,6 +145,16 @@ pub struct Selection {
 
     /// Currently selected clip instances
     selected_clip_instances: Vec<Uuid>,
+
+    /// Active raster pixel selection (marquee or lasso outline).
+    /// Transient UI state — not persisted.
+    #[serde(skip)]
+    pub raster_selection: Option<RasterSelection>,
+
+    /// Floating raster selection waiting to be committed or cancelled.
+    /// Transient UI state — not persisted.
+    #[serde(skip)]
+    pub raster_floating: Option<RasterFloatingSelection>,
 }
 
 impl Selection {
@@ -79,6 +165,8 @@ impl Selection {
             selected_edges: HashSet::new(),
             selected_faces: HashSet::new(),
             selected_clip_instances: Vec::new(),
+            raster_selection: None,
+            raster_floating: None,
         }
     }
 
@@ -302,6 +390,8 @@ impl Selection {
         self.selected_edges.clear();
         self.selected_faces.clear();
         self.selected_clip_instances.clear();
+        self.raster_selection = None;
+        self.raster_floating = None;
     }
 
     /// Check if selection is empty

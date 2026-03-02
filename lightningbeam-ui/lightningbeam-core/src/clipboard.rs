@@ -82,6 +82,14 @@ pub enum ClipboardContent {
         /// Notes: (start_time, note, velocity, duration) — times relative to selection start
         notes: Vec<(f64, u8, u8, f64)>,
     },
+    /// Raw pixel data from a raster layer selection.
+    /// Pixels are sRGB-encoded premultiplied RGBA, `width × height × 4` bytes —
+    /// the same in-memory format as `RasterKeyframe::raw_pixels`.
+    RasterPixels {
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl ClipboardContent {
@@ -176,6 +184,9 @@ impl ClipboardContent {
                 // No IDs to regenerate, just clone
                 (ClipboardContent::MidiNotes { notes: notes.clone() }, id_map)
             }
+            ClipboardContent::RasterPixels { pixels, width, height } => {
+                (ClipboardContent::RasterPixels { pixels: pixels.clone(), width: *width, height: *height }, id_map)
+            }
             ClipboardContent::Shapes { shapes } => {
                 // Regenerate shape IDs
                 let new_shapes: Vec<Shape> = shapes
@@ -255,6 +266,62 @@ impl ClipboardManager {
         }
 
         None
+    }
+
+    /// Copy raster pixels to the system clipboard as an image.
+    ///
+    /// `pixels` must be sRGB-encoded premultiplied RGBA (`w × h × 4` bytes).
+    /// Converts to straight-alpha RGBA8 for arboard.  Silently ignores errors
+    /// (arboard is a temporary integration point and will be replaced).
+    pub fn try_set_raster_image(&mut self, pixels: &[u8], width: u32, height: u32) {
+        let Some(system) = self.system.as_mut() else { return };
+        // Unpremultiply: sRGB-premul → straight RGBA8 for the system clipboard.
+        let straight: Vec<u8> = pixels.chunks_exact(4).flat_map(|p| {
+            let a = p[3];
+            if a == 0 {
+                [0u8, 0, 0, 0]
+            } else {
+                let inv = 255.0 / a as f32;
+                [
+                    (p[0] as f32 * inv).round().min(255.0) as u8,
+                    (p[1] as f32 * inv).round().min(255.0) as u8,
+                    (p[2] as f32 * inv).round().min(255.0) as u8,
+                    a,
+                ]
+            }
+        }).collect();
+        let img = arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(straight),
+        };
+        let _ = system.set_image(img);
+    }
+
+    /// Try to read an image from the system clipboard.
+    ///
+    /// Returns sRGB-encoded premultiplied RGBA pixels on success, or `None` if
+    /// no image is available.  Silently ignores errors.
+    pub fn try_get_raster_image(&mut self) -> Option<(Vec<u8>, u32, u32)> {
+        let img = self.system.as_mut()?.get_image().ok()?;
+        let width = img.width as u32;
+        let height = img.height as u32;
+        // Premultiply: straight RGBA8 → sRGB-premul.
+        let premul: Vec<u8> = img.bytes.chunks_exact(4).flat_map(|p| {
+            let a = p[3];
+            if a == 0 {
+                [0u8, 0, 0, 0]
+            } else {
+                let scale = a as f32 / 255.0;
+                [
+                    (p[0] as f32 * scale).round() as u8,
+                    (p[1] as f32 * scale).round() as u8,
+                    (p[2] as f32 * scale).round() as u8,
+                    a,
+                ]
+            }
+        }).collect();
+        Some((premul, width, height))
     }
 
     /// Check if there's content available to paste

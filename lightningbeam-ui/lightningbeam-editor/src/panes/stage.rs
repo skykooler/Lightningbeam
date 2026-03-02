@@ -4372,6 +4372,68 @@ impl StagePane {
     /// Handle raster stroke tool input (Draw/Erase/Smudge on a raster layer).
     ///
     /// Computes GPU dab lists for each drag event and stores them in
+    /// Commit any live floating raster selection into `raw_pixels` right now,
+    /// synchronously.  Must be called before capturing `buffer_before` for a
+    /// new brush stroke or before starting a new marquee/lasso drag, so the
+    /// GPU canvas and undo snapshots are based on the fully-composited canvas.
+    ///
+    /// Unlike the async `commit_raster_floating_if_any` flag (used for tool
+    /// switches detected in main.rs), this path is needed for in-canvas
+    /// interactions where the commit must happen *before* other per-frame work.
+    fn commit_raster_floating_now(shared: &mut SharedPaneState) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterStrokeAction;
+        use lightningbeam_core::selection::RasterFloatingSelection;
+
+        let Some(float): Option<RasterFloatingSelection> =
+            shared.selection.raster_floating.take()
+        else {
+            return;
+        };
+        shared.selection.raster_selection = None;
+
+        let document = shared.action_executor.document_mut();
+        let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else {
+            return;
+        };
+        let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
+
+        // Porter-Duff "src over dst" for sRGB-encoded premultiplied pixels.
+        for row in 0..float.height {
+            let dy = float.y + row as i32;
+            if dy < 0 || dy >= kf.height as i32 { continue; }
+            for col in 0..float.width {
+                let dx = float.x + col as i32;
+                if dx < 0 || dx >= kf.width as i32 { continue; }
+                let si = ((row * float.width + col) * 4) as usize;
+                let di = ((dy as u32 * kf.width + dx as u32) * 4) as usize;
+                let sa = float.pixels[si + 3] as u32;
+                if sa == 0 { continue; }
+                let da = kf.raw_pixels[di + 3] as u32;
+                let out_a = sa + da * (255 - sa) / 255;
+                kf.raw_pixels[di + 3] = out_a as u8;
+                if out_a > 0 {
+                    for c in 0..3 {
+                        let v = float.pixels[si + c] as u32 * 255
+                            + kf.raw_pixels[di + c] as u32 * (255 - sa);
+                        kf.raw_pixels[di + c] = (v / 255).min(255) as u8;
+                    }
+                }
+            }
+        }
+
+        let canvas_after = kf.raw_pixels.clone();
+        let (w, h) = (kf.width, kf.height);
+        let action = RasterStrokeAction::new(
+            float.layer_id, float.time,
+            float.canvas_before, canvas_after,
+            w, h,
+        );
+        if let Err(e) = shared.action_executor.execute(Box::new(action)) {
+            eprintln!("commit_raster_floating_now: {e}");
+        }
+    }
+
     /// `self.pending_raster_dabs` for dispatch by `VelloCallback::prepare()`.
     ///
     /// The actual pixel rendering happens on the GPU (compute shader).  The CPU
@@ -4428,6 +4490,10 @@ impl StagePane {
         // Mouse down: capture buffer_before, start stroke, compute first dab
         // ----------------------------------------------------------------
         if self.rsp_drag_started(response) || self.rsp_clicked(response) {
+            // Commit any floating selection synchronously so buffer_before and
+            // the GPU canvas initial upload see the fully-composited canvas.
+            Self::commit_raster_floating_now(shared);
+
             let (doc_width, doc_height) = {
                 let doc = shared.action_executor.document();
                 (doc.width as u32, doc.height as u32)
@@ -4607,6 +4673,181 @@ impl StagePane {
                 }
             }
         }
+    }
+
+    /// Rectangular marquee selection tool for raster layers.
+    fn handle_raster_select_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::selection::RasterSelection;
+        use lightningbeam_core::tool::ToolState;
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+        let doc = shared.action_executor.document();
+        let Some(kf) = doc.get_layer(&layer_id).and_then(|l| {
+            if let AnyLayer::Raster(rl) = l { rl.keyframe_at(*shared.playback_time) } else { None }
+        }) else { return };
+        let (canvas_w, canvas_h) = (kf.width as i32, kf.height as i32);
+
+        if self.rsp_drag_started(response) {
+            Self::commit_raster_floating_now(shared);
+            let (px, py) = (world_pos.x as i32, world_pos.y as i32);
+            *shared.tool_state = ToolState::DrawingRasterMarquee {
+                start: (px, py),
+                current: (px, py),
+            };
+        }
+
+        if self.rsp_dragged(response) {
+            if let ToolState::DrawingRasterMarquee { start, ref mut current } = *shared.tool_state {
+                let (px, py) = (world_pos.x as i32, world_pos.y as i32);
+                *current = (px, py);
+                let (x0, x1) = (start.0.min(px).max(0), start.0.max(px).min(canvas_w));
+                let (y0, y1) = (start.1.min(py).max(0), start.1.max(py).min(canvas_h));
+                shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+            }
+        }
+
+        if self.rsp_drag_stopped(response) {
+            if let ToolState::DrawingRasterMarquee { start, current } = *shared.tool_state {
+                let (x0, x1) = (start.0.min(current.0).max(0), start.0.max(current.0).min(canvas_w));
+                let (y0, y1) = (start.1.min(current.1).max(0), start.1.max(current.1).min(canvas_h));
+                shared.selection.raster_selection = if x1 > x0 && y1 > y0 {
+                    Some(RasterSelection::Rect(x0, y0, x1, y1))
+                } else {
+                    None
+                };
+                *shared.tool_state = ToolState::Idle;
+            }
+        }
+
+        if self.rsp_clicked(response) {
+            // A click with no drag: commit float (clicked() fires on release, so
+            // drag_started() may not have fired) then clear the selection.
+            Self::commit_raster_floating_now(shared);
+            shared.selection.raster_selection = None;
+            *shared.tool_state = ToolState::Idle;
+        }
+
+        let _ = (ui, canvas_h);
+    }
+
+    /// Freehand lasso selection tool for raster layers.
+    fn handle_raster_lasso_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::selection::RasterSelection;
+        use lightningbeam_core::tool::ToolState;
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+        if !shared.action_executor.document()
+            .get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)))
+        { return; }
+
+        if self.rsp_drag_started(response) {
+            Self::commit_raster_floating_now(shared);
+            let pt = (world_pos.x as i32, world_pos.y as i32);
+            *shared.tool_state = ToolState::DrawingRasterLasso { points: vec![pt] };
+        }
+
+        if self.rsp_dragged(response) {
+            if let ToolState::DrawingRasterLasso { ref mut points } = *shared.tool_state {
+                let pt = (world_pos.x as i32, world_pos.y as i32);
+                if let Some(&last) = points.last() {
+                    let (dx, dy) = (pt.0 - last.0, pt.1 - last.1);
+                    if dx * dx + dy * dy >= 9 {
+                        points.push(pt);
+                    }
+                }
+                if points.len() >= 2 {
+                    shared.selection.raster_selection = Some(RasterSelection::Lasso(points.clone()));
+                }
+            }
+        }
+
+        if self.rsp_drag_stopped(response) {
+            if let ToolState::DrawingRasterLasso { ref points } = *shared.tool_state {
+                shared.selection.raster_selection = if points.len() >= 3 {
+                    Some(RasterSelection::Lasso(points.clone()))
+                } else {
+                    None
+                };
+            }
+            *shared.tool_state = ToolState::Idle;
+        }
+
+        if self.rsp_clicked(response) {
+            shared.selection.raster_selection = None;
+            *shared.tool_state = ToolState::Idle;
+        }
+
+        let _ = ui;
+    }
+
+    /// Animated "marching ants" dashed outline along a closed screen-space polygon.
+    /// `phase` advances over time to animate the dashes.
+    fn draw_marching_ants(painter: &egui::Painter, pts: &[egui::Pos2], phase: f32) {
+        if pts.len() < 2 { return; }
+        let n = pts.len();
+        let mut d = phase.rem_euclid(8.0); // 4px on, 4px off
+        for i in 0..n {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            let seg = a.distance(b);
+            if seg < 0.5 { continue; }
+            let dir = (b - a) / seg;
+            let mut t = 0.0f32;
+            while t < seg {
+                let rem = if d < 4.0 { 4.0 - d } else { 8.0 - d };
+                let dl = rem.min(seg - t);
+                if d < 4.0 {
+                    let p0 = a + dir * t;
+                    let p1 = a + dir * (t + dl);
+                    painter.line_segment([p0, p1], egui::Stroke::new(2.5, egui::Color32::WHITE));
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.5, egui::Color32::BLACK));
+                }
+                d = (d + dl).rem_euclid(8.0);
+                t += dl;
+            }
+        }
+    }
+
+    /// Draw marching ants around a canvas-space rect converted to screen space.
+    fn draw_marching_ants_rect(
+        painter: &egui::Painter,
+        rect_min: egui::Pos2,
+        x0: i32, y0: i32, x1: i32, y1: i32,
+        zoom: f32, pan: egui::Vec2, phase: f32,
+    ) {
+        let s = |cx: i32, cy: i32| egui::pos2(
+            rect_min.x + pan.x + cx as f32 * zoom,
+            rect_min.y + pan.y + cy as f32 * zoom,
+        );
+        Self::draw_marching_ants(painter, &[s(x0,y0), s(x1,y0), s(x1,y1), s(x0,y1)], phase);
+    }
+
+    /// Draw marching ants around a canvas-space lasso polygon.
+    fn draw_marching_ants_lasso(
+        painter: &egui::Painter,
+        rect_min: egui::Pos2,
+        pts: &[(i32, i32)],
+        zoom: f32, pan: egui::Vec2, phase: f32,
+    ) {
+        let screen: Vec<egui::Pos2> = pts.iter().map(|&(cx, cy)| egui::pos2(
+            rect_min.x + pan.x + cx as f32 * zoom,
+            rect_min.y + pan.y + cy as f32 * zoom,
+        )).collect();
+        Self::draw_marching_ants(painter, &screen, phase);
     }
 
     fn handle_paint_bucket_tool(
@@ -6609,7 +6850,14 @@ impl StagePane {
 
             match *shared.selected_tool {
                 Tool::Select => {
-                    self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
+                    let is_raster = shared.active_layer_id.and_then(|id| {
+                        shared.action_executor.document().get_layer(&id)
+                    }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+                    if is_raster {
+                        self.handle_raster_select_tool(ui, &response, world_pos, shared);
+                    } else {
+                        self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
+                    }
                 }
                 Tool::BezierEdit => {
                     self.handle_bezier_edit_tool(ui, &response, world_pos, shift_held, shared);
@@ -6636,6 +6884,9 @@ impl StagePane {
                 }
                 Tool::Smudge => {
                     self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Smudge, shared);
+                }
+                Tool::SelectLasso => {
+                    self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
                 }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
@@ -6954,6 +7205,79 @@ impl StagePane {
                 painter.circle_filled(screen_pos, cp_hover_radius, cp_hover_color);
             }
         }
+    }
+
+    /// Render raster selection overlays:
+    ///   - Animated "marching ants" around the active raster selection (marquee or lasso)
+    ///   - Floating selection pixels as an egui texture composited at the float position
+    fn render_raster_selection_overlays(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::selection::RasterSelection;
+
+        let has_sel = shared.selection.raster_selection.is_some();
+        let has_float = shared.selection.raster_floating.is_some();
+        if !has_sel && !has_float { return; }
+
+        let time = ui.input(|i| i.time) as f32;
+        // 8px/s scroll rate → repeating every 1 s
+        let phase = (time * 8.0).rem_euclid(8.0);
+        let painter = ui.painter_at(rect);
+        let pan = self.pan_offset;
+        let zoom = self.zoom;
+
+        // ── Marching ants ─────────────────────────────────────────────────────
+        if let Some(sel) = &shared.selection.raster_selection {
+            match sel {
+                RasterSelection::Rect(x0, y0, x1, y1) => {
+                    Self::draw_marching_ants_rect(
+                        &painter, rect.min,
+                        *x0, *y0, *x1, *y1,
+                        zoom, pan, phase,
+                    );
+                }
+                RasterSelection::Lasso(pts) => {
+                    Self::draw_marching_ants_lasso(&painter, rect.min, pts, zoom, pan, phase);
+                }
+            }
+        }
+
+        // ── Floating selection texture overlay ────────────────────────────────
+        if let Some(float) = &shared.selection.raster_floating {
+            let tex_id = format!("raster_float_{}_{}", float.layer_id, float.time.to_bits());
+
+            // Upload pixels as an egui texture (re-uploaded every frame the float exists;
+            // egui caches by name so this is a no-op when the pixels haven't changed).
+            let color_image = egui::ColorImage::from_rgba_premultiplied(
+                [float.width as usize, float.height as usize],
+                &float.pixels,
+            );
+            let texture = ui.ctx().load_texture(
+                &tex_id,
+                color_image,
+                egui::TextureOptions::NEAREST,
+            );
+
+            // Position in screen space
+            let sx = rect.min.x + pan.x + float.x as f32 * zoom;
+            let sy = rect.min.y + pan.y + float.y as f32 * zoom;
+            let sw = float.width as f32 * zoom;
+            let sh = float.height as f32 * zoom;
+            let float_rect = egui::Rect::from_min_size(egui::pos2(sx, sy), egui::vec2(sw, sh));
+
+            painter.image(
+                texture.id(),
+                float_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+
+        // Keep animating while a selection is visible
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
     }
 
     /// Render snap indicator when snap is active (works for all vector-editing tools).
@@ -7553,6 +7877,9 @@ impl PaneRenderer for StagePane {
 
         // Render vector editing overlays (vertices, control points, etc.)
         self.render_vector_editing_overlays(ui, rect, shared);
+
+        // Raster selection overlays: marching ants + floating selection texture
+        self.render_raster_selection_overlays(ui, rect, shared);
 
         // Render snap indicator (works for all tools, not just Select/BezierEdit)
         self.render_snap_indicator(ui, rect, shared);

@@ -324,6 +324,7 @@ mod tool_icons {
     pub static SPLIT: &[u8] = include_bytes!("../../../src/assets/split.svg");
     pub static ERASE: &[u8] = include_bytes!("../../../src/assets/erase.svg");
     pub static SMUDGE: &[u8] = include_bytes!("../../../src/assets/smudge.svg");
+    pub static LASSO: &[u8] = include_bytes!("../../../src/assets/lasso.svg");
 }
 
 /// Embedded focus icon SVGs
@@ -395,6 +396,7 @@ impl ToolIconCache {
                 Tool::Split => tool_icons::SPLIT,
                 Tool::Erase => tool_icons::ERASE,
                 Tool::Smudge => tool_icons::SMUDGE,
+                Tool::SelectLasso => tool_icons::LASSO,
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -770,6 +772,8 @@ struct EditorApp {
     /// Count of in-flight graph preset loads — keeps the repaint loop alive
     /// until the audio thread sends GraphPresetLoaded events for all of them
     pending_graph_loads: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set by raster select tools when a new interaction requires committing the floating selection
+    commit_raster_floating_if_any: bool,
     /// Set by MenuAction::Group when focus is Nodes — consumed by node graph pane next frame
     pending_node_group: bool,
     /// Set by MenuAction::Ungroup when focus is Nodes — consumed by node graph pane next frame
@@ -1044,6 +1048,7 @@ impl EditorApp {
             audio_event_rx,
             audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_graph_loads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            commit_raster_floating_if_any: false,
             pending_node_group: false,
             pending_node_ungroup: false,
             audio_sample_rate,
@@ -1806,10 +1811,174 @@ impl EditorApp {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Raster pixel helpers
+    // -----------------------------------------------------------------------
+
+    /// Extract the pixels covered by `sel` from `raw_pixels`.
+    /// Returns (pixels, width, height) in sRGB-premul RGBA format.
+    /// For a Lasso selection pixels outside the polygon are zeroed (alpha=0).
+    fn extract_raster_selection(
+        raw_pixels: &[u8],
+        canvas_w: u32,
+        canvas_h: u32,
+        sel: &lightningbeam_core::selection::RasterSelection,
+    ) -> (Vec<u8>, u32, u32) {
+        use lightningbeam_core::selection::RasterSelection;
+        let (x0, y0, x1, y1) = sel.bounding_rect();
+        let x0 = x0.max(0) as u32;
+        let y0 = y0.max(0) as u32;
+        let x1 = (x1 as u32).min(canvas_w);
+        let y1 = (y1 as u32).min(canvas_h);
+        let w = x1.saturating_sub(x0);
+        let h = y1.saturating_sub(y0);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let cx = x0 + col;
+                let cy = y0 + row;
+                let inside = match sel {
+                    RasterSelection::Rect(..) => true,
+                    RasterSelection::Lasso(_) => sel.contains_pixel(cx as i32, cy as i32),
+                };
+                if inside {
+                    let src = ((cy * canvas_w + cx) * 4) as usize;
+                    let dst = ((row * w + col) * 4) as usize;
+                    out[dst..dst + 4].copy_from_slice(&raw_pixels[src..src + 4]);
+                }
+            }
+        }
+        (out, w, h)
+    }
+
+    /// Erase pixels covered by `sel` in `raw_pixels` (set alpha=0, rgb=0).
+    fn erase_raster_selection(
+        raw_pixels: &mut [u8],
+        canvas_w: u32,
+        canvas_h: u32,
+        sel: &lightningbeam_core::selection::RasterSelection,
+    ) {
+        let (x0, y0, x1, y1) = sel.bounding_rect();
+        let x0 = x0.max(0) as u32;
+        let y0 = y0.max(0) as u32;
+        let x1 = (x1 as u32).min(canvas_w);
+        let y1 = (y1 as u32).min(canvas_h);
+        for cy in y0..y1 {
+            for cx in x0..x1 {
+                if sel.contains_pixel(cx as i32, cy as i32) {
+                    let idx = ((cy * canvas_w + cx) * 4) as usize;
+                    raw_pixels[idx..idx + 4].fill(0);
+                }
+            }
+        }
+    }
+
+    /// Porter-Duff "over" composite of `src` onto `dst` at canvas offset `(ox, oy)`.
+    /// Both buffers are sRGB-encoded premultiplied RGBA.
+    fn composite_over(
+        dst: &mut [u8], dst_w: u32, dst_h: u32,
+        src: &[u8],     src_w: u32, src_h: u32,
+        ox: i32, oy: i32,
+    ) {
+        for row in 0..src_h {
+            let dy = oy + row as i32;
+            if dy < 0 || dy >= dst_h as i32 { continue; }
+            for col in 0..src_w {
+                let dx = ox + col as i32;
+                if dx < 0 || dx >= dst_w as i32 { continue; }
+                let si = ((row * src_w + col) * 4) as usize;
+                let di = ((dy as u32 * dst_w + dx as u32) * 4) as usize;
+                let sa = src[si + 3] as u32;
+                if sa == 0 { continue; }
+                let da = dst[di + 3] as u32;
+                // out_a = src_a + dst_a * (255 - src_a) / 255
+                let out_a = sa + da * (255 - sa) / 255;
+                dst[di + 3] = out_a as u8;
+                if out_a > 0 {
+                    for c in 0..3 {
+                        // premul over: out = src + dst*(1-src_a/255)
+                        // v is in [0, 255²], so one /255 brings it back to [0, 255]
+                        let v = src[si + c] as u32 * 255
+                            + dst[di + c] as u32 * (255 - sa);
+                        dst[di + c] = (v / 255).min(255) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Commit a floating raster selection: composite it into the keyframe's
+    /// `raw_pixels` and record a `RasterStrokeAction` for undo.
+    /// Clears `selection.raster_floating` and `selection.raster_selection`.
+    /// No-op if there is no floating selection.
+    fn commit_raster_floating(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterStrokeAction;
+
+        let Some(float) = self.selection.raster_floating.take() else { return };
+        self.selection.raster_selection = None;
+
+        let document = self.action_executor.document_mut();
+        let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
+        let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
+
+        Self::composite_over(
+            &mut kf.raw_pixels, kf.width, kf.height,
+            &float.pixels, float.width, float.height,
+            float.x, float.y,
+        );
+        let canvas_after = kf.raw_pixels.clone();
+        let w = kf.width;
+        let h = kf.height;
+
+        let action = RasterStrokeAction::new(
+            float.layer_id, float.time,
+            float.canvas_before, canvas_after,
+            w, h,
+        );
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("commit_raster_floating: {}", e);
+        }
+    }
+
+    /// Cancel a floating raster selection: restore the canvas from the
+    /// pre-cut/paste snapshot.  No undo entry is created.
+    fn cancel_raster_floating(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        let Some(float) = self.selection.raster_floating.take() else { return };
+        self.selection.raster_selection = None;
+
+        let document = self.action_executor.document_mut();
+        let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
+        let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
+        kf.raw_pixels = float.canvas_before;
+    }
+
     /// Copy the current selection to the clipboard
     fn clipboard_copy_selection(&mut self) {
         use lightningbeam_core::clipboard::{ClipboardContent, ClipboardLayerType};
         use lightningbeam_core::layer::AnyLayer;
+
+        // Raster selection takes priority when on a raster layer
+        if let (Some(layer_id), Some(raster_sel)) = (
+            self.active_layer_id,
+            self.selection.raster_selection.as_ref(),
+        ) {
+            let document = self.action_executor.document();
+            if let Some(AnyLayer::Raster(rl)) = document.get_layer(&layer_id) {
+                if let Some(kf) = rl.keyframe_at(self.playback_time) {
+                    let (pixels, w, h) = Self::extract_raster_selection(
+                        &kf.raw_pixels, kf.width, kf.height, raster_sel,
+                    );
+                    self.clipboard_manager.try_set_raster_image(&pixels, w, h);
+                    self.clipboard_manager.copy(ClipboardContent::RasterPixels {
+                        pixels, width: w, height: h,
+                    });
+                }
+                return;
+            }
+        }
 
         // Check what's selected: clip instances take priority, then shapes
         if !self.selection.clip_instances().is_empty() {
@@ -1883,6 +2052,43 @@ impl EditorApp {
 
     /// Delete the current selection (for cut and delete operations)
     fn clipboard_delete_selection(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterStrokeAction;
+
+        // Raster: commit any floating selection first, then erase the marquee region
+        if let (Some(layer_id), Some(raster_sel)) = (
+            self.active_layer_id,
+            self.selection.raster_selection.clone(),
+        ) {
+            let document = self.action_executor.document();
+            if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
+                // Committing a floating selection before erasing ensures any
+                // prior paste is baked in before we punch the new hole.
+                self.commit_raster_floating();
+
+                let document = self.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&layer_id) {
+                    if let Some(kf) = rl.keyframe_at_mut(self.playback_time) {
+                        let canvas_before = kf.raw_pixels.clone();
+                        Self::erase_raster_selection(
+                            &mut kf.raw_pixels, kf.width, kf.height, &raster_sel,
+                        );
+                        let canvas_after = kf.raw_pixels.clone();
+                        let w = kf.width;
+                        let h = kf.height;
+                        let action = RasterStrokeAction::new(
+                            layer_id, self.playback_time,
+                            canvas_before, canvas_after, w, h,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Raster erase failed: {}", e);
+                        }
+                    }
+                }
+                self.selection.raster_selection = None;
+                return;
+            }
+        }
 
         if !self.selection.clip_instances().is_empty() {
             let active_layer_id = match self.active_layer_id {
@@ -1972,12 +2178,26 @@ impl EditorApp {
         use lightningbeam_core::clipboard::ClipboardContent;
         use lightningbeam_core::layer::AnyLayer;
 
-        let content = match self.clipboard_manager.paste() {
-            Some(c) => c,
-            None => return,
-        };
+        // Resolve content from all sources:
+        //   1. Internal cache (ClipboardContent, any type)
+        //   2. System clipboard JSON (LIGHTNINGBEAM_CLIPBOARD: prefix)
+        //   3. System clipboard image — only attempted when the active layer is raster,
+        //      since non-raster layers have no way to consume raw pixel data
+        let active_is_raster = self.active_layer_id
+            .and_then(|id| self.action_executor.document().get_layer(&id))
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        // Regenerate IDs for the paste
+        let content = self.clipboard_manager.paste().or_else(|| {
+            if active_is_raster {
+                self.clipboard_manager.try_get_raster_image()
+                    .map(|(pixels, width, height)| ClipboardContent::RasterPixels { pixels, width, height })
+            } else {
+                None
+            }
+        });
+        let Some(content) = content else { return };
+
+        // Regenerate IDs for the paste (no-op for RasterPixels)
         let (new_content, _id_map) = content.with_regenerated_ids();
 
         match new_content {
@@ -2098,6 +2318,48 @@ impl EditorApp {
             }
             ClipboardContent::MidiNotes { .. } => {
                 // MIDI notes are pasted directly in the piano roll pane, not here
+            }
+            ClipboardContent::RasterPixels { pixels, width, height } => {
+                let Some(layer_id) = self.active_layer_id else { return };
+                let document = self.action_executor.document();
+                let Some(AnyLayer::Raster(rl)) = document.get_layer(&layer_id) else { return };
+                let Some(kf) = rl.keyframe_at(self.playback_time) else { return };
+
+                // Paste position: top-left of the current raster selection if any,
+                // otherwise the canvas origin.
+                let (paste_x, paste_y) = self.selection.raster_selection
+                    .as_ref()
+                    .map(|s| { let (x0, y0, _, _) = s.bounding_rect(); (x0, y0) })
+                    .unwrap_or((0, 0));
+
+                // Snapshot canvas before for undo on commit / restore on cancel.
+                let canvas_before = kf.raw_pixels.clone();
+                let canvas_w = kf.width;
+                let canvas_h = kf.height;
+                drop(kf); // release immutable borrow before taking mutable
+
+                // Commit any pre-existing floating selection before creating a new one.
+                self.commit_raster_floating();
+
+                use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
+                self.selection.raster_floating = Some(RasterFloatingSelection {
+                    pixels,
+                    width,
+                    height,
+                    x: paste_x,
+                    y: paste_y,
+                    layer_id,
+                    time: self.playback_time,
+                    canvas_before,
+                });
+                // Update the marquee to show the floating selection bounds.
+                self.selection.raster_selection = Some(RasterSelection::Rect(
+                    paste_x,
+                    paste_y,
+                    paste_x + width as i32,
+                    paste_y + height as i32,
+                ));
+                let _ = (canvas_w, canvas_h); // used only to satisfy borrow checker above
             }
         }
     }
@@ -5201,6 +5463,7 @@ impl eframe::App for EditorApp {
                     pending_graph_loads: &self.pending_graph_loads,
                     clipboard_consumed: &mut clipboard_consumed,
                     keymap: &self.keymap,
+                    commit_raster_floating_if_any: &mut self.commit_raster_floating_if_any,
                     pending_node_group: &mut self.pending_node_group,
                     pending_node_ungroup: &mut self.pending_node_ungroup,
                     #[cfg(debug_assertions)]
@@ -5483,6 +5746,11 @@ impl eframe::App for EditorApp {
                 // Reset playback time to 0 when entering a clip
                 self.playback_time = 0.0;
             }
+            if self.commit_raster_floating_if_any {
+                self.commit_raster_floating_if_any = false;
+                self.commit_raster_floating();
+            }
+
             if pending_exit_clip {
                 if let Some(entry) = self.editing_context.pop() {
                     self.selection.clear();
@@ -5592,6 +5860,10 @@ impl eframe::App for EditorApp {
                     (AppAction::ToolBezierEdit, Tool::BezierEdit),
                     (AppAction::ToolText, Tool::Text),
                     (AppAction::ToolRegionSelect, Tool::RegionSelect),
+                    (AppAction::ToolErase, Tool::Erase),
+                    (AppAction::ToolSmudge, Tool::Smudge),
+                    (AppAction::ToolSelectLasso, Tool::SelectLasso),
+                    (AppAction::ToolSplit, Tool::Split),
                 ];
                 for &(action, tool) in tool_map {
                     if self.keymap.action_pressed(action, i) {
@@ -5619,9 +5891,13 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Escape key: revert uncommitted region selection
+        // Escape key: cancel floating raster selection or revert uncommitted region selection
         if !wants_keyboard && ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::CancelAction, i)) {
-            if self.region_selection.is_some() {
+            if self.selection.raster_floating.is_some() {
+                self.cancel_raster_floating();
+            } else if self.selection.raster_selection.is_some() {
+                self.selection.raster_selection = None;
+            } else if self.region_selection.is_some() {
                 Self::revert_region_selection(
                     &mut self.region_selection,
                     &mut self.action_executor,
