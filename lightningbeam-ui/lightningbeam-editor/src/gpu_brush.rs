@@ -94,7 +94,6 @@ impl CanvasPair {
     /// in `raw_pixels` / PNG files).  The values are decoded to linear premultiplied
     /// before being written to the canvas, which operates entirely in linear space.
     pub fn upload(&self, queue: &wgpu::Queue, pixels: &[u8]) {
-        eprintln!("[CANVAS] upload: {}x{} pixels={}", self.width, self.height, pixels.len());
         // Decode sRGB-premultiplied → linear premultiplied for the GPU canvas.
         let linear: Vec<u8> = pixels.chunks_exact(4).flat_map(|p| {
             let r = (srgb_to_linear(p[0] as f32 / 255.0) * 255.0 + 0.5) as u8;
@@ -269,10 +268,8 @@ impl GpuBrushEngine {
         let needs_new = self.canvases.get(&keyframe_id)
             .map_or(true, |c| c.width != width || c.height != height);
         if needs_new {
-            eprintln!("[CANVAS] ensure_canvas: creating new CanvasPair for kf={:?} {}x{}", keyframe_id, width, height);
             self.canvases.insert(keyframe_id, CanvasPair::new(device, width, height));
         } else {
-            eprintln!("[CANVAS] ensure_canvas: reusing existing CanvasPair for kf={:?}", keyframe_id);
         }
         self.canvases.get_mut(&keyframe_id).unwrap()
     }
@@ -306,7 +303,6 @@ impl GpuBrushEngine {
             depth_or_array_layers: 1,
         };
 
-        eprintln!("[DAB] render_dabs keyframe={:?} count={}", keyframe_id, dabs.len());
         for dab in dabs {
             // Per-dab bounding box
             let r_fringe = dab.radius + 1.0;
@@ -415,9 +411,7 @@ impl GpuBrushEngine {
             queue.submit(Some(compute_enc.finish()));
 
             // Swap: the just-written dst becomes src for the next dab.
-            eprintln!("[DAB] dispatched bbox=({},{},{},{}) current_before_swap={}", x0, y0, x1, y1, canvas.current);
             canvas.swap();
-            eprintln!("[DAB] after swap: current={}", canvas.current);
         }
     }
 

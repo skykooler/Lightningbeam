@@ -418,7 +418,7 @@ impl FocusIconCache {
         }
     }
 
-    fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
+    fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, display_size: f32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&icon) {
             let (svg_bytes, svg_filename) = match icon {
                 FocusIcon::Animation => (focus_icons::ANIMATION, "focus-animation.svg"),
@@ -435,7 +435,8 @@ impl FocusIconCache {
             );
             let svg_with_color = svg_data.replace("currentColor", &color_hex);
 
-            if let Some(texture) = rasterize_svg(svg_with_color.as_bytes(), svg_filename, 120, ctx) {
+            let render_size = (display_size * ctx.pixels_per_point()).ceil() as u32;
+            if let Some(texture) = rasterize_svg(svg_with_color.as_bytes(), svg_filename, render_size, ctx) {
                 self.icons.insert(icon, texture);
             }
         }
@@ -1310,12 +1311,13 @@ impl EditorApp {
 
         // Icon area - render SVG texture
         let icon_color = egui::Color32::from_gray(200);
-        let icon_center = rect.center_top() + egui::vec2(0.0, 50.0);
-        let icon_display_size = 60.0;
+        let title_area_height = 40.0;
+        let icon_display_size = rect.width() - 16.0;
+        let icon_center = egui::pos2(rect.center().x, rect.min.y + (rect.height() - title_area_height) * 0.5);
 
         // Get or load the SVG icon texture
         let ctx = ui.ctx().clone();
-        if let Some(texture) = self.focus_icon_cache.get_or_load(icon, icon_color, &ctx) {
+        if let Some(texture) = self.focus_icon_cache.get_or_load(icon, icon_color, icon_display_size, &ctx) {
             let texture_size = texture.size_vec2();
             let scale = icon_display_size / texture_size.x.max(texture_size.y);
             let scaled_size = texture_size * scale;
