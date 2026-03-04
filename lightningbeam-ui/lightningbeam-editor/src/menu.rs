@@ -757,6 +757,46 @@ impl MenuSystem {
         }
     }
 
+    /// Measure the minimum width needed for a menu's contents.
+    /// Accounts for label text + gap + shortcut text + padding.
+    fn measure_menu_width(ui: &egui::Ui, children: &[MenuDef], keymap: Option<&crate::keymap::KeymapManager>) -> f32 {
+        let label_font = egui::FontId::proportional(14.0);
+        let shortcut_font = egui::FontId::proportional(12.0);
+        let gap = 24.0; // space between label and shortcut
+        let padding = 16.0; // left + right padding
+
+        let mut max_width: f32 = 0.0;
+        for child in children {
+            match child {
+                MenuDef::Item(item_def) => {
+                    let label_width = ui.fonts_mut(|f| f.layout_no_wrap(item_def.label.to_string(), label_font.clone(), egui::Color32::WHITE).size().x);
+                    let effective_shortcut = if let Some(km) = keymap {
+                        if let Ok(app_action) = crate::keymap::AppAction::try_from(item_def.action) {
+                            km.get(app_action)
+                        } else {
+                            item_def.shortcut
+                        }
+                    } else {
+                        item_def.shortcut
+                    };
+                    let shortcut_width = if let Some(shortcut) = &effective_shortcut {
+                        let text = Self::format_shortcut(shortcut);
+                        ui.fonts_mut(|f| f.layout_no_wrap(text, shortcut_font.clone(), egui::Color32::WHITE).size().x) + gap
+                    } else {
+                        0.0
+                    };
+                    max_width = max_width.max(label_width + shortcut_width);
+                }
+                MenuDef::Submenu { label, .. } => {
+                    let label_width = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), label_font.clone(), egui::Color32::WHITE).size().x);
+                    max_width = max_width.max(label_width + 20.0); // extra space for submenu arrow
+                }
+                MenuDef::Separator => {}
+            }
+        }
+        max_width + padding
+    }
+
     /// Render egui menu bar from the same menu structure (for Linux/Windows)
     pub fn render_egui_menu_bar(
         &self,
@@ -767,11 +807,58 @@ impl MenuSystem {
         current_layout_index: usize,
     ) -> Option<MenuAction> {
         let mut action = None;
+        let ctx = ui.ctx().clone();
+        let menus = MenuItemDef::menu_structure();
 
         egui::MenuBar::new().ui(ui, |ui| {
-            for menu_def in MenuItemDef::menu_structure() {
-                if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap, layout_names, current_layout_index) {
+            // Phase 1: render all top-level buttons and collect responses.
+            // For non-submenu items (separators, bare actions), render them inline.
+            let mut button_entries: Vec<(egui::Response, egui::Id, &MenuDef)> = Vec::new();
+            for menu_def in menus {
+                if let MenuDef::Submenu { label, .. } = menu_def {
+                    let response = ui.button(*label);
+                    let popup_id = egui::Popup::default_response_id(&response);
+                    button_entries.push((response, popup_id, menu_def));
+                } else if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap, layout_names, current_layout_index) {
                     action = Some(a);
+                }
+            }
+
+            // Phase 2: hover-to-switch between top-level menus.
+            // If one of our menu popups is open and the user hovers a different button, switch.
+            let any_ours_open = button_entries.iter().any(|(_, pid, _)| egui::Popup::is_id_open(&ctx, *pid));
+            if any_ours_open {
+                for (response, popup_id, _) in &button_entries {
+                    if response.hovered() && !egui::Popup::is_id_open(&ctx, *popup_id) {
+                        // open_id closes all other popups and opens this one
+                        egui::Popup::open_id(&ctx, *popup_id);
+                        break;
+                    }
+                }
+            }
+
+            // Phase 3: show popups via standard Popup::menu.
+            // Popup::menu sets UiKind::Menu, Frame::popup, menu_style, and MenuState::mark_shown,
+            // so SubMenuButton works correctly for nested submenus.
+            for (response, _, menu_def) in button_entries {
+                if let MenuDef::Submenu { children, .. } = menu_def {
+                    let popup_result = egui::Popup::menu(&response).show(|ui| {
+                        let min_width = Self::measure_menu_width(ui, children, keymap);
+                        ui.set_width(min_width);
+                        let mut a = None;
+                        for child in *children {
+                            if let Some(result) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                a = Some(result);
+                                ui.close();
+                            }
+                        }
+                        a
+                    });
+                    if let Some(r) = popup_result {
+                        if let Some(a) = r.inner {
+                            action = Some(a);
+                        }
+                    }
                 }
             }
         });
@@ -802,65 +889,63 @@ impl MenuSystem {
                 None
             }
             MenuDef::Submenu { label, children } => {
-                let mut action = None;
-                ui.menu_button(*label, |ui| {
-                    if *label == "Open Recent" {
-                        // Special handling for "Open Recent" submenu
-                        for (index, path) in recent_files.iter().enumerate() {
-                            let display_name = path
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("Unknown");
-
-                            if ui.button(display_name).clicked() {
-                                action = Some(MenuAction::OpenRecent(index));
-                                ui.close();
-                            }
-                        }
-
-                        if !recent_files.is_empty() {
-                            ui.separator();
-                        }
-
-                        if ui.button("Clear Recent Files").clicked() {
-                            action = Some(MenuAction::ClearRecentFiles);
-                            ui.close();
-                        }
-                    } else if *label == "Layout" {
-                        // Render static items first (Next/Previous Layout)
-                        for child in *children {
-                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
-                                action = Some(a);
-                                ui.close();
-                            }
-                        }
-
-                        // Dynamic layout list
-                        if !layout_names.is_empty() {
-                            ui.separator();
-                            for (index, name) in layout_names.iter().enumerate() {
-                                let label = if index == current_layout_index {
-                                    format!("* {}", name)
-                                } else {
-                                    name.clone()
-                                };
-                                if ui.button(label).clicked() {
-                                    action = Some(MenuAction::SwitchLayout(index));
+                let (_, popup) = egui::containers::menu::SubMenuButton::new(*label)
+                    .ui(ui, |ui| {
+                        if *label == "Open Recent" {
+                            let mut action = None;
+                            for (index, path) in recent_files.iter().enumerate() {
+                                let display_name = path
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("Unknown");
+                                if ui.button(display_name).clicked() {
+                                    action = Some(MenuAction::OpenRecent(index));
                                     ui.close();
                                 }
                             }
-                        }
-                    } else {
-                        // Normal submenu rendering
-                        for child in *children {
-                            if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
-                                action = Some(a);
+                            if !recent_files.is_empty() {
+                                ui.separator();
+                            }
+                            if ui.button("Clear Recent Files").clicked() {
+                                action = Some(MenuAction::ClearRecentFiles);
                                 ui.close();
                             }
+                            action
+                        } else if *label == "Layout" {
+                            let mut action = None;
+                            for child in *children {
+                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                    action = Some(a);
+                                    ui.close();
+                                }
+                            }
+                            if !layout_names.is_empty() {
+                                ui.separator();
+                                for (index, name) in layout_names.iter().enumerate() {
+                                    let entry = if index == current_layout_index {
+                                        format!("* {}", name)
+                                    } else {
+                                        name.clone()
+                                    };
+                                    if ui.button(entry).clicked() {
+                                        action = Some(MenuAction::SwitchLayout(index));
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            action
+                        } else {
+                            let mut action = None;
+                            for child in *children {
+                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                    action = Some(a);
+                                    ui.close();
+                                }
+                            }
+                            action
                         }
-                    }
-                });
-                action
+                    });
+                popup.and_then(|r| r.inner)
             }
         }
     }
@@ -882,9 +967,6 @@ impl MenuSystem {
         } else {
             String::new()
         };
-
-        // Set minimum width for menu items to prevent cramping
-        ui.set_min_width(180.0);
 
         let desired_width = ui.available_width();
         let (rect, response) = ui.allocate_exact_size(
