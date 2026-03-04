@@ -8210,13 +8210,14 @@ impl PaneRenderer for StagePane {
         ui.painter().add(cb);
 
         // Show camera info overlay
+        let info_color = shared.theme.text_color(&["#stage", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
         ui.painter().text(
             rect.min + egui::vec2(10.0, 10.0),
             egui::Align2::LEFT_TOP,
             format!("Vello Stage (zoom: {:.2}, pan: {:.0},{:.0})",
                 self.zoom, self.pan_offset.x, self.pan_offset.y),
             egui::FontId::proportional(14.0),
-            egui::Color32::from_gray(200),
+            info_color,
         );
 
         // Render breadcrumb navigation when inside a movie clip

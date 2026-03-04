@@ -65,6 +65,16 @@ impl AmpSimNode {
         Ok(())
     }
 
+    /// Load a bundled NAM model by name (e.g. "BossSD1").
+    pub fn load_bundled_model(&mut self, name: &str) -> Result<(), String> {
+        let mut model = super::bundled_models::load_bundled_model(name)
+            .ok_or_else(|| format!("Unknown bundled model: {}", name))??;
+        model.set_max_buffer_size(1024);
+        self.model = Some(model);
+        self.model_path = Some(format!("bundled:{}", name));
+        Ok(())
+    }
+
     /// Get the loaded model path (for preset serialization).
     pub fn model_path(&self) -> Option<&str> {
         self.model_path.as_deref()

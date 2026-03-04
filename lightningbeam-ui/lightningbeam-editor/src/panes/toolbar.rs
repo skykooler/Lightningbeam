@@ -83,9 +83,9 @@ impl PaneRenderer for ToolbarPane {
 
             // Button background
             let bg_color = if is_selected {
-                egui::Color32::from_rgb(70, 100, 150) // Highlighted blue
+                shared.theme.bg_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(70, 100, 150))
             } else {
-                egui::Color32::from_rgb(50, 50, 50)
+                shared.theme.bg_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
             };
             ui.painter().rect_filled(button_rect, 4.0, bg_color);
 
@@ -113,7 +113,7 @@ impl PaneRenderer for ToolbarPane {
                 ];
                 ui.painter().add(egui::Shape::convex_polygon(
                     tri.to_vec(),
-                    egui::Color32::from_gray(200),
+                    shared.theme.text_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_gray(200)),
                     egui::Stroke::NONE,
                 ));
             }
@@ -159,7 +159,7 @@ impl PaneRenderer for ToolbarPane {
                 ui.painter().rect_stroke(
                     button_rect,
                     4.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_gray(180)),
+                    egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".hover"], ui.ctx(), egui::Color32::from_gray(180))),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -186,7 +186,7 @@ impl PaneRenderer for ToolbarPane {
                 ui.painter().rect_stroke(
                     button_rect,
                     4.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255)),
+                    egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -216,12 +216,13 @@ impl PaneRenderer for ToolbarPane {
         // Raster layers label them "FG" / "BG"; vector layers label them "Stroke" / "Fill".
         {
             let stroke_label = if is_raster { "FG" } else { "Stroke" };
+            let label_color = shared.theme.text_color(&["#toolbar", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
             ui.painter().text(
                 egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
                 egui::Align2::CENTER_CENTER,
                 stroke_label,
                 egui::FontId::proportional(14.0),
-                egui::Color32::from_gray(200),
+                label_color,
             );
 
             let stroke_button_rect = egui::Rect::from_min_size(
@@ -246,12 +247,13 @@ impl PaneRenderer for ToolbarPane {
         // Fill/BG color swatch
         {
             let fill_label = if is_raster { "BG" } else { "Fill" };
+            let label_color = shared.theme.text_color(&["#toolbar", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
             ui.painter().text(
                 egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
                 egui::Align2::CENTER_CENTER,
                 fill_label,
                 egui::FontId::proportional(14.0),
-                egui::Color32::from_gray(200),
+                label_color,
             );
 
             let fill_button_rect = egui::Rect::from_min_size(

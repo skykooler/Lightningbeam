@@ -1140,11 +1140,20 @@ impl AudioGraph {
             if let Some(ref model_path) = serialized_node.nam_model_path {
                 if serialized_node.node_type == "AmpSim" {
                     use crate::audio::node_graph::nodes::AmpSimNode;
-                    let resolved_path = resolve_sample_path(model_path);
+                    eprintln!("[AmpSim] Preset restore: nam_model_path={:?}", model_path);
                     if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
                         if let Some(amp_sim) = graph_node.node.as_any_mut().downcast_mut::<AmpSimNode>() {
-                            if let Err(e) = amp_sim.load_model(&resolved_path) {
-                                eprintln!("Warning: failed to load NAM model {}: {}", resolved_path, e);
+                            let result = if let Some(bundled_name) = model_path.strip_prefix("bundled:") {
+                                eprintln!("[AmpSim] Preset: loading bundled model {:?}", bundled_name);
+                                amp_sim.load_bundled_model(bundled_name)
+                            } else {
+                                let resolved_path = resolve_sample_path(model_path);
+                                eprintln!("[AmpSim] Preset: loading from file {:?}", resolved_path);
+                                amp_sim.load_model(&resolved_path)
+                            };
+                            match &result {
+                                Ok(()) => eprintln!("[AmpSim] Preset: model loaded successfully"),
+                                Err(e) => eprintln!("[AmpSim] Preset: failed to load NAM model: {}", e),
                             }
                         }
                     }

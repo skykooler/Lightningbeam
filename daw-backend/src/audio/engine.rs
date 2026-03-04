@@ -1710,6 +1710,7 @@ impl Engine {
             Command::AmpSimLoadModel(track_id, node_id, model_path) => {
                 use crate::audio::node_graph::nodes::AmpSimNode;
 
+                eprintln!("[AmpSim] Loading model: {:?} for track {:?} node {}", model_path, track_id, node_id);
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
@@ -1719,8 +1720,16 @@ impl Engine {
                     let node_idx = NodeIndex::new(node_id as usize);
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
                         if let Some(amp_sim) = graph_node.node.as_any_mut().downcast_mut::<AmpSimNode>() {
-                            if let Err(e) = amp_sim.load_model(&model_path) {
-                                eprintln!("Failed to load NAM model: {}", e);
+                            let result = if let Some(bundled_name) = model_path.strip_prefix("bundled:") {
+                                eprintln!("[AmpSim] Loading bundled model: {}", bundled_name);
+                                amp_sim.load_bundled_model(bundled_name)
+                            } else {
+                                eprintln!("[AmpSim] Loading model from file: {}", model_path);
+                                amp_sim.load_model(&model_path)
+                            };
+                            match &result {
+                                Ok(()) => eprintln!("[AmpSim] Model loaded successfully"),
+                                Err(e) => eprintln!("[AmpSim] Failed to load NAM model: {}", e),
                             }
                         }
                     }

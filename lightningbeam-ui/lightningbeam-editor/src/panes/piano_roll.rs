@@ -290,7 +290,8 @@ impl PianoRollPane {
         let painter = ui.painter_at(rect);
 
         // Background
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(30, 30, 35));
+        let bg = shared.theme.bg_color(&["#piano-roll", ".pane-content"], ui.ctx(), Color32::from_rgb(30, 30, 35));
+        painter.rect_filled(rect, 0.0, bg);
 
         // Render grid (clipped to grid area)
         let grid_painter = ui.painter_at(grid_rect);
@@ -1450,7 +1451,8 @@ impl PianoRollPane {
         let painter = ui.painter_at(rect);
 
         // Background
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 20, 25));
+        let spec_bg = shared.theme.bg_color(&["#piano-roll", ".pane-content"], ui.ctx(), Color32::from_rgb(20, 20, 25));
+        painter.rect_filled(rect, 0.0, spec_bg);
 
         // Dot grid background (visible where the spectrogram doesn't draw)
         let grid_painter = ui.painter_at(view_rect);
@@ -1633,10 +1635,14 @@ impl PianoRollPane {
 impl PaneRenderer for PianoRollPane {
     fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
         ui.horizontal(|ui| {
+            let header_text = shared.theme.text_color(&["#piano-roll", ".pane-header"], ui.ctx(), Color32::from_gray(180));
+            let header_secondary = shared.theme.text_color(&["#piano-roll", ".text-secondary"], ui.ctx(), Color32::from_gray(140));
+            let header_accent = shared.theme.text_color(&["#piano-roll", ".status-success"], ui.ctx(), Color32::from_rgb(143, 252, 143));
+
             // Pane title
             ui.label(
                 egui::RichText::new("Piano Roll")
-                    .color(Color32::from_gray(180))
+                    .color(header_text)
                     .size(11.0),
             );
             ui.separator();
@@ -1644,7 +1650,7 @@ impl PaneRenderer for PianoRollPane {
             // Zoom
             ui.label(
                 egui::RichText::new(format!("{:.0}px/s", self.pixels_per_second))
-                    .color(Color32::from_gray(140))
+                    .color(header_secondary)
                     .size(10.0),
             );
 
@@ -1653,7 +1659,7 @@ impl PaneRenderer for PianoRollPane {
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!("{} selected", self.selected_note_indices.len()))
-                        .color(Color32::from_rgb(143, 252, 143))
+                        .color(header_accent)
                         .size(10.0),
                 );
             }
@@ -1669,7 +1675,7 @@ impl PaneRenderer for PianoRollPane {
                                 let n = &resolved[idx];
                                 ui.label(
                                     egui::RichText::new(format!("{} vel:{}", Self::note_name(n.note), n.velocity))
-                                        .color(Color32::from_gray(140))
+                                        .color(header_secondary)
                                         .size(10.0),
                                 );
                             }
@@ -1691,7 +1697,7 @@ impl PaneRenderer for PianoRollPane {
                 ui.separator();
                 ui.label(
                     egui::RichText::new("Gamma")
-                        .color(Color32::from_gray(140))
+                        .color(header_secondary)
                         .size(10.0),
                 );
                 ui.add(

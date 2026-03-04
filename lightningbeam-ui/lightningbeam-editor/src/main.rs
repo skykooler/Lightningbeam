@@ -19,6 +19,7 @@ mod menu;
 use menu::{MenuAction, MenuSystem};
 
 mod theme;
+mod theme_render;
 use theme::{Theme, ThemeMode};
 
 mod waveform_gpu;
@@ -6037,6 +6038,7 @@ impl eframe::App for EditorApp {
                 self.audio_controller.as_ref(),
             );
             debug_overlay::render_debug_overlay(ctx, &stats);
+
         }
 
         // Render custom cursor overlay (on top of everything including debug overlay)
@@ -6370,22 +6372,20 @@ fn render_pane(
     );
 
     // Draw header background
-    ui.painter().rect_filled(
-        header_rect,
-        0.0,
-        egui::Color32::from_rgb(35, 35, 35),
-    );
+    let header_bg = ctx.shared.theme.bg_color(&[".pane-header"], ui.ctx(), egui::Color32::from_rgb(35, 35, 35));
+    ui.painter().rect_filled(header_rect, 0.0, header_bg);
 
     // Draw content background
-    let bg_color = if let Some(pane_type) = pane_type {
-        pane_color(pane_type)
+    let pane_id = pane_type.map(pane_type_css_id);
+    let bg_color = if let Some(pane_id) = pane_id {
+        ctx.shared.theme.bg_color(&[pane_id, ".pane-content"], ui.ctx(), pane_color(pane_type.unwrap()))
     } else {
         egui::Color32::from_rgb(40, 40, 40)
     };
     ui.painter().rect_filled(content_rect, 0.0, bg_color);
 
     // Draw border around entire pane
-    let border_color = egui::Color32::from_gray(80);
+    let border_color = ctx.shared.theme.border_color(&[".pane-chrome"], ui.ctx(), egui::Color32::from_gray(80));
     let border_width = 1.0;
     ui.painter().rect_stroke(
         rect,
@@ -6395,10 +6395,11 @@ fn render_pane(
     );
 
     // Draw header separator line
+    let sep_color = ctx.shared.theme.border_color(&[".pane-chrome-separator"], ui.ctx(), egui::Color32::from_gray(50));
     ui.painter().hline(
         rect.x_range(),
         header_rect.max.y,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(50)),
+        egui::Stroke::new(1.0, sep_color),
     );
 
     // Render icon button in header (left side)
@@ -6410,11 +6411,8 @@ fn render_pane(
     );
 
     // Draw icon button background
-    ui.painter().rect_filled(
-        icon_button_rect,
-        4.0,
-        egui::Color32::from_rgba_premultiplied(50, 50, 50, 200),
-    );
+    let icon_btn_bg = ctx.shared.theme.bg_color(&[".pane-icon-button"], ui.ctx(), egui::Color32::from_rgba_premultiplied(50, 50, 50, 200));
+    ui.painter().rect_filled(icon_button_rect, 4.0, icon_btn_bg);
 
     // Load and render icon if available
     if let Some(pane_type) = pane_type {
@@ -6774,6 +6772,23 @@ fn pane_color(pane_type: PaneType) -> egui::Color32 {
         PaneType::PresetBrowser => egui::Color32::from_rgb(50, 45, 30),
         PaneType::AssetLibrary => egui::Color32::from_rgb(45, 50, 35),
         PaneType::ScriptEditor => egui::Color32::from_rgb(35, 30, 55),
+    }
+}
+
+/// CSS ID selector for a pane type (e.g., PaneType::Stage -> "#stage")
+fn pane_type_css_id(pane_type: PaneType) -> &'static str {
+    match pane_type {
+        PaneType::Stage => "#stage",
+        PaneType::Timeline => "#timeline",
+        PaneType::Toolbar => "#toolbar",
+        PaneType::Infopanel => "#infopanel",
+        PaneType::Outliner => "#outliner",
+        PaneType::PianoRoll => "#piano-roll",
+        PaneType::VirtualPiano => "#virtual-piano",
+        PaneType::NodeEditor => "#node-editor",
+        PaneType::PresetBrowser => "#preset-browser",
+        PaneType::AssetLibrary => "#asset-library",
+        PaneType::ScriptEditor => "#shader-editor",
     }
 }
 

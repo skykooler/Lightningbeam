@@ -683,6 +683,26 @@ struct FolderContextMenuState {
     position: egui::Pos2,
 }
 
+/// Get background color for an interactive item based on its state
+fn item_state_bg(
+    theme: &crate::theme::Theme,
+    ctx: &egui::Context,
+    pane_ctx: &str,
+    is_dragging: bool,
+    is_selected: bool,
+    is_hovered: bool,
+) -> egui::Color32 {
+    if is_dragging {
+        theme.bg_color(&[pane_ctx, ".item", ".dragging"], ctx, egui::Color32::from_rgb(80, 100, 120))
+    } else if is_selected {
+        theme.bg_color(&[pane_ctx, ".item", ".selected"], ctx, egui::Color32::from_rgb(60, 80, 100))
+    } else if is_hovered {
+        theme.bg_color(&[pane_ctx, ".item", ".hover"], ctx, egui::Color32::from_rgb(45, 45, 45))
+    } else {
+        theme.bg_color(&[pane_ctx, ".item"], ctx, egui::Color32::from_rgb(35, 35, 35))
+    }
+}
+
 pub struct AssetLibraryPane {
     /// Current search filter text
     search_filter: String,
@@ -1335,7 +1355,7 @@ impl AssetLibraryPane {
         // Background
         let bg_style = shared.theme.style(".panel-header", ui.ctx());
         let bg_color = bg_style
-            .background_color
+            .background_color()
             .unwrap_or(egui::Color32::from_rgb(30, 30, 30));
         ui.painter().rect_filled(search_rect, 0.0, bg_color);
 
@@ -1366,9 +1386,9 @@ impl AssetLibraryPane {
         let list_selected = self.view_mode == AssetViewMode::List;
         let list_response = ui.allocate_rect(list_button_rect, egui::Sense::click());
         let list_bg = if list_selected {
-            egui::Color32::from_rgb(70, 90, 110)
+            shared.theme.bg_color(&["#asset-library", ".view-toggle", ".selected"], ui.ctx(), egui::Color32::from_rgb(70, 90, 110))
         } else if list_response.hovered() {
-            egui::Color32::from_rgb(50, 50, 50)
+            shared.theme.bg_color(&["#asset-library", ".view-toggle", ".hover"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -1376,9 +1396,9 @@ impl AssetLibraryPane {
 
         // Draw list icon (three horizontal lines)
         let list_icon_color = if list_selected {
-            egui::Color32::WHITE
+            shared.theme.text_color(&["#asset-library", ".view-toggle", ".selected"], ui.ctx(), egui::Color32::WHITE)
         } else {
-            egui::Color32::from_gray(150)
+            shared.theme.text_color(&["#asset-library", ".view-toggle"], ui.ctx(), egui::Color32::from_gray(150))
         };
         let line_spacing = 4.0;
         let line_width = 10.0;
@@ -1402,9 +1422,9 @@ impl AssetLibraryPane {
         let grid_selected = self.view_mode == AssetViewMode::Grid;
         let grid_response = ui.allocate_rect(grid_button_rect, egui::Sense::click());
         let grid_bg = if grid_selected {
-            egui::Color32::from_rgb(70, 90, 110)
+            shared.theme.bg_color(&["#asset-library", ".view-toggle", ".selected"], ui.ctx(), egui::Color32::from_rgb(70, 90, 110))
         } else if grid_response.hovered() {
-            egui::Color32::from_rgb(50, 50, 50)
+            shared.theme.bg_color(&["#asset-library", ".view-toggle", ".hover"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -1412,9 +1432,9 @@ impl AssetLibraryPane {
 
         // Draw grid icon (2x2 squares)
         let grid_icon_color = if grid_selected {
-            egui::Color32::WHITE
+            shared.theme.text_color(&["#asset-library", ".view-toggle", ".selected"], ui.ctx(), egui::Color32::WHITE)
         } else {
-            egui::Color32::from_gray(150)
+            shared.theme.text_color(&["#asset-library", ".view-toggle"], ui.ctx(), egui::Color32::from_gray(150))
         };
         let square_size = 4.0;
         let square_gap = 2.0;
@@ -1444,7 +1464,7 @@ impl AssetLibraryPane {
             egui::Align2::LEFT_TOP,
             "Search:",
             egui::FontId::proportional(14.0),
-            egui::Color32::from_gray(180),
+            shared.theme.text_color(&["#asset-library", ".search-label"], ui.ctx(), egui::Color32::from_gray(180)),
         );
 
         // Text field using IME-safe widget (leave room for view toggle buttons)
@@ -1473,7 +1493,7 @@ impl AssetLibraryPane {
         // Background
         let bg_style = shared.theme.style(".panel-content", ui.ctx());
         let bg_color = bg_style
-            .background_color
+            .background_color()
             .unwrap_or(egui::Color32::from_rgb(40, 40, 40));
         ui.painter().rect_filled(tabs_rect, 0.0, bg_color);
 
@@ -1490,7 +1510,7 @@ impl AssetLibraryPane {
 
             // Tab background
             let tab_bg = if is_selected {
-                egui::Color32::from_rgb(60, 60, 60)
+                shared.theme.bg_color(&["#asset-library", ".category-tab", ".selected"], ui.ctx(), egui::Color32::from_rgb(60, 60, 60))
             } else {
                 egui::Color32::TRANSPARENT
             };
@@ -1508,7 +1528,7 @@ impl AssetLibraryPane {
             let text_color = if is_selected {
                 indicator_color
             } else {
-                egui::Color32::from_gray(150)
+                shared.theme.text_color(&["#asset-library", ".category-tab"], ui.ctx(), egui::Color32::from_gray(150))
             };
 
             ui.painter().text(
@@ -1552,7 +1572,7 @@ impl AssetLibraryPane {
         // Background
         let bg_style = shared.theme.style(".panel-header", ui.ctx());
         let bg_color = bg_style
-            .background_color
+            .background_color()
             .unwrap_or(egui::Color32::from_rgb(25, 25, 25));
         ui.painter().rect_filled(rect, 0.0, bg_color);
 
@@ -1600,11 +1620,11 @@ impl AssetLibraryPane {
 
             // Determine color based on state
             let text_color = if is_last {
-                egui::Color32::WHITE
+                shared.theme.text_color(&["#asset-library", ".breadcrumb", ".active"], ui.ctx(), egui::Color32::WHITE)
             } else if response.hovered() {
-                egui::Color32::from_rgb(100, 150, 255)
+                shared.theme.text_color(&["#asset-library", ".breadcrumb", ".hover"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))
             } else {
-                egui::Color32::from_rgb(150, 150, 150)
+                shared.theme.text_color(&["#asset-library", ".breadcrumb"], ui.ctx(), egui::Color32::from_rgb(150, 150, 150))
             };
 
             // Draw text
@@ -1639,7 +1659,7 @@ impl AssetLibraryPane {
                     egui::Align2::LEFT_CENTER,
                     ">",
                     egui::FontId::proportional(12.0),
-                    egui::Color32::from_rgb(100, 100, 100),
+                    shared.theme.text_color(&["#asset-library", ".breadcrumb-separator"], ui.ctx(), egui::Color32::from_rgb(100, 100, 100)),
                 );
                 x_offset += 16.0;
             }
@@ -1718,15 +1738,7 @@ impl AssetLibraryPane {
             let is_being_dragged = shared.dragging_asset.as_ref().map(|d| d.clip_id == asset.id).unwrap_or(false);
 
             // Item background
-            let item_bg = if is_being_dragged {
-                egui::Color32::from_rgb(80, 100, 120)
-            } else if is_selected {
-                egui::Color32::from_rgb(60, 80, 100)
-            } else if response.hovered() {
-                egui::Color32::from_rgb(45, 45, 45)
-            } else {
-                egui::Color32::from_rgb(35, 35, 35)
-            };
+            let item_bg = item_state_bg(shared.theme, ui.ctx(), "#asset-library", is_being_dragged, is_selected, response.hovered());
             ui.painter().rect_filled(item_rect, 4.0, item_bg);
 
             // Thumbnail area
@@ -1960,12 +1972,11 @@ impl AssetLibraryPane {
 
                                 // Background
                                 let bg_color = if is_drop_hover {
-                                    // Highlight as drop target
-                                    egui::Color32::from_rgb(60, 100, 140)
+                                    shared.theme.bg_color(&["#asset-library", ".folder-item", ".drop-target"], ui.ctx(), egui::Color32::from_rgb(60, 100, 140))
                                 } else if response.hovered() {
-                                    egui::Color32::from_rgb(50, 50, 50)
+                                    shared.theme.bg_color(&["#asset-library", ".folder-item", ".hover"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
                                 } else {
-                                    egui::Color32::from_rgb(35, 35, 35)
+                                    shared.theme.bg_color(&["#asset-library", ".folder-item"], ui.ctx(), egui::Color32::from_rgb(35, 35, 35))
                                 };
                                 ui.painter().rect_filled(item_rect, 0.0, bg_color);
 
@@ -1974,7 +1985,7 @@ impl AssetLibraryPane {
                                     ui.painter().rect_stroke(
                                         item_rect,
                                         0.0,
-                                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                                        egui::Stroke::new(2.0, shared.theme.border_color(&["#asset-library", ".folder-item", ".drop-target"], ui.ctx(), egui::Color32::from_rgb(100, 180, 255))),
                                         egui::StrokeKind::Middle,
                                     );
                                 }
@@ -2018,7 +2029,7 @@ impl AssetLibraryPane {
                                         egui::Align2::LEFT_CENTER,
                                         &folder.name,
                                         egui::FontId::proportional(13.0),
-                                        egui::Color32::WHITE,
+                                        shared.theme.text_color(&["#asset-library", ".folder-item", ".name"], ui.ctx(), egui::Color32::WHITE),
                                     );
                                 }
 
@@ -2029,7 +2040,7 @@ impl AssetLibraryPane {
                                     egui::Align2::RIGHT_CENTER,
                                     count_text,
                                     egui::FontId::proportional(11.0),
-                                    egui::Color32::from_rgb(150, 150, 150),
+                                    shared.theme.text_color(&["#asset-library", ".folder-item", ".count"], ui.ctx(), egui::Color32::from_rgb(150, 150, 150)),
                                 );
 
                                 // Handle drop: move asset to folder
@@ -2131,12 +2142,11 @@ impl AssetLibraryPane {
 
                                     // Background
                                     let bg_color = if is_drop_hover {
-                                        // Highlight as drop target
-                                        egui::Color32::from_rgb(60, 100, 140)
+                                        shared.theme.bg_color(&["#asset-library", ".folder-item", ".drop-target"], ui.ctx(), egui::Color32::from_rgb(60, 100, 140))
                                     } else if response.hovered() {
-                                        egui::Color32::from_rgb(50, 50, 50)
+                                        shared.theme.bg_color(&["#asset-library", ".folder-item", ".hover"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
                                     } else {
-                                        egui::Color32::from_rgb(35, 35, 35)
+                                        shared.theme.bg_color(&["#asset-library", ".folder-item"], ui.ctx(), egui::Color32::from_rgb(35, 35, 35))
                                     };
                                     ui.painter().rect_filled(rect, 4.0, bg_color);
 
@@ -2145,7 +2155,7 @@ impl AssetLibraryPane {
                                         ui.painter().rect_stroke(
                                             rect,
                                             4.0,
-                                            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 180, 255)),
+                                            egui::Stroke::new(2.0, shared.theme.border_color(&["#asset-library", ".folder-item", ".drop-target"], ui.ctx(), egui::Color32::from_rgb(100, 180, 255))),
                                             egui::StrokeKind::Middle,
                                         );
                                     }
@@ -2176,7 +2186,7 @@ impl AssetLibraryPane {
                                         egui::Align2::CENTER_CENTER,
                                         name,
                                         egui::FontId::proportional(10.0),
-                                        egui::Color32::WHITE,
+                                        shared.theme.text_color(&["#asset-library", ".folder-item", ".name"], ui.ctx(), egui::Color32::WHITE),
                                     );
 
                                     // Item count
@@ -2185,7 +2195,7 @@ impl AssetLibraryPane {
                                         egui::Align2::CENTER_CENTER,
                                         format!("{} items", folder.item_count),
                                         egui::FontId::proportional(9.0),
-                                        egui::Color32::from_rgb(150, 150, 150),
+                                        shared.theme.text_color(&["#asset-library", ".folder-item", ".count"], ui.ctx(), egui::Color32::from_rgb(150, 150, 150)),
                                     );
 
                                     // Handle drop: move asset to folder
@@ -2251,19 +2261,11 @@ impl AssetLibraryPane {
             .unwrap_or(false);
 
         // Text colors
-        let text_color = egui::Color32::from_gray(200);
-        let secondary_text_color = egui::Color32::from_gray(120);
+        let text_color = shared.theme.text_color(&["#asset-library", ".text-primary"], ui.ctx(), egui::Color32::from_gray(200));
+        let secondary_text_color = shared.theme.text_color(&["#asset-library", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(120));
 
         // Item background
-        let item_bg = if is_being_dragged {
-            egui::Color32::from_rgb(80, 100, 120)
-        } else if is_selected {
-            egui::Color32::from_rgb(60, 80, 100)
-        } else if response.hovered() {
-            egui::Color32::from_rgb(45, 45, 45)
-        } else {
-            egui::Color32::from_rgb(35, 35, 35)
-        };
+        let item_bg = item_state_bg(shared.theme, ui.ctx(), "#asset-library", is_being_dragged, is_selected, response.hovered());
         ui.painter().rect_filled(item_rect, 3.0, item_bg);
 
         // Category color indicator bar
@@ -2437,15 +2439,7 @@ impl AssetLibraryPane {
             .unwrap_or(false);
 
         // Background
-        let bg_color = if is_being_dragged {
-            egui::Color32::from_rgb(80, 100, 120)
-        } else if is_selected {
-            egui::Color32::from_rgb(60, 80, 100)
-        } else if response.hovered() {
-            egui::Color32::from_rgb(50, 50, 50)
-        } else {
-            egui::Color32::from_rgb(35, 35, 35)
-        };
+        let bg_color = item_state_bg(shared.theme, ui.ctx(), "#asset-library", is_being_dragged, is_selected, response.hovered());
         ui.painter().rect_filled(rect, 4.0, bg_color);
 
         // Thumbnail
@@ -2617,7 +2611,7 @@ impl AssetLibraryPane {
         // Background
         let bg_style = shared.theme.style(".panel-content", ui.ctx());
         let bg_color = bg_style
-            .background_color
+            .background_color()
             .unwrap_or(egui::Color32::from_rgb(25, 25, 25));
         ui.painter().rect_filled(rect, 0.0, bg_color);
 
@@ -2722,15 +2716,7 @@ impl AssetLibraryPane {
                             .unwrap_or(false);
 
                         // Item background
-                        let item_bg = if is_being_dragged {
-                            egui::Color32::from_rgb(80, 100, 120) // Highlight when dragging
-                        } else if is_selected {
-                            egui::Color32::from_rgb(60, 80, 100)
-                        } else if response.hovered() {
-                            egui::Color32::from_rgb(45, 45, 45)
-                        } else {
-                            egui::Color32::from_rgb(35, 35, 35)
-                        };
+                        let item_bg = item_state_bg(shared.theme, ui.ctx(), "#asset-library", is_being_dragged, is_selected, response.hovered());
                         ui.painter().rect_filled(item_rect, 3.0, item_bg);
 
                         // Category color indicator bar
@@ -3030,7 +3016,7 @@ impl AssetLibraryPane {
         // Background
         let bg_style = shared.theme.style(".panel-content", ui.ctx());
         let bg_color = bg_style
-            .background_color
+            .background_color()
             .unwrap_or(egui::Color32::from_rgb(25, 25, 25));
         ui.painter().rect_filled(rect, 0.0, bg_color);
 

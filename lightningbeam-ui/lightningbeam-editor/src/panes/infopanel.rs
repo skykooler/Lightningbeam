@@ -881,11 +881,8 @@ impl PaneRenderer for InfopanelPane {
         shared: &mut SharedPaneState,
     ) {
         // Background
-        ui.painter().rect_filled(
-            rect,
-            0.0,
-            egui::Color32::from_rgb(30, 35, 40),
-        );
+        let bg = shared.theme.bg_color(&["#infopanel", ".pane-content"], ui.ctx(), egui::Color32::from_rgb(30, 35, 40));
+        ui.painter().rect_filled(rect, 0.0, bg);
 
         // Create scrollable area for content
         let content_rect = rect.shrink(8.0);
