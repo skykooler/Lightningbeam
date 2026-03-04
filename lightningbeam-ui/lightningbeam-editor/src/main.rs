@@ -419,7 +419,7 @@ impl FocusIconCache {
         }
     }
 
-    fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
+    fn get_or_load(&mut self, icon: FocusIcon, icon_color: egui::Color32, display_size: f32, ctx: &egui::Context) -> Option<&egui::TextureHandle> {
         if !self.icons.contains_key(&icon) {
             let (svg_bytes, svg_filename) = match icon {
                 FocusIcon::Animation => (focus_icons::ANIMATION, "focus-animation.svg"),
@@ -436,7 +436,8 @@ impl FocusIconCache {
             );
             let svg_with_color = svg_data.replace("currentColor", &color_hex);
 
-            if let Some(texture) = rasterize_svg(svg_with_color.as_bytes(), svg_filename, 120, ctx) {
+            let render_size = (display_size * ctx.pixels_per_point()).ceil() as u32;
+            if let Some(texture) = rasterize_svg(svg_with_color.as_bytes(), svg_filename, render_size, ctx) {
                 self.icons.insert(icon, texture);
             }
         }
@@ -1311,12 +1312,13 @@ impl EditorApp {
 
         // Icon area - render SVG texture
         let icon_color = egui::Color32::from_gray(200);
-        let icon_center = rect.center_top() + egui::vec2(0.0, 50.0);
-        let icon_display_size = 60.0;
+        let title_area_height = 40.0;
+        let icon_display_size = rect.width() - 16.0;
+        let icon_center = egui::pos2(rect.center().x, rect.min.y + (rect.height() - title_area_height) * 0.5);
 
         // Get or load the SVG icon texture
         let ctx = ui.ctx().clone();
-        if let Some(texture) = self.focus_icon_cache.get_or_load(icon, icon_color, &ctx) {
+        if let Some(texture) = self.focus_icon_cache.get_or_load(icon, icon_color, icon_display_size, &ctx) {
             let texture_size = texture.size_vec2();
             let scale = icon_display_size / texture_size.x.max(texture_size.y);
             let scaled_size = texture_size * scale;
@@ -1920,7 +1922,7 @@ impl EditorApp {
         use lightningbeam_core::actions::RasterStrokeAction;
 
         let Some(float) = self.selection.raster_floating.take() else { return };
-        self.selection.raster_selection = None;
+        let sel = self.selection.raster_selection.take();
 
         let document = self.action_executor.document_mut();
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
@@ -1931,11 +1933,36 @@ impl EditorApp {
         if kf.raw_pixels.len() != expected {
             kf.raw_pixels.resize(expected, 0);
         }
-        Self::composite_over(
-            &mut kf.raw_pixels, kf.width, kf.height,
-            &float.pixels, float.width, float.height,
-            float.x, float.y,
-        );
+
+        // Porter-Duff "src over dst" for sRGB-encoded premultiplied pixels,
+        // masked by the selection C when present.
+        for row in 0..float.height {
+            let dy = float.y + row as i32;
+            if dy < 0 || dy >= kf.height as i32 { continue; }
+            for col in 0..float.width {
+                let dx = float.x + col as i32;
+                if dx < 0 || dx >= kf.width as i32 { continue; }
+                // Apply selection mask C (if selection exists, only composite where inside)
+                if let Some(ref s) = sel {
+                    if !s.contains_pixel(dx, dy) { continue; }
+                }
+                let si = ((row * float.width + col) * 4) as usize;
+                let di = ((dy as u32 * kf.width + dx as u32) * 4) as usize;
+                let sa = float.pixels[si + 3] as u32;
+                if sa == 0 { continue; }
+                let da = kf.raw_pixels[di + 3] as u32;
+                let out_a = sa + da * (255 - sa) / 255;
+                kf.raw_pixels[di + 3] = out_a as u8;
+                if out_a > 0 {
+                    for c in 0..3 {
+                        let v = float.pixels[si + c] as u32 * 255
+                            + kf.raw_pixels[di + c] as u32 * (255 - sa);
+                        kf.raw_pixels[di + c] = (v / 255).min(255) as u8;
+                    }
+                }
+            }
+        }
+
         let canvas_after = kf.raw_pixels.clone();
         let w = kf.width;
         let h = kf.height;
@@ -2394,6 +2421,7 @@ impl EditorApp {
                     layer_id,
                     time: self.playback_time,
                     canvas_before,
+                    canvas_id: uuid::Uuid::new_v4(),
                 });
                 // Update the marquee to show the floating selection bounds.
                 self.selection.raster_selection = Some(RasterSelection::Rect(

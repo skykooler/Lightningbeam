@@ -1,8 +1,12 @@
 // Canvas blit shader.
 //
-// Renders a GPU raster canvas (at document resolution) into the layer's sRGB
-// render buffer (at viewport resolution), applying the camera transform
-// (pan + zoom) to map document-space pixels to viewport-space pixels.
+// Renders a GPU raster canvas (at document resolution) into an Rgba16Float HDR
+// buffer (at viewport resolution), applying the camera transform (pan + zoom)
+// to map document-space pixels to viewport-space pixels.
+//
+// The canvas stores premultiplied linear RGBA.  We output it as-is so the HDR
+// compositor sees the same premultiplied-linear format it always works with,
+// bypassing the sRGB intermediate used for Vello layers.
 //
 // Any viewport pixel whose corresponding document coordinate falls outside
 // [0, canvas_w) × [0, canvas_h) outputs transparent black.
@@ -21,6 +25,10 @@ struct CameraParams {
 @group(0) @binding(0) var canvas_tex:     texture_2d<f32>;
 @group(0) @binding(1) var canvas_sampler: sampler;
 @group(0) @binding(2) var<uniform> camera: CameraParams;
+/// Selection mask: R8Unorm, 255 = inside selection (keep), 0 = outside (discard).
+/// A 1×1 all-white texture is bound when no selection is active.
+@group(0) @binding(3) var mask_tex:     texture_2d<f32>;
+@group(0) @binding(4) var mask_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -36,17 +44,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.position = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
     out.uv = vec2<f32>(x, y);
     return out;
-}
-
-// Linear → sRGB encoding for a single channel.
-// Applied to premultiplied linear values so the downstream srgb_to_linear
-// pass round-trips correctly without darkening semi-transparent edges.
-fn linear_to_srgb(c: f32) -> f32 {
-    return select(
-        1.055 * pow(max(c, 0.0), 1.0 / 2.4) - 0.055,
-        c * 12.92,
-        c <= 0.0031308,
-    );
 }
 
 @fragment
@@ -67,21 +64,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // The canvas stores premultiplied linear RGBA.
-    // The downstream pipeline (srgb_to_linear → compositor) expects the sRGB
-    // buffer to contain straight-alpha sRGB, i.e. the same format Vello outputs:
-    //   sRGB buffer: srgb(r_straight), srgb(g_straight), srgb(b_straight), a
-    //   srgb_to_linear: r_straight, g_straight, b_straight, a   (linear straight)
-    //   compositor:  r_straight * a * opacity  (premultiplied, correct)
-    //
-    // Without unpremultiplying, the compositor would double-premultiply:
-    //   src = (premul_r, premul_g, premul_b, a)  → output = premul_r * a = r * a²
-    // which produces a dark halo over transparent regions.
+    // The compositor expects straight-alpha linear (it premultiplies by src_alpha itself),
+    // so unpremultiply here.  No sRGB conversion — the HDR buffer is linear throughout.
     let c = textureSample(canvas_tex, canvas_sampler, canvas_uv);
+    let mask = textureSample(mask_tex, mask_sampler, canvas_uv).r;
+    let masked_a = c.a * mask;
     let inv_a = select(0.0, 1.0 / c.a, c.a > 1e-6);
-    return vec4<f32>(
-        linear_to_srgb(c.r * inv_a),
-        linear_to_srgb(c.g * inv_a),
-        linear_to_srgb(c.b * inv_a),
-        c.a,
-    );
+    return vec4<f32>(c.r * inv_a, c.g * inv_a, c.b * inv_a, masked_a);
 }

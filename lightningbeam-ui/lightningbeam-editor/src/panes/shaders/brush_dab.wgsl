@@ -79,15 +79,19 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
     let rr = (dx * dx + dy * dy) / (dab.radius * dab.radius);
     if rr > 1.0 { return current; }
 
-    // Two-segment linear falloff (identical to libmypaint calculate_opa)
-    let h    = clamp(dab.hardness, 0.001, 1.0);
+    // Quadratic falloff: flat inner core, smooth quadratic outer zone.
+    // r is the actual normalised distance [0,1]; h controls the hard-core radius.
+    // Inner zone (r ≤ h): fully opaque.
+    // Outer zone (r > h): opa = ((1-r)/(1-h))^2, giving a smooth bell-shaped dab.
+    let h = clamp(dab.hardness, 0.0, 1.0);
+    let r = sqrt(rr);
     var opa_weight: f32;
-    if rr <= h {
-        opa_weight = 1.0 + rr * (-(1.0 / h - 1.0));
+    if h >= 1.0 || r <= h {
+        opa_weight = 1.0;
     } else {
-        opa_weight = h / (1.0 - h) + rr * (-h / (1.0 - h));
+        let t = (1.0 - r) / (1.0 - h);
+        opa_weight = t * t;
     }
-    opa_weight = clamp(opa_weight, 0.0, 1.0);
 
     if dab.blend_mode == 0u {
         // Normal: "over" operator
