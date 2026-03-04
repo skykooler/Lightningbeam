@@ -508,6 +508,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(ref float_sel) = self.ctx.selection.raster_floating {
                 if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
                     if !gpu_brush.canvases.contains_key(&float_sel.canvas_id) {
+                        eprintln!("[CANVAS] lazy-init float canvas id={:?}", float_sel.canvas_id);
                         gpu_brush.ensure_canvas(device, float_sel.canvas_id, float_sel.width, float_sel.height);
                         if let Some(canvas) = gpu_brush.canvases.get(&float_sel.canvas_id) {
                             let pixels = if float_sel.pixels.is_empty() {
@@ -536,6 +537,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     );
                     // On stroke start, upload the pre-stroke pixel data to both textures
                     if let Some(ref pixels) = pending.initial_pixels {
+                        eprintln!("[STROKE] uploading initial_pixels for kf={:?} painting_float={}", pending.keyframe_id, self.ctx.painting_float);
                         if let Some(canvas) = gpu_brush.canvases.get(&pending.keyframe_id) {
                             canvas.upload(queue, pixels);
                         }
@@ -592,6 +594,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             );
             drop(image_cache);
 
+            // Debug frame counter (only active during strokes)
+            static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let dbg_frame = FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dbg_stroke = self.ctx.painting_canvas.is_some();
+            if dbg_stroke {
+                eprintln!("[FRAME {}] painting_canvas={:?} painting_float={}", dbg_frame, self.ctx.painting_canvas, self.ctx.painting_float);
+            }
+
             // Get buffer pool for layer rendering
             let mut buffer_pool = shared.buffer_pool.lock().unwrap();
 
@@ -631,6 +641,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     antialiasing_method: vello::AaConfig::Msaa16,
                 };
 
+                if dbg_stroke { eprintln!("[DRAW] background Vello render"); }
                 if let Ok(mut renderer) = shared.renderer.lock() {
                     renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &bg_render_params).ok();
                 }
@@ -650,6 +661,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 // Clear to dark gray (stage background outside document bounds)
                 // Note: stage_bg values are already in linear space for HDR compositing
                 let stage_bg = [45.0 / 255.0, 45.0 / 255.0, 48.0 / 255.0, 1.0];
+                if dbg_stroke { eprintln!("[COMPOSITE] background onto HDR"); }
                 shared.compositor.composite(
                     device,
                     queue,
@@ -757,12 +769,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             &instance_resources.hdr_texture_view,
                         ) {
                             // GPU canvas blit path: if a live GPU canvas exists for this
-                            // raster layer, sample it directly instead of rendering the Vello
-                            // scene (which lags until raw_pixels is updated after readback).
+                            // raster layer, blit it directly into the HDR buffer (premultiplied
+                            // linear → Rgba16Float), bypassing the sRGB intermediate entirely.
+                            // Vello path: render to sRGB buffer → srgb_to_linear → HDR buffer.
                             let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf {
                                 let mut used = false;
                                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
                                     if let Some(canvas) = gpu_brush.canvases.get(&kf_id) {
+                                        if dbg_stroke { eprintln!("[DRAW] GPU canvas blit layer={:?} kf={:?} canvas.current={}", rendered_layer.layer_id, kf_id, canvas.current); }
                                         let camera = crate::gpu_brush::CameraParams {
                                             pan_x:      self.ctx.pan_offset.x,
                                             pan_y:      self.ctx.pan_offset.y,
@@ -776,7 +790,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                         shared.canvas_blit.blit(
                                             device, queue,
                                             canvas.src_view(),
-                                            srgb_view,
+                                            hdr_layer_view,  // blit directly to HDR
                                             &camera,
                                             None,  // no mask on layer canvas blit
                                         );
@@ -789,18 +803,17 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             };
 
                             if !used_gpu_canvas {
-                                // Render layer scene to sRGB buffer
+                                // Render layer scene to sRGB buffer, then convert to HDR
+                                if dbg_stroke { eprintln!("[DRAW] Vello render layer={:?} opacity={}", rendered_layer.layer_id, rendered_layer.opacity); }
                                 if let Ok(mut renderer) = shared.renderer.lock() {
                                     renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
                                 }
+                                let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("layer_srgb_to_linear_encoder"),
+                                });
+                                shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
+                                queue.submit(Some(convert_encoder.finish()));
                             }
-
-                            // Convert sRGB to linear HDR
-                            let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("layer_srgb_to_linear_encoder"),
-                            });
-                            shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
-                            queue.submit(Some(convert_encoder.finish()));
 
                             // Composite this layer onto the HDR accumulator with its opacity
                             let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
@@ -809,6 +822,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 rendered_layer.blend_mode,
                             );
 
+                            if dbg_stroke { eprintln!("[COMPOSITE] layer={:?} opacity={} blend={:?} used_gpu_canvas={}", rendered_layer.layer_id, rendered_layer.opacity, rendered_layer.blend_mode, used_gpu_canvas); }
                             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("layer_composite_encoder"),
                             });
@@ -1003,6 +1017,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Blit the float GPU canvas on top of all composited layers.
             // The float_mask_view clips to the selection shape (None = full float visible).
+            if dbg_stroke { eprintln!("[FRAME {}] float blit section: raster_floating={}", dbg_frame, self.ctx.selection.raster_floating.is_some()); }
             if let Some(ref float_sel) = self.ctx.selection.raster_floating {
                 let float_canvas_id = float_sel.canvas_id;
                 let float_x = float_sel.x;
@@ -1011,10 +1026,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 let float_h = float_sel.height;
                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
                     if let Some(canvas) = gpu_brush.canvases.get(&float_canvas_id) {
-                        let float_srgb_handle = buffer_pool.acquire(device, layer_spec);
-                        let float_hdr_handle  = buffer_pool.acquire(device, hdr_spec);
-                        if let (Some(fsrgb_view), Some(fhdr_view), Some(hdr_view)) = (
-                            buffer_pool.get_view(float_srgb_handle),
+                        if dbg_stroke { eprintln!("[DRAW] float canvas blit canvas_id={:?} canvas.current={}", float_canvas_id, canvas.current); }
+                        let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
+                        if let (Some(fhdr_view), Some(hdr_view)) = (
                             buffer_pool.get_view(float_hdr_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
@@ -1028,27 +1042,22 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 viewport_h: height as f32,
                                 _pad: 0.0,
                             };
+                            // Blit directly to HDR (straight-alpha linear, no sRGB step)
                             shared.canvas_blit.blit(
                                 device, queue,
                                 canvas.src_view(),
-                                fsrgb_view,
+                                fhdr_view,
                                 &fcamera,
                                 float_mask_view.as_ref(),
                             );
-                            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("float_canvas_srgb_to_linear"),
-                            });
-                            shared.srgb_to_linear.convert(device, &mut enc, fsrgb_view, fhdr_view);
-                            queue.submit(Some(enc.finish()));
-
                             let float_layer = lightningbeam_core::gpu::CompositorLayer::normal(float_hdr_handle, 1.0);
+                            if dbg_stroke { eprintln!("[COMPOSITE] float canvas onto HDR"); }
                             let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("float_canvas_composite"),
                             });
                             shared.compositor.composite(device, queue, &mut enc, &[float_layer], &buffer_pool, hdr_view, None);
                             queue.submit(Some(enc.finish()));
                         }
-                        buffer_pool.release(float_srgb_handle);
                         buffer_pool.release(float_hdr_handle);
                     }
                 }
@@ -2180,6 +2189,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             antialiasing_method: vello::AaConfig::Msaa16,
                         };
 
+                        if self.ctx.painting_canvas.is_some() { eprintln!("[DRAW] overlay Vello render"); }
                         if let Ok(mut renderer) = shared.renderer.lock() {
                             renderer.render_to_texture(device, queue, &scene, overlay_srgb_view, &overlay_params).ok();
                         }
@@ -2193,6 +2203,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                         // Composite overlay onto HDR texture
                         let overlay_layer = lightningbeam_core::gpu::CompositorLayer::normal(overlay_hdr_handle, 1.0);
+                        if self.ctx.painting_canvas.is_some() { eprintln!("[COMPOSITE] overlay onto HDR"); }
                         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("overlay_composite_encoder"),
                         });
