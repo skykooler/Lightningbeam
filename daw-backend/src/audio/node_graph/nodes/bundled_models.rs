@@ -10,22 +10,22 @@ const BUNDLED_MODELS: &[BundledModel] = &[
     BundledModel {
         name: "BossSD1",
         filename: "BossSD1-WaveNet.nam",
-        data: include_bytes!("../../../../../vendor/NeuralAudio/Utils/Models/BossSD1-WaveNet.nam"),
+        data: include_bytes!("../../../../../src/assets/nam_models/BossSD1-WaveNet.nam"),
     },
     BundledModel {
         name: "DeluxeReverb",
         filename: "DeluxeReverb.nam",
-        data: include_bytes!("../../../../../vendor/NeuralAudio/Utils/Models/DeluxeReverb.nam"),
+        data: include_bytes!("../../../../../src/assets/nam_models/DeluxeReverb.nam"),
     },
     BundledModel {
         name: "DingwallBass",
         filename: "DingwallBass.nam",
-        data: include_bytes!("../../../../../vendor/NeuralAudio/Utils/Models/DingwallBass.nam"),
+        data: include_bytes!("../../../../../src/assets/nam_models/DingwallBass.nam"),
     },
     BundledModel {
         name: "Rhythm",
         filename: "Rhythm.nam",
-        data: include_bytes!("../../../../../vendor/NeuralAudio/Utils/Models/Rhythm.nam"),
+        data: include_bytes!("../../../../../src/assets/nam_models/Rhythm.nam"),
     },
 ];
 
