@@ -4720,18 +4720,14 @@ impl StagePane {
         if !is_raster { return; }
 
         let brush = {
-            use lightningbeam_core::brush_settings::BrushSettings;
-            BrushSettings {
-                radius_log: shared.brush_radius.ln(),
-                hardness: *shared.brush_hardness,
-                opaque: *shared.brush_opacity,
-                dabs_per_radius: *shared.brush_spacing,
-                color_h: 0.0,
-                color_s: 0.0,
-                color_v: 0.0,
-                pressure_radius_gain: 0.3,
-                pressure_opacity_gain: 0.8,
-            }
+            // Start from the active preset (carries elliptical ratio/angle, jitter, etc.)
+            // then override the four parameters the user controls via UI sliders.
+            let mut b = shared.active_brush_settings.clone();
+            b.radius_log = shared.brush_radius.ln();
+            b.hardness   = *shared.brush_hardness;
+            b.opaque     = *shared.brush_opacity;
+            b.dabs_per_radius = *shared.brush_spacing;
+            b
         };
 
         let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {

@@ -11,6 +11,7 @@
 /// - Document settings (when nothing is focused)
 
 use eframe::egui::{self, DragValue, Ui};
+use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
 use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction};
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
 use lightningbeam_core::selection::FocusSelection;
@@ -25,6 +26,8 @@ pub struct InfopanelPane {
     tool_section_open: bool,
     /// Whether the shape properties section is expanded
     shape_section_open: bool,
+    /// Index of the selected brush preset (None = custom / unset)
+    selected_brush_preset: Option<usize>,
 }
 
 impl InfopanelPane {
@@ -32,6 +35,7 @@ impl InfopanelPane {
         Self {
             tool_section_open: true,
             shape_section_open: true,
+            selected_brush_preset: None,
         }
     }
 }
@@ -302,6 +306,12 @@ impl InfopanelPane {
 
                     // Raster paint tools
                     Tool::Draw | Tool::Erase | Tool::Smudge if is_raster_paint_tool => {
+                        // Brush preset picker (Draw tool only)
+                        if matches!(tool, Tool::Draw) {
+                            self.render_brush_preset_grid(ui, shared);
+                            ui.add_space(2.0);
+                        }
+
                         // Color source toggle (Draw tool only)
                         if matches!(tool, Tool::Draw) {
                             ui.horizontal(|ui| {
@@ -349,6 +359,81 @@ impl InfopanelPane {
 
                 ui.add_space(4.0);
             });
+    }
+
+    /// Render the brush preset thumbnail grid for the Draw raster tool.
+    fn render_brush_preset_grid(&mut self, ui: &mut Ui, shared: &mut SharedPaneState) {
+        let presets = bundled_brushes();
+        if presets.is_empty() { return; }
+
+        let gap = 3.0;
+        let cols = 2usize;
+        let cell_w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).max(50.0);
+        let cell_h = 80.0;
+
+        for (row_idx, chunk) in presets.chunks(cols).enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (col_idx, preset) in chunk.iter().enumerate() {
+                    let idx = row_idx * cols + col_idx;
+                    let is_selected = self.selected_brush_preset == Some(idx);
+
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(cell_w, cell_h),
+                        egui::Sense::click(),
+                    );
+
+                    let painter = ui.painter();
+
+                    let bg = if is_selected {
+                        egui::Color32::from_rgb(45, 65, 95)
+                    } else if resp.hovered() {
+                        egui::Color32::from_rgb(45, 50, 62)
+                    } else {
+                        egui::Color32::from_rgb(32, 36, 44)
+                    };
+                    painter.rect_filled(rect, 4.0, bg);
+                    if is_selected {
+                        painter.rect_stroke(
+                            rect, 4.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)),
+                            egui::StrokeKind::Middle,
+                        );
+                    }
+
+                    // Dab preview (upper portion, leaving 18 px for the name)
+                    let preview_rect = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(4.0, 4.0),
+                        egui::vec2(cell_w - 8.0, cell_h - 22.0),
+                    );
+                    paint_brush_dab(painter, preview_rect, &preset.settings);
+
+                    // Name
+                    painter.text(
+                        egui::pos2(rect.center().x, rect.max.y - 9.0),
+                        egui::Align2::CENTER_CENTER,
+                        preset.name,
+                        egui::FontId::proportional(9.5),
+                        if is_selected {
+                            egui::Color32::from_rgb(140, 190, 255)
+                        } else {
+                            egui::Color32::from_gray(160)
+                        },
+                    );
+
+                    if resp.clicked() {
+                        self.selected_brush_preset = Some(idx);
+                        let s = &preset.settings;
+                        *shared.brush_radius  = s.radius_at_pressure(0.5).clamp(1.0, 200.0);
+                        *shared.brush_opacity = s.opaque.clamp(0.0, 1.0);
+                        *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                        *shared.brush_spacing = s.dabs_per_radius;
+                        *shared.active_brush_settings = s.clone();
+                    }
+                }
+            });
+            ui.add_space(gap);
+        }
     }
 
     // Transform section: deferred to Phase 2 (DCEL elements don't have instance transforms)
@@ -861,6 +946,40 @@ impl InfopanelPane {
 
                 ui.add_space(4.0);
             });
+    }
+}
+
+/// Draw a brush dab preview into `rect` approximating the brush falloff shape.
+///
+/// Renders N concentric filled circles from outermost to innermost.  Because each
+/// inner circle overwrites the pixels of all outer circles beneath it, the visible
+/// alpha at distance `d` from the centre equals the alpha of the innermost circle
+/// whose radius ≥ `d`.  This step-approximates the actual brush falloff formula:
+/// `opa = ((1 − r) / (1 − hardness))²` for `r > hardness`, 1 inside the hard core.
+fn paint_brush_dab(painter: &egui::Painter, rect: egui::Rect, s: &BrushSettings) {
+    let center = rect.center();
+    let max_r = (rect.width().min(rect.height()) / 2.0 - 2.0).max(1.0);
+    let h = s.hardness;
+    let a = s.opaque;
+
+    const N: usize = 12;
+    for i in 0..N {
+        // t: normalized radial position of this ring, 1.0 = outermost edge
+        let t = 1.0 - i as f32 / N as f32;
+        let r = max_r * t;
+
+        let opa_weight = if h >= 1.0 || t <= h {
+            1.0f32
+        } else {
+            let x = (1.0 - t) / (1.0 - h).max(1e-4);
+            (x * x).min(1.0)
+        };
+
+        let alpha = (opa_weight * a * 220.0).min(220.0) as u8;
+        painter.circle_filled(
+            center, r,
+            egui::Color32::from_rgba_unmultiplied(200, 200, 220, alpha),
+        );
     }
 }
 

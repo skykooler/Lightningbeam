@@ -766,6 +766,8 @@ struct EditorApp {
     brush_hardness: f32, // brush hardness 0.0–1.0
     brush_spacing: f32,  // dabs_per_radius (fraction of radius per dab)
     brush_use_fg: bool,  // true = paint with FG (stroke) color, false = BG (fill) color
+    /// Full brush settings for the currently active preset (carries elliptical, jitter, etc.)
+    active_brush_settings: lightningbeam_core::brush_settings::BrushSettings,
     // Audio engine integration
     #[allow(dead_code)] // Must be kept alive to maintain audio output
     audio_stream: Option<cpal::Stream>,
@@ -1047,6 +1049,7 @@ impl EditorApp {
             brush_hardness: 0.5,
             brush_spacing: 0.1,
             brush_use_fg: true,
+            active_brush_settings: lightningbeam_core::brush_settings::BrushSettings::default(),
             audio_stream,
             audio_controller,
             audio_event_rx,
@@ -5503,6 +5506,7 @@ impl eframe::App for EditorApp {
                     brush_hardness: &mut self.brush_hardness,
                     brush_spacing: &mut self.brush_spacing,
                     brush_use_fg: &mut self.brush_use_fg,
+                    active_brush_settings: &mut self.active_brush_settings,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

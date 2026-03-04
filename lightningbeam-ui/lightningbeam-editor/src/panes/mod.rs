@@ -194,6 +194,8 @@ pub struct SharedPaneState<'a> {
     pub brush_spacing: &'a mut f32,
     /// Whether the brush paints with the foreground (fill) color (true) or background (stroke) color (false)
     pub brush_use_fg: &'a mut bool,
+    /// Full brush settings for the active preset (carries elliptical, jitter, slow_tracking, etc.)
+    pub active_brush_settings: &'a mut lightningbeam_core::brush_settings::BrushSettings,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching

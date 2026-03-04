@@ -20,7 +20,7 @@ struct GpuDab {
     x: f32, y: f32, radius: f32, hardness: f32,             // bytes  0–15
     opacity: f32, color_r: f32, color_g: f32, color_b: f32, // bytes 16–31
     color_a: f32, ndx: f32, ndy: f32, smudge_dist: f32,     // bytes 32–47
-    blend_mode: u32, _pad0: u32, _pad1: u32, _pad2: u32,    // bytes 48–63
+    blend_mode: u32, elliptical_dab_ratio: f32, elliptical_dab_angle: f32, lock_alpha: f32, // bytes 48–63
 }
 
 struct Params {
@@ -76,7 +76,20 @@ fn bilinear_sample(px: f32, py: f32) -> vec4<f32> {
 fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
     let dx = f32(px) + 0.5 - dab.x;
     let dy = f32(py) + 0.5 - dab.y;
-    let rr = (dx * dx + dy * dy) / (dab.radius * dab.radius);
+
+    // Normalised squared distance — supports circular and elliptical dabs.
+    var rr: f32;
+    if dab.elliptical_dab_ratio > 1.001 {
+        // Rotate into the dab's local frame.
+        // Major axis is along dab.elliptical_dab_angle; minor axis is compressed by ratio.
+        let c = cos(dab.elliptical_dab_angle);
+        let s = sin(dab.elliptical_dab_angle);
+        let dx_r =  dx * c + dy * s;                               // along major axis
+        let dy_r = (-dx * s + dy * c) * dab.elliptical_dab_ratio;  // minor axis compressed
+        rr = (dx_r * dx_r + dy_r * dy_r) / (dab.radius * dab.radius);
+    } else {
+        rr = (dx * dx + dy * dy) / (dab.radius * dab.radius);
+    }
     if rr > 1.0 { return current; }
 
     // Quadratic falloff: flat inner core, smooth quadratic outer zone.
@@ -94,15 +107,17 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
     }
 
     if dab.blend_mode == 0u {
-        // Normal: "over" operator
+        // Normal: "over" operator on premultiplied RGBA.
+        // If lock_alpha > 0.5, preserve the destination alpha unchanged.
         let dab_a = opa_weight * dab.opacity * dab.color_a;
         if dab_a <= 0.0 { return current; }
         let ba = 1.0 - dab_a;
+        let out_a = select(dab_a + ba * current.a, current.a, dab.lock_alpha > 0.5);
         return vec4<f32>(
             dab_a * dab.color_r + ba * current.r,
             dab_a * dab.color_g + ba * current.g,
             dab_a * dab.color_b + ba * current.b,
-            dab_a               + ba * current.a,
+            out_a,
         );
     } else if dab.blend_mode == 1u {
         // Erase: multiplicative alpha reduction
