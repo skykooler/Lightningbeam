@@ -276,12 +276,10 @@ impl GpuBrushEngine {
 
     /// Dispatch the brush compute shader for `dabs` onto the canvas of `keyframe_id`.
     ///
-    /// Each dab is dispatched as a separate copy+compute+swap so that every dab
-    /// reads the result of the previous one.  This is required for the smudge tool:
-    /// if all dabs were batched into one dispatch they would all read the pre-batch
-    /// canvas state, breaking the carry-forward that makes smudge drag pixels along.
+    /// Each dab is dispatched serially: copy the dab's bounding box from src→dst,
+    /// dispatch the compute shader, then swap.  The bbox-only copy is safe because
+    /// neither normal/erase nor smudge reads outside the current dab's radius.
     ///
-    /// `dab_bbox` is the union bounding box (unused here; kept for API compat).
     /// If `dabs` is empty, does nothing.
     pub fn render_dabs(
         &mut self,
@@ -294,56 +292,41 @@ impl GpuBrushEngine {
         canvas_h: u32,
     ) {
         if dabs.is_empty() { return; }
-
         if !self.canvases.contains_key(&keyframe_id) { return; }
 
-        let full_extent = wgpu::Extent3d {
-            width:  self.canvases[&keyframe_id].width,
-            height: self.canvases[&keyframe_id].height,
-            depth_or_array_layers: 1,
-        };
-
         for dab in dabs {
-            // Per-dab bounding box
             let r_fringe = dab.radius + 1.0;
-            let dx0 = (dab.x - r_fringe).floor() as i32;
-            let dy0 = (dab.y - r_fringe).floor() as i32;
-            let dx1 = (dab.x + r_fringe).ceil()  as i32;
-            let dy1 = (dab.y + r_fringe).ceil()  as i32;
+            let x0 = ((dab.x - r_fringe).floor() as i32).max(0) as u32;
+            let y0 = ((dab.y - r_fringe).floor() as i32).max(0) as u32;
+            let x1 = ((dab.x + r_fringe).ceil() as i32).min(canvas_w as i32) as u32;
+            let y1 = ((dab.y + r_fringe).ceil() as i32).min(canvas_h as i32) as u32;
+            if x1 <= x0 || y1 <= y0 { continue; }
 
-            let x0 = dx0.max(0) as u32;
-            let y0 = dy0.max(0) as u32;
-            let x1 = (dx1.min(canvas_w as i32 - 1)).max(0) as u32;
-            let y1 = (dy1.min(canvas_h as i32 - 1)).max(0) as u32;
-            if x1 < x0 || y1 < y0 { continue; }
-
-            let bbox_w = x1 - x0 + 1;
-            let bbox_h = y1 - y0 + 1;
+            let bbox_w = x1 - x0;
+            let bbox_h = y1 - y0;
 
             let canvas = self.canvases.get_mut(&keyframe_id).unwrap();
 
-            // Pre-fill dst from src so pixels outside this dab's bbox are preserved.
             let mut copy_enc = device.create_command_encoder(
                 &wgpu::CommandEncoderDescriptor { label: Some("canvas_copy_encoder") },
             );
             copy_enc.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture:  canvas.src(),
+                    texture:   canvas.src(),
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
+                    origin:    wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                    aspect:    wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture:  canvas.dst(),
+                    texture:   canvas.dst(),
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
+                    origin:    wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                    aspect:    wgpu::TextureAspect::All,
                 },
-                full_extent,
+                wgpu::Extent3d { width: bbox_w, height: bbox_h, depth_or_array_layers: 1 },
             );
             queue.submit(Some(copy_enc.finish()));
 
-            // Upload single-dab buffer and params
             let dab_bytes = bytemuck::bytes_of(dab);
             let dab_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label:              Some("dab_storage_buf"),
@@ -354,8 +337,8 @@ impl GpuBrushEngine {
             queue.write_buffer(&dab_buf, 0, dab_bytes);
 
             let params = DabParams {
-                bbox_x0:  x0 as i32,
-                bbox_y0:  y0 as i32,
+                bbox_x0: x0 as i32,
+                bbox_y0: y0 as i32,
                 bbox_w,
                 bbox_h,
                 num_dabs: 1,
@@ -375,22 +358,10 @@ impl GpuBrushEngine {
                 label:  Some("brush_dab_bg"),
                 layout: &self.compute_bg_layout,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: dab_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(canvas.src_view()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(canvas.dst_view()),
-                    },
+                    wgpu::BindGroupEntry { binding: 0, resource: dab_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(canvas.src_view()) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(canvas.dst_view()) },
                 ],
             });
 
@@ -399,18 +370,13 @@ impl GpuBrushEngine {
             );
             {
                 let mut pass = compute_enc.begin_compute_pass(
-                    &wgpu::ComputePassDescriptor {
-                        label: Some("brush_dab_pass"),
-                        timestamp_writes: None,
-                    },
+                    &wgpu::ComputePassDescriptor { label: Some("brush_dab_pass"), timestamp_writes: None },
                 );
                 pass.set_pipeline(&self.compute_pipeline);
                 pass.set_bind_group(0, &bg, &[]);
                 pass.dispatch_workgroups(bbox_w.div_ceil(8), bbox_h.div_ceil(8), 1);
             }
             queue.submit(Some(compute_enc.finish()));
-
-            // Swap: the just-written dst becomes src for the next dab.
             canvas.swap();
         }
     }

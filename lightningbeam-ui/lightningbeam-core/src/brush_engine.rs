@@ -139,7 +139,8 @@ impl BrushEngine {
         if stroke.points.len() < 2 {
             if let Some(pt) = stroke.points.first() {
                 let r = stroke.brush_settings.radius_at_pressure(pt.pressure);
-                let o = stroke.brush_settings.opacity_at_pressure(pt.pressure);
+                let raw_o = stroke.brush_settings.opacity_at_pressure(pt.pressure);
+                let o = 1.0 - (1.0 - raw_o).powf(stroke.brush_settings.dabs_per_radius * 0.5);
                 // Single-tap smudge has no direction — skip (same as CPU engine)
                 if !matches!(stroke.blend_mode, RasterBlendMode::Smudge) {
                     push_dab(&mut dabs, &mut bbox, pt.x, pt.y, r, o, 0.0, 0.0, 0.0);
@@ -177,7 +178,12 @@ impl BrushEngine {
                 let y2 = p0.y + t * dy;
                 let pressure2 = p0.pressure + t * (p1.pressure - p0.pressure);
                 let radius2 = stroke.brush_settings.radius_at_pressure(pressure2);
-                let opacity2 = stroke.brush_settings.opacity_at_pressure(pressure2);
+                let raw_opacity = stroke.brush_settings.opacity_at_pressure(pressure2);
+                // Normalize per-dab opacity so dense dabs don't saturate faster than sparse ones.
+                // Formula: per_dab = 1 − (1 − raw)^(dabs_per_radius / 2)
+                // Derivation: N = 2/dabs_per_radius dabs cover one full diameter at the centre;
+                // accumulated = 1 − (1 − per_dab)^N = raw  →  per_dab = 1 − (1−raw)^(dabs_per_radius/2)
+                let opacity2 = 1.0 - (1.0 - raw_opacity).powf(stroke.brush_settings.dabs_per_radius * 0.5);
 
                 if matches!(stroke.blend_mode, RasterBlendMode::Smudge) {
                     let ndx = dx / seg_len;
