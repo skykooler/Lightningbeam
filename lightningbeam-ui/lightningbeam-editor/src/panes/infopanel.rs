@@ -329,10 +329,9 @@ impl InfopanelPane {
                             ui.add(egui::Slider::new(shared.smudge_radius, 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Reach:");
-                            ui.add(egui::Slider::new(shared.smudge_strength, 0.1_f32..=5.0)
-                                .logarithmic(true)
-                                .custom_formatter(|v, _| format!("{:.2}x", v)));
+                            ui.label("Strength:");
+                            ui.add(egui::Slider::new(shared.smudge_strength, 0.0_f32..=1.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                         });
                         ui.horizontal(|ui| {
                             ui.label("Hardness:");

@@ -4812,7 +4812,7 @@ impl StagePane {
                 b.dabs_per_actual_radius = 0.0;
                 // strength controls how far behind the stroke to sample (smudge_dist multiplier).
                 // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
-                b.smudge_radius_log = shared.smudge_strength.ln();
+                b.smudge_radius_log = *shared.smudge_strength; // linear [0,1] strength
             }
             b
         };

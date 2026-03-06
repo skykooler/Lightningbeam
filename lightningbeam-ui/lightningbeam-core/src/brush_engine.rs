@@ -461,7 +461,10 @@ impl BrushEngine {
                 if matches!(base_blend, RasterBlendMode::Smudge) {
                     let ndx = dx / seg_len;
                     let ndy = dy / seg_len;
-                    let smudge_dist = radius2 * bs.smudge_radius_log.exp();
+                    // strength=1.0 → sample from 1 dab back (drag pixels with us).
+                    // strength=0.0 → sample from current position (no change).
+                    // smudge_radius_log is repurposed as a linear [0,1] strength value here.
+                    let smudge_dist = spacing_px * bs.smudge_radius_log.clamp(0.0, 1.0);
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
                              ndx, ndy, smudge_dist);

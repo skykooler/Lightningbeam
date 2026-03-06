@@ -276,15 +276,9 @@ impl GpuBrushEngine {
 
     /// Dispatch the brush compute shader for `dabs` onto the canvas of `keyframe_id`.
     ///
-    /// All dabs for the frame are batched into a single GPU dispatch:
-    /// 1. Copy the FULL canvas src→dst (so dst has all previous dabs).
-    /// 2. Upload all dabs as one storage buffer.
-    /// 3. Dispatch the compute shader once over the union bounding box.
-    /// 4. Swap once.
-    ///
-    /// Batching is required for correctness: a per-dab copy of only the dab's
-    /// bounding box would leave all other previous dabs missing from dst after swap,
-    /// causing every other dab to flicker in/out.
+    /// Paint/erase dabs are batched in a single GPU dispatch with a full canvas copy.
+    /// Smudge dabs are dispatched sequentially (one per dab) with a bbox-only copy
+    /// so each dab reads the canvas state written by the previous dab.
     ///
     /// If `dabs` is empty, does nothing.
     pub fn render_dabs(
@@ -298,12 +292,65 @@ impl GpuBrushEngine {
         canvas_h: u32,
     ) {
         if dabs.is_empty() { return; }
+
+        // Smudge dabs must be applied one at a time so each dab reads the canvas
+        // state written by the previous dab.  Use bbox-only copies (union of current
+        // and previous dab) to avoid an expensive full-canvas copy per dab.
+        let is_smudge = dabs.first().map(|d| d.blend_mode == 2).unwrap_or(false);
+        if is_smudge {
+            let mut prev_bbox: Option<(i32, i32, i32, i32)> = None;
+            for dab in dabs {
+                let r = dab.radius + 1.0;
+                let cur_bbox = (
+                    (dab.x - r).floor() as i32,
+                    (dab.y - r).floor() as i32,
+                    (dab.x + r).ceil()  as i32,
+                    (dab.y + r).ceil()  as i32,
+                );
+                // Expand copy region to include the previous dab's bbox so the
+                // pixels it wrote are visible as the source for this dab's smudge.
+                let copy_bbox = match prev_bbox {
+                    Some(pb) => (cur_bbox.0.min(pb.0), cur_bbox.1.min(pb.1),
+                                 cur_bbox.2.max(pb.2), cur_bbox.3.max(pb.3)),
+                    None     => cur_bbox,
+                };
+                self.render_dabs_batch(device, queue, keyframe_id,
+                    std::slice::from_ref(dab), cur_bbox, Some(copy_bbox), canvas_w, canvas_h);
+                prev_bbox = Some(cur_bbox);
+            }
+        } else {
+            self.render_dabs_batch(device, queue, keyframe_id, dabs, bbox, None, canvas_w, canvas_h);
+        }
+    }
+
+    /// Inner batch dispatch.
+    ///
+    /// `dispatch_bbox` — region dispatched to the compute shader (usually the union of all dab bboxes).
+    /// `copy_bbox`     — region to copy src→dst before dispatch:
+    ///   - `None`      → copy the full canvas (required for paint/erase batches so
+    ///                   dabs outside the current frame's region are preserved).
+    ///   - `Some(r)`   → copy only region `r` (sufficient for sequential smudge dabs
+    ///                   because both textures hold identical data outside previously
+    ///                   touched regions, so no full copy is needed).
+    fn render_dabs_batch(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        keyframe_id: Uuid,
+        dabs:        &[GpuDab],
+        dispatch_bbox: (i32, i32, i32, i32),
+        copy_bbox:   Option<(i32, i32, i32, i32)>,
+        canvas_w: u32,
+        canvas_h: u32,
+    ) {
+        if dabs.is_empty() { return; }
         let canvas = match self.canvases.get_mut(&keyframe_id) {
             Some(c) => c,
             None => return,
         };
 
-        // Clamp the union bounding box to canvas bounds.
+        // Clamp the dispatch bounding box to canvas bounds.
+        let bbox = dispatch_bbox;
         let x0 = bbox.0.max(0) as u32;
         let y0 = bbox.1.max(0) as u32;
         let x1 = (bbox.2 as u32).min(canvas_w);
@@ -312,26 +359,58 @@ impl GpuBrushEngine {
         let bbox_w = x1 - x0;
         let bbox_h = y1 - y0;
 
-        // Step 1: Copy the ENTIRE canvas src→dst so dst starts with all previous dabs.
-        // A bbox-only copy would lose previous dabs outside this frame's region after swap.
+        // Step 1: Copy src→dst.
+        // For paint/erase batches (copy_bbox = None): copy the ENTIRE canvas so dst
+        //   starts with all previous dabs — a bbox-only copy would lose dabs outside
+        //   this frame's region after swap.
+        // For smudge (copy_bbox = Some(r)): copy only the union of the current and
+        //   previous dab bboxes.  Outside that region both textures hold identical
+        //   data so no full copy is needed.
         let mut copy_enc = device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("canvas_full_copy_encoder") },
+            &wgpu::CommandEncoderDescriptor { label: Some("canvas_copy_encoder") },
         );
-        copy_enc.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture:   canvas.src(),
-                mip_level: 0,
-                origin:    wgpu::Origin3d::ZERO,
-                aspect:    wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture:   canvas.dst(),
-                mip_level: 0,
-                origin:    wgpu::Origin3d::ZERO,
-                aspect:    wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d { width: canvas_w, height: canvas_h, depth_or_array_layers: 1 },
-        );
+        match copy_bbox {
+            None => {
+                copy_enc.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture:   canvas.src(),
+                        mip_level: 0,
+                        origin:    wgpu::Origin3d::ZERO,
+                        aspect:    wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture:   canvas.dst(),
+                        mip_level: 0,
+                        origin:    wgpu::Origin3d::ZERO,
+                        aspect:    wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d { width: canvas_w, height: canvas_h, depth_or_array_layers: 1 },
+                );
+            }
+            Some(cb) => {
+                let cx0 = cb.0.max(0) as u32;
+                let cy0 = cb.1.max(0) as u32;
+                let cx1 = (cb.2 as u32).min(canvas_w);
+                let cy1 = (cb.3 as u32).min(canvas_h);
+                if cx1 > cx0 && cy1 > cy0 {
+                    copy_enc.copy_texture_to_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture:   canvas.src(),
+                            mip_level: 0,
+                            origin:    wgpu::Origin3d { x: cx0, y: cy0, z: 0 },
+                            aspect:    wgpu::TextureAspect::All,
+                        },
+                        wgpu::TexelCopyTextureInfo {
+                            texture:   canvas.dst(),
+                            mip_level: 0,
+                            origin:    wgpu::Origin3d { x: cx0, y: cy0, z: 0 },
+                            aspect:    wgpu::TextureAspect::All,
+                        },
+                        wgpu::Extent3d { width: cx1 - cx0, height: cy1 - cy0, depth_or_array_layers: 1 },
+                    );
+                }
+            }
+        }
         queue.submit(Some(copy_enc.finish()));
 
         // Step 2: Upload all dabs as a single storage buffer.
