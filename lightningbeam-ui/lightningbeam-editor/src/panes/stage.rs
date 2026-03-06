@@ -617,6 +617,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 clone_src_offset: None,
                                 pattern_type: 0,
                                 pattern_scale: 32.0,
+                                dodge_burn_mode: 0,
                                 points: vec![
                                     StrokePoint { x: x0,    y: y_lo,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
                                     StrokePoint { x: mid_x, y: mid_y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
@@ -4885,6 +4886,13 @@ impl StagePane {
                     *shared.smudge_hardness,
                     *shared.smudge_spacing,
                 ),
+                RasterBlendMode::DodgeBurn => (
+                    lightningbeam_core::brush_settings::BrushSettings::default(),
+                    *shared.dodge_burn_radius,
+                    *shared.dodge_burn_exposure,
+                    *shared.dodge_burn_hardness,
+                    *shared.dodge_burn_spacing,
+                ),
                 _ => (
                     shared.active_brush_settings.clone(),
                     *shared.brush_radius,
@@ -4978,6 +4986,7 @@ impl StagePane {
                     clone_src_offset: self.clone_stroke_offset,
                     pattern_type: *shared.pattern_type,
                     pattern_scale: *shared.pattern_scale,
+                    dodge_burn_mode: *shared.dodge_burn_mode,
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5069,6 +5078,7 @@ impl StagePane {
                     clone_src_offset: self.clone_stroke_offset,
                     pattern_type: *shared.pattern_type,
                     pattern_scale: *shared.pattern_scale,
+                    dodge_burn_mode: *shared.dodge_burn_mode,
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5156,6 +5166,7 @@ impl StagePane {
                             clone_src_offset,
                             pattern_type: *shared.pattern_type,
                             pattern_scale: *shared.pattern_scale,
+                            dodge_burn_mode: *shared.dodge_burn_mode,
                             points: vec![prev_pt, curr_local],
                         };
                         let current_time = ui.input(|i| i.time);
@@ -5220,6 +5231,7 @@ impl StagePane {
                             clone_src_offset: self.clone_stroke_offset,
                             pattern_type: *shared.pattern_type,
                             pattern_scale: *shared.pattern_scale,
+                            dodge_burn_mode: *shared.dodge_burn_mode,
                             points: vec![pt],
                         };
                         let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, stroke_state, dt);
@@ -7586,6 +7598,9 @@ impl StagePane {
                 Tool::PatternStamp => {
                     self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::PatternStamp, shared);
                 }
+                Tool::DodgeBurn => {
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::DodgeBurn, shared);
+                }
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
                 }
@@ -8066,8 +8081,8 @@ impl StagePane {
             Tool::Erase => (*shared.eraser_radius, *shared.eraser_radius, 0.0_f32),
             Tool::Smudge
             | Tool::BlurSharpen
-            | Tool::DodgeBurn
             | Tool::Sponge => (*shared.smudge_radius, *shared.smudge_radius, 0.0_f32),
+            Tool::DodgeBurn => (*shared.dodge_burn_radius, *shared.dodge_burn_radius, 0.0_f32),
             _ => {
                 let bs = &shared.active_brush_settings;
                 let r = *shared.brush_radius;

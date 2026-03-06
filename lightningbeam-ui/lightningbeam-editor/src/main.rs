@@ -806,6 +806,12 @@ struct EditorApp {
     /// Pattern stamp settings
     pattern_type:  u32,
     pattern_scale: f32,
+    /// Dodge/Burn tool settings
+    dodge_burn_radius:   f32,
+    dodge_burn_hardness: f32,
+    dodge_burn_spacing:  f32,
+    dodge_burn_exposure: f32,
+    dodge_burn_mode:     u32,
     /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
     brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
@@ -1107,6 +1113,11 @@ impl EditorApp {
             smudge_strength: 1.0,
             pattern_type:  0,
             pattern_scale: 32.0,
+            dodge_burn_radius:   30.0,
+            dodge_burn_hardness: 0.5,
+            dodge_burn_spacing:  3.0,
+            dodge_burn_exposure: 0.5,
+            dodge_burn_mode:     0,
             brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
@@ -5577,6 +5588,11 @@ impl eframe::App for EditorApp {
                     smudge_strength: &mut self.smudge_strength,
                     pattern_type:  &mut self.pattern_type,
                     pattern_scale: &mut self.pattern_scale,
+                    dodge_burn_radius:   &mut self.dodge_burn_radius,
+                    dodge_burn_hardness: &mut self.dodge_burn_hardness,
+                    dodge_burn_spacing:  &mut self.dodge_burn_spacing,
+                    dodge_burn_exposure: &mut self.dodge_burn_exposure,
+                    dodge_burn_mode:     &mut self.dodge_burn_mode,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

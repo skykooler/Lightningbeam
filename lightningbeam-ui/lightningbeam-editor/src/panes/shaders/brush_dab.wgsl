@@ -240,6 +240,26 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             alpha * corrected.b + ba * current.b,
             alpha * corrected.a + ba * current.a,
         );
+    } else if dab.blend_mode == 6u {
+        // Dodge / Burn: power-curve exposure adjustment.
+        // color_r: 0.0 = dodge, 1.0 = burn
+        // Uses pow(channel, gamma) which is asymmetric across channels:
+        //   burn  (gamma > 1): low channels compressed toward 0 faster than high ones → saturation increases
+        //   dodge (gamma < 1): low channels lifted faster than high ones → saturation decreases
+        // This matches the behaviour of GIMP / Photoshop dodge-burn tools.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let rgb = max(current.rgb, vec3<f32>(0.0));
+        var adjusted: vec3<f32>;
+        if dab.color_r < 0.5 {
+            // Dodge: gamma < 1 → brightens
+            adjusted = pow(rgb, vec3<f32>(max(1.0 - s, 0.001)));
+        } else {
+            // Burn: gamma > 1 → darkens and increases saturation
+            adjusted = pow(rgb, vec3<f32>(1.0 + s));
+        }
+        return vec4<f32>(clamp(adjusted, vec3<f32>(0.0), vec3<f32>(1.0)), current.a);
     } else {
         return current;
     }

@@ -305,6 +305,7 @@ impl BrushEngine {
             RasterBlendMode::CloneStamp => 3u32,
             RasterBlendMode::Healing      => 4u32,
             RasterBlendMode::PatternStamp => 5u32,
+            RasterBlendMode::DodgeBurn    => 6u32,
         };
 
         let push_dab = |dabs: &mut Vec<GpuDab>,
@@ -327,7 +328,7 @@ impl BrushEngine {
                 color_b: cb,
                 // Clone stamp: color_r/color_g hold source canvas X/Y, so color_a = 1.0
                 // (blend strength is opa_weight × opacity × 1.0 in the shader).
-                color_a: if blend_mode_u == 3 || blend_mode_u == 4 { 1.0 } else { stroke.color[3] },
+                color_a: if blend_mode_u == 3 || blend_mode_u == 4 || blend_mode_u == 6 { 1.0 } else { stroke.color[3] },
                 ndx, ndy, smudge_dist,
                 blend_mode: blend_mode_u,
                 elliptical_dab_ratio: bs.elliptical_dab_ratio.max(1.0),
@@ -368,6 +369,9 @@ impl BrushEngine {
                         } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
                             // ndx = pattern_type, ndy = pattern_scale
                             (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
+                        } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
+                            // color_r = mode (0=dodge, 1=burn); strength comes from opacity
+                            (stroke.dodge_burn_mode as f32, 0.0, 0.0, 0.0, 0.0)
                         } else {
                             (cr, cg, cb, 0.0, 0.0)
                         };
@@ -495,6 +499,12 @@ impl BrushEngine {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
                              stroke.pattern_type as f32, stroke.pattern_scale, 0.0);
+                } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
+                    // color_r = mode (0=dodge, 1=burn)
+                    push_dab(&mut dabs, &mut bbox,
+                             ex, ey, radius2, opacity2,
+                             stroke.dodge_burn_mode as f32, 0.0, 0.0,
+                             0.0, 0.0, 0.0);
                 } else {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
@@ -534,6 +544,9 @@ impl BrushEngine {
                 } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
                     // ndx = pattern_type, ndy = pattern_scale
                     (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
+                } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
+                    // color_r = mode (0=dodge, 1=burn)
+                    (stroke.dodge_burn_mode as f32, 0.0, 0.0, 0.0, 0.0)
                 } else {
                     (cr, cg, cb, 0.0, 0.0)
                 };

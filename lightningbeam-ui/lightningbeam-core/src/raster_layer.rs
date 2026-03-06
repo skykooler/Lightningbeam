@@ -24,6 +24,8 @@ pub enum RasterBlendMode {
     Healing,
     /// Pattern stamp: paint with a repeating procedural tile pattern
     PatternStamp,
+    /// Dodge / Burn: lighten (dodge) or darken (burn) existing pixels
+    DodgeBurn,
 }
 
 impl Default for RasterBlendMode {
@@ -65,6 +67,9 @@ pub struct StrokeRecord {
     /// Pattern stamp: tile size in pixels
     #[serde(default = "default_pattern_scale")]
     pub pattern_scale: f32,
+    /// Dodge/Burn mode: 0 = dodge (lighten), 1 = burn (darken)
+    #[serde(default)]
+    pub dodge_burn_mode: u32,
     pub points: Vec<StrokePoint>,
 }
 

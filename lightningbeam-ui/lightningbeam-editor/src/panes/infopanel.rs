@@ -173,6 +173,7 @@ impl InfopanelPane {
             tool,
             Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
             | Tool::Erase | Tool::Smudge | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
+            | Tool::DodgeBurn
         );
 
         // Only show tool options for tools that have options
@@ -197,6 +198,7 @@ impl InfopanelPane {
                 Tool::CloneStamp => "Clone Stamp",
                 Tool::HealingBrush => "Healing Brush",
                 Tool::PatternStamp => "Pattern Stamp",
+                Tool::DodgeBurn   => "Dodge / Burn",
                 _ => "Brush",
             }
         } else {
@@ -356,6 +358,37 @@ impl InfopanelPane {
                         });
                         ui.add_space(4.0);
                         self.render_raster_tool_options(ui, shared, false);
+                    }
+
+                    Tool::DodgeBurn if is_raster_paint_tool => {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(*shared.dodge_burn_mode == 0, "Dodge").clicked() {
+                                *shared.dodge_burn_mode = 0;
+                            }
+                            if ui.selectable_label(*shared.dodge_burn_mode == 1, "Burn").clicked() {
+                                *shared.dodge_burn_mode = 1;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Size:");
+                            ui.add(egui::Slider::new(shared.dodge_burn_radius, 1.0_f32..=500.0).logarithmic(true).suffix(" px"));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Exposure:");
+                            ui.add(egui::Slider::new(shared.dodge_burn_exposure, 0.0_f32..=1.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hardness:");
+                            ui.add(egui::Slider::new(shared.dodge_burn_hardness, 0.0_f32..=1.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Spacing:");
+                            ui.add(egui::Slider::new(shared.dodge_burn_spacing, 0.5_f32..=20.0)
+                                .logarithmic(true)
+                                .custom_formatter(|v, _| format!("{:.1}", v)));
+                        });
                     }
 
                     Tool::Smudge if is_raster_paint_tool => {

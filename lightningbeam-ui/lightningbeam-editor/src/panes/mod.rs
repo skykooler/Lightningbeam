@@ -212,6 +212,13 @@ pub struct SharedPaneState<'a> {
     pub pattern_type:  &'a mut u32,
     /// Pattern stamp: tile size in pixels
     pub pattern_scale: &'a mut f32,
+    /// Dodge/Burn tool settings
+    pub dodge_burn_radius:   &'a mut f32,
+    pub dodge_burn_hardness: &'a mut f32,
+    pub dodge_burn_spacing:  &'a mut f32,
+    pub dodge_burn_exposure: &'a mut f32,
+    /// 0 = dodge (lighten), 1 = burn (darken)
+    pub dodge_burn_mode: &'a mut u32,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching
