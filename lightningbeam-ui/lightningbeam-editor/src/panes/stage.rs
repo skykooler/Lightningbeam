@@ -7518,6 +7518,9 @@ impl StagePane {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
                 }
+                Tool::Pencil | Tool::Pen | Tool::Airbrush => {
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Normal, shared);
+                }
                 Tool::Erase => {
                     self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Erase, shared);
                 }
@@ -8001,8 +8004,11 @@ impl StagePane {
 
         // Compute semi-axes (world pixels) and dab rotation angle.
         let (a_world, b_world, dab_angle_rad) = match *shared.selected_tool {
-            Tool::Erase  => (*shared.eraser_radius, *shared.eraser_radius, 0.0_f32),
-            Tool::Smudge => (*shared.smudge_radius, *shared.smudge_radius, 0.0_f32),
+            Tool::Erase => (*shared.eraser_radius, *shared.eraser_radius, 0.0_f32),
+            Tool::Smudge
+            | Tool::BlurSharpen
+            | Tool::DodgeBurn
+            | Tool::Sponge => (*shared.smudge_radius, *shared.smudge_radius, 0.0_f32),
             _ => {
                 let bs = &shared.active_brush_settings;
                 let r = *shared.brush_radius;
@@ -8637,7 +8643,10 @@ impl PaneRenderer for StagePane {
                 use lightningbeam_core::tool::Tool;
                 let is_raster_paint = matches!(
                     *shared.selected_tool,
-                    Tool::Draw | Tool::Erase | Tool::Smudge
+                    Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
+                    | Tool::Erase | Tool::Smudge
+                    | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
+                    | Tool::DodgeBurn | Tool::Sponge | Tool::BlurSharpen
                 ) && shared.active_layer_id.and_then(|id| {
                     shared.action_executor.document().get_layer(&id)
                 }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));

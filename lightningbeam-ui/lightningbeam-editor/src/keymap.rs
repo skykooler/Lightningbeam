@@ -429,24 +429,26 @@ impl AppAction {
 /// `Tool::Split` has no tool-shortcut action (it's triggered via the menu).
 pub fn tool_app_action(tool: lightningbeam_core::tool::Tool) -> Option<AppAction> {
     use lightningbeam_core::tool::Tool;
-    Some(match tool {
-        Tool::Select      => AppAction::ToolSelect,
-        Tool::Draw        => AppAction::ToolDraw,
-        Tool::Transform   => AppAction::ToolTransform,
-        Tool::Rectangle   => AppAction::ToolRectangle,
-        Tool::Ellipse     => AppAction::ToolEllipse,
-        Tool::PaintBucket => AppAction::ToolPaintBucket,
-        Tool::Eyedropper  => AppAction::ToolEyedropper,
-        Tool::Line        => AppAction::ToolLine,
-        Tool::Polygon     => AppAction::ToolPolygon,
-        Tool::BezierEdit  => AppAction::ToolBezierEdit,
-        Tool::Text        => AppAction::ToolText,
-        Tool::RegionSelect => AppAction::ToolRegionSelect,
-        Tool::Erase       => AppAction::ToolErase,
-        Tool::Smudge      => AppAction::ToolSmudge,
-        Tool::SelectLasso => AppAction::ToolSelectLasso,
-        Tool::Split       => AppAction::ToolSplit,
-    })
+    match tool {
+        Tool::Select      => Some(AppAction::ToolSelect),
+        Tool::Draw        => Some(AppAction::ToolDraw),
+        Tool::Transform   => Some(AppAction::ToolTransform),
+        Tool::Rectangle   => Some(AppAction::ToolRectangle),
+        Tool::Ellipse     => Some(AppAction::ToolEllipse),
+        Tool::PaintBucket => Some(AppAction::ToolPaintBucket),
+        Tool::Eyedropper  => Some(AppAction::ToolEyedropper),
+        Tool::Line        => Some(AppAction::ToolLine),
+        Tool::Polygon     => Some(AppAction::ToolPolygon),
+        Tool::BezierEdit  => Some(AppAction::ToolBezierEdit),
+        Tool::Text        => Some(AppAction::ToolText),
+        Tool::RegionSelect => Some(AppAction::ToolRegionSelect),
+        Tool::Erase       => Some(AppAction::ToolErase),
+        Tool::Smudge      => Some(AppAction::ToolSmudge),
+        Tool::SelectLasso => Some(AppAction::ToolSelectLasso),
+        Tool::Split       => Some(AppAction::ToolSplit),
+        // New tools have no keybinding yet
+        _ => None,
+    }
 }
 
 // === Default bindings ===

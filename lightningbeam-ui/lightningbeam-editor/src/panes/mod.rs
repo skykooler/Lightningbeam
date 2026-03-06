@@ -283,6 +283,8 @@ pub struct SharedPaneState<'a> {
     pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
     /// Region select mode (Rectangle or Lasso)
     pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
+    /// Lasso select sub-mode (Freehand / Polygonal / Magnetic)
+    pub lasso_mode: &'a mut lightningbeam_core::tool::LassoMode,
     /// Counter for in-flight graph preset loads — increment when sending a
     /// GraphLoadPreset command so the repaint loop stays alive until the
     /// audio thread sends GraphPresetLoaded back

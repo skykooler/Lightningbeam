@@ -124,7 +124,7 @@
       "children": [
         {
           "type": "vertical-grid",
-          "percent": 30,
+          "percent": 67,
           "children": [
             { "type": "pane", "name": "toolbar" },
             { "type": "pane", "name": "infopanel" }

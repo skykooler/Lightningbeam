@@ -332,6 +332,7 @@ mod tool_icons {
     pub static ERASE: &[u8] = include_bytes!("../../../src/assets/erase.svg");
     pub static SMUDGE: &[u8] = include_bytes!("../../../src/assets/smudge.svg");
     pub static LASSO: &[u8] = include_bytes!("../../../src/assets/lasso.svg");
+    pub static TODO: &[u8] = include_bytes!("../../../src/assets/todo.svg");
 }
 
 /// Embedded focus icon SVGs
@@ -399,11 +400,28 @@ impl ToolIconCache {
                 Tool::Polygon => tool_icons::POLYGON,
                 Tool::BezierEdit => tool_icons::BEZIER_EDIT,
                 Tool::Text => tool_icons::TEXT,
-                Tool::RegionSelect => tool_icons::SELECT, // Reuse select icon for now
+                Tool::RegionSelect => tool_icons::SELECT,
                 Tool::Split => tool_icons::SPLIT,
                 Tool::Erase => tool_icons::ERASE,
                 Tool::Smudge => tool_icons::SMUDGE,
                 Tool::SelectLasso => tool_icons::LASSO,
+                // Not yet implemented — use placeholder icon
+                Tool::Pencil
+                | Tool::Pen
+                | Tool::Airbrush
+                | Tool::CloneStamp
+                | Tool::HealingBrush
+                | Tool::PatternStamp
+                | Tool::DodgeBurn
+                | Tool::Sponge
+                | Tool::BlurSharpen
+                | Tool::Gradient
+                | Tool::CustomShape
+                | Tool::SelectEllipse
+                | Tool::MagicWand
+                | Tool::QuickSelect
+                | Tool::Warp
+                | Tool::Liquify => tool_icons::TODO,
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -856,6 +874,7 @@ struct EditorApp {
     // Region select state
     region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     region_select_mode: lightningbeam_core::tool::RegionSelectMode,
+    lasso_mode: lightningbeam_core::tool::LassoMode,
 
     // VU meter levels
     input_level: f32,
@@ -1127,6 +1146,7 @@ impl EditorApp {
             polygon_sides: 5,                // Default to pentagon
             region_selection: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
+            lasso_mode: lightningbeam_core::tool::LassoMode::default(),
             input_level: 0.0,
             output_level: (0.0, 0.0),
             track_levels: HashMap::new(),
@@ -5590,6 +5610,7 @@ impl eframe::App for EditorApp {
                     script_saved: &mut self.script_saved,
                     region_selection: &mut self.region_selection,
                     region_select_mode: &mut self.region_select_mode,
+                    lasso_mode: &mut self.lasso_mode,
                     pending_graph_loads: &self.pending_graph_loads,
                     clipboard_consumed: &mut clipboard_consumed,
                     keymap: &self.keymap,

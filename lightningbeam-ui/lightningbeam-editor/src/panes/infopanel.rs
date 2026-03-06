@@ -169,7 +169,10 @@ impl InfopanelPane {
             .and_then(|id| shared.action_executor.document().get_layer(&id))
             .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        let is_raster_paint_tool = active_is_raster && matches!(tool, Tool::Draw | Tool::Erase | Tool::Smudge);
+        let is_raster_paint_tool = active_is_raster && matches!(
+            tool,
+            Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush | Tool::Erase | Tool::Smudge
+        );
 
         // Only show tool options for tools that have options
         let is_vector_tool = !active_is_raster && matches!(
@@ -319,7 +322,7 @@ impl InfopanelPane {
                     }
 
                     // Raster paint tools
-                    Tool::Draw | Tool::Erase if is_raster_paint_tool => {
+                    Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush | Tool::Erase if is_raster_paint_tool => {
                         self.render_raster_tool_options(ui, shared, matches!(tool, Tool::Erase));
                     }
 
@@ -513,6 +516,11 @@ impl InfopanelPane {
                                 *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
                                 *shared.brush_spacing  = s.dabs_per_radius;
                                 *shared.active_brush_settings = s.clone();
+                                // If the user was on a preset-backed tool (Pencil/Pen/Airbrush)
+                                // and manually picked a different brush, revert to the generic tool.
+                                if matches!(*shared.selected_tool, Tool::Pencil | Tool::Pen | Tool::Airbrush) {
+                                    *shared.selected_tool = Tool::Draw;
+                                }
                             }
                         }
                     }
