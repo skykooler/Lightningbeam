@@ -67,7 +67,7 @@
             "inputs": {}
         },
         "dabs_per_second": {
-            "base_value": 0.0,
+            "base_value": 30.0,
             "inputs": {}
         },
         "direction_filter": {

@@ -768,6 +768,8 @@ struct EditorApp {
     brush_use_fg: bool,  // true = paint with FG (stroke) color, false = BG (fill) color
     /// Full brush settings for the currently active preset (carries elliptical, jitter, etc.)
     active_brush_settings: lightningbeam_core::brush_settings::BrushSettings,
+    /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
+    brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
     #[allow(dead_code)] // Must be kept alive to maintain audio output
     audio_stream: Option<cpal::Stream>,
@@ -1050,6 +1052,7 @@ impl EditorApp {
             brush_spacing: 0.1,
             brush_use_fg: true,
             active_brush_settings: lightningbeam_core::brush_settings::BrushSettings::default(),
+            brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
             audio_event_rx,
@@ -5557,6 +5560,7 @@ impl eframe::App for EditorApp {
                     test_mode: &mut self.test_mode,
                     #[cfg(debug_assertions)]
                     synthetic_input: &mut synthetic_input_storage,
+                    brush_preview_pixels: &self.brush_preview_pixels,
                 },
                 pane_instances: &mut self.pane_instances,
             };

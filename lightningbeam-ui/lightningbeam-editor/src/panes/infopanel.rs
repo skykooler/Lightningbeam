@@ -28,6 +28,8 @@ pub struct InfopanelPane {
     shape_section_open: bool,
     /// Index of the selected brush preset (None = custom / unset)
     selected_brush_preset: Option<usize>,
+    /// Cached preview textures, one per preset (populated lazily).
+    brush_preview_textures: Vec<egui::TextureHandle>,
 }
 
 impl InfopanelPane {
@@ -36,6 +38,7 @@ impl InfopanelPane {
             tool_section_open: true,
             shape_section_open: true,
             selected_brush_preset: None,
+            brush_preview_textures: Vec::new(),
         }
     }
 }
@@ -366,6 +369,27 @@ impl InfopanelPane {
         let presets = bundled_brushes();
         if presets.is_empty() { return; }
 
+        // Build preview TextureHandles from GPU-rendered pixel data when available.
+        if self.brush_preview_textures.len() != presets.len() {
+            if let Ok(previews) = shared.brush_preview_pixels.try_lock() {
+                if previews.len() == presets.len() {
+                    self.brush_preview_textures.clear();
+                    for (idx, (w, h, pixels)) in previews.iter().enumerate() {
+                        let image = egui::ColorImage::from_rgba_premultiplied(
+                            [*w as usize, *h as usize],
+                            pixels,
+                        );
+                        let handle = ui.ctx().load_texture(
+                            format!("brush_preview_{}", presets[idx].name),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.brush_preview_textures.push(handle);
+                    }
+                }
+            }
+        }
+
         let gap = 3.0;
         let cols = 2usize;
         let cell_w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).max(50.0);
@@ -406,7 +430,13 @@ impl InfopanelPane {
                         rect.min + egui::vec2(4.0, 4.0),
                         egui::vec2(cell_w - 8.0, cell_h - 22.0),
                     );
-                    paint_brush_dab(painter, preview_rect, &preset.settings);
+                    if let Some(tex) = self.brush_preview_textures.get(idx) {
+                        painter.image(
+                            tex.id(), preview_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
 
                     // Name
                     painter.text(
@@ -424,10 +454,11 @@ impl InfopanelPane {
                     if resp.clicked() {
                         self.selected_brush_preset = Some(idx);
                         let s = &preset.settings;
-                        *shared.brush_radius  = s.radius_at_pressure(0.5).clamp(1.0, 200.0);
-                        *shared.brush_opacity = s.opaque.clamp(0.0, 1.0);
+                        // Size is intentionally NOT reset — it is global and persists
+                        // across preset switches.  All other parameters load from preset.
+                        *shared.brush_opacity  = s.opaque.clamp(0.0, 1.0);
                         *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                        *shared.brush_spacing = s.dabs_per_radius;
+                        *shared.brush_spacing  = s.dabs_per_radius;
                         *shared.active_brush_settings = s.clone();
                     }
                 }

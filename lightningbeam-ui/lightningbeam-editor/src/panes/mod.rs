@@ -293,6 +293,10 @@ pub struct SharedPaneState<'a> {
     /// Synthetic input from test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     pub synthetic_input: &'a mut Option<crate::test_mode::SyntheticInput>,
+    /// GPU-rendered brush preview thumbnails.  Populated by `VelloCallback::prepare()`
+    /// on the first frame; panes (e.g. infopanel) convert the pixel data to egui
+    /// TextureHandles.  Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
+    pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
 }
 
 /// Trait for pane rendering

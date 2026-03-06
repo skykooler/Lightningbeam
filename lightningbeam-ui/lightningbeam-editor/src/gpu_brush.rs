@@ -276,9 +276,15 @@ impl GpuBrushEngine {
 
     /// Dispatch the brush compute shader for `dabs` onto the canvas of `keyframe_id`.
     ///
-    /// Each dab is dispatched serially: copy the dab's bounding box from src→dst,
-    /// dispatch the compute shader, then swap.  The bbox-only copy is safe because
-    /// neither normal/erase nor smudge reads outside the current dab's radius.
+    /// All dabs for the frame are batched into a single GPU dispatch:
+    /// 1. Copy the FULL canvas src→dst (so dst has all previous dabs).
+    /// 2. Upload all dabs as one storage buffer.
+    /// 3. Dispatch the compute shader once over the union bounding box.
+    /// 4. Swap once.
+    ///
+    /// Batching is required for correctness: a per-dab copy of only the dab's
+    /// bounding box would leave all other previous dabs missing from dst after swap,
+    /// causing every other dab to flicker in/out.
     ///
     /// If `dabs` is empty, does nothing.
     pub fn render_dabs(
@@ -287,98 +293,102 @@ impl GpuBrushEngine {
         queue:  &wgpu::Queue,
         keyframe_id: Uuid,
         dabs:   &[GpuDab],
-        _bbox:  (i32, i32, i32, i32),
+        bbox:   (i32, i32, i32, i32),
         canvas_w: u32,
         canvas_h: u32,
     ) {
         if dabs.is_empty() { return; }
-        if !self.canvases.contains_key(&keyframe_id) { return; }
+        let canvas = match self.canvases.get_mut(&keyframe_id) {
+            Some(c) => c,
+            None => return,
+        };
 
-        for dab in dabs {
-            let r_fringe = dab.radius + 1.0;
-            let x0 = ((dab.x - r_fringe).floor() as i32).max(0) as u32;
-            let y0 = ((dab.y - r_fringe).floor() as i32).max(0) as u32;
-            let x1 = ((dab.x + r_fringe).ceil() as i32).min(canvas_w as i32) as u32;
-            let y1 = ((dab.y + r_fringe).ceil() as i32).min(canvas_h as i32) as u32;
-            if x1 <= x0 || y1 <= y0 { continue; }
+        // Clamp the union bounding box to canvas bounds.
+        let x0 = bbox.0.max(0) as u32;
+        let y0 = bbox.1.max(0) as u32;
+        let x1 = (bbox.2 as u32).min(canvas_w);
+        let y1 = (bbox.3 as u32).min(canvas_h);
+        if x1 <= x0 || y1 <= y0 { return; }
+        let bbox_w = x1 - x0;
+        let bbox_h = y1 - y0;
 
-            let bbox_w = x1 - x0;
-            let bbox_h = y1 - y0;
+        // Step 1: Copy the ENTIRE canvas src→dst so dst starts with all previous dabs.
+        // A bbox-only copy would lose previous dabs outside this frame's region after swap.
+        let mut copy_enc = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("canvas_full_copy_encoder") },
+        );
+        copy_enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture:   canvas.src(),
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture:   canvas.dst(),
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d { width: canvas_w, height: canvas_h, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(copy_enc.finish()));
 
-            let canvas = self.canvases.get_mut(&keyframe_id).unwrap();
+        // Step 2: Upload all dabs as a single storage buffer.
+        let dab_bytes = bytemuck::cast_slice(dabs);
+        let dab_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("dab_storage_buf"),
+            size:               dab_bytes.len() as u64,
+            usage:              wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&dab_buf, 0, dab_bytes);
 
-            let mut copy_enc = device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("canvas_copy_encoder") },
+        let params = DabParams {
+            bbox_x0: x0 as i32,
+            bbox_y0: y0 as i32,
+            bbox_w,
+            bbox_h,
+            num_dabs: dabs.len() as u32,
+            canvas_w,
+            canvas_h,
+            _pad: 0,
+        };
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("dab_params_buf"),
+            size:               std::mem::size_of::<DabParams>() as u64,
+            usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:  Some("brush_dab_bg"),
+            layout: &self.compute_bg_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: dab_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(canvas.src_view()) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(canvas.dst_view()) },
+            ],
+        });
+
+        // Step 3: Single dispatch over the union bounding box.
+        let mut compute_enc = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("brush_dab_encoder") },
+        );
+        {
+            let mut pass = compute_enc.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("brush_dab_pass"), timestamp_writes: None },
             );
-            copy_enc.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture:   canvas.src(),
-                    mip_level: 0,
-                    origin:    wgpu::Origin3d { x: x0, y: y0, z: 0 },
-                    aspect:    wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture:   canvas.dst(),
-                    mip_level: 0,
-                    origin:    wgpu::Origin3d { x: x0, y: y0, z: 0 },
-                    aspect:    wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d { width: bbox_w, height: bbox_h, depth_or_array_layers: 1 },
-            );
-            queue.submit(Some(copy_enc.finish()));
-
-            let dab_bytes = bytemuck::bytes_of(dab);
-            let dab_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label:              Some("dab_storage_buf"),
-                size:               dab_bytes.len() as u64,
-                usage:              wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&dab_buf, 0, dab_bytes);
-
-            let params = DabParams {
-                bbox_x0: x0 as i32,
-                bbox_y0: y0 as i32,
-                bbox_w,
-                bbox_h,
-                num_dabs: 1,
-                canvas_w,
-                canvas_h,
-                _pad: 0,
-            };
-            let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label:              Some("dab_params_buf"),
-                size:               std::mem::size_of::<DabParams>() as u64,
-                usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&params_buf, 0, bytemuck::bytes_of(&params));
-
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label:  Some("brush_dab_bg"),
-                layout: &self.compute_bg_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: dab_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(canvas.src_view()) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(canvas.dst_view()) },
-                ],
-            });
-
-            let mut compute_enc = device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("brush_dab_encoder") },
-            );
-            {
-                let mut pass = compute_enc.begin_compute_pass(
-                    &wgpu::ComputePassDescriptor { label: Some("brush_dab_pass"), timestamp_writes: None },
-                );
-                pass.set_pipeline(&self.compute_pipeline);
-                pass.set_bind_group(0, &bg, &[]);
-                pass.dispatch_workgroups(bbox_w.div_ceil(8), bbox_h.div_ceil(8), 1);
-            }
-            queue.submit(Some(compute_enc.finish()));
-            canvas.swap();
+            pass.set_pipeline(&self.compute_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(bbox_w.div_ceil(8), bbox_h.div_ceil(8), 1);
         }
+        queue.submit(Some(compute_enc.finish()));
+
+        // Step 4: Swap once — dst (with all dabs applied) becomes the new src.
+        canvas.swap();
     }
 
     /// Read the current canvas back to a CPU `Vec<u8>` (raw RGBA, row-major).
@@ -463,6 +473,58 @@ impl GpuBrushEngine {
         }
 
         Some(pixels)
+    }
+
+    /// Render a set of dabs to an offscreen texture and return the raw pixels.
+    ///
+    /// This is a **blocking** GPU readback — intended for one-time renders such as
+    /// brush preview thumbnails.  Do not call every frame on the hot path.
+    ///
+    /// The returned `Vec<u8>` is in **sRGB-encoded premultiplied RGBA** format,
+    /// suitable for creating an `egui::ColorImage` via
+    /// `ColorImage::from_rgba_premultiplied`.
+    ///
+    /// A dedicated scratch canvas keyed by a fixed UUID is reused across calls so
+    /// no allocation is needed after the first invocation.
+    pub fn render_to_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        dabs:   &[GpuDab],
+        width:  u32,
+        height: u32,
+    ) -> Vec<u8> {
+        use std::sync::OnceLock;
+        static SCRATCH_ID: OnceLock<Uuid> = OnceLock::new();
+        let scratch_id = *SCRATCH_ID.get_or_init(Uuid::new_v4);
+
+        // Ensure a correctly-sized scratch canvas exists.
+        self.ensure_canvas(device, scratch_id, width, height);
+
+        // Clear to transparent so previous renders don't bleed through.
+        let blank = vec![0u8; (width * height * 4) as usize];
+        if let Some(canvas) = self.canvases.get(&scratch_id) {
+            canvas.upload(queue, &blank);
+        }
+
+        if !dabs.is_empty() {
+            // Compute the union bounding box of all dabs.
+            let bbox = dabs.iter().fold(
+                (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+                |acc, d| {
+                    let r = d.radius + 1.0;
+                    (
+                        acc.0.min((d.x - r).floor() as i32),
+                        acc.1.min((d.y - r).floor() as i32),
+                        acc.2.max((d.x + r).ceil()  as i32),
+                        acc.3.max((d.y + r).ceil()  as i32),
+                    )
+                },
+            );
+            self.render_dabs(device, queue, scratch_id, dabs, bbox, width, height);
+        }
+
+        self.readback_canvas(device, queue, scratch_id).unwrap_or_default()
     }
 
     /// Remove the canvas pair for a keyframe (e.g. when the layer is deleted).

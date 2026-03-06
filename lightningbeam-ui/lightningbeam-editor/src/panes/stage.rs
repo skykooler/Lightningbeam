@@ -412,6 +412,11 @@ struct VelloRenderContext {
     /// True while the current stroke targets the float buffer (B) rather than
     /// the layer canvas (A).  Used in prepare() to route the GPU canvas blit.
     painting_float: bool,
+    /// Shared pixel buffer for brush preview thumbnails.
+    /// `prepare()` renders all presets here on the first frame;
+    /// the infopanel converts the pixel data to egui TextureHandles.
+    /// Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
+    brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
 }
 
 /// Callback for Vello rendering within egui
@@ -576,6 +581,49 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // this frame (painting_canvas is still Some).  render_content
                             // will clear painting_canvas and set pending_canvas_removal,
                             // so the texture is freed at the top of the next prepare().
+                        }
+                    }
+                }
+            }
+
+            // Generate brush preview thumbnails on first use (one-time, blocking readback).
+            if let Ok(mut previews) = self.ctx.brush_preview_pixels.try_lock() {
+                if previews.is_empty() {
+                    if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                        use lightningbeam_core::brush_engine::{BrushEngine, StrokeState};
+                        use lightningbeam_core::raster_layer::{StrokeRecord, StrokePoint, RasterBlendMode};
+                        use lightningbeam_core::brush_settings::bundled_brushes;
+
+                        const PW: u32 = 120;
+                        const PH: u32 = 56;
+
+                        for preset in bundled_brushes() {
+                            let preview_radius = (PH as f32 * 0.22).max(2.5);
+                            let mut scaled = preset.settings.clone();
+                            scaled.radius_log = preview_radius.ln();
+                            scaled.slow_tracking = 0.0;
+                            scaled.slow_tracking_per_dab = 0.0;
+
+                            let y_lo  = PH as f32 * 0.72;
+                            let y_hi  = PH as f32 * 0.28;
+                            let x0    = PW as f32 * 0.10;
+                            let x1    = PW as f32 * 0.90;
+                            let mid_x = (x0 + x1) * 0.5;
+                            let mid_y = (y_lo + y_hi) * 0.5;
+                            let stroke = StrokeRecord {
+                                brush_settings: scaled,
+                                color: [0.85f32, 0.88, 1.0, 1.0],
+                                blend_mode: RasterBlendMode::Normal,
+                                points: vec![
+                                    StrokePoint { x: x0,    y: y_lo,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                    StrokePoint { x: mid_x, y: mid_y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                    StrokePoint { x: x1,    y: y_hi,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                ],
+                            };
+                            let mut state = StrokeState::new();
+                            let (dabs, _) = BrushEngine::compute_dabs(&stroke, &mut state, 0.0);
+                            let pixels = gpu_brush.render_to_image(device, queue, &dabs, PW, PH);
+                            previews.push((PW, PH, pixels));
                         }
                     }
                 }
@@ -2422,6 +2470,9 @@ pub struct StagePane {
     /// True while the current stroke is being painted onto the float buffer (B)
     /// rather than the layer canvas (A).
     painting_float: bool,
+    /// Timestamp (ui time in seconds) of the last `compute_dabs` call for this stroke.
+    /// Used to compute `dt` for the unified distance+time dab accumulator.
+    raster_last_compute_time: f64,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2545,6 +2596,7 @@ impl StagePane {
             pending_canvas_removal: None,
             stroke_clip_selection: None,
             painting_float: false,
+            raster_last_compute_time: 0.0,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -4723,7 +4775,11 @@ impl StagePane {
             // Start from the active preset (carries elliptical ratio/angle, jitter, etc.)
             // then override the four parameters the user controls via UI sliders.
             let mut b = shared.active_brush_settings.clone();
-            b.radius_log = shared.brush_radius.ln();
+            // Compensate for pressure_radius_gain so that the UI-chosen radius is the
+            // actual rendered radius at our fixed mouse pressure of 1.0.
+            // radius_at_pressure(1.0) = exp(radius_log + gain × 0.5)
+            // → radius_log = ln(brush_radius) - gain × 0.5
+            b.radius_log = shared.brush_radius.ln() - b.pressure_radius_gain * 0.5;
             b.hardness   = *shared.brush_hardness;
             b.opaque     = *shared.brush_opacity;
             b.dabs_per_radius = *shared.brush_spacing;
@@ -4744,7 +4800,16 @@ impl StagePane {
         // ----------------------------------------------------------------
         // Mouse down: capture buffer_before, start stroke, compute first dab
         // ----------------------------------------------------------------
-        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
+        // Use primary_pressed (fires immediately on mouse-down) so the first dab
+        // appears before any drag movement.  Guard against re-triggering if a stroke
+        // is already in progress.
+        // rsp_clicked fires on the release frame of a quick click; the first condition
+        // already handles the press frame with is_none() guard.  The clicked guard is
+        // only needed when no stroke is active (avoids re-starting mid-stroke).
+        let stroke_start = (self.rsp_primary_pressed(ui) && response.hovered()
+                            && self.raster_stroke_state.is_none())
+                        || (self.rsp_clicked(response) && self.raster_stroke_state.is_none());
+        if stroke_start {
             // Determine if we are painting into the float (B) or the layer (A).
             let painting_float = shared.selection.raster_floating.is_some();
             self.painting_float = painting_float;
@@ -4763,7 +4828,6 @@ impl StagePane {
 
                 // Compute first dab (same arithmetic as the layer case).
                 let mut stroke_state = StrokeState::new();
-                stroke_state.distance_since_last_dab = f32::MAX;
                 // Convert to float-local space: dabs must be in canvas pixel coords.
                 let first_pt = StrokePoint {
                     x: world_pos.x - float_x as f32,
@@ -4776,7 +4840,8 @@ impl StagePane {
                     blend_mode,
                     points: vec![first_pt.clone()],
                 };
-                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state);
+                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
+                self.raster_last_compute_time = ui.input(|i| i.time);
 
                 self.painting_canvas = Some((layer_id, canvas_id));
                 self.pending_undo_before = Some((
@@ -4852,7 +4917,6 @@ impl StagePane {
 
                 // Compute the first dab (single-point tap)
                 let mut stroke_state = StrokeState::new();
-                stroke_state.distance_since_last_dab = f32::MAX;
 
                 let first_pt = StrokePoint {
                     x: world_pos.x, y: world_pos.y,
@@ -4864,7 +4928,8 @@ impl StagePane {
                     blend_mode,
                     points: vec![first_pt.clone()],
                 };
-                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state);
+                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
+                self.raster_last_compute_time = ui.input(|i| i.time);
 
                 // Layer strokes apply selection masking at readback time via stroke_clip_selection.
 
@@ -4946,7 +5011,10 @@ impl StagePane {
                             blend_mode,
                             points: vec![prev_pt, curr_local],
                         };
-                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state);
+                        let current_time = ui.input(|i| i.time);
+                        let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+                        self.raster_last_compute_time = current_time;
+                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state, dt);
                         self.pending_raster_dabs = Some(PendingRasterDabs {
                             keyframe_id: canvas_id,
                             layer_id,
@@ -4963,6 +5031,78 @@ impl StagePane {
                     self.raster_last_point = Some(moved_pt);
                 }
             }
+        }
+
+        // ----------------------------------------------------------------
+        // Stationary time-based dabs: when the mouse hasn't moved this frame,
+        // still pass dt to the engine so time-based brushes (airbrush, etc.)
+        // can accumulate and fire at the cursor position.
+        // ----------------------------------------------------------------
+        if self.pending_raster_dabs.is_none()
+            && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. })
+        {
+            let current_time = ui.input(|i| i.time);
+            if self.raster_last_compute_time > 0.0 {
+                let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+                self.raster_last_compute_time = current_time;
+
+                if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
+                    let canvas_info = if self.painting_float {
+                        shared.selection.raster_floating.as_ref().map(|f| {
+                            (f.canvas_id, f.width, f.height, f.x as f32, f.y as f32)
+                        })
+                    } else {
+                        let doc = shared.action_executor.document();
+                        if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                            if let Some(kf) = rl.keyframe_at(time) {
+                                Some((kf.id, kf.width, kf.height, 0.0f32, 0.0f32))
+                            } else { None }
+                        } else { None }
+                    };
+
+                    if let Some((canvas_id, cw, ch, cx, cy)) = canvas_info {
+                        let pt = StrokePoint {
+                            x: world_pos.x - cx,
+                            y: world_pos.y - cy,
+                            pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                        };
+                        let single = StrokeRecord {
+                            brush_settings: brush.clone(),
+                            color,
+                            blend_mode,
+                            points: vec![pt],
+                        };
+                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, stroke_state, dt);
+                        if !dabs.is_empty() {
+                            self.pending_raster_dabs = Some(PendingRasterDabs {
+                                keyframe_id: canvas_id,
+                                layer_id,
+                                time,
+                                canvas_width: cw,
+                                canvas_height: ch,
+                                initial_pixels: None,
+                                dabs,
+                                dab_bbox,
+                                wants_final_readback: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reset compute-time tracker when stroke ends so next stroke starts fresh.
+        if !matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            self.raster_last_compute_time = 0.0;
+        }
+
+        // Keep egui repainting while a stroke is active so that:
+        //   1. Time-based dabs (dabs_per_second) fire at the correct rate even when the
+        //      mouse is held stationary (no move events → no automatic egui repaint).
+        //   2. The post-stroke Vello update (consuming the readback result) happens on
+        //      the very next frame rather than waiting for the next user input event.
+        if matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            ui.ctx().request_repaint();
         }
 
         // ----------------------------------------------------------------
@@ -8196,6 +8336,7 @@ impl PaneRenderer for StagePane {
             painting_canvas: self.painting_canvas,
             pending_canvas_removal: self.pending_canvas_removal.take(),
             painting_float: self.painting_float,
+            brush_preview_pixels: shared.brush_preview_pixels.clone(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(
