@@ -122,7 +122,7 @@ impl Dcel {
                 self.insert_edge_both_connected(he_fwd, he_bwd, v1, v2, edge_id, &curve, face)
             }
             _ => {
-                self.insert_edge_one_isolated(he_fwd, he_bwd, v1, v2, edge_id, &curve, v1_isolated)
+                self.insert_edge_one_isolated(he_fwd, he_bwd, v1, v2, edge_id, &curve, v1_isolated, face)
             }
         }
     }
@@ -169,6 +169,7 @@ impl Dcel {
         edge_id: EdgeId,
         curve: &CubicBez,
         v1_is_isolated: bool,
+        face_hint: FaceId,
     ) -> (EdgeId, FaceId) {
         let (connected, isolated) = if v1_is_isolated { (v2, v1) } else { (v1, v2) };
 
@@ -187,7 +188,21 @@ impl Dcel {
         };
         let ccw_succ = self.find_ccw_successor(connected, out_angle);
         let he_into = self.half_edges[ccw_succ.idx()].prev;
-        let actual_face = self.half_edges[he_into.idx()].face;
+        let angular_face = self.half_edges[he_into.idx()].face;
+
+        // If angular ordering disagrees with face_hint, try to find the correct
+        // sector using find_predecessor_on_face — same logic as insert_edge_both_connected.
+        let (he_into, ccw_succ, actual_face) = if angular_face != face_hint {
+            if let Some((alt_into, alt_ccw)) =
+                self.find_predecessor_on_face(connected, out_angle, face_hint)
+            {
+                (alt_into, alt_ccw, face_hint)
+            } else {
+                (he_into, ccw_succ, angular_face)
+            }
+        } else {
+            (he_into, ccw_succ, angular_face)
+        };
 
         // Splice: ... → he_into → [he_out → he_back] → ccw_succ → ...
         self.half_edges[he_into.idx()].next = he_out;
@@ -247,6 +262,25 @@ impl Dcel {
                     debug_assert_eq!(face_v1, face_v2);
                     (into_v1, into_v2, ccw_v1, ccw_v2, face_v1)
                 }
+            } else if face_v1 != face_v2 {
+                // Angular ordering disagrees between the two endpoints.
+                // Trust face_hint (midpoint probe) as the authoritative face —
+                // it correctly determines which face the edge's interior lies in,
+                // regardless of which angular sector each vertex landed in.
+                let target = face_hint;
+                let fix_v1 = if face_v1 == target {
+                    (into_v1, ccw_v1)
+                } else {
+                    self.find_predecessor_on_face(v1, fwd_angle, target)
+                        .unwrap_or((into_v1, ccw_v1))
+                };
+                let fix_v2 = if face_v2 == target {
+                    (into_v2, ccw_v2)
+                } else {
+                    self.find_predecessor_on_face(v2, bwd_angle, target)
+                        .unwrap_or((into_v2, ccw_v2))
+                };
+                (fix_v1.0, fix_v2.0, fix_v1.1, fix_v2.1, target)
             } else {
                 debug_assert_eq!(
                     face_v1, face_v2,

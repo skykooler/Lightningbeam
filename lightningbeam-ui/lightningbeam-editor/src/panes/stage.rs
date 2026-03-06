@@ -4203,9 +4203,28 @@ impl StagePane {
             return;
         }
 
+        // Capture DCEL snapshot + region path for crash diagnosis (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            use vello::kurbo::PathEl;
+            let path_elems: Vec<serde_json::Value> = region_path.elements().iter().map(|el| match el {
+                PathEl::MoveTo(p) => serde_json::json!({"type": "M", "x": p.x, "y": p.y}),
+                PathEl::LineTo(p) => serde_json::json!({"type": "L", "x": p.x, "y": p.y}),
+                PathEl::QuadTo(p1, p2) => serde_json::json!({"type": "Q", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y}),
+                PathEl::CurveTo(p1, p2, p3) => serde_json::json!({"type": "C", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y, "x3": p3.x, "y3": p3.y}),
+                PathEl::ClosePath => serde_json::json!({"type": "Z"}),
+            }).collect();
+            let geom = serde_json::json!({
+                "region_path": path_elems,
+                "dcel_snapshot": serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
+            });
+            shared.test_mode.set_pending_geometry(geom);
+        }
+
         // Insert region boundary as invisible edges (no stroke style/color)
         let stroke_result = dcel.insert_stroke(&segments, None, None, 1.0);
-        let boundary_verts = stroke_result.new_vertices;
+        let boundary_verts: Vec<_> = stroke_result.new_vertices.clone();
+        let region_edge_ids: Vec<_> = stroke_result.new_edges.clone();
 
         // Extract the inside portion; self (dcel) keeps the outside + boundary.
         let mut selected_dcel = dcel.extract_region(&region_path, &boundary_verts);
@@ -4224,8 +4243,24 @@ impl StagePane {
         if !has_visible {
             // Nothing visible inside — restore snapshot and bail
             *dcel = snapshot;
+            #[cfg(debug_assertions)]
+            shared.test_mode.clear_pending_geometry();
             return;
         }
+
+        // Compute inside_vertices: non-deleted verts in selected_dcel that aren't boundary.
+        let inside_vertices: Vec<_> = selected_dcel
+            .vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                if v.deleted { return None; }
+                let vid = lightningbeam_core::dcel::VertexId(i as u32);
+                if !boundary_verts.contains(&vid) { Some(vid) } else { None }
+            })
+            .collect();
+
+        let action_epoch = shared.action_executor.epoch();
 
         shared.selection.clear();
 
@@ -4238,7 +4273,14 @@ impl StagePane {
             selected_dcel,
             transform: vello::kurbo::Affine::IDENTITY,
             committed: false,
+            inside_vertices,
+            boundary_vertices: boundary_verts,
+            region_edge_ids,
+            action_epoch_at_selection: action_epoch,
         });
+
+        #[cfg(debug_assertions)]
+        shared.test_mode.clear_pending_geometry();
     }
 
     /// Revert an uncommitted region selection, restoring the DCEL from snapshot
@@ -4255,11 +4297,26 @@ impl StagePane {
             return;
         }
 
-        // Restore the DCEL from the snapshot taken before boundary insertion
+        let no_actions_taken =
+            shared.action_executor.epoch() == region_sel.action_epoch_at_selection;
+
         let doc = shared.action_executor.document_mut();
         if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
             if let Some(dcel) = vl.dcel_at_time_mut(region_sel.time) {
-                *dcel = region_sel.dcel_snapshot;
+                if no_actions_taken {
+                    // Nothing changed: restore snapshot cleanly (undo boundary insertion)
+                    *dcel = region_sel.dcel_snapshot;
+                } else {
+                    // Actions were applied to the selection: merge selected_dcel back
+                    let mut merged = region_sel.dcel_snapshot;
+                    merged.merge_back_from_selected(
+                        &region_sel.selected_dcel,
+                        &region_sel.inside_vertices,
+                        &region_sel.boundary_vertices,
+                        &region_sel.region_edge_ids,
+                    );
+                    *dcel = merged;
+                }
             }
         }
 

@@ -192,6 +192,9 @@ pub struct TestModeState {
     /// Current in-flight event, set before processing. If a panic occurs during
     /// processing, the panic hook appends this to the saved test case.
     pub pending_event: Arc<Mutex<Option<TestEvent>>>,
+    /// Geometry context set before risky operations (e.g. region select).
+    /// Shared with the panic hook so crashes include the relevant geometry.
+    pub pending_geometry: Arc<Mutex<Option<serde_json::Value>>>,
     /// Always-on ring buffer of last N events (for crash capture outside test mode)
     pub event_ring: VecDeque<TestEvent>,
     pub ring_start_time: Instant,
@@ -205,7 +208,7 @@ pub struct TestModeState {
 }
 
 impl TestModeState {
-    pub fn new(panic_snapshot: Arc<Mutex<Option<TestCase>>>, pending_event: Arc<Mutex<Option<TestEvent>>>, is_replaying: Arc<AtomicBool>) -> Self {
+    pub fn new(panic_snapshot: Arc<Mutex<Option<TestCase>>>, pending_event: Arc<Mutex<Option<TestEvent>>>, is_replaying: Arc<AtomicBool>, pending_geometry: Arc<Mutex<Option<serde_json::Value>>>) -> Self {
         let test_dir = directories::ProjectDirs::from("", "", "lightningbeam")
             .map(|dirs| dirs.data_dir().join("test_cases"))
             .unwrap_or_else(|| PathBuf::from("test_cases"));
@@ -219,12 +222,29 @@ impl TestModeState {
             status_message: None,
             panic_snapshot,
             pending_event,
+            pending_geometry,
             event_ring: VecDeque::with_capacity(RING_BUFFER_SIZE),
             ring_start_time: Instant::now(),
             ring_event_count: 0,
             events_since_snapshot: 0,
             replay_cursor_pos: None,
             is_replaying,
+        }
+    }
+
+    /// Store geometry context for panic capture.
+    /// Called before risky operations (e.g. region select) so the panic hook
+    /// can include it in the crash file for easier reproduction.
+    pub fn set_pending_geometry(&self, context: serde_json::Value) {
+        if let Ok(mut guard) = self.pending_geometry.try_lock() {
+            *guard = Some(context);
+        }
+    }
+
+    /// Clear the pending geometry context (call after the operation succeeds).
+    pub fn clear_pending_geometry(&self) {
+        if let Ok(mut guard) = self.pending_geometry.try_lock() {
+            *guard = None;
         }
     }
 
@@ -339,6 +359,7 @@ impl TestModeState {
         panic_snapshot: &Arc<Mutex<Option<TestCase>>>,
         pending_event: &Arc<Mutex<Option<TestEvent>>>,
         is_replaying: &Arc<AtomicBool>,
+        pending_geometry: &Arc<Mutex<Option<serde_json::Value>>>,
         msg: String,
         backtrace: String,
         test_dir: &PathBuf,
@@ -370,6 +391,11 @@ impl TestModeState {
                 if let Some(event) = pending.take() {
                     test_case.events.push(event);
                 }
+            }
+
+            // Attach geometry context if one was set before the crash
+            if let Ok(mut geom_guard) = pending_geometry.try_lock() {
+                test_case.geometry_context = geom_guard.take();
             }
 
             test_case.ended_with_panic = true;
