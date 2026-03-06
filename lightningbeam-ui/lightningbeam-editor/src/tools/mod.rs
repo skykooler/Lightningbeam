@@ -20,6 +20,7 @@ pub mod healing_brush;
 pub mod pattern_stamp;
 pub mod dodge_burn;
 pub mod sponge;
+pub mod blur_sharpen;
 
 // ---------------------------------------------------------------------------
 // Shared settings struct (replaces 20+ individual SharedPaneState / EditorApp fields)
@@ -67,6 +68,15 @@ pub struct RasterToolSettings {
     pub sponge_flow: f32,
     /// 0 = saturate, 1 = desaturate
     pub sponge_mode: u32,
+    // --- Blur / Sharpen ---
+    pub blur_sharpen_radius: f32,
+    pub blur_sharpen_hardness: f32,
+    pub blur_sharpen_spacing: f32,
+    pub blur_sharpen_strength: f32,
+    /// Neighborhood kernel radius in canvas pixels (1–20)
+    pub blur_sharpen_kernel: f32,
+    /// 0 = blur, 1 = sharpen
+    pub blur_sharpen_mode: u32,
 }
 
 impl Default for RasterToolSettings {
@@ -104,6 +114,12 @@ impl Default for RasterToolSettings {
             sponge_spacing: 3.0,
             sponge_flow: 0.5,
             sponge_mode: 0,
+            blur_sharpen_radius: 30.0,
+            blur_sharpen_hardness: 0.5,
+            blur_sharpen_spacing: 3.0,
+            blur_sharpen_strength: 0.5,
+            blur_sharpen_kernel: 5.0,
+            blur_sharpen_mode: 0,
         }
     }
 }
@@ -158,6 +174,7 @@ pub fn raster_tool_def(tool: &Tool) -> Option<&'static dyn RasterToolDef> {
         Tool::PatternStamp => Some(&pattern_stamp::PATTERN_STAMP),
         Tool::DodgeBurn    => Some(&dodge_burn::DODGE_BURN),
         Tool::Sponge       => Some(&sponge::SPONGE),
+        Tool::BlurSharpen  => Some(&blur_sharpen::BLUR_SHARPEN),
         _                  => None,
     }
 }

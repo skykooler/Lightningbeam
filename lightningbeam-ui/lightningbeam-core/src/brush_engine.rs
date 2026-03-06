@@ -307,6 +307,7 @@ impl BrushEngine {
             RasterBlendMode::PatternStamp => 5u32,
             RasterBlendMode::DodgeBurn    => 6u32,
             RasterBlendMode::Sponge       => 7u32,
+            RasterBlendMode::BlurSharpen  => 8u32,
         };
 
         let push_dab = |dabs: &mut Vec<GpuDab>,
@@ -371,6 +372,8 @@ impl BrushEngine {
                                 (cr, cg, cb, tp[0], tp[1]),
                             RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
                                 (tp[0], 0.0, 0.0, 0.0, 0.0),
+                            RasterBlendMode::BlurSharpen =>
+                                (tp[0], 0.0, 0.0, tp[1], 0.0),
                             _ => (cr, cg, cb, 0.0, 0.0),
                         };
                         push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
@@ -494,6 +497,8 @@ impl BrushEngine {
                             (cr, cg, cb, tp[0], tp[1]),
                         RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
                             (tp[0], 0.0, 0.0, 0.0, 0.0),
+                        RasterBlendMode::BlurSharpen =>
+                            (tp[0], 0.0, 0.0, tp[1], 0.0),
                         _ => (cr, cg, cb, 0.0, 0.0),
                     };
                     push_dab(&mut dabs, &mut bbox,
@@ -535,6 +540,8 @@ impl BrushEngine {
                         (cr, cg, cb, tp[0], tp[1]),
                     RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
                         (tp[0], 0.0, 0.0, 0.0, 0.0),
+                    RasterBlendMode::BlurSharpen =>
+                        (tp[0], 0.0, 0.0, tp[1], 0.0),
                     _ => (cr, cg, cb, 0.0, 0.0),
                 };
                 push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,

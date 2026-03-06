@@ -28,6 +28,8 @@ pub enum RasterBlendMode {
     DodgeBurn,
     /// Sponge: saturate or desaturate existing pixels
     Sponge,
+    /// Blur / Sharpen: soften or crisp up existing pixels
+    BlurSharpen,
 }
 
 impl Default for RasterBlendMode {
@@ -41,7 +43,7 @@ impl RasterBlendMode {
     /// use the brush color at all (clone, heal, dodge/burn, sponge).
     /// Used by brush_engine.rs to decide whether color_a should be 1.0 or stroke.color[3].
     pub fn uses_brush_color(self) -> bool {
-        !matches!(self, Self::CloneStamp | Self::Healing | Self::DodgeBurn | Self::Sponge)
+        !matches!(self, Self::CloneStamp | Self::Healing | Self::DodgeBurn | Self::Sponge | Self::BlurSharpen)
     }
 }
 

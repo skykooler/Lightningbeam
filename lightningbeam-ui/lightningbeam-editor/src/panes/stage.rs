@@ -4904,6 +4904,10 @@ impl StagePane {
                 // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
                 b.smudge_radius_log = shared.raster_settings.smudge_strength; // linear [0,1] strength
             }
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::BlurSharpen) {
+                // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
+                b.dabs_per_actual_radius = 0.0;
+            }
             b
         };
 

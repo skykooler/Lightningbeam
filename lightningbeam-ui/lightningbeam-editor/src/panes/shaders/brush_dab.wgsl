@@ -278,6 +278,52 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             adjusted = mix(current.rgb, luma_vec, s);
         }
         return vec4<f32>(adjusted, current.a);
+    } else if dab.blend_mode == 8u {
+        // Blur / Sharpen: 5×5 separable Gaussian kernel.
+        // color_r: 0.0 = blur, 1.0 = sharpen
+        // ndx:     kernel radius in canvas pixels (> 0)
+        //
+        // Samples are placed on a grid at ±step and ±2*step per axis, where step = kr/2.
+        // Weights are exp(-x²/2σ²) with σ = step, factored as a separable product.
+        // This gives a true Gaussian falloff rather than a flat ring, so edges blend
+        // into a smooth gradient rather than a flat averaged zone.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let kr   = max(dab.ndx, 1.0);
+        let cx2  = f32(px) + 0.5;
+        let cy2  = f32(py) + 0.5;
+        let step = kr * 0.5;
+
+        // 1-D Gaussian weights at distances 0, ±step, ±2*step  (σ = step):
+        //   exp(0) = 1.0,  exp(-0.5) ≈ 0.6065,  exp(-2.0) ≈ 0.1353
+        var gauss = array<f32, 5>(0.1353, 0.6065, 1.0, 0.6065, 0.1353);
+
+        var blur_sum = vec4<f32>(0.0);
+        var blur_w   = 0.0;
+        for (var iy = 0; iy < 5; iy++) {
+            for (var ix = 0; ix < 5; ix++) {
+                let w   = gauss[ix] * gauss[iy];
+                let spx = cx2 + (f32(ix) - 2.0) * step;
+                let spy = cy2 + (f32(iy) - 2.0) * step;
+                blur_sum += bilinear_sample(spx, spy) * w;
+                blur_w   += w;
+            }
+        }
+        let blurred = blur_sum / blur_w;
+
+        let c = textureLoad(canvas_src, vec2<i32>(px, py), 0);
+        var result: vec4<f32>;
+        if dab.color_r < 0.5 {
+            // Blur: blend current toward the Gaussian-weighted local average.
+            result = mix(current, blurred, s);
+        } else {
+            // Sharpen: unsharp mask — push pixel away from the local average.
+            // sharpened = 2*src - blurred  →  highlights diverge, shadows diverge.
+            let sharpened = clamp(c * 2.0 - blurred, vec4<f32>(0.0), vec4<f32>(1.0));
+            result = mix(current, sharpened, s);
+        }
+        return result;
     } else {
         return current;
     }
