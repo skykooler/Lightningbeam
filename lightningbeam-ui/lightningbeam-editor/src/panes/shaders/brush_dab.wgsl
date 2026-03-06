@@ -126,7 +126,7 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
         let new_a = current.a * (1.0 - dab_a);
         let scale = select(0.0, new_a / current.a, current.a > 1e-6);
         return vec4<f32>(current.r * scale, current.g * scale, current.b * scale, new_a);
-    } else {
+    } else if dab.blend_mode == 2u {
         // Smudge: directional warp — sample from position behind the stroke direction
         let alpha = opa_weight * dab.opacity;
         if alpha <= 0.0 { return current; }
@@ -140,6 +140,24 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             alpha * src.b + da * current.b,
             alpha * src.a + da * current.a,
         );
+    } else if dab.blend_mode == 3u {
+        // Clone stamp: sample from (this_pixel + offset) in the source canvas.
+        // color_r/color_g store the world-space offset (source_world - drag_start_world)
+        // computed once when the stroke begins. Each pixel samples its own source texel.
+        let alpha = opa_weight * dab.opacity;
+        if alpha <= 0.0 { return current; }
+        let src_x = f32(px) + 0.5 + dab.color_r;
+        let src_y = f32(py) + 0.5 + dab.color_g;
+        let src = bilinear_sample(src_x, src_y);
+        let ba  = 1.0 - alpha;
+        return vec4<f32>(
+            alpha * src.r + ba * current.r,
+            alpha * src.g + ba * current.g,
+            alpha * src.b + ba * current.b,
+            alpha * src.a + ba * current.a,
+        );
+    } else {
+        return current;
     }
 }
 

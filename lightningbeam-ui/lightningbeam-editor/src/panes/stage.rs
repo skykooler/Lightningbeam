@@ -614,6 +614,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 brush_settings: scaled,
                                 color: [0.85f32, 0.88, 1.0, 1.0],
                                 blend_mode: RasterBlendMode::Normal,
+                                clone_src_offset: None,
                                 points: vec![
                                     StrokePoint { x: x0,    y: y_lo,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
                                     StrokePoint { x: mid_x, y: mid_y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
@@ -2482,6 +2483,11 @@ pub struct StagePane {
     /// Timestamp (ui time in seconds) of the last `compute_dabs` call for this stroke.
     /// Used to compute `dt` for the unified distance+time dab accumulator.
     raster_last_compute_time: f64,
+    /// Clone stamp: world-space source point set by Alt+click.
+    clone_source: Option<egui::Vec2>,
+    /// Clone stamp: (source_world - drag_start_world) computed at stroke start.
+    /// Constant for the entire stroke; cleared when the stroke ends.
+    clone_stroke_offset: Option<(f32, f32)>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2606,6 +2612,8 @@ impl StagePane {
             stroke_clip_selection: None,
             painting_float: false,
             raster_last_compute_time: 0.0,
+            clone_source: None,
+            clone_stroke_offset: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -4926,6 +4934,16 @@ impl StagePane {
                             && self.raster_stroke_state.is_none())
                         || (self.rsp_clicked(response) && self.raster_stroke_state.is_none());
         if stroke_start {
+            // Clone stamp: compute and store the source offset (source - drag_start).
+            // This is constant for the entire stroke and used in every StrokeRecord below.
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp) {
+                self.clone_stroke_offset = self.clone_source.map(|s| (
+                    s.x - world_pos.x, s.y - world_pos.y,
+                ));
+            } else {
+                self.clone_stroke_offset = None;
+            }
+
             // Determine if we are painting into the float (B) or the layer (A).
             let painting_float = shared.selection.raster_floating.is_some();
             self.painting_float = painting_float;
@@ -4954,6 +4972,7 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
+                    clone_src_offset: self.clone_stroke_offset,
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5042,6 +5061,7 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
+                    clone_src_offset: self.clone_stroke_offset,
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5121,10 +5141,12 @@ impl StagePane {
                     };
 
                     if dx * dx + dy * dy >= MIN_DIST_SQ {
+                        let clone_src_offset = self.clone_stroke_offset;
                         let seg = StrokeRecord {
                             brush_settings: brush.clone(),
                             color,
                             blend_mode,
+                            clone_src_offset,
                             points: vec![prev_pt, curr_local],
                         };
                         let current_time = ui.input(|i| i.time);
@@ -5186,6 +5208,7 @@ impl StagePane {
                             brush_settings: brush.clone(),
                             color,
                             blend_mode,
+                            clone_src_offset: self.clone_stroke_offset,
                             points: vec![pt],
                         };
                         let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, stroke_state, dt);
@@ -7483,6 +7506,19 @@ impl StagePane {
             });
         }
 
+        // Clone stamp: Alt+click sets the source point regardless of the alt-pan guard below.
+        {
+            use lightningbeam_core::tool::Tool;
+            if matches!(*shared.selected_tool, Tool::CloneStamp)
+                && alt_held
+                && self.rsp_primary_pressed(ui)
+                && response.hovered()
+            {
+                eprintln!("[clone stamp] set clone source to ({:.1}, {:.1})", world_pos.x, world_pos.y);
+                self.clone_source = Some(world_pos);
+            }
+        }
+
         // Handle tool input (only if not using Alt modifier for panning)
         if !alt_held {
             use lightningbeam_core::tool::Tool;
@@ -7526,6 +7562,11 @@ impl StagePane {
                 }
                 Tool::Smudge => {
                     self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Smudge, shared);
+                }
+                Tool::CloneStamp => {
+                    // Alt+click (source-setting) is handled before this block.
+                    // Here alt_held is always false, so just paint.
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp, shared);
                 }
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
@@ -8634,6 +8675,32 @@ impl PaneRenderer for StagePane {
                 6.0,
                 egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 100, 100, 200)),
             );
+        }
+
+        // Draw clone source indicator when clone stamp tool is selected.
+        if matches!(*shared.selected_tool, lightningbeam_core::tool::Tool::CloneStamp) {
+            if let Some(src_world) = self.clone_source {
+                let src_canvas = egui::vec2(
+                    src_world.x * self.zoom + self.pan_offset.x,
+                    src_world.y * self.zoom + self.pan_offset.y,
+                );
+                let src_screen = rect.min + src_canvas;
+                let painter = ui.painter_at(rect);
+                let r = 8.0_f32;    // circle radius
+                let arm = 14.0_f32; // arm half-length (extends past the circle)
+                let gap = r + 2.0;  // gap between circle edge and arm start
+                for (width, color) in [
+                    (3.0_f32, egui::Color32::BLACK),
+                    (1.5_f32, egui::Color32::WHITE),
+                ] {
+                    let s = egui::Stroke::new(width, color);
+                    painter.circle_stroke(src_screen, r, s);
+                    painter.line_segment([src_screen - egui::vec2(arm, 0.0), src_screen - egui::vec2(gap, 0.0)], s);
+                    painter.line_segment([src_screen + egui::vec2(gap, 0.0), src_screen + egui::vec2(arm, 0.0)], s);
+                    painter.line_segment([src_screen - egui::vec2(0.0, arm), src_screen - egui::vec2(0.0, gap)], s);
+                    painter.line_segment([src_screen + egui::vec2(0.0, gap), src_screen + egui::vec2(0.0, arm)], s);
+                }
+            }
         }
 
         // Set custom tool cursor when pointer is over the stage canvas.

@@ -18,6 +18,8 @@ pub enum RasterBlendMode {
     Erase,
     /// Smudge / blend surrounding pixels
     Smudge,
+    /// Clone stamp: copy pixels from a source region
+    CloneStamp,
 }
 
 impl Default for RasterBlendMode {
@@ -48,6 +50,11 @@ pub struct StrokeRecord {
     /// RGBA linear color [r, g, b, a]
     pub color: [f32; 4],
     pub blend_mode: RasterBlendMode,
+    /// Clone stamp source offset: (source_x - drag_start_x, source_y - drag_start_y).
+    /// For each dab at canvas position D, the source pixel is sampled from D + offset.
+    /// None for all non-clone-stamp blend modes.
+    #[serde(default)]
+    pub clone_src_offset: Option<(f32, f32)>,
     pub points: Vec<StrokePoint>,
 }
 

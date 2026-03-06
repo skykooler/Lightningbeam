@@ -299,9 +299,10 @@ impl BrushEngine {
             other => other,
         };
         let blend_mode_u = match base_blend {
-            RasterBlendMode::Normal => 0u32,
-            RasterBlendMode::Erase  => 1u32,
-            RasterBlendMode::Smudge => 2u32,
+            RasterBlendMode::Normal     => 0u32,
+            RasterBlendMode::Erase      => 1u32,
+            RasterBlendMode::Smudge     => 2u32,
+            RasterBlendMode::CloneStamp => 3u32,
         };
 
         let push_dab = |dabs: &mut Vec<GpuDab>,
@@ -322,7 +323,9 @@ impl BrushEngine {
                 color_r: cr,
                 color_g: cg,
                 color_b: cb,
-                color_a: stroke.color[3],
+                // Clone stamp: color_r/color_g hold source canvas X/Y, so color_a = 1.0
+                // (blend strength is opa_weight × opacity × 1.0 in the shader).
+                color_a: if blend_mode_u == 3 { 1.0 } else { stroke.color[3] },
                 ndx, ndy, smudge_dist,
                 blend_mode: blend_mode_u,
                 elliptical_dab_ratio: bs.elliptical_dab_ratio.max(1.0),
@@ -356,7 +359,14 @@ impl BrushEngine {
                         state, bs, pt.x, pt.y, base_r, pt.pressure, stroke.color,
                     );
                     if !matches!(base_blend, RasterBlendMode::Smudge) {
-                        push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr, cg, cb,
+                        let (cr2, cg2, cb2) = if matches!(base_blend, RasterBlendMode::CloneStamp) {
+                            // Store offset in color_r/color_g; shader adds it per-pixel.
+                            let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
+                            (ox, oy, 0.0)
+                        } else {
+                            (cr, cg, cb)
+                        };
+                        push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
                                  0.0, 0.0, 0.0);
                     }
                 }
@@ -468,6 +478,13 @@ impl BrushEngine {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
                              ndx, ndy, smudge_dist);
+                } else if matches!(base_blend, RasterBlendMode::CloneStamp) {
+                    // Store the offset (not absolute position) in color_r/color_g.
+                    // The shader adds this to each pixel's own position for per-pixel sampling.
+                    let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
+                    push_dab(&mut dabs, &mut bbox,
+                             ex, ey, radius2, opacity2, ox, oy, 0.0,
+                             0.0, 0.0, 0.0);
                 } else {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
@@ -500,7 +517,14 @@ impl BrushEngine {
                     last_smooth_x, last_smooth_y,
                     base_r, last_pressure, stroke.color,
                 );
-                push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr, cg, cb,
+                let (cr2, cg2, cb2) = if matches!(base_blend, RasterBlendMode::CloneStamp) {
+                    // Store offset in color_r/color_g; shader adds it per-pixel.
+                    let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
+                    (ox, oy, 0.0)
+                } else {
+                    (cr, cg, cb)
+                };
+                push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
                          0.0, 0.0, 0.0);
             }
         }
