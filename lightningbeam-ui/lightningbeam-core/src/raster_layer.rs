@@ -26,6 +26,8 @@ pub enum RasterBlendMode {
     PatternStamp,
     /// Dodge / Burn: lighten (dodge) or darken (burn) existing pixels
     DodgeBurn,
+    /// Sponge: saturate or desaturate existing pixels
+    Sponge,
 }
 
 impl Default for RasterBlendMode {
@@ -70,6 +72,9 @@ pub struct StrokeRecord {
     /// Dodge/Burn mode: 0 = dodge (lighten), 1 = burn (darken)
     #[serde(default)]
     pub dodge_burn_mode: u32,
+    /// Sponge mode: 0 = saturate, 1 = desaturate
+    #[serde(default)]
+    pub sponge_mode: u32,
     pub points: Vec<StrokePoint>,
 }
 

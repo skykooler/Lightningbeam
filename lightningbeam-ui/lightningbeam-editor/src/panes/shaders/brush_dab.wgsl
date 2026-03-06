@@ -260,6 +260,24 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             adjusted = pow(rgb, vec3<f32>(1.0 + s));
         }
         return vec4<f32>(clamp(adjusted, vec3<f32>(0.0), vec3<f32>(1.0)), current.a);
+    } else if dab.blend_mode == 7u {
+        // Sponge: saturate or desaturate existing pixels.
+        // color_r: 0.0 = saturate, 1.0 = desaturate
+        // Computes luminance, then moves RGB toward (desaturate) or away from (saturate) it.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let luma = dot(current.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_vec = vec3<f32>(luma);
+        var adjusted: vec3<f32>;
+        if dab.color_r < 0.5 {
+            // Saturate: push RGB away from luma (increase chroma)
+            adjusted = clamp(current.rgb + s * (current.rgb - luma_vec), vec3<f32>(0.0), vec3<f32>(1.0));
+        } else {
+            // Desaturate: blend RGB toward luma
+            adjusted = mix(current.rgb, luma_vec, s);
+        }
+        return vec4<f32>(adjusted, current.a);
     } else {
         return current;
     }

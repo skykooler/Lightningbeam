@@ -219,6 +219,13 @@ pub struct SharedPaneState<'a> {
     pub dodge_burn_exposure: &'a mut f32,
     /// 0 = dodge (lighten), 1 = burn (darken)
     pub dodge_burn_mode: &'a mut u32,
+    /// Sponge tool settings
+    pub sponge_radius:   &'a mut f32,
+    pub sponge_hardness: &'a mut f32,
+    pub sponge_spacing:  &'a mut f32,
+    pub sponge_flow:     &'a mut f32,
+    /// 0 = saturate, 1 = desaturate
+    pub sponge_mode: &'a mut u32,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching
