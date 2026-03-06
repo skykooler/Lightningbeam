@@ -329,7 +329,7 @@ impl BrushEngine {
                 color_b: cb,
                 // Clone stamp: color_r/color_g hold source canvas X/Y, so color_a = 1.0
                 // (blend strength is opa_weight × opacity × 1.0 in the shader).
-                color_a: if blend_mode_u == 3 || blend_mode_u == 4 || blend_mode_u == 6 || blend_mode_u == 7 { 1.0 } else { stroke.color[3] },
+                color_a: if base_blend.uses_brush_color() { stroke.color[3] } else { 1.0 },
                 ndx, ndy, smudge_dist,
                 blend_mode: blend_mode_u,
                 elliptical_dab_ratio: bs.elliptical_dab_ratio.max(1.0),
@@ -363,21 +363,15 @@ impl BrushEngine {
                         state, bs, pt.x, pt.y, base_r, pt.pressure, stroke.color,
                     );
                     if !matches!(base_blend, RasterBlendMode::Smudge) {
-                        let (cr2, cg2, cb2, ndx2, ndy2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
-                            // Store offset in color_r/color_g; shader adds it per-pixel.
-                            let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
-                            (ox, oy, 0.0, 0.0, 0.0)
-                        } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
-                            // ndx = pattern_type, ndy = pattern_scale
-                            (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
-                        } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
-                            // color_r = mode (0=dodge, 1=burn); strength comes from opacity
-                            (stroke.dodge_burn_mode as f32, 0.0, 0.0, 0.0, 0.0)
-                        } else if matches!(base_blend, RasterBlendMode::Sponge) {
-                            // color_r = mode (0=saturate, 1=desaturate); strength comes from opacity
-                            (stroke.sponge_mode as f32, 0.0, 0.0, 0.0, 0.0)
-                        } else {
-                            (cr, cg, cb, 0.0, 0.0)
+                        let tp = &stroke.tool_params;
+                        let (cr2, cg2, cb2, ndx2, ndy2) = match base_blend {
+                            RasterBlendMode::CloneStamp | RasterBlendMode::Healing =>
+                                (tp[0], tp[1], 0.0, 0.0, 0.0),
+                            RasterBlendMode::PatternStamp =>
+                                (cr, cg, cb, tp[0], tp[1]),
+                            RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
+                                (tp[0], 0.0, 0.0, 0.0, 0.0),
+                            _ => (cr, cg, cb, 0.0, 0.0),
                         };
                         push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
                                  ndx2, ndy2, 0.0);
@@ -491,34 +485,20 @@ impl BrushEngine {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
                              ndx, ndy, smudge_dist);
-                } else if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
-                    // Store the offset (not absolute position) in color_r/color_g.
-                    // The shader adds this to each pixel's own position for per-pixel sampling.
-                    let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
-                    push_dab(&mut dabs, &mut bbox,
-                             ex, ey, radius2, opacity2, ox, oy, 0.0,
-                             0.0, 0.0, 0.0);
-                } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
-                    // ndx = pattern_type, ndy = pattern_scale
-                    push_dab(&mut dabs, &mut bbox,
-                             ex, ey, radius2, opacity2, cr, cg, cb,
-                             stroke.pattern_type as f32, stroke.pattern_scale, 0.0);
-                } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
-                    // color_r = mode (0=dodge, 1=burn)
-                    push_dab(&mut dabs, &mut bbox,
-                             ex, ey, radius2, opacity2,
-                             stroke.dodge_burn_mode as f32, 0.0, 0.0,
-                             0.0, 0.0, 0.0);
-                } else if matches!(base_blend, RasterBlendMode::Sponge) {
-                    // color_r = mode (0=saturate, 1=desaturate)
-                    push_dab(&mut dabs, &mut bbox,
-                             ex, ey, radius2, opacity2,
-                             stroke.sponge_mode as f32, 0.0, 0.0,
-                             0.0, 0.0, 0.0);
                 } else {
+                    let tp = &stroke.tool_params;
+                    let (cr2, cg2, cb2, ndx2, ndy2) = match base_blend {
+                        RasterBlendMode::CloneStamp | RasterBlendMode::Healing =>
+                            (tp[0], tp[1], 0.0, 0.0, 0.0),
+                        RasterBlendMode::PatternStamp =>
+                            (cr, cg, cb, tp[0], tp[1]),
+                        RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
+                            (tp[0], 0.0, 0.0, 0.0, 0.0),
+                        _ => (cr, cg, cb, 0.0, 0.0),
+                    };
                     push_dab(&mut dabs, &mut bbox,
-                             ex, ey, radius2, opacity2, cr, cg, cb,
-                             0.0, 0.0, 0.0);
+                             ex, ey, radius2, opacity2, cr2, cg2, cb2,
+                             ndx2, ndy2, 0.0);
                 }
 
                 state.partial_dabs = 0.0;
@@ -547,21 +527,15 @@ impl BrushEngine {
                     last_smooth_x, last_smooth_y,
                     base_r, last_pressure, stroke.color,
                 );
-                let (cr2, cg2, cb2, ndx2, ndy2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
-                    // Store offset in color_r/color_g; shader adds it per-pixel.
-                    let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
-                    (ox, oy, 0.0, 0.0, 0.0)
-                } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
-                    // ndx = pattern_type, ndy = pattern_scale
-                    (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
-                } else if matches!(base_blend, RasterBlendMode::DodgeBurn) {
-                    // color_r = mode (0=dodge, 1=burn)
-                    (stroke.dodge_burn_mode as f32, 0.0, 0.0, 0.0, 0.0)
-                } else if matches!(base_blend, RasterBlendMode::Sponge) {
-                    // color_r = mode (0=saturate, 1=desaturate)
-                    (stroke.sponge_mode as f32, 0.0, 0.0, 0.0, 0.0)
-                } else {
-                    (cr, cg, cb, 0.0, 0.0)
+                let tp = &stroke.tool_params;
+                let (cr2, cg2, cb2, ndx2, ndy2) = match base_blend {
+                    RasterBlendMode::CloneStamp | RasterBlendMode::Healing =>
+                        (tp[0], tp[1], 0.0, 0.0, 0.0),
+                    RasterBlendMode::PatternStamp =>
+                        (cr, cg, cb, tp[0], tp[1]),
+                    RasterBlendMode::DodgeBurn | RasterBlendMode::Sponge =>
+                        (tp[0], 0.0, 0.0, 0.0, 0.0),
+                    _ => (cr, cg, cb, 0.0, 0.0),
                 };
                 push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
                          ndx2, ndy2, 0.0);

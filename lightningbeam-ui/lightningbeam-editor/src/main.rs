@@ -13,6 +13,8 @@ use uuid::Uuid;
 mod panes;
 use panes::{PaneInstance, PaneRenderer};
 
+mod tools;
+
 mod widgets;
 
 mod menu;
@@ -784,40 +786,8 @@ struct EditorApp {
     draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
-    // Raster brush settings
-    brush_radius: f32,   // brush radius in pixels
-    brush_opacity: f32,  // brush opacity 0.0–1.0
-    brush_hardness: f32, // brush hardness 0.0–1.0
-    brush_spacing: f32,  // dabs_per_radius (fraction of radius per dab)
-    brush_use_fg: bool,  // true = paint with FG (stroke) color, false = BG (fill) color
-    /// Full brush settings for the currently active paint preset (carries elliptical, jitter, etc.)
-    active_brush_settings: lightningbeam_core::brush_settings::BrushSettings,
-    /// Eraser tool brush settings (separate from paint brush, defaults to "Brush" preset)
-    eraser_radius: f32,
-    eraser_opacity: f32,
-    eraser_hardness: f32,
-    eraser_spacing: f32,
-    active_eraser_settings: lightningbeam_core::brush_settings::BrushSettings,
-    /// Smudge tool settings (no preset picker)
-    smudge_radius: f32,
-    smudge_hardness: f32,
-    smudge_spacing: f32,
-    smudge_strength: f32,
-    /// Pattern stamp settings
-    pattern_type:  u32,
-    pattern_scale: f32,
-    /// Dodge/Burn tool settings
-    dodge_burn_radius:   f32,
-    dodge_burn_hardness: f32,
-    dodge_burn_spacing:  f32,
-    dodge_burn_exposure: f32,
-    dodge_burn_mode:     u32,
-    /// Sponge tool settings
-    sponge_radius:   f32,
-    sponge_hardness: f32,
-    sponge_spacing:  f32,
-    sponge_flow:     f32,
-    sponge_mode:     u32,
+    /// All per-tool raster paint settings (brush, eraser, smudge, clone, pattern, dodge/burn, sponge).
+    raster_settings: tools::RasterToolSettings,
     /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
     brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
@@ -1098,37 +1068,7 @@ impl EditorApp {
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
-            brush_radius: 10.0,
-            brush_opacity: 1.0,
-            brush_hardness: 0.5,
-            brush_spacing: 0.1,
-            brush_use_fg: true,
-            active_brush_settings: lightningbeam_core::brush_settings::BrushSettings::default(),
-            eraser_radius: 10.0,
-            eraser_opacity: 1.0,
-            eraser_hardness: 0.5,
-            eraser_spacing: 0.1,
-            active_eraser_settings: lightningbeam_core::brush_settings::bundled_brushes()
-                .iter()
-                .find(|p| p.name == "Brush")
-                .map(|p| p.settings.clone())
-                .unwrap_or_default(),
-            smudge_radius: 15.0,
-            smudge_hardness: 0.8,
-            smudge_spacing: 8.0,
-            smudge_strength: 1.0,
-            pattern_type:  0,
-            pattern_scale: 32.0,
-            dodge_burn_radius:   30.0,
-            dodge_burn_hardness: 0.5,
-            dodge_burn_spacing:  3.0,
-            dodge_burn_exposure: 0.5,
-            dodge_burn_mode:     0,
-            sponge_radius:   30.0,
-            sponge_hardness: 0.5,
-            sponge_spacing:  3.0,
-            sponge_flow:     0.5,
-            sponge_mode:     0,
+            raster_settings: tools::RasterToolSettings::default(),
             brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
@@ -5582,33 +5522,7 @@ impl eframe::App for EditorApp {
                     draw_simplify_mode: &mut self.draw_simplify_mode,
                     rdp_tolerance: &mut self.rdp_tolerance,
                     schneider_max_error: &mut self.schneider_max_error,
-                    brush_radius: &mut self.brush_radius,
-                    brush_opacity: &mut self.brush_opacity,
-                    brush_hardness: &mut self.brush_hardness,
-                    brush_spacing: &mut self.brush_spacing,
-                    brush_use_fg: &mut self.brush_use_fg,
-                    active_brush_settings: &mut self.active_brush_settings,
-                    eraser_radius: &mut self.eraser_radius,
-                    eraser_opacity: &mut self.eraser_opacity,
-                    eraser_hardness: &mut self.eraser_hardness,
-                    eraser_spacing: &mut self.eraser_spacing,
-                    active_eraser_settings: &mut self.active_eraser_settings,
-                    smudge_radius: &mut self.smudge_radius,
-                    smudge_hardness: &mut self.smudge_hardness,
-                    smudge_spacing: &mut self.smudge_spacing,
-                    smudge_strength: &mut self.smudge_strength,
-                    pattern_type:  &mut self.pattern_type,
-                    pattern_scale: &mut self.pattern_scale,
-                    dodge_burn_radius:   &mut self.dodge_burn_radius,
-                    dodge_burn_hardness: &mut self.dodge_burn_hardness,
-                    dodge_burn_spacing:  &mut self.dodge_burn_spacing,
-                    dodge_burn_exposure: &mut self.dodge_burn_exposure,
-                    dodge_burn_mode:     &mut self.dodge_burn_mode,
-                    sponge_radius:   &mut self.sponge_radius,
-                    sponge_hardness: &mut self.sponge_hardness,
-                    sponge_spacing:  &mut self.sponge_spacing,
-                    sponge_flow:     &mut self.sponge_flow,
-                    sponge_mode:     &mut self.sponge_mode,
+                    raster_settings: &mut self.raster_settings,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

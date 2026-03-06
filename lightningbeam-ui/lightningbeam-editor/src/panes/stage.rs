@@ -614,11 +614,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 brush_settings: scaled,
                                 color: [0.85f32, 0.88, 1.0, 1.0],
                                 blend_mode: RasterBlendMode::Normal,
-                                clone_src_offset: None,
-                                pattern_type: 0,
-                                pattern_scale: 32.0,
-                                dodge_burn_mode: 0,
-                                sponge_mode: 0,
+                                tool_params: [0.0; 4],
                                 points: vec![
                                     StrokePoint { x: x0,    y: y_lo,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
                                     StrokePoint { x: mid_x, y: mid_y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
@@ -2487,8 +2483,6 @@ pub struct StagePane {
     /// Timestamp (ui time in seconds) of the last `compute_dabs` call for this stroke.
     /// Used to compute `dt` for the unified distance+time dab accumulator.
     raster_last_compute_time: f64,
-    /// Clone stamp: world-space source point set by Alt+click.
-    clone_source: Option<egui::Vec2>,
     /// Clone stamp: (source_world - drag_start_world) computed at stroke start.
     /// Constant for the entire stroke; cleared when the stroke ends.
     clone_stroke_offset: Option<(f32, f32)>,
@@ -2616,7 +2610,6 @@ impl StagePane {
             stroke_clip_selection: None,
             painting_float: false,
             raster_last_compute_time: 0.0,
-            clone_source: None,
             clone_stroke_offset: None,
             #[cfg(debug_assertions)]
             replay_override: None,
@@ -4841,6 +4834,27 @@ impl StagePane {
     /// `self.pending_raster_dabs` for dispatch by `VelloCallback::prepare()`.
     ///
     /// The actual pixel rendering happens on the GPU (compute shader).  The CPU
+    /// Build the `tool_params: [f32; 4]` for a StrokeRecord.
+    /// For clone/healing: [offset_x, offset_y, 0, 0] (computed from clone_stroke_offset).
+    /// For all other tools: delegates to def.tool_params().
+    fn make_tool_params(
+        &self,
+        def: &dyn crate::tools::RasterToolDef,
+        shared: &SharedPaneState,
+    ) -> [f32; 4] {
+        use lightningbeam_core::raster_layer::RasterBlendMode;
+        match def.blend_mode() {
+            RasterBlendMode::CloneStamp | RasterBlendMode::Healing => {
+                if let Some((ox, oy)) = self.clone_stroke_offset {
+                    [ox, oy, 0.0, 0.0]
+                } else {
+                    [0.0; 4]
+                }
+            }
+            _ => def.tool_params(shared.raster_settings),
+        }
+    }
+
     /// only does dab placement arithmetic (cheap).  On stroke end a readback is
     /// requested so the undo system can capture the final pixel state.
     fn handle_raster_stroke_tool(
@@ -4848,9 +4862,10 @@ impl StagePane {
         ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
-        blend_mode: lightningbeam_core::raster_layer::RasterBlendMode,
+        def: &'static dyn crate::tools::RasterToolDef,
         shared: &mut SharedPaneState,
     ) {
+        let blend_mode = def.blend_mode();
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::raster_layer::StrokePoint;
@@ -4869,46 +4884,10 @@ impl StagePane {
         if !is_raster { return; }
 
         let brush = {
-            // Start from the active preset for this tool, then override the
-            // user-controlled slider values.
-            use lightningbeam_core::raster_layer::RasterBlendMode;
-            let (base_settings, radius, opacity, hardness, spacing) = match blend_mode {
-                RasterBlendMode::Erase => (
-                    shared.active_eraser_settings.clone(),
-                    *shared.eraser_radius,
-                    *shared.eraser_opacity,
-                    *shared.eraser_hardness,
-                    *shared.eraser_spacing,
-                ),
-                RasterBlendMode::Smudge => (
-                    lightningbeam_core::brush_settings::BrushSettings::default(),
-                    *shared.smudge_radius,
-                    1.0, // opacity fixed at 1.0; strength is a separate smudge_dist multiplier
-                    *shared.smudge_hardness,
-                    *shared.smudge_spacing,
-                ),
-                RasterBlendMode::DodgeBurn => (
-                    lightningbeam_core::brush_settings::BrushSettings::default(),
-                    *shared.dodge_burn_radius,
-                    *shared.dodge_burn_exposure,
-                    *shared.dodge_burn_hardness,
-                    *shared.dodge_burn_spacing,
-                ),
-                RasterBlendMode::Sponge => (
-                    lightningbeam_core::brush_settings::BrushSettings::default(),
-                    *shared.sponge_radius,
-                    *shared.sponge_flow,
-                    *shared.sponge_hardness,
-                    *shared.sponge_spacing,
-                ),
-                _ => (
-                    shared.active_brush_settings.clone(),
-                    *shared.brush_radius,
-                    *shared.brush_opacity,
-                    *shared.brush_hardness,
-                    *shared.brush_spacing,
-                ),
-            };
+            // Delegate brush parameter extraction to the tool definition.
+            let bp = def.brush_params(shared.raster_settings);
+            let (base_settings, radius, opacity, hardness, spacing) =
+                (bp.base_settings, bp.radius, bp.opacity, bp.hardness, bp.spacing);
             let mut b = base_settings;
             // Compensate for pressure_radius_gain so that the UI-chosen radius is the
             // actual rendered radius at our fixed mouse pressure of 1.0.
@@ -4918,12 +4897,12 @@ impl StagePane {
             b.hardness        = hardness;
             b.opaque          = opacity;
             b.dabs_per_radius = spacing;
-            if matches!(blend_mode, RasterBlendMode::Smudge) {
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Smudge) {
                 // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
                 b.dabs_per_actual_radius = 0.0;
                 // strength controls how far behind the stroke to sample (smudge_dist multiplier).
                 // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
-                b.smudge_radius_log = *shared.smudge_strength; // linear [0,1] strength
+                b.smudge_radius_log = shared.raster_settings.smudge_strength; // linear [0,1] strength
             }
             b
         };
@@ -4931,7 +4910,7 @@ impl StagePane {
         let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
             [1.0f32, 1.0, 1.0, 1.0]
         } else {
-            let c = if *shared.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
+            let c = if shared.raster_settings.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
             let s2l = |v: u8| -> f32 {
                 let f = v as f32 / 255.0;
                 if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
@@ -4956,7 +4935,7 @@ impl StagePane {
             // This is constant for the entire stroke and used in every StrokeRecord below.
             if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp
                                   | lightningbeam_core::raster_layer::RasterBlendMode::Healing) {
-                self.clone_stroke_offset = self.clone_source.map(|s| (
+                self.clone_stroke_offset = shared.raster_settings.clone_source.map(|s| (
                     s.x - world_pos.x, s.y - world_pos.y,
                 ));
             } else {
@@ -4991,11 +4970,7 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
-                    clone_src_offset: self.clone_stroke_offset,
-                    pattern_type: *shared.pattern_type,
-                    pattern_scale: *shared.pattern_scale,
-                    dodge_burn_mode: *shared.dodge_burn_mode,
-                    sponge_mode: *shared.sponge_mode,
+                    tool_params: self.make_tool_params(def, shared),
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5084,11 +5059,7 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
-                    clone_src_offset: self.clone_stroke_offset,
-                    pattern_type: *shared.pattern_type,
-                    pattern_scale: *shared.pattern_scale,
-                    dodge_burn_mode: *shared.dodge_burn_mode,
-                    sponge_mode: *shared.sponge_mode,
+                    tool_params: self.make_tool_params(def, shared),
                     points: vec![first_pt.clone()],
                 };
                 let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
@@ -5130,6 +5101,7 @@ impl StagePane {
         // Mouse drag: compute dabs for this segment
         // ----------------------------------------------------------------
         if self.rsp_dragged(response) {
+            let tool_params = self.make_tool_params(def, shared);
             if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
                 if let Some(prev_pt) = self.raster_last_point.take() {
                     // Get canvas info and float offset now (used for both distance check
@@ -5168,16 +5140,11 @@ impl StagePane {
                     };
 
                     if dx * dx + dy * dy >= MIN_DIST_SQ {
-                        let clone_src_offset = self.clone_stroke_offset;
                         let seg = StrokeRecord {
                             brush_settings: brush.clone(),
                             color,
                             blend_mode,
-                            clone_src_offset,
-                            pattern_type: *shared.pattern_type,
-                            pattern_scale: *shared.pattern_scale,
-                            dodge_burn_mode: *shared.dodge_burn_mode,
-                            sponge_mode: *shared.sponge_mode,
+                            tool_params,
                             points: vec![prev_pt, curr_local],
                         };
                         let current_time = ui.input(|i| i.time);
@@ -5214,6 +5181,7 @@ impl StagePane {
             if self.raster_last_compute_time > 0.0 {
                 let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
                 self.raster_last_compute_time = current_time;
+                let tool_params = self.make_tool_params(def, shared);
 
                 if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
                     let canvas_info = if self.painting_float {
@@ -5239,11 +5207,7 @@ impl StagePane {
                             brush_settings: brush.clone(),
                             color,
                             blend_mode,
-                            clone_src_offset: self.clone_stroke_offset,
-                            pattern_type: *shared.pattern_type,
-                            pattern_scale: *shared.pattern_scale,
-                            dodge_burn_mode: *shared.dodge_burn_mode,
-                            sponge_mode: *shared.sponge_mode,
+                            tool_params,
                             points: vec![pt],
                         };
                         let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, stroke_state, dt);
@@ -7541,16 +7505,18 @@ impl StagePane {
             });
         }
 
-        // Clone stamp / healing brush: Alt+click sets the source point regardless of the alt-pan guard below.
+        // Alt+click: set source point for clone/healing tools.
         {
             use lightningbeam_core::tool::Tool;
-            if matches!(*shared.selected_tool, Tool::CloneStamp | Tool::HealingBrush)
+            let tool_uses_alt = crate::tools::raster_tool_def(shared.selected_tool)
+                .map_or(false, |d| d.uses_alt_click());
+            if tool_uses_alt
                 && alt_held
                 && self.rsp_primary_pressed(ui)
                 && response.hovered()
             {
                 eprintln!("[clone/healing] set clone source to ({:.1}, {:.1})", world_pos.x, world_pos.y);
-                self.clone_source = Some(world_pos);
+                shared.raster_settings.clone_source = Some(world_pos);
             }
         }
 
@@ -7584,37 +7550,14 @@ impl StagePane {
                         shared.action_executor.document().get_layer(&id)
                     }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
                     if is_raster {
-                        self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Normal, shared);
+                        self.handle_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
                     } else {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
                 }
-                Tool::Pencil | Tool::Pen | Tool::Airbrush => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Normal, shared);
-                }
-                Tool::Erase => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Erase, shared);
-                }
-                Tool::Smudge => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Smudge, shared);
-                }
-                Tool::CloneStamp => {
-                    // Alt+click (source-setting) is handled before this block.
-                    // Here alt_held is always false, so just paint.
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp, shared);
-                }
-                Tool::HealingBrush => {
-                    // Alt+click (source-setting) is handled before this block.
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Healing, shared);
-                }
-                Tool::PatternStamp => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::PatternStamp, shared);
-                }
-                Tool::DodgeBurn => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::DodgeBurn, shared);
-                }
-                Tool::Sponge => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Sponge, shared);
+                tool if crate::tools::raster_tool_def(&tool).is_some() => {
+                    let def = crate::tools::raster_tool_def(&tool).unwrap();
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, def, shared);
                 }
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
@@ -8092,20 +8035,25 @@ impl StagePane {
         use lightningbeam_core::tool::Tool;
 
         // Compute semi-axes (world pixels) and dab rotation angle.
-        let (a_world, b_world, dab_angle_rad) = match *shared.selected_tool {
-            Tool::Erase => (*shared.eraser_radius, *shared.eraser_radius, 0.0_f32),
-            Tool::Smudge
-            | Tool::BlurSharpen => (*shared.smudge_radius, *shared.smudge_radius, 0.0_f32),
-            Tool::DodgeBurn => (*shared.dodge_burn_radius, *shared.dodge_burn_radius, 0.0_f32),
-            Tool::Sponge    => (*shared.sponge_radius,     *shared.sponge_radius,     0.0_f32),
-            _ => {
-                let bs = &shared.active_brush_settings;
-                let r = *shared.brush_radius;
+        let (a_world, b_world, dab_angle_rad) = if let Some(def) = crate::tools::raster_tool_def(shared.selected_tool) {
+            let r = def.cursor_radius(shared.raster_settings);
+            // For the standard paint brush, also account for elliptical shape.
+            if matches!(*shared.selected_tool,
+                Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush)
+            {
+                let bs = &shared.raster_settings.active_brush_settings;
                 let ratio = bs.elliptical_dab_ratio.max(1.0);
-                // Expand radius to cover the full jitter extent.
                 let expand = 1.0 + bs.offset_by_random;
                 (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+            } else {
+                (r, r, 0.0_f32)
             }
+        } else {
+            let bs = &shared.raster_settings.active_brush_settings;
+            let r = shared.raster_settings.brush_radius;
+            let ratio = bs.elliptical_dab_ratio.max(1.0);
+            let expand = 1.0 + bs.offset_by_random;
+            (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
         };
 
         let a = a_world * self.zoom; // major semi-axis in screen pixels
@@ -8726,8 +8674,10 @@ impl PaneRenderer for StagePane {
         }
 
         // Draw clone source indicator when clone stamp or healing brush tool is selected.
-        if matches!(*shared.selected_tool, lightningbeam_core::tool::Tool::CloneStamp | lightningbeam_core::tool::Tool::HealingBrush) {
-            if let Some(src_world) = self.clone_source {
+        let tool_uses_alt = crate::tools::raster_tool_def(shared.selected_tool)
+            .map_or(false, |d| d.uses_alt_click());
+        if tool_uses_alt {
+            if let Some(src_world) = shared.raster_settings.clone_source {
                 let src_canvas = egui::vec2(
                     src_world.x * self.zoom + self.pan_offset.x,
                     src_world.y * self.zoom + self.pan_offset.y,

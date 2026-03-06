@@ -136,10 +136,10 @@ impl PaneRenderer for ToolbarPane {
                 if let Some(name) = preset_name {
                     if let Some(preset) = bundled_brushes().iter().find(|p| p.name == name) {
                         let s = &preset.settings;
-                        *shared.brush_opacity  = s.opaque.clamp(0.0, 1.0);
-                        *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                        *shared.brush_spacing  = s.dabs_per_radius;
-                        *shared.active_brush_settings = s.clone();
+                        shared.raster_settings.brush_opacity  = s.opaque.clamp(0.0, 1.0);
+                        shared.raster_settings.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                        shared.raster_settings.brush_spacing  = s.dabs_per_radius;
+                        shared.raster_settings.active_brush_settings = s.clone();
                     }
                 }
             }

@@ -36,6 +36,15 @@ impl Default for RasterBlendMode {
     }
 }
 
+impl RasterBlendMode {
+    /// Returns false for blend modes that operate on existing pixels and don't
+    /// use the brush color at all (clone, heal, dodge/burn, sponge).
+    /// Used by brush_engine.rs to decide whether color_a should be 1.0 or stroke.color[3].
+    pub fn uses_brush_color(self) -> bool {
+        !matches!(self, Self::CloneStamp | Self::Healing | Self::DodgeBurn | Self::Sponge)
+    }
+}
+
 /// A single point along a stroke
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StrokePoint {
@@ -58,27 +67,15 @@ pub struct StrokeRecord {
     /// RGBA linear color [r, g, b, a]
     pub color: [f32; 4],
     pub blend_mode: RasterBlendMode,
-    /// Clone stamp source offset: (source_x - drag_start_x, source_y - drag_start_y).
-    /// For each dab at canvas position D, the source pixel is sampled from D + offset.
-    /// None for all non-clone-stamp blend modes.
+    /// Generic tool parameters — encoding depends on blend_mode:
+    /// - CloneStamp / Healing: [offset_x, offset_y, 0, 0]
+    /// - PatternStamp:         [pattern_type, pattern_scale, 0, 0]
+    /// - DodgeBurn / Sponge:   [mode, 0, 0, 0]
+    /// - all others:           [0, 0, 0, 0]
     #[serde(default)]
-    pub clone_src_offset: Option<(f32, f32)>,
-    /// Pattern stamp: procedural pattern type (0=Checkerboard, 1=Dots, 2=H-Lines, 3=V-Lines, 4=Diagonal, 5=Crosshatch)
-    #[serde(default)]
-    pub pattern_type: u32,
-    /// Pattern stamp: tile size in pixels
-    #[serde(default = "default_pattern_scale")]
-    pub pattern_scale: f32,
-    /// Dodge/Burn mode: 0 = dodge (lighten), 1 = burn (darken)
-    #[serde(default)]
-    pub dodge_burn_mode: u32,
-    /// Sponge mode: 0 = saturate, 1 = desaturate
-    #[serde(default)]
-    pub sponge_mode: u32,
+    pub tool_params: [f32; 4],
     pub points: Vec<StrokePoint>,
 }
-
-fn default_pattern_scale() -> f32 { 32.0 }
 
 /// Specifies how the raster content transitions to the next keyframe
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

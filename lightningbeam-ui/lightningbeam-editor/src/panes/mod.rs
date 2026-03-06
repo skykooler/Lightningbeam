@@ -187,45 +187,8 @@ pub struct SharedPaneState<'a> {
     pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     pub rdp_tolerance: &'a mut f64,
     pub schneider_max_error: &'a mut f64,
-    /// Raster paint brush settings
-    pub brush_radius: &'a mut f32,
-    pub brush_opacity: &'a mut f32,
-    pub brush_hardness: &'a mut f32,
-    pub brush_spacing: &'a mut f32,
-    /// Whether the brush paints with the foreground (fill) color (true) or background (stroke) color (false)
-    pub brush_use_fg: &'a mut bool,
-    /// Full brush settings for the active paint preset (carries elliptical, jitter, slow_tracking, etc.)
-    pub active_brush_settings: &'a mut lightningbeam_core::brush_settings::BrushSettings,
-    /// Raster eraser brush settings (separate from paint brush)
-    pub eraser_radius: &'a mut f32,
-    pub eraser_opacity: &'a mut f32,
-    pub eraser_hardness: &'a mut f32,
-    pub eraser_spacing: &'a mut f32,
-    /// Full brush settings for the active eraser preset
-    pub active_eraser_settings: &'a mut lightningbeam_core::brush_settings::BrushSettings,
-    /// Raster smudge tool settings (no preset picker)
-    pub smudge_radius: &'a mut f32,
-    pub smudge_hardness: &'a mut f32,
-    pub smudge_spacing: &'a mut f32,
-    pub smudge_strength: &'a mut f32,
-    /// Pattern stamp: selected procedural pattern type (0=Checkerboard..5=Crosshatch)
-    pub pattern_type:  &'a mut u32,
-    /// Pattern stamp: tile size in pixels
-    pub pattern_scale: &'a mut f32,
-    /// Dodge/Burn tool settings
-    pub dodge_burn_radius:   &'a mut f32,
-    pub dodge_burn_hardness: &'a mut f32,
-    pub dodge_burn_spacing:  &'a mut f32,
-    pub dodge_burn_exposure: &'a mut f32,
-    /// 0 = dodge (lighten), 1 = burn (darken)
-    pub dodge_burn_mode: &'a mut u32,
-    /// Sponge tool settings
-    pub sponge_radius:   &'a mut f32,
-    pub sponge_hardness: &'a mut f32,
-    pub sponge_spacing:  &'a mut f32,
-    pub sponge_flow:     &'a mut f32,
-    /// 0 = saturate, 1 = desaturate
-    pub sponge_mode: &'a mut u32,
+    /// All per-tool raster paint settings (replaces 20+ individual fields).
+    pub raster_settings: &'a mut crate::tools::RasterToolSettings,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching

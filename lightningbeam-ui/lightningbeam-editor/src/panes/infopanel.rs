@@ -169,12 +169,8 @@ impl InfopanelPane {
             .and_then(|id| shared.action_executor.document().get_layer(&id))
             .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        let is_raster_paint_tool = active_is_raster && matches!(
-            tool,
-            Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
-            | Tool::Erase | Tool::Smudge | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
-            | Tool::DodgeBurn | Tool::Sponge
-        );
+        let raster_tool_def = active_is_raster.then(|| crate::tools::raster_tool_def(&tool)).flatten();
+        let is_raster_paint_tool = raster_tool_def.is_some();
 
         // Only show tool options for tools that have options
         let is_vector_tool = !active_is_raster && matches!(
@@ -191,20 +187,9 @@ impl InfopanelPane {
             return;
         }
 
-        let header_label = if is_raster_paint_tool {
-            match tool {
-                Tool::Erase => "Eraser",
-                Tool::Smudge => "Smudge",
-                Tool::CloneStamp => "Clone Stamp",
-                Tool::HealingBrush => "Healing Brush",
-                Tool::PatternStamp => "Pattern Stamp",
-                Tool::DodgeBurn => "Dodge / Burn",
-                Tool::Sponge    => "Sponge",
-                _ => "Brush",
-            }
-        } else {
-            "Tool Options"
-        };
+        let header_label = raster_tool_def
+            .map(|d| d.header_label())
+            .unwrap_or("Tool Options");
 
         egui::CollapsingHeader::new(header_label)
             .id_salt(("tool_options", path))
@@ -216,6 +201,14 @@ impl InfopanelPane {
                 if is_vector_tool {
                     ui.checkbox(shared.snap_enabled, "Snap to Geometry");
                     ui.add_space(2.0);
+                }
+
+                // Raster paint tool: delegate to per-tool impl.
+                if let Some(def) = raster_tool_def {
+                    def.render_ui(ui, shared.raster_settings);
+                    if def.show_brush_preset_picker() {
+                        self.render_raster_tool_options(ui, shared, def.is_eraser());
+                    }
                 }
 
                 match tool {
@@ -328,124 +321,6 @@ impl InfopanelPane {
                         });
                     }
 
-                    // Raster paint tools
-                    Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
-                    | Tool::Erase | Tool::CloneStamp | Tool::HealingBrush if is_raster_paint_tool => {
-                        self.render_raster_tool_options(ui, shared, matches!(tool, Tool::Erase));
-                    }
-
-                    Tool::PatternStamp if is_raster_paint_tool => {
-                        const PATTERN_NAMES: &[&str] = &[
-                            "Checkerboard", "Dots", "H-Lines", "V-Lines", "Diagonal \\", "Diagonal /", "Crosshatch",
-                        ];
-                        let selected_name = PATTERN_NAMES
-                            .get(*shared.pattern_type as usize)
-                            .copied()
-                            .unwrap_or("Checkerboard");
-                        ui.horizontal(|ui| {
-                            ui.label("Pattern:");
-                            egui::ComboBox::from_id_salt("pattern_type")
-                                .selected_text(selected_name)
-                                .show_ui(ui, |ui| {
-                                    for (i, name) in PATTERN_NAMES.iter().enumerate() {
-                                        ui.selectable_value(shared.pattern_type, i as u32, *name);
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Scale:");
-                            ui.add(egui::Slider::new(shared.pattern_scale, 4.0_f32..=256.0)
-                                .logarithmic(true).suffix(" px"));
-                        });
-                        ui.add_space(4.0);
-                        self.render_raster_tool_options(ui, shared, false);
-                    }
-
-                    Tool::DodgeBurn if is_raster_paint_tool => {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(*shared.dodge_burn_mode == 0, "Dodge").clicked() {
-                                *shared.dodge_burn_mode = 0;
-                            }
-                            if ui.selectable_label(*shared.dodge_burn_mode == 1, "Burn").clicked() {
-                                *shared.dodge_burn_mode = 1;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Size:");
-                            ui.add(egui::Slider::new(shared.dodge_burn_radius, 1.0_f32..=500.0).logarithmic(true).suffix(" px"));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Exposure:");
-                            ui.add(egui::Slider::new(shared.dodge_burn_exposure, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Hardness:");
-                            ui.add(egui::Slider::new(shared.dodge_burn_hardness, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Spacing:");
-                            ui.add(egui::Slider::new(shared.dodge_burn_spacing, 0.5_f32..=20.0)
-                                .logarithmic(true)
-                                .custom_formatter(|v, _| format!("{:.1}", v)));
-                        });
-                    }
-
-                    Tool::Sponge if is_raster_paint_tool => {
-                        ui.horizontal(|ui| {
-                            if ui.selectable_label(*shared.sponge_mode == 0, "Saturate").clicked() {
-                                *shared.sponge_mode = 0;
-                            }
-                            if ui.selectable_label(*shared.sponge_mode == 1, "Desaturate").clicked() {
-                                *shared.sponge_mode = 1;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Size:");
-                            ui.add(egui::Slider::new(shared.sponge_radius, 1.0_f32..=500.0).logarithmic(true).suffix(" px"));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Flow:");
-                            ui.add(egui::Slider::new(shared.sponge_flow, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Hardness:");
-                            ui.add(egui::Slider::new(shared.sponge_hardness, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Spacing:");
-                            ui.add(egui::Slider::new(shared.sponge_spacing, 0.5_f32..=20.0)
-                                .logarithmic(true)
-                                .custom_formatter(|v, _| format!("{:.1}", v)));
-                        });
-                    }
-
-                    Tool::Smudge if is_raster_paint_tool => {
-                        ui.horizontal(|ui| {
-                            ui.label("Size:");
-                            ui.add(egui::Slider::new(shared.smudge_radius, 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Strength:");
-                            ui.add(egui::Slider::new(shared.smudge_strength, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Hardness:");
-                            ui.add(egui::Slider::new(shared.smudge_hardness, 0.0_f32..=1.0)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Spacing:");
-                            ui.add(egui::Slider::new(shared.smudge_spacing, 0.5_f32..=20.0)
-                                .logarithmic(true)
-                                .custom_formatter(|v, _| format!("{:.1}", v)));
-                        });
-                    }
-
                     _ => {}
                 }
 
@@ -464,17 +339,19 @@ impl InfopanelPane {
         self.render_brush_preset_grid(ui, shared, is_eraser);
         ui.add_space(2.0);
 
+        let rs = &mut shared.raster_settings;
+
         if !is_eraser {
             ui.horizontal(|ui| {
                 ui.label("Color:");
-                ui.selectable_value(shared.brush_use_fg, true, "FG");
-                ui.selectable_value(shared.brush_use_fg, false, "BG");
+                ui.selectable_value(&mut rs.brush_use_fg, true, "FG");
+                ui.selectable_value(&mut rs.brush_use_fg, false, "BG");
             });
         }
 
         macro_rules! field {
             ($eraser:ident, $brush:ident) => {
-                if is_eraser { &mut *shared.$eraser } else { &mut *shared.$brush }
+                if is_eraser { &mut rs.$eraser } else { &mut rs.$brush }
             }
         }
 
@@ -603,16 +480,17 @@ impl InfopanelPane {
                             selected = Some(idx);
                             expanded = false;
                             let s = &preset.settings;
+                            let rs = &mut shared.raster_settings;
                             if is_eraser {
-                                *shared.eraser_opacity  = s.opaque.clamp(0.0, 1.0);
-                                *shared.eraser_hardness = s.hardness.clamp(0.0, 1.0);
-                                *shared.eraser_spacing  = s.dabs_per_radius;
-                                *shared.active_eraser_settings = s.clone();
+                                rs.eraser_opacity  = s.opaque.clamp(0.0, 1.0);
+                                rs.eraser_hardness = s.hardness.clamp(0.0, 1.0);
+                                rs.eraser_spacing  = s.dabs_per_radius;
+                                rs.active_eraser_settings = s.clone();
                             } else {
-                                *shared.brush_opacity  = s.opaque.clamp(0.0, 1.0);
-                                *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                                *shared.brush_spacing  = s.dabs_per_radius;
-                                *shared.active_brush_settings = s.clone();
+                                rs.brush_opacity  = s.opaque.clamp(0.0, 1.0);
+                                rs.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                                rs.brush_spacing  = s.dabs_per_radius;
+                                rs.active_brush_settings = s.clone();
                                 // If the user was on a preset-backed tool (Pencil/Pen/Airbrush)
                                 // and manually picked a different brush, revert to the generic tool.
                                 if matches!(*shared.selected_tool, Tool::Pencil | Tool::Pen | Tool::Airbrush) {
