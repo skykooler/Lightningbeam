@@ -13,6 +13,19 @@ fn main() {
     let wrapper_dir = Path::new(&manifest_dir).join("cmake");
     let neural_audio_dir = Path::new(&manifest_dir).join("../vendor/NeuralAudio");
 
+    // Copy our patched CAPI files over the submodule versions before building.
+    // The upstream submodule uses `wchar_t*` on all platforms; our patch makes
+    // Linux/macOS use `const char*` instead, matching what the Rust FFI sends.
+    let capi_dir = neural_audio_dir.join("NeuralAudioCAPI");
+    let override_dir = Path::new(&manifest_dir).join("capi-override");
+    for filename in &["NeuralAudioCApi.h", "NeuralAudioCApi.cpp"] {
+        let src = override_dir.join(filename);
+        let dst = capi_dir.join(filename);
+        std::fs::copy(&src, &dst)
+            .unwrap_or_else(|e| panic!("Failed to copy {} override: {}", filename, e));
+        println!("cargo:rerun-if-changed=capi-override/{}", filename);
+    }
+
     let mut cfg = cmake::Config::new(&wrapper_dir);
     // Force single-config generator on Unix to avoid libraries landing in Release/ subdirs
     if !cfg!(target_os = "windows") {
@@ -50,6 +63,4 @@ fn main() {
         _ => {}
     }
 
-    println!("cargo:rerun-if-changed=../vendor/NeuralAudio/NeuralAudioCAPI/NeuralAudioCApi.h");
-    println!("cargo:rerun-if-changed=../vendor/NeuralAudio/NeuralAudioCAPI/NeuralAudioCApi.cpp");
 }
