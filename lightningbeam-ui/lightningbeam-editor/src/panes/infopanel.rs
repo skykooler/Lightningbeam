@@ -172,7 +172,7 @@ impl InfopanelPane {
         let is_raster_paint_tool = active_is_raster && matches!(
             tool,
             Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
-            | Tool::Erase | Tool::Smudge | Tool::CloneStamp
+            | Tool::Erase | Tool::Smudge | Tool::CloneStamp | Tool::HealingBrush
         );
 
         // Only show tool options for tools that have options
@@ -195,6 +195,7 @@ impl InfopanelPane {
                 Tool::Erase => "Eraser",
                 Tool::Smudge => "Smudge",
                 Tool::CloneStamp => "Clone Stamp",
+                Tool::HealingBrush => "Healing Brush",
                 _ => "Brush",
             }
         } else {
@@ -325,7 +326,7 @@ impl InfopanelPane {
 
                     // Raster paint tools
                     Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
-                    | Tool::Erase | Tool::CloneStamp if is_raster_paint_tool => {
+                    | Tool::Erase | Tool::CloneStamp | Tool::HealingBrush if is_raster_paint_tool => {
                         self.render_raster_tool_options(ui, shared, matches!(tool, Tool::Erase));
                     }
 

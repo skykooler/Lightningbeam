@@ -20,6 +20,8 @@ pub enum RasterBlendMode {
     Smudge,
     /// Clone stamp: copy pixels from a source region
     CloneStamp,
+    /// Healing brush: color-corrected clone stamp (preserves source texture, shifts color to match destination)
+    Healing,
 }
 
 impl Default for RasterBlendMode {

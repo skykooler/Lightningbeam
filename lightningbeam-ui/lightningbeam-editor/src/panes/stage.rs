@@ -4934,9 +4934,10 @@ impl StagePane {
                             && self.raster_stroke_state.is_none())
                         || (self.rsp_clicked(response) && self.raster_stroke_state.is_none());
         if stroke_start {
-            // Clone stamp: compute and store the source offset (source - drag_start).
+            // Clone stamp / healing brush: compute and store the source offset (source - drag_start).
             // This is constant for the entire stroke and used in every StrokeRecord below.
-            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp) {
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp
+                                  | lightningbeam_core::raster_layer::RasterBlendMode::Healing) {
                 self.clone_stroke_offset = self.clone_source.map(|s| (
                     s.x - world_pos.x, s.y - world_pos.y,
                 ));
@@ -7506,15 +7507,15 @@ impl StagePane {
             });
         }
 
-        // Clone stamp: Alt+click sets the source point regardless of the alt-pan guard below.
+        // Clone stamp / healing brush: Alt+click sets the source point regardless of the alt-pan guard below.
         {
             use lightningbeam_core::tool::Tool;
-            if matches!(*shared.selected_tool, Tool::CloneStamp)
+            if matches!(*shared.selected_tool, Tool::CloneStamp | Tool::HealingBrush)
                 && alt_held
                 && self.rsp_primary_pressed(ui)
                 && response.hovered()
             {
-                eprintln!("[clone stamp] set clone source to ({:.1}, {:.1})", world_pos.x, world_pos.y);
+                eprintln!("[clone/healing] set clone source to ({:.1}, {:.1})", world_pos.x, world_pos.y);
                 self.clone_source = Some(world_pos);
             }
         }
@@ -7567,6 +7568,10 @@ impl StagePane {
                     // Alt+click (source-setting) is handled before this block.
                     // Here alt_held is always false, so just paint.
                     self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp, shared);
+                }
+                Tool::HealingBrush => {
+                    // Alt+click (source-setting) is handled before this block.
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Healing, shared);
                 }
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
@@ -8677,8 +8682,8 @@ impl PaneRenderer for StagePane {
             );
         }
 
-        // Draw clone source indicator when clone stamp tool is selected.
-        if matches!(*shared.selected_tool, lightningbeam_core::tool::Tool::CloneStamp) {
+        // Draw clone source indicator when clone stamp or healing brush tool is selected.
+        if matches!(*shared.selected_tool, lightningbeam_core::tool::Tool::CloneStamp | lightningbeam_core::tool::Tool::HealingBrush) {
             if let Some(src_world) = self.clone_source {
                 let src_canvas = egui::vec2(
                     src_world.x * self.zoom + self.pan_offset.x,

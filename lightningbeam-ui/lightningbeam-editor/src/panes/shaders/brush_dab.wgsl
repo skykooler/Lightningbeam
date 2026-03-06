@@ -156,6 +156,47 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             alpha * src.b + ba * current.b,
             alpha * src.a + ba * current.a,
         );
+    } else if dab.blend_mode == 4u {
+        // Healing brush: per-pixel color-corrected clone stamp.
+        // color_r/color_g = source offset (ox, oy), same as clone stamp.
+        // For each pixel: result = src_pixel + (local_dest_mean - local_src_mean)
+        // Means are computed from 4 cardinal neighbors at ±half-radius — per-pixel, no banding.
+        let alpha = opa_weight * dab.opacity;
+        if alpha <= 0.0 { return current; }
+
+        let cw = i32(params.canvas_w);
+        let ch = i32(params.canvas_h);
+        let ox = dab.color_r;
+        let oy = dab.color_g;
+        let hr = max(dab.radius * 0.5, 1.0);
+        let ihr = i32(hr);
+
+        // Per-pixel DESTINATION mean: 4 cardinal neighbors from canvas_src (pre-batch state)
+        let d_n = textureLoad(canvas_src, vec2<i32>(px,                      clamp(py - ihr, 0, ch - 1)), 0);
+        let d_s = textureLoad(canvas_src, vec2<i32>(px,                      clamp(py + ihr, 0, ch - 1)), 0);
+        let d_w = textureLoad(canvas_src, vec2<i32>(clamp(px - ihr, 0, cw - 1), py                     ), 0);
+        let d_e = textureLoad(canvas_src, vec2<i32>(clamp(px + ihr, 0, cw - 1), py                     ), 0);
+        let d_mean = (d_n + d_s + d_w + d_e) * 0.25;
+
+        // Per-pixel SOURCE mean: 4 cardinal neighbors at offset position (bilinear for sub-pixel offsets)
+        let spx = f32(px) + 0.5 + ox;
+        let spy = f32(py) + 0.5 + oy;
+        let s_mean = (bilinear_sample(spx,        spy - hr)
+                   + bilinear_sample(spx,        spy + hr)
+                   + bilinear_sample(spx - hr,   spy     )
+                   + bilinear_sample(spx + hr,   spy     )) * 0.25;
+
+        // Source pixel + color correction
+        let s_pixel   = bilinear_sample(spx, spy);
+        let corrected = clamp(s_pixel + (d_mean - s_mean), vec4<f32>(0.0), vec4<f32>(1.0));
+
+        let ba = 1.0 - alpha;
+        return vec4<f32>(
+            alpha * corrected.r + ba * current.r,
+            alpha * corrected.g + ba * current.g,
+            alpha * corrected.b + ba * current.b,
+            alpha * corrected.a + ba * current.a,
+        );
     } else {
         return current;
     }
