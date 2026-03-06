@@ -1138,7 +1138,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Render selected DCEL from active region selection (with transform)
             if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = camera_transform * region_sel.transform;
+                let sel_transform = overlay_transform * region_sel.transform;
                 lightningbeam_core::renderer::render_dcel(
                     &region_sel.selected_dcel,
                     &mut scene,
@@ -1152,6 +1152,27 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             drop(image_cache);
             scene
         };
+
+        // Render region selection fill into the overlay scene.
+        // In HDR mode the main scene-building block returns an empty scene (only layer content
+        // goes through the HDR pipeline), so we must add the selected-DCEL fill here so it
+        // appears underneath the stipple overlay. In legacy mode the render_dcel call inside
+        // the block already handled this, but running it again is harmless since `scene` would
+        // be a fresh empty scene only in HDR mode.
+        if USE_HDR_COMPOSITING {
+            if let Some(ref region_sel) = self.ctx.region_selection {
+                let sel_transform = overlay_transform * region_sel.transform;
+                let mut image_cache = shared.image_cache.lock().unwrap();
+                lightningbeam_core::renderer::render_dcel(
+                    &region_sel.selected_dcel,
+                    &mut scene,
+                    sel_transform,
+                    1.0,
+                    &self.ctx.document,
+                    &mut image_cache,
+                );
+            }
+        }
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
@@ -1526,18 +1547,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         _ => {}
                     }
 
-                    // 2c. Draw active region selection boundary
-                    if let Some(ref region_sel) = self.ctx.region_selection {
-                        // Draw the region boundary as a dashed outline
-                        let boundary_color = Color::from_rgba8(255, 150, 0, 150);
-                        scene.stroke(
-                            &Stroke::new(1.0).with_dashes(0.0, &[6.0, 4.0]),
-                            overlay_transform,
-                            boundary_color,
-                            None,
-                            &region_sel.region_path,
-                        );
-                    }
 
                     // 3. Draw rectangle creation preview
                     if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
@@ -2795,6 +2804,12 @@ impl StagePane {
             Some(id) => id,
             None => return, // No active layer
         };
+
+        // Revert any active region selection on mouse press before borrowing the document
+        // immutably, so the two selection modes don't coexist.
+        if self.rsp_primary_pressed(ui) {
+            Self::revert_region_selection_static(shared);
+        }
 
         let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
@@ -4121,8 +4136,10 @@ impl StagePane {
 
         // Mouse down: start region selection
         if self.rsp_drag_started(response) {
-            // Revert any existing uncommitted region selection
+            // Revert any existing uncommitted region selection, and clear the
+            // regular selection so both selection modes don't coexist.
             Self::revert_region_selection_static(shared);
+            shared.selection.clear();
 
             match *shared.region_select_mode {
                 RegionSelectMode::Rectangle => {
@@ -4255,9 +4272,28 @@ impl StagePane {
             return;
         }
 
+        // Capture DCEL snapshot + region path for crash diagnosis (debug builds only)
+        #[cfg(debug_assertions)]
+        {
+            use vello::kurbo::PathEl;
+            let path_elems: Vec<serde_json::Value> = region_path.elements().iter().map(|el| match el {
+                PathEl::MoveTo(p) => serde_json::json!({"type": "M", "x": p.x, "y": p.y}),
+                PathEl::LineTo(p) => serde_json::json!({"type": "L", "x": p.x, "y": p.y}),
+                PathEl::QuadTo(p1, p2) => serde_json::json!({"type": "Q", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y}),
+                PathEl::CurveTo(p1, p2, p3) => serde_json::json!({"type": "C", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y, "x3": p3.x, "y3": p3.y}),
+                PathEl::ClosePath => serde_json::json!({"type": "Z"}),
+            }).collect();
+            let geom = serde_json::json!({
+                "region_path": path_elems,
+                "dcel_snapshot": serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
+            });
+            shared.test_mode.set_pending_geometry(geom);
+        }
+
         // Insert region boundary as invisible edges (no stroke style/color)
         let stroke_result = dcel.insert_stroke(&segments, None, None, 1.0);
-        let boundary_verts = stroke_result.new_vertices;
+        let boundary_verts: Vec<_> = stroke_result.new_vertices.clone();
+        let region_edge_ids: Vec<_> = stroke_result.new_edges.clone();
 
         // Extract the inside portion; self (dcel) keeps the outside + boundary.
         let mut selected_dcel = dcel.extract_region(&region_path, &boundary_verts);
@@ -4276,10 +4312,37 @@ impl StagePane {
         if !has_visible {
             // Nothing visible inside — restore snapshot and bail
             *dcel = snapshot;
+            #[cfg(debug_assertions)]
+            shared.test_mode.clear_pending_geometry();
             return;
         }
 
+        // Compute inside_vertices: non-deleted verts in selected_dcel that aren't boundary.
+        let inside_vertices: Vec<_> = selected_dcel
+            .vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                if v.deleted { return None; }
+                let vid = lightningbeam_core::dcel::VertexId(i as u32);
+                if !boundary_verts.contains(&vid) { Some(vid) } else { None }
+            })
+            .collect();
+
+        let action_epoch = shared.action_executor.epoch();
+
         shared.selection.clear();
+
+        // Populate global selection with the faces from the extracted DCEL so
+        // property panels and other tools can see what is selected. We add face
+        // IDs only (no boundary edges/vertices) because the boundary geometry
+        // lives in selected_dcel, not in the live DCEL.
+        for (i, face) in selected_dcel.faces.iter().enumerate() {
+            if face.deleted || i == 0 { continue; }
+            if face.fill_color.is_some() || face.image_fill.is_some() {
+                shared.selection.select_face_id_only(lightningbeam_core::dcel::FaceId(i as u32));
+            }
+        }
 
         // Store region selection state with extracted DCEL
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
@@ -4290,7 +4353,14 @@ impl StagePane {
             selected_dcel,
             transform: vello::kurbo::Affine::IDENTITY,
             committed: false,
+            inside_vertices,
+            boundary_vertices: boundary_verts,
+            region_edge_ids,
+            action_epoch_at_selection: action_epoch,
         });
+
+        #[cfg(debug_assertions)]
+        shared.test_mode.clear_pending_geometry();
     }
 
     /// Revert an uncommitted region selection, restoring the DCEL from snapshot
@@ -4307,11 +4377,26 @@ impl StagePane {
             return;
         }
 
-        // Restore the DCEL from the snapshot taken before boundary insertion
+        let no_actions_taken =
+            shared.action_executor.epoch() == region_sel.action_epoch_at_selection;
+
         let doc = shared.action_executor.document_mut();
         if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
             if let Some(dcel) = vl.dcel_at_time_mut(region_sel.time) {
-                *dcel = region_sel.dcel_snapshot;
+                if no_actions_taken {
+                    // Nothing changed: restore snapshot cleanly (undo boundary insertion)
+                    *dcel = region_sel.dcel_snapshot;
+                } else {
+                    // Actions were applied to the selection: merge selected_dcel back
+                    let mut merged = region_sel.dcel_snapshot;
+                    merged.merge_back_from_selected(
+                        &region_sel.selected_dcel,
+                        &region_sel.inside_vertices,
+                        &region_sel.boundary_vertices,
+                        &region_sel.region_edge_ids,
+                    );
+                    *dcel = merged;
+                }
             }
         }
 

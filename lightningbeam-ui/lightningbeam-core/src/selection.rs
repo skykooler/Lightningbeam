@@ -201,6 +201,16 @@ impl Selection {
         }
     }
 
+    /// Select a face by ID only, without adding boundary edges or vertices.
+    ///
+    /// Use this when the geometry lives in a separate DCEL (e.g. region selection's
+    /// `selected_dcel`) so we don't add stale edge/vertex IDs to the selection.
+    pub fn select_face_id_only(&mut self, face_id: FaceId) {
+        if !face_id.is_none() && face_id.0 != 0 {
+            self.selected_faces.insert(face_id);
+        }
+    }
+
     /// Select a face and all its boundary edges + vertices.
     pub fn select_face(&mut self, face_id: FaceId, dcel: &Dcel) {
         if face_id.is_none() || face_id.0 == 0 || dcel.face(face_id).deleted {
@@ -429,6 +439,17 @@ pub struct RegionSelection {
     pub transform: Affine,
     /// Whether the selection has been committed (via an operation on the selection)
     pub committed: bool,
+    /// Non-boundary vertices that are strictly inside the region (for merge-back).
+    pub inside_vertices: Vec<VertexId>,
+    /// Region boundary intersection vertices (for merge-back and fill propagation).
+    pub boundary_vertices: Vec<VertexId>,
+    /// IDs of the invisible edges inserted for the region boundary stroke.
+    /// Removing these during merge-back heals the face splits they created.
+    pub region_edge_ids: Vec<EdgeId>,
+    /// Action epoch recorded when this selection was created.
+    /// Compared against `ActionExecutor::epoch()` on deselect to decide
+    /// whether merge-back is needed or a clean snapshot restore suffices.
+    pub action_epoch_at_selection: u64,
 }
 
 #[cfg(test)]

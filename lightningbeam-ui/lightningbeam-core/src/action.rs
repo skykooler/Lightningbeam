@@ -132,6 +132,10 @@ pub struct ActionExecutor {
 
     /// Maximum number of actions to keep in undo stack
     max_undo_depth: usize,
+
+    /// Monotonically increasing counter, bumped on every `execute` call.
+    /// Used to detect whether any actions were taken during a region selection.
+    epoch: u64,
 }
 
 impl ActionExecutor {
@@ -144,6 +148,7 @@ impl ActionExecutor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_undo_depth: 100, // Default: keep last 100 actions
+            epoch: 0,
         }
     }
 
@@ -187,6 +192,9 @@ impl ActionExecutor {
 
         // Clear redo stack (new action invalidates redo history)
         self.redo_stack.clear();
+
+        // Bump epoch so region selections can detect that an action occurred
+        self.epoch = self.epoch.wrapping_add(1);
 
         // Add to undo stack
         self.undo_stack.push(action);
@@ -289,6 +297,16 @@ impl ActionExecutor {
         self.redo_stack.len()
     }
 
+    /// Return the current action epoch.
+    ///
+    /// The epoch is a monotonically increasing counter that is bumped every
+    /// time `execute` is called. It is never decremented on undo/redo, so
+    /// callers can record it at a point in time and later compare to detect
+    /// whether any action was executed in the interim.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Clear all undo/redo history
     pub fn clear_history(&mut self) {
         self.undo_stack.clear();
@@ -335,6 +353,7 @@ impl ActionExecutor {
 
         // 3. Push to undo stack (both succeeded)
         self.redo_stack.clear();
+        self.epoch = self.epoch.wrapping_add(1);
         self.undo_stack.push(action);
 
         // Limit undo stack size

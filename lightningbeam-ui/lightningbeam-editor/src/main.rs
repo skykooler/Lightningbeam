@@ -194,17 +194,23 @@ fn main() -> eframe::Result {
     let test_mode_is_replaying: std::sync::Arc<std::sync::atomic::AtomicBool> =
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(debug_assertions)]
+    let test_mode_pending_geometry: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(debug_assertions)]
     let test_mode_panic_snapshot_for_app = test_mode_panic_snapshot.clone();
     #[cfg(debug_assertions)]
     let test_mode_pending_event_for_app = test_mode_pending_event.clone();
     #[cfg(debug_assertions)]
     let test_mode_is_replaying_for_app = test_mode_is_replaying.clone();
+    #[cfg(debug_assertions)]
+    let test_mode_pending_geometry_for_app = test_mode_pending_geometry.clone();
 
     #[cfg(debug_assertions)]
     {
         let panic_snapshot = test_mode_panic_snapshot.clone();
         let pending_event = test_mode_pending_event.clone();
         let is_replaying = test_mode_is_replaying.clone();
+        let pending_geometry = test_mode_pending_geometry.clone();
         let test_dir = directories::ProjectDirs::from("", "", "lightningbeam")
             .map(|dirs| dirs.data_dir().join("test_cases"))
             .unwrap_or_else(|| std::path::PathBuf::from("test_cases"));
@@ -219,7 +225,7 @@ fn main() -> eframe::Result {
                 format!("{}", info)
             };
             let backtrace = format!("{}", std::backtrace::Backtrace::force_capture());
-            test_mode::TestModeState::record_panic(&panic_snapshot, &pending_event, &is_replaying, msg, backtrace, &test_dir);
+            test_mode::TestModeState::record_panic(&panic_snapshot, &pending_event, &is_replaying, &pending_geometry, msg, backtrace, &test_dir);
             default_hook(info);
         }));
     }
@@ -229,7 +235,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             #[cfg(debug_assertions)]
-            let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app);
+            let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
             #[cfg(not(debug_assertions))]
             let app = EditorApp::new(cc, layouts, theme);
             Ok(Box::new(app))
@@ -936,6 +942,7 @@ impl EditorApp {
         #[cfg(debug_assertions)] panic_snapshot: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestCase>>>,
         #[cfg(debug_assertions)] pending_event: std::sync::Arc<std::sync::Mutex<Option<lightningbeam_core::test_mode::TestEvent>>>,
         #[cfg(debug_assertions)] is_replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        #[cfg(debug_assertions)] pending_geometry: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     ) -> Self {
         let current_layout = layouts[0].layout.clone();
 
@@ -1144,7 +1151,7 @@ impl EditorApp {
 
             // Debug test mode (F5)
             #[cfg(debug_assertions)]
-            test_mode: test_mode::TestModeState::new(panic_snapshot, pending_event, is_replaying),
+            test_mode: test_mode::TestModeState::new(panic_snapshot, pending_event, is_replaying, pending_geometry),
 
             // Debug overlay (F3)
             cursor_cache: custom_cursor::CursorCache::new(),

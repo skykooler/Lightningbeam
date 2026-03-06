@@ -88,6 +88,10 @@ pub struct TestCase {
     pub ended_with_panic: bool,
     pub panic_message: Option<String>,
     pub panic_backtrace: Option<String>,
+    /// Serialized geometry context at the time of the crash (e.g. DCEL + region path).
+    /// Populated by set_pending_geometry before risky operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_context: Option<serde_json::Value>,
 }
 
 impl TestCase {
@@ -102,6 +106,7 @@ impl TestCase {
             ended_with_panic: false,
             panic_message: None,
             panic_backtrace: None,
+            geometry_context: None,
         }
     }
 
