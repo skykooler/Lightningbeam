@@ -1090,7 +1090,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Render selected DCEL from active region selection (with transform)
             if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = camera_transform * region_sel.transform;
+                let sel_transform = overlay_transform * region_sel.transform;
                 lightningbeam_core::renderer::render_dcel(
                     &region_sel.selected_dcel,
                     &mut scene,
@@ -1104,6 +1104,27 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             drop(image_cache);
             scene
         };
+
+        // Render region selection fill into the overlay scene.
+        // In HDR mode the main scene-building block returns an empty scene (only layer content
+        // goes through the HDR pipeline), so we must add the selected-DCEL fill here so it
+        // appears underneath the stipple overlay. In legacy mode the render_dcel call inside
+        // the block already handled this, but running it again is harmless since `scene` would
+        // be a fresh empty scene only in HDR mode.
+        if USE_HDR_COMPOSITING {
+            if let Some(ref region_sel) = self.ctx.region_selection {
+                let sel_transform = overlay_transform * region_sel.transform;
+                let mut image_cache = shared.image_cache.lock().unwrap();
+                lightningbeam_core::renderer::render_dcel(
+                    &region_sel.selected_dcel,
+                    &mut scene,
+                    sel_transform,
+                    1.0,
+                    &self.ctx.document,
+                    &mut image_cache,
+                );
+            }
+        }
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
@@ -1478,18 +1499,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         _ => {}
                     }
 
-                    // 2c. Draw active region selection boundary
-                    if let Some(ref region_sel) = self.ctx.region_selection {
-                        // Draw the region boundary as a dashed outline
-                        let boundary_color = Color::from_rgba8(255, 150, 0, 150);
-                        scene.stroke(
-                            &Stroke::new(1.0).with_dashes(0.0, &[6.0, 4.0]),
-                            overlay_transform,
-                            boundary_color,
-                            None,
-                            &region_sel.region_path,
-                        );
-                    }
 
                     // 3. Draw rectangle creation preview
                     if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
@@ -2743,6 +2752,12 @@ impl StagePane {
             Some(id) => id,
             None => return, // No active layer
         };
+
+        // Revert any active region selection on mouse press before borrowing the document
+        // immutably, so the two selection modes don't coexist.
+        if self.rsp_primary_pressed(ui) {
+            Self::revert_region_selection_static(shared);
+        }
 
         let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
@@ -4069,8 +4084,10 @@ impl StagePane {
 
         // Mouse down: start region selection
         if self.rsp_drag_started(response) {
-            // Revert any existing uncommitted region selection
+            // Revert any existing uncommitted region selection, and clear the
+            // regular selection so both selection modes don't coexist.
             Self::revert_region_selection_static(shared);
+            shared.selection.clear();
 
             match *shared.region_select_mode {
                 RegionSelectMode::Rectangle => {
@@ -4263,6 +4280,17 @@ impl StagePane {
         let action_epoch = shared.action_executor.epoch();
 
         shared.selection.clear();
+
+        // Populate global selection with the faces from the extracted DCEL so
+        // property panels and other tools can see what is selected. We add face
+        // IDs only (no boundary edges/vertices) because the boundary geometry
+        // lives in selected_dcel, not in the live DCEL.
+        for (i, face) in selected_dcel.faces.iter().enumerate() {
+            if face.deleted || i == 0 { continue; }
+            if face.fill_color.is_some() || face.image_fill.is_some() {
+                shared.selection.select_face_id_only(lightningbeam_core::dcel::FaceId(i as u32));
+            }
+        }
 
         // Store region selection state with extracted DCEL
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {

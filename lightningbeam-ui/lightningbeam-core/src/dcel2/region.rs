@@ -596,6 +596,80 @@ mod tests {
         extracted.validate();
     }
 
+    /// Selection entirely inside a filled face: the original face must survive.
+    ///
+    /// Before this fix, `insert_edge_both_connected` would overwrite F1's
+    /// `outer_half_edge` with the spur back-chain, causing F1 to lose its
+    /// rectangle boundary and visually disappear.
+    #[test]
+    fn rect_inner_region_select_preserves_face() {
+        use crate::shape::ShapeColor;
+        let red = ShapeColor::rgb(255, 0, 0);
+        let mut dcel = Dcel::new();
+
+        // Build a rectangle: (100,100)-(300,200)
+        let tl = Point::new(100.0, 100.0);
+        let tr = Point::new(300.0, 100.0);
+        let br = Point::new(300.0, 200.0);
+        let bl = Point::new(100.0, 200.0);
+        dcel.insert_stroke(&[
+            line_cubic(tl, tr), line_cubic(tr, br),
+            line_cubic(br, bl), line_cubic(bl, tl),
+        ], None, None, 1.0);
+
+        // Simulate paint-bucket: create face for rectangle interior and assign fill.
+        let fq = dcel.find_face_at_point(Point::new(200.0, 150.0));
+        let f1 = if !fq.cycle_he.is_none() && fq.face.0 == 0 {
+            dcel.create_face_at_cycle(fq.cycle_he)
+        } else {
+            fq.face
+        };
+        dcel.faces[f1.idx()].fill_color = Some(red);
+        dcel.validate();
+
+        // Confirm F1 has fill
+        assert!(dcel.faces.iter().skip(1).any(|f| !f.deleted && f.fill_color.is_some()),
+            "rect face should have fill before selection");
+
+        // Selection: (150,130)-(250,170) — entirely inside the rectangle
+        let sa = Point::new(150.0, 130.0);
+        let sb = Point::new(250.0, 130.0);
+        let sc = Point::new(250.0, 170.0);
+        let sd = Point::new(150.0, 170.0);
+        let mut region_path = BezPath::new();
+        region_path.move_to(sa);
+        region_path.line_to(sb);
+        region_path.line_to(sc);
+        region_path.line_to(sd);
+        region_path.close_path();
+
+        let sel_result = dcel.insert_stroke(&[
+            line_cubic(sa, sb), line_cubic(sb, sc),
+            line_cubic(sc, sd), line_cubic(sd, sa),
+        ], None, None, 1.0);
+        dcel.validate();
+
+        let boundary_verts = sel_result.new_vertices.clone();
+        let extracted = dcel.extract_region(&region_path, &boundary_verts);
+
+        dcel.validate();
+        extracted.validate();
+
+        // The live DCEL must still have a filled face (the original rectangle).
+        let live_filled = dcel.faces.iter().enumerate()
+            .filter(|(i, f)| *i > 0 && !f.deleted && f.fill_color.is_some())
+            .count();
+        assert!(live_filled >= 1,
+            "live DCEL should still have at least one filled face after selection; got {live_filled}");
+
+        // The extracted DCEL must also have a filled face (selection interior, inherits fill).
+        let extracted_filled = extracted.faces.iter().enumerate()
+            .filter(|(i, f)| *i > 0 && !f.deleted && f.fill_color.is_some())
+            .count();
+        assert!(extracted_filled >= 1,
+            "extracted DCEL should have at least one filled face; got {extracted_filled}");
+    }
+
     /// Replicate: multiple consecutive region-selects on two rectangles,
     /// some of which select empty space. Verifies no crash accumulates.
     #[test]

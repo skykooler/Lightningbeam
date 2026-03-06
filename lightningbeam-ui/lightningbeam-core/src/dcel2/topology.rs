@@ -331,6 +331,25 @@ impl Dcel {
         // the old face's outer_half_edge.
         let old_ohe = self.faces[actual_face.idx()].outer_half_edge;
         let fwd_has_old = !old_ohe.is_none() && self.cycle_contains(he_fwd, old_ohe);
+        let bwd_has_old = !fwd_has_old && !old_ohe.is_none() && self.cycle_contains(he_bwd, old_ohe);
+
+        if !fwd_has_old && !bwd_has_old {
+            // Neither new cycle contains the face's existing outer boundary.
+            // This happens when the edge closes a loop entirely within the face
+            // (all selection vertices are isolated/floating, never connected to the
+            // face's real boundary). Don't overwrite outer_half_edge — it still
+            // correctly points to the face's real boundary (e.g. the rectangle).
+            // he_fwd = the enclosed interior (new face F2); he_bwd = reverse
+            // traversal of the selection boundary (stays in actual_face).
+            self.assign_cycle_face(he_bwd, actual_face);
+            let new_face = self.alloc_face();
+            self.faces[new_face.idx()].fill_color = self.faces[actual_face.idx()].fill_color;
+            self.faces[new_face.idx()].image_fill = self.faces[actual_face.idx()].image_fill;
+            self.faces[new_face.idx()].fill_rule = self.faces[actual_face.idx()].fill_rule;
+            self.faces[new_face.idx()].outer_half_edge = he_fwd;
+            self.assign_cycle_face(he_fwd, new_face);
+            return (edge_id, new_face);
+        }
 
         let (he_old_cycle, he_new_cycle) = if fwd_has_old {
             (he_fwd, he_bwd)

@@ -201,6 +201,16 @@ impl Selection {
         }
     }
 
+    /// Select a face by ID only, without adding boundary edges or vertices.
+    ///
+    /// Use this when the geometry lives in a separate DCEL (e.g. region selection's
+    /// `selected_dcel`) so we don't add stale edge/vertex IDs to the selection.
+    pub fn select_face_id_only(&mut self, face_id: FaceId) {
+        if !face_id.is_none() && face_id.0 != 0 {
+            self.selected_faces.insert(face_id);
+        }
+    }
+
     /// Select a face and all its boundary edges + vertices.
     pub fn select_face(&mut self, face_id: FaceId, dcel: &Dcel) {
         if face_id.is_none() || face_id.0 == 0 || dcel.face(face_id).deleted {
