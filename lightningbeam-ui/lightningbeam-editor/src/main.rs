@@ -766,8 +766,19 @@ struct EditorApp {
     brush_hardness: f32, // brush hardness 0.0–1.0
     brush_spacing: f32,  // dabs_per_radius (fraction of radius per dab)
     brush_use_fg: bool,  // true = paint with FG (stroke) color, false = BG (fill) color
-    /// Full brush settings for the currently active preset (carries elliptical, jitter, etc.)
+    /// Full brush settings for the currently active paint preset (carries elliptical, jitter, etc.)
     active_brush_settings: lightningbeam_core::brush_settings::BrushSettings,
+    /// Eraser tool brush settings (separate from paint brush, defaults to "Brush" preset)
+    eraser_radius: f32,
+    eraser_opacity: f32,
+    eraser_hardness: f32,
+    eraser_spacing: f32,
+    active_eraser_settings: lightningbeam_core::brush_settings::BrushSettings,
+    /// Smudge tool settings (no preset picker)
+    smudge_radius: f32,
+    smudge_hardness: f32,
+    smudge_spacing: f32,
+    smudge_strength: f32,
     /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
     brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
@@ -1052,6 +1063,19 @@ impl EditorApp {
             brush_spacing: 0.1,
             brush_use_fg: true,
             active_brush_settings: lightningbeam_core::brush_settings::BrushSettings::default(),
+            eraser_radius: 10.0,
+            eraser_opacity: 1.0,
+            eraser_hardness: 0.5,
+            eraser_spacing: 0.1,
+            active_eraser_settings: lightningbeam_core::brush_settings::bundled_brushes()
+                .iter()
+                .find(|p| p.name == "Brush")
+                .map(|p| p.settings.clone())
+                .unwrap_or_default(),
+            smudge_radius: 15.0,
+            smudge_hardness: 0.8,
+            smudge_spacing: 8.0,
+            smudge_strength: 1.0,
             brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
@@ -5510,6 +5534,15 @@ impl eframe::App for EditorApp {
                     brush_spacing: &mut self.brush_spacing,
                     brush_use_fg: &mut self.brush_use_fg,
                     active_brush_settings: &mut self.active_brush_settings,
+                    eraser_radius: &mut self.eraser_radius,
+                    eraser_opacity: &mut self.eraser_opacity,
+                    eraser_hardness: &mut self.eraser_hardness,
+                    eraser_spacing: &mut self.eraser_spacing,
+                    active_eraser_settings: &mut self.active_eraser_settings,
+                    smudge_radius: &mut self.smudge_radius,
+                    smudge_hardness: &mut self.smudge_hardness,
+                    smudge_spacing: &mut self.smudge_spacing,
+                    smudge_strength: &mut self.smudge_strength,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

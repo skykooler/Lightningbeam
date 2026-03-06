@@ -4772,17 +4772,48 @@ impl StagePane {
         if !is_raster { return; }
 
         let brush = {
-            // Start from the active preset (carries elliptical ratio/angle, jitter, etc.)
-            // then override the four parameters the user controls via UI sliders.
-            let mut b = shared.active_brush_settings.clone();
+            // Start from the active preset for this tool, then override the
+            // user-controlled slider values.
+            use lightningbeam_core::raster_layer::RasterBlendMode;
+            let (base_settings, radius, opacity, hardness, spacing) = match blend_mode {
+                RasterBlendMode::Erase => (
+                    shared.active_eraser_settings.clone(),
+                    *shared.eraser_radius,
+                    *shared.eraser_opacity,
+                    *shared.eraser_hardness,
+                    *shared.eraser_spacing,
+                ),
+                RasterBlendMode::Smudge => (
+                    lightningbeam_core::brush_settings::BrushSettings::default(),
+                    *shared.smudge_radius,
+                    1.0, // opacity fixed at 1.0; strength is a separate smudge_dist multiplier
+                    *shared.smudge_hardness,
+                    *shared.smudge_spacing,
+                ),
+                _ => (
+                    shared.active_brush_settings.clone(),
+                    *shared.brush_radius,
+                    *shared.brush_opacity,
+                    *shared.brush_hardness,
+                    *shared.brush_spacing,
+                ),
+            };
+            let mut b = base_settings;
             // Compensate for pressure_radius_gain so that the UI-chosen radius is the
             // actual rendered radius at our fixed mouse pressure of 1.0.
             // radius_at_pressure(1.0) = exp(radius_log + gain × 0.5)
-            // → radius_log = ln(brush_radius) - gain × 0.5
-            b.radius_log = shared.brush_radius.ln() - b.pressure_radius_gain * 0.5;
-            b.hardness   = *shared.brush_hardness;
-            b.opaque     = *shared.brush_opacity;
-            b.dabs_per_radius = *shared.brush_spacing;
+            // → radius_log = ln(radius) - gain × 0.5
+            b.radius_log      = radius.ln() - b.pressure_radius_gain * 0.5;
+            b.hardness        = hardness;
+            b.opaque          = opacity;
+            b.dabs_per_radius = spacing;
+            if matches!(blend_mode, RasterBlendMode::Smudge) {
+                // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
+                b.dabs_per_actual_radius = 0.0;
+                // strength controls how far behind the stroke to sample (smudge_dist multiplier).
+                // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
+                b.smudge_radius_log = shared.smudge_strength.ln();
+            }
             b
         };
 

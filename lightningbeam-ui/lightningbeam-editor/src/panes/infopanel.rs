@@ -26,18 +26,29 @@ pub struct InfopanelPane {
     tool_section_open: bool,
     /// Whether the shape properties section is expanded
     shape_section_open: bool,
-    /// Index of the selected brush preset (None = custom / unset)
+    /// Index of the selected paint brush preset (None = custom / unset)
     selected_brush_preset: Option<usize>,
+    /// Whether the paint brush picker is expanded
+    brush_picker_expanded: bool,
+    /// Index of the selected eraser brush preset
+    selected_eraser_preset: Option<usize>,
+    /// Whether the eraser brush picker is expanded
+    eraser_picker_expanded: bool,
     /// Cached preview textures, one per preset (populated lazily).
     brush_preview_textures: Vec<egui::TextureHandle>,
 }
 
 impl InfopanelPane {
     pub fn new() -> Self {
+        let presets = bundled_brushes();
+        let default_eraser_idx = presets.iter().position(|p| p.name == "Brush");
         Self {
             tool_section_open: true,
             shape_section_open: true,
             selected_brush_preset: None,
+            brush_picker_expanded: false,
+            selected_eraser_preset: default_eraser_idx,
+            eraser_picker_expanded: false,
             brush_preview_textures: Vec::new(),
         }
     }
@@ -308,52 +319,31 @@ impl InfopanelPane {
                     }
 
                     // Raster paint tools
-                    Tool::Draw | Tool::Erase | Tool::Smudge if is_raster_paint_tool => {
-                        // Brush preset picker (Draw tool only)
-                        if matches!(tool, Tool::Draw) {
-                            self.render_brush_preset_grid(ui, shared);
-                            ui.add_space(2.0);
-                        }
+                    Tool::Draw | Tool::Erase if is_raster_paint_tool => {
+                        self.render_raster_tool_options(ui, shared, matches!(tool, Tool::Erase));
+                    }
 
-                        // Color source toggle (Draw tool only)
-                        if matches!(tool, Tool::Draw) {
-                            ui.horizontal(|ui| {
-                                ui.label("Color:");
-                                ui.selectable_value(shared.brush_use_fg, true, "FG");
-                                ui.selectable_value(shared.brush_use_fg, false, "BG");
-                            });
-                        }
+                    Tool::Smudge if is_raster_paint_tool => {
                         ui.horizontal(|ui| {
                             ui.label("Size:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_radius, 1.0_f32..=200.0)
-                                    .logarithmic(true)
-                                    .suffix(" px"),
-                            );
+                            ui.add(egui::Slider::new(shared.smudge_radius, 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
                         });
-                        if !matches!(tool, Tool::Smudge) {
-                            ui.horizontal(|ui| {
-                                ui.label("Opacity:");
-                                ui.add(
-                                    egui::Slider::new(shared.brush_opacity, 0.0_f32..=1.0)
-                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                                );
-                            });
-                        }
+                        ui.horizontal(|ui| {
+                            ui.label("Reach:");
+                            ui.add(egui::Slider::new(shared.smudge_strength, 0.1_f32..=5.0)
+                                .logarithmic(true)
+                                .custom_formatter(|v, _| format!("{:.2}x", v)));
+                        });
                         ui.horizontal(|ui| {
                             ui.label("Hardness:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_hardness, 0.0_f32..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
+                            ui.add(egui::Slider::new(shared.smudge_hardness, 0.0_f32..=1.0)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                         });
                         ui.horizontal(|ui| {
                             ui.label("Spacing:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_spacing, 0.01_f32..=1.0)
-                                    .logarithmic(true)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
+                            ui.add(egui::Slider::new(shared.smudge_spacing, 0.5_f32..=20.0)
+                                .logarithmic(true)
+                                .custom_formatter(|v, _| format!("{:.1}", v)));
                         });
                     }
 
@@ -364,8 +354,56 @@ impl InfopanelPane {
             });
     }
 
-    /// Render the brush preset thumbnail grid for the Draw raster tool.
-    fn render_brush_preset_grid(&mut self, ui: &mut Ui, shared: &mut SharedPaneState) {
+    /// Render all options for a raster paint tool (brush picker + sliders).
+    /// `is_eraser` drives which shared state is read/written.
+    fn render_raster_tool_options(
+        &mut self,
+        ui: &mut Ui,
+        shared: &mut SharedPaneState,
+        is_eraser: bool,
+    ) {
+        self.render_brush_preset_grid(ui, shared, is_eraser);
+        ui.add_space(2.0);
+
+        if !is_eraser {
+            ui.horizontal(|ui| {
+                ui.label("Color:");
+                ui.selectable_value(shared.brush_use_fg, true, "FG");
+                ui.selectable_value(shared.brush_use_fg, false, "BG");
+            });
+        }
+
+        macro_rules! field {
+            ($eraser:ident, $brush:ident) => {
+                if is_eraser { &mut *shared.$eraser } else { &mut *shared.$brush }
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            ui.add(egui::Slider::new(field!(eraser_radius, brush_radius), 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Opacity:");
+            ui.add(egui::Slider::new(field!(eraser_opacity, brush_opacity), 0.0_f32..=1.0)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hardness:");
+            ui.add(egui::Slider::new(field!(eraser_hardness, brush_hardness), 0.0_f32..=1.0)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Spacing:");
+            ui.add(egui::Slider::new(field!(eraser_spacing, brush_spacing), 0.01_f32..=1.0)
+                .logarithmic(true)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+    }
+
+    /// Render the brush preset thumbnail grid (collapsible).
+    /// `is_eraser` drives which picker state and which shared settings are updated.
+    fn render_brush_preset_grid(&mut self, ui: &mut Ui, shared: &mut SharedPaneState, is_eraser: bool) {
         let presets = bundled_brushes();
         if presets.is_empty() { return; }
 
@@ -390,80 +428,107 @@ impl InfopanelPane {
             }
         }
 
+        // Read picker state into locals to avoid multiple &mut self borrows.
+        let mut expanded = if is_eraser { self.eraser_picker_expanded } else { self.brush_picker_expanded };
+        let mut selected = if is_eraser { self.selected_eraser_preset } else { self.selected_brush_preset };
+
         let gap = 3.0;
         let cols = 2usize;
-        let cell_w = ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).max(50.0);
+        let avail_w = ui.available_width();
+        let cell_w = ((avail_w - gap * (cols as f32 - 1.0)) / cols as f32).max(50.0);
         let cell_h = 80.0;
 
-        for (row_idx, chunk) in presets.chunks(cols).enumerate() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for (col_idx, preset) in chunk.iter().enumerate() {
-                    let idx = row_idx * cols + col_idx;
-                    let is_selected = self.selected_brush_preset == Some(idx);
-
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(cell_w, cell_h),
-                        egui::Sense::click(),
-                    );
-
-                    let painter = ui.painter();
-
-                    let bg = if is_selected {
-                        egui::Color32::from_rgb(45, 65, 95)
-                    } else if resp.hovered() {
-                        egui::Color32::from_rgb(45, 50, 62)
-                    } else {
-                        egui::Color32::from_rgb(32, 36, 44)
-                    };
-                    painter.rect_filled(rect, 4.0, bg);
-                    if is_selected {
-                        painter.rect_stroke(
-                            rect, 4.0,
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)),
-                            egui::StrokeKind::Middle,
-                        );
-                    }
-
-                    // Dab preview (upper portion, leaving 18 px for the name)
-                    let preview_rect = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(4.0, 4.0),
-                        egui::vec2(cell_w - 8.0, cell_h - 22.0),
-                    );
-                    if let Some(tex) = self.brush_preview_textures.get(idx) {
-                        painter.image(
-                            tex.id(), preview_rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                    }
-
-                    // Name
-                    painter.text(
-                        egui::pos2(rect.center().x, rect.max.y - 9.0),
-                        egui::Align2::CENTER_CENTER,
-                        preset.name,
-                        egui::FontId::proportional(9.5),
-                        if is_selected {
-                            egui::Color32::from_rgb(140, 190, 255)
-                        } else {
-                            egui::Color32::from_gray(160)
-                        },
-                    );
-
-                    if resp.clicked() {
-                        self.selected_brush_preset = Some(idx);
-                        let s = &preset.settings;
-                        // Size is intentionally NOT reset — it is global and persists
-                        // across preset switches.  All other parameters load from preset.
-                        *shared.brush_opacity  = s.opaque.clamp(0.0, 1.0);
-                        *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                        *shared.brush_spacing  = s.dabs_per_radius;
-                        *shared.active_brush_settings = s.clone();
-                    }
+        if !expanded {
+            // Collapsed: show just the currently selected preset as a single wide cell.
+            let show_idx = selected.unwrap_or(0);
+            if let Some(preset) = presets.get(show_idx) {
+                let full_w = avail_w.max(50.0);
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(full_w, cell_h), egui::Sense::click());
+                let painter = ui.painter();
+                let bg = if resp.hovered() {
+                    egui::Color32::from_rgb(50, 56, 70)
+                } else {
+                    egui::Color32::from_rgb(45, 65, 95)
+                };
+                painter.rect_filled(rect, 4.0, bg);
+                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)), egui::StrokeKind::Middle);
+                let preview_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(4.0, 4.0),
+                    egui::vec2(rect.width() - 8.0, cell_h - 22.0),
+                );
+                if let Some(tex) = self.brush_preview_textures.get(show_idx) {
+                    painter.image(tex.id(), preview_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE);
                 }
-            });
-            ui.add_space(gap);
+                painter.text(egui::pos2(rect.center().x, rect.max.y - 9.0),
+                    egui::Align2::CENTER_CENTER, preset.name,
+                    egui::FontId::proportional(9.5), egui::Color32::from_rgb(140, 190, 255));
+                if resp.clicked() { expanded = true; }
+            }
+        } else {
+            // Expanded: full grid; clicking a preset selects it and collapses.
+            for (row_idx, chunk) in presets.chunks(cols).enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (col_idx, preset) in chunk.iter().enumerate() {
+                        let idx = row_idx * cols + col_idx;
+                        let is_sel = selected == Some(idx);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell_w, cell_h), egui::Sense::click());
+                        let painter = ui.painter();
+                        let bg = if is_sel {
+                            egui::Color32::from_rgb(45, 65, 95)
+                        } else if resp.hovered() {
+                            egui::Color32::from_rgb(45, 50, 62)
+                        } else {
+                            egui::Color32::from_rgb(32, 36, 44)
+                        };
+                        painter.rect_filled(rect, 4.0, bg);
+                        if is_sel {
+                            painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)), egui::StrokeKind::Middle);
+                        }
+                        let preview_rect = egui::Rect::from_min_size(
+                            rect.min + egui::vec2(4.0, 4.0),
+                            egui::vec2(cell_w - 8.0, cell_h - 22.0),
+                        );
+                        if let Some(tex) = self.brush_preview_textures.get(idx) {
+                            painter.image(tex.id(), preview_rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE);
+                        }
+                        painter.text(egui::pos2(rect.center().x, rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER, preset.name,
+                            egui::FontId::proportional(9.5),
+                            if is_sel { egui::Color32::from_rgb(140, 190, 255) } else { egui::Color32::from_gray(160) });
+                        if resp.clicked() {
+                            selected = Some(idx);
+                            expanded = false;
+                            let s = &preset.settings;
+                            if is_eraser {
+                                *shared.eraser_opacity  = s.opaque.clamp(0.0, 1.0);
+                                *shared.eraser_hardness = s.hardness.clamp(0.0, 1.0);
+                                *shared.eraser_spacing  = s.dabs_per_radius;
+                                *shared.active_eraser_settings = s.clone();
+                            } else {
+                                *shared.brush_opacity  = s.opaque.clamp(0.0, 1.0);
+                                *shared.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                                *shared.brush_spacing  = s.dabs_per_radius;
+                                *shared.active_brush_settings = s.clone();
+                            }
+                        }
+                    }
+                });
+                ui.add_space(gap);
+            }
+        }
+
+        // Write back picker state.
+        if is_eraser {
+            self.eraser_picker_expanded = expanded;
+            self.selected_eraser_preset = selected;
+        } else {
+            self.brush_picker_expanded = expanded;
+            self.selected_brush_preset = selected;
         }
     }
 
