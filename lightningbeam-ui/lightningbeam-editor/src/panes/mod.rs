@@ -208,6 +208,10 @@ pub struct SharedPaneState<'a> {
     pub smudge_hardness: &'a mut f32,
     pub smudge_spacing: &'a mut f32,
     pub smudge_strength: &'a mut f32,
+    /// Pattern stamp: selected procedural pattern type (0=Checkerboard..5=Crosshatch)
+    pub pattern_type:  &'a mut u32,
+    /// Pattern stamp: tile size in pixels
+    pub pattern_scale: &'a mut f32,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching

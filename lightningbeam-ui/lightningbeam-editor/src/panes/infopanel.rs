@@ -172,7 +172,7 @@ impl InfopanelPane {
         let is_raster_paint_tool = active_is_raster && matches!(
             tool,
             Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
-            | Tool::Erase | Tool::Smudge | Tool::CloneStamp | Tool::HealingBrush
+            | Tool::Erase | Tool::Smudge | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
         );
 
         // Only show tool options for tools that have options
@@ -196,6 +196,7 @@ impl InfopanelPane {
                 Tool::Smudge => "Smudge",
                 Tool::CloneStamp => "Clone Stamp",
                 Tool::HealingBrush => "Healing Brush",
+                Tool::PatternStamp => "Pattern Stamp",
                 _ => "Brush",
             }
         } else {
@@ -328,6 +329,33 @@ impl InfopanelPane {
                     Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
                     | Tool::Erase | Tool::CloneStamp | Tool::HealingBrush if is_raster_paint_tool => {
                         self.render_raster_tool_options(ui, shared, matches!(tool, Tool::Erase));
+                    }
+
+                    Tool::PatternStamp if is_raster_paint_tool => {
+                        const PATTERN_NAMES: &[&str] = &[
+                            "Checkerboard", "Dots", "H-Lines", "V-Lines", "Diagonal \\", "Diagonal /", "Crosshatch",
+                        ];
+                        let selected_name = PATTERN_NAMES
+                            .get(*shared.pattern_type as usize)
+                            .copied()
+                            .unwrap_or("Checkerboard");
+                        ui.horizontal(|ui| {
+                            ui.label("Pattern:");
+                            egui::ComboBox::from_id_salt("pattern_type")
+                                .selected_text(selected_name)
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in PATTERN_NAMES.iter().enumerate() {
+                                        ui.selectable_value(shared.pattern_type, i as u32, *name);
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Scale:");
+                            ui.add(egui::Slider::new(shared.pattern_scale, 4.0_f32..=256.0)
+                                .logarithmic(true).suffix(" px"));
+                        });
+                        ui.add_space(4.0);
+                        self.render_raster_tool_options(ui, shared, false);
                     }
 
                     Tool::Smudge if is_raster_paint_tool => {

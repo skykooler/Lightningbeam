@@ -156,6 +156,49 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             alpha * src.b + ba * current.b,
             alpha * src.a + ba * current.a,
         );
+    } else if dab.blend_mode == 5u {
+        // Pattern stamp: procedural tiling pattern using brush color.
+        // ndx = pattern_type (0=Checker, 1=Dots, 2=H-Lines, 3=V-Lines, 4=Diagonal, 5=Crosshatch)
+        // ndy = pattern_scale (tile size in pixels, >= 1.0)
+        let scale = max(dab.ndy, 1.0);
+        let pt    = u32(dab.ndx);
+
+        // Fractional position within the tile [0.0, 1.0)
+        let tx = fract(f32(px) / scale);
+        let ty = fract(f32(py) / scale);
+
+        var on: bool;
+        if pt == 0u {           // Checkerboard
+            let cx = u32(floor(f32(px) / scale));
+            let cy = u32(floor(f32(py) / scale));
+            on = (cx + cy) % 2u == 0u;
+        } else if pt == 1u {    // Polka dots (r ≈ 0.35 of cell radius)
+            let ddx = tx - 0.5; let ddy = ty - 0.5;
+            on = ddx * ddx + ddy * ddy < 0.1225;
+        } else if pt == 2u {    // Horizontal lines (50% duty)
+            on = ty < 0.5;
+        } else if pt == 3u {    // Vertical lines (50% duty)
+            on = tx < 0.5;
+        } else if pt == 4u {    // Diagonal \ (top-left → bottom-right)
+            on = fract((f32(px) + f32(py)) / scale) < 0.5;
+        } else if pt == 5u {    // Diagonal / (top-right → bottom-left)
+            on = fract((f32(px) - f32(py)) / scale) < 0.5;
+        } else {                // Crosshatch (type 6+)
+            on = tx < 0.4 || ty < 0.4;
+        }
+
+        if !on { return current; }
+
+        // Paint with brush color — same compositing as Normal blend
+        let dab_a = opa_weight * dab.opacity * dab.color_a;
+        if dab_a <= 0.0 { return current; }
+        let ba = 1.0 - dab_a;
+        return vec4<f32>(
+            dab_a * dab.color_r + ba * current.r,
+            dab_a * dab.color_g + ba * current.g,
+            dab_a * dab.color_b + ba * current.b,
+            dab_a + ba * current.a,
+        );
     } else if dab.blend_mode == 4u {
         // Healing brush: per-pixel color-corrected clone stamp.
         // color_r/color_g = source offset (ox, oy), same as clone stamp.

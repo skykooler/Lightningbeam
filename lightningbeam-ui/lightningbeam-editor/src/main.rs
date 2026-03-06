@@ -803,6 +803,9 @@ struct EditorApp {
     smudge_hardness: f32,
     smudge_spacing: f32,
     smudge_strength: f32,
+    /// Pattern stamp settings
+    pattern_type:  u32,
+    pattern_scale: f32,
     /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
     brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
@@ -1102,6 +1105,8 @@ impl EditorApp {
             smudge_hardness: 0.8,
             smudge_spacing: 8.0,
             smudge_strength: 1.0,
+            pattern_type:  0,
+            pattern_scale: 32.0,
             brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
@@ -5570,6 +5575,8 @@ impl eframe::App for EditorApp {
                     smudge_hardness: &mut self.smudge_hardness,
                     smudge_spacing: &mut self.smudge_spacing,
                     smudge_strength: &mut self.smudge_strength,
+                    pattern_type:  &mut self.pattern_type,
+                    pattern_scale: &mut self.pattern_scale,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,

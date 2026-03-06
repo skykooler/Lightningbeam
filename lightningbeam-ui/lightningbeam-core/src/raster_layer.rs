@@ -22,6 +22,8 @@ pub enum RasterBlendMode {
     CloneStamp,
     /// Healing brush: color-corrected clone stamp (preserves source texture, shifts color to match destination)
     Healing,
+    /// Pattern stamp: paint with a repeating procedural tile pattern
+    PatternStamp,
 }
 
 impl Default for RasterBlendMode {
@@ -57,8 +59,16 @@ pub struct StrokeRecord {
     /// None for all non-clone-stamp blend modes.
     #[serde(default)]
     pub clone_src_offset: Option<(f32, f32)>,
+    /// Pattern stamp: procedural pattern type (0=Checkerboard, 1=Dots, 2=H-Lines, 3=V-Lines, 4=Diagonal, 5=Crosshatch)
+    #[serde(default)]
+    pub pattern_type: u32,
+    /// Pattern stamp: tile size in pixels
+    #[serde(default = "default_pattern_scale")]
+    pub pattern_scale: f32,
     pub points: Vec<StrokePoint>,
 }
+
+fn default_pattern_scale() -> f32 { 32.0 }
 
 /// Specifies how the raster content transitions to the next keyframe
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

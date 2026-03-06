@@ -303,7 +303,8 @@ impl BrushEngine {
             RasterBlendMode::Erase      => 1u32,
             RasterBlendMode::Smudge     => 2u32,
             RasterBlendMode::CloneStamp => 3u32,
-            RasterBlendMode::Healing    => 4u32,
+            RasterBlendMode::Healing      => 4u32,
+            RasterBlendMode::PatternStamp => 5u32,
         };
 
         let push_dab = |dabs: &mut Vec<GpuDab>,
@@ -360,15 +361,18 @@ impl BrushEngine {
                         state, bs, pt.x, pt.y, base_r, pt.pressure, stroke.color,
                     );
                     if !matches!(base_blend, RasterBlendMode::Smudge) {
-                        let (cr2, cg2, cb2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
+                        let (cr2, cg2, cb2, ndx2, ndy2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
                             // Store offset in color_r/color_g; shader adds it per-pixel.
                             let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
-                            (ox, oy, 0.0)
+                            (ox, oy, 0.0, 0.0, 0.0)
+                        } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
+                            // ndx = pattern_type, ndy = pattern_scale
+                            (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
                         } else {
-                            (cr, cg, cb)
+                            (cr, cg, cb, 0.0, 0.0)
                         };
                         push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
-                                 0.0, 0.0, 0.0);
+                                 ndx2, ndy2, 0.0);
                     }
                 }
             }
@@ -486,6 +490,11 @@ impl BrushEngine {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, ox, oy, 0.0,
                              0.0, 0.0, 0.0);
+                } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
+                    // ndx = pattern_type, ndy = pattern_scale
+                    push_dab(&mut dabs, &mut bbox,
+                             ex, ey, radius2, opacity2, cr, cg, cb,
+                             stroke.pattern_type as f32, stroke.pattern_scale, 0.0);
                 } else {
                     push_dab(&mut dabs, &mut bbox,
                              ex, ey, radius2, opacity2, cr, cg, cb,
@@ -518,15 +527,18 @@ impl BrushEngine {
                     last_smooth_x, last_smooth_y,
                     base_r, last_pressure, stroke.color,
                 );
-                let (cr2, cg2, cb2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
+                let (cr2, cg2, cb2, ndx2, ndy2) = if matches!(base_blend, RasterBlendMode::CloneStamp | RasterBlendMode::Healing) {
                     // Store offset in color_r/color_g; shader adds it per-pixel.
                     let (ox, oy) = stroke.clone_src_offset.unwrap_or((0.0, 0.0));
-                    (ox, oy, 0.0)
+                    (ox, oy, 0.0, 0.0, 0.0)
+                } else if matches!(base_blend, RasterBlendMode::PatternStamp) {
+                    // ndx = pattern_type, ndy = pattern_scale
+                    (cr, cg, cb, stroke.pattern_type as f32, stroke.pattern_scale)
                 } else {
-                    (cr, cg, cb)
+                    (cr, cg, cb, 0.0, 0.0)
                 };
                 push_dab(&mut dabs, &mut bbox, ex, ey, r, o, cr2, cg2, cb2,
-                         0.0, 0.0, 0.0);
+                         ndx2, ndy2, 0.0);
             }
         }
 
