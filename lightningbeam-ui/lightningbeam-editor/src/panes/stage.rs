@@ -7898,6 +7898,72 @@ impl StagePane {
             }
         }
     }
+
+    /// Draw the brush-size outline cursor for raster paint tools.
+    ///
+    /// Renders an alternating black/white dashed ellipse (marching-ants style) centred on
+    /// `pos` (screen space). The ellipse shape reflects the brush's `elliptical_dab_ratio`
+    /// and angle; for brushes with position jitter (`offset_by_random`) the radius is
+    /// expanded so the outline marks the full extent where paint can land.
+    fn draw_brush_cursor(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        pos: egui::Pos2,
+        shared: &SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::Tool;
+
+        // Compute semi-axes (world pixels) and dab rotation angle.
+        let (a_world, b_world, dab_angle_rad) = match *shared.selected_tool {
+            Tool::Erase  => (*shared.eraser_radius, *shared.eraser_radius, 0.0_f32),
+            Tool::Smudge => (*shared.smudge_radius, *shared.smudge_radius, 0.0_f32),
+            _ => {
+                let bs = &shared.active_brush_settings;
+                let r = *shared.brush_radius;
+                let ratio = bs.elliptical_dab_ratio.max(1.0);
+                // Expand radius to cover the full jitter extent.
+                let expand = 1.0 + bs.offset_by_random;
+                (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+            }
+        };
+
+        let a = a_world * self.zoom; // major semi-axis in screen pixels
+        let b = b_world * self.zoom; // minor semi-axis in screen pixels
+        if a < 1.0 { return; }
+
+        let painter = ui.painter_at(rect);
+        let cos_a = dab_angle_rad.cos();
+        let sin_a = dab_angle_rad.sin();
+
+        // Approximate ellipse perimeter (Ramanujan) to decide how many dashes to draw.
+        let h = ((a - b) / (a + b)).powi(2);
+        let perimeter = std::f32::consts::PI * (a + b)
+            * (1.0 + 3.0 * h / (10.0 + (4.0 - 3.0 * h).sqrt()));
+        let dash_px = 4.0_f32;
+        let n = ((perimeter / dash_px).ceil() as usize).max(8);
+
+        let pt = |i: usize| -> egui::Pos2 {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            let ex = a * t.cos();
+            let ey = b * t.sin();
+            pos + egui::vec2(ex * cos_a - ey * sin_a, ex * sin_a + ey * cos_a)
+        };
+
+        // Alternating black/white 1-px segments.
+        for i in 0..n {
+            let color = if i % 2 == 0 { egui::Color32::BLACK } else { egui::Color32::WHITE };
+            painter.line_segment([pt(i), pt(i + 1)], egui::Stroke::new(1.0, color));
+        }
+
+        // Small crosshair at centre.
+        let arm = 3.0_f32.min(a * 0.3).max(1.0);
+        for (color, width) in [(egui::Color32::BLACK, 2.0_f32), (egui::Color32::WHITE, 1.0_f32)] {
+            let s = egui::Stroke::new(width, color);
+            painter.line_segment([pos - egui::vec2(arm, 0.0), pos + egui::vec2(arm, 0.0)], s);
+            painter.line_segment([pos - egui::vec2(0.0, arm), pos + egui::vec2(0.0, arm)], s);
+        }
+    }
 }
 
 
@@ -8479,14 +8545,27 @@ impl PaneRenderer for StagePane {
             );
         }
 
-        // Set custom tool cursor when pointer is over the stage canvas
-        // (system cursors from transform handles take priority via render_overlay check)
+        // Set custom tool cursor when pointer is over the stage canvas.
+        // Raster paint tools get a brush-size outline; everything else uses the SVG cursor.
         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
             if rect.contains(pos) {
-                crate::custom_cursor::set(
-                    ui.ctx(),
-                    crate::custom_cursor::CustomCursor::from_tool(*shared.selected_tool),
-                );
+                use lightningbeam_core::tool::Tool;
+                let is_raster_paint = matches!(
+                    *shared.selected_tool,
+                    Tool::Draw | Tool::Erase | Tool::Smudge
+                ) && shared.active_layer_id.and_then(|id| {
+                    shared.action_executor.document().get_layer(&id)
+                }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+
+                if is_raster_paint {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                    self.draw_brush_cursor(ui, rect, pos, shared);
+                } else {
+                    crate::custom_cursor::set(
+                        ui.ctx(),
+                        crate::custom_cursor::CustomCursor::from_tool(*shared.selected_tool),
+                    );
+                }
             }
         }
     }
