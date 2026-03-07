@@ -5669,37 +5669,105 @@ impl StagePane {
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::shape::ShapeColor;
-        use lightningbeam_core::actions::PaintBucketAction;
-        use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match shared.active_layer_id {
-            Some(id) => id,
+            Some(id) => *id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
+        if !self.rsp_clicked(response) { return; }
 
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        if self.rsp_clicked(response) {
+        if is_raster {
+            self.handle_raster_paint_bucket(world_pos, active_layer_id, shared);
+        } else {
+            use lightningbeam_core::shape::ShapeColor;
+            use lightningbeam_core::actions::PaintBucketAction;
+            use vello::kurbo::Point;
             let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
             let fill_color = ShapeColor::from_egui(*shared.fill_color);
-
             let action = PaintBucketAction::new(
-                *active_layer_id,
+                active_layer_id,
                 *shared.playback_time,
                 click_point,
                 fill_color,
             );
             let _ = shared.action_executor.execute(Box::new(action));
         }
+    }
+
+    fn handle_raster_paint_bucket(
+        &mut self,
+        world_pos: egui::Vec2,
+        layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterFillAction;
+        use lightningbeam_core::flood_fill::{raster_flood_fill, FillThresholdMode};
+        use crate::tools::FillThresholdMode as EditorMode;
+
+        let time = *shared.playback_time;
+
+        // Ensure a keyframe exists at the current time.
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+
+        // Snapshot current pixels.
+        let (buffer_before, width, height) = {
+            let doc = shared.action_executor.document();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                if let Some(kf) = rl.keyframe_at(time) {
+                    let expected = (kf.width * kf.height * 4) as usize;
+                    let buf = if kf.raw_pixels.len() == expected {
+                        kf.raw_pixels.clone()
+                    } else {
+                        vec![0u8; expected]
+                    };
+                    (buf, kf.width, kf.height)
+                } else { return; }
+            } else { return; }
+        };
+
+        let seed_x = world_pos.x as i32;
+        let seed_y = world_pos.y as i32;
+        if seed_x < 0 || seed_y < 0 || seed_x >= width as i32 || seed_y >= height as i32 {
+            return;
+        }
+
+        let fill_egui = *shared.fill_color;
+        let fill_color = [fill_egui.r(), fill_egui.g(), fill_egui.b(), fill_egui.a()];
+        let threshold  = shared.raster_settings.fill_threshold;
+        let softness   = shared.raster_settings.fill_softness;
+        let core_mode  = match shared.raster_settings.fill_threshold_mode {
+            EditorMode::Absolute => FillThresholdMode::Absolute,
+            EditorMode::Relative => FillThresholdMode::Relative,
+        };
+
+        let mut buffer_after = buffer_before.clone();
+        raster_flood_fill(
+            &mut buffer_after,
+            width, height,
+            seed_x, seed_y,
+            fill_color,
+            threshold, softness,
+            core_mode,
+            shared.selection.raster_selection.as_ref(),
+        );
+
+        let action = RasterFillAction::new(layer_id, time, buffer_before, buffer_after, width, height);
+        let _ = shared.action_executor.execute(Box::new(action));
     }
 
     /// Apply transform preview to objects based on current mouse position

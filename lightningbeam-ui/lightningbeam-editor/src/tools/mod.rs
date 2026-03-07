@@ -77,6 +77,25 @@ pub struct RasterToolSettings {
     pub blur_sharpen_kernel: f32,
     /// 0 = blur, 1 = sharpen
     pub blur_sharpen_mode: u32,
+    // --- Flood fill (Paint Bucket, raster) ---
+    /// Color-distance threshold (Euclidean RGBA, 0–510). Pixels within this
+    /// distance of the comparison color are included in the fill.
+    pub fill_threshold: f32,
+    /// Soft-edge width as a percentage of the threshold (0 = hard, 100 = full fade).
+    pub fill_softness: f32,
+    /// Whether to compare each pixel to the seed pixel (Absolute) or to its BFS
+    /// parent pixel (Relative, spreads across gradients).
+    pub fill_threshold_mode: FillThresholdMode,
+}
+
+/// Threshold comparison mode for the raster flood fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FillThresholdMode {
+    /// Compare each candidate pixel to the original seed pixel (default).
+    #[default]
+    Absolute,
+    /// Compare each candidate pixel to the pixel it was reached from.
+    Relative,
 }
 
 impl Default for RasterToolSettings {
@@ -120,6 +139,9 @@ impl Default for RasterToolSettings {
             blur_sharpen_strength: 0.5,
             blur_sharpen_kernel: 5.0,
             blur_sharpen_mode: 0,
+            fill_threshold: 15.0,
+            fill_softness: 0.0,
+            fill_threshold_mode: FillThresholdMode::Absolute,
         }
     }
 }

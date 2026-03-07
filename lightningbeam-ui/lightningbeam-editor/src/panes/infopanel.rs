@@ -278,15 +278,52 @@ impl InfopanelPane {
                     }
 
                     Tool::PaintBucket => {
-                        // Gap tolerance
-                        ui.horizontal(|ui| {
-                            ui.label("Gap Tolerance:");
-                            ui.add(
-                                DragValue::new(shared.paint_bucket_gap_tolerance)
-                                    .speed(0.1)
-                                    .range(0.0..=50.0),
-                            );
-                        });
+                        if active_is_raster {
+                            use crate::tools::FillThresholdMode;
+                            ui.horizontal(|ui| {
+                                ui.label("Threshold:");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut shared.raster_settings.fill_threshold,
+                                        0.0_f32..=255.0,
+                                    )
+                                    .step_by(1.0),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Softness:");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut shared.raster_settings.fill_softness,
+                                        0.0_f32..=100.0,
+                                    )
+                                    .custom_formatter(|v, _| format!("{:.0}%", v)),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Mode:");
+                                ui.selectable_value(
+                                    &mut shared.raster_settings.fill_threshold_mode,
+                                    FillThresholdMode::Absolute,
+                                    "Absolute",
+                                );
+                                ui.selectable_value(
+                                    &mut shared.raster_settings.fill_threshold_mode,
+                                    FillThresholdMode::Relative,
+                                    "Relative",
+                                );
+                            });
+                        } else {
+                            // Vector: gap tolerance
+                            ui.horizontal(|ui| {
+                                ui.label("Gap Tolerance:");
+                                ui.add(
+                                    DragValue::new(shared.paint_bucket_gap_tolerance)
+                                        .speed(0.1)
+                                        .range(0.0..=50.0),
+                                );
+                            });
+                        }
                     }
 
                     Tool::Polygon => {
