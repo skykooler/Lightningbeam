@@ -68,6 +68,7 @@ pub enum WebcamRecordCommand {
 
 pub mod toolbar;
 pub mod stage;
+pub mod gradient_editor;
 pub mod timeline;
 pub mod infopanel;
 pub mod outliner;

@@ -113,7 +113,13 @@ pub struct RasterKeyframe {
     /// and encoded back to PNG on save.  An empty Vec means the canvas is blank (transparent).
     #[serde(skip)]
     pub raw_pixels: Vec<u8>,
+    /// Set to `true` whenever `raw_pixels` changes so the GPU texture cache can re-upload.
+    /// Always `true` after load; cleared by the renderer after uploading.
+    #[serde(skip, default = "default_true")]
+    pub texture_dirty: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl RasterKeyframe {
     /// Returns true when the pixel buffer has been initialised (non-blank).

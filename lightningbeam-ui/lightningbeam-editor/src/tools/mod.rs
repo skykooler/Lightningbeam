@@ -99,6 +99,39 @@ pub struct RasterToolSettings {
     // --- Marquee select shape ---
     /// Whether the rectangular select tool draws a rect or an ellipse.
     pub select_shape: SelectionShape,
+    // --- Warp ---
+    pub warp_grid_cols: u32,
+    pub warp_grid_rows: u32,
+    // --- Liquify ---
+    pub liquify_mode:     LiquifyMode,
+    pub liquify_radius:   f32,
+    pub liquify_strength: f32,
+    // --- Gradient ---
+    pub gradient: lightningbeam_core::gradient::ShapeGradient,
+    pub gradient_opacity: f32,
+}
+
+/// Brush mode for the Liquify tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiquifyMode {
+    #[default]
+    Push,
+    Pucker,
+    Bloat,
+    Smooth,
+    Reconstruct,
+}
+
+impl LiquifyMode {
+    pub fn as_u32(self) -> u32 {
+        match self {
+            LiquifyMode::Push        => 0,
+            LiquifyMode::Pucker      => 1,
+            LiquifyMode::Bloat       => 2,
+            LiquifyMode::Smooth      => 3,
+            LiquifyMode::Reconstruct => 4,
+        }
+    }
 }
 
 /// Shape mode for the rectangular-select tool.
@@ -168,6 +201,13 @@ impl Default for RasterToolSettings {
             fill_threshold_mode: FillThresholdMode::Absolute,
             quick_select_radius: 20.0,
             select_shape: SelectionShape::Rect,
+            warp_grid_cols: 4,
+            warp_grid_rows: 4,
+            liquify_mode:     LiquifyMode::Push,
+            liquify_radius:   50.0,
+            liquify_strength: 0.5,
+            gradient:         lightningbeam_core::gradient::ShapeGradient::default(),
+            gradient_opacity: 1.0,
         }
     }
 }

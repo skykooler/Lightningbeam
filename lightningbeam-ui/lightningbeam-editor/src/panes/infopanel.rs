@@ -12,12 +12,14 @@
 
 use eframe::egui::{self, DragValue, Ui};
 use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
-use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction};
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction};
+use lightningbeam_core::gradient::ShapeGradient;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
 use lightningbeam_core::selection::FocusSelection;
 use lightningbeam_core::shape::ShapeColor;
 use lightningbeam_core::tool::{SimplifyMode, Tool};
 use super::{NodePath, PaneRenderer, SharedPaneState};
+use super::gradient_editor::gradient_stop_editor;
 use uuid::Uuid;
 
 /// Info panel pane state
@@ -36,6 +38,10 @@ pub struct InfopanelPane {
     eraser_picker_expanded: bool,
     /// Cached preview textures, one per preset (populated lazily).
     brush_preview_textures: Vec<egui::TextureHandle>,
+    /// Selected stop index for gradient editor in shape section.
+    selected_shape_gradient_stop: Option<usize>,
+    /// Selected stop index for gradient editor in tool section (gradient tool).
+    selected_tool_gradient_stop: Option<usize>,
 }
 
 impl InfopanelPane {
@@ -50,6 +56,8 @@ impl InfopanelPane {
             selected_eraser_preset: default_eraser_idx,
             eraser_picker_expanded: false,
             brush_preview_textures: Vec::new(),
+            selected_shape_gradient_stop: None,
+            selected_tool_gradient_stop: None,
         }
     }
 }
@@ -65,6 +73,8 @@ struct SelectionInfo {
 
     // Shape property values (None = mixed)
     fill_color: Option<Option<ShapeColor>>,
+    /// None = mixed across selection; Some(None) = no gradient; Some(Some(g)) = all same gradient
+    fill_gradient: Option<Option<ShapeGradient>>,
     stroke_color: Option<Option<ShapeColor>>,
     stroke_width: Option<f64>,
 }
@@ -76,6 +86,7 @@ impl Default for SelectionInfo {
             dcel_count: 0,
             layer_id: None,
             fill_color: None,
+            fill_gradient: None,
             stroke_color: None,
             stroke_width: None,
         }
@@ -138,20 +149,31 @@ impl InfopanelPane {
                         // Gather fill properties from selected faces
                         let mut first_fill_color: Option<Option<ShapeColor>> = None;
                         let mut fill_color_mixed = false;
+                        let mut first_fill_gradient: Option<Option<ShapeGradient>> = None;
+                        let mut fill_gradient_mixed = false;
 
                         for &fid in shared.selection.selected_faces() {
                             let face = dcel.face(fid);
                             let fc = face.fill_color;
+                            let fg = face.gradient_fill.clone();
 
                             match first_fill_color {
                                 None => first_fill_color = Some(fc),
                                 Some(prev) if prev != fc => fill_color_mixed = true,
                                 _ => {}
                             }
+                            match &first_fill_gradient {
+                                None => first_fill_gradient = Some(fg),
+                                Some(prev) if *prev != fg => fill_gradient_mixed = true,
+                                _ => {}
+                            }
                         }
 
                         if !fill_color_mixed {
                             info.fill_color = first_fill_color;
+                        }
+                        if !fill_gradient_mixed {
+                            info.fill_gradient = first_fill_gradient;
                         }
                     }
                 }
@@ -191,6 +213,7 @@ impl InfopanelPane {
             || is_raster_select || is_raster_shape || matches!(
             tool,
             Tool::PaintBucket | Tool::RegionSelect | Tool::MagicWand | Tool::QuickSelect
+            | Tool::Warp | Tool::Liquify | Tool::Gradient
         );
 
         if !has_options {
@@ -414,6 +437,62 @@ impl InfopanelPane {
                         });
                     }
 
+                    Tool::Warp => {
+                        ui.horizontal(|ui| {
+                            ui.label("Grid:");
+                            let cols = shared.raster_settings.warp_grid_cols;
+                            let rows = shared.raster_settings.warp_grid_rows;
+                            for (label, c, r) in [("3×3", 3u32, 3u32), ("4×4", 4, 4), ("5×5", 5, 5), ("8×8", 8, 8)] {
+                                let selected = cols == c && rows == r;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    shared.raster_settings.warp_grid_cols = c;
+                                    shared.raster_settings.warp_grid_rows = r;
+                                }
+                            }
+                        });
+                        ui.small("Enter to commit · Escape to cancel");
+                    }
+
+                    Tool::Liquify => {
+                        use crate::tools::LiquifyMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            for (label, mode) in [
+                                ("Push",        LiquifyMode::Push),
+                                ("Pucker",       LiquifyMode::Pucker),
+                                ("Bloat",        LiquifyMode::Bloat),
+                                ("Smooth",       LiquifyMode::Smooth),
+                                ("Reconstruct",  LiquifyMode::Reconstruct),
+                            ] {
+                                let selected = shared.raster_settings.liquify_mode == mode;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    shared.raster_settings.liquify_mode = mode;
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Radius:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.liquify_radius,
+                                    5.0_f32..=500.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Strength:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.liquify_strength,
+                                    0.01_f32..=1.0,
+                                )
+                                .step_by(0.01),
+                            );
+                        });
+                        ui.small("Enter to commit · Escape to cancel");
+                    }
+
                     Tool::Polygon => {
                         // Number of sides
                         ui.horizontal(|ui| {
@@ -459,6 +538,22 @@ impl InfopanelPane {
                                 *shared.region_select_mode = RegionSelectMode::Lasso;
                             }
                         });
+                    }
+
+                    Tool::Gradient if active_is_raster => {
+                        ui.horizontal(|ui| {
+                            ui.label("Opacity:");
+                            ui.add(egui::Slider::new(
+                                &mut shared.raster_settings.gradient_opacity,
+                                0.0_f32..=1.0,
+                            ).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                        });
+                        ui.add_space(4.0);
+                        gradient_stop_editor(
+                            ui,
+                            &mut shared.raster_settings.gradient,
+                            &mut self.selected_tool_gradient_stop,
+                        );
                     }
 
                     _ => {}
@@ -680,28 +775,72 @@ impl InfopanelPane {
                 self.shape_section_open = true;
                 ui.add_space(4.0);
 
-                // Fill color
+                // Fill — determine current fill type
+                let has_gradient = matches!(&info.fill_gradient, Some(Some(_)));
+                let has_solid = matches!(&info.fill_color, Some(Some(_)));
+                let fill_is_none = matches!(&info.fill_color, Some(None))
+                    && matches!(&info.fill_gradient, Some(None));
+                let fill_mixed = info.fill_color.is_none() && info.fill_gradient.is_none();
+
+                // Fill type toggle row
                 ui.horizontal(|ui| {
                     ui.label("Fill:");
-                    match info.fill_color {
-                        Some(Some(color)) => {
+                    if fill_mixed {
+                        ui.label("--");
+                    } else {
+                        if ui.selectable_label(fill_is_none, "None").clicked() && !fill_is_none {
+                            let action = SetFillPaintAction::solid(
+                                layer_id, time, face_ids.clone(), None,
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                        if ui.selectable_label(has_solid || (!has_gradient && !fill_is_none), "Solid").clicked() && !has_solid {
+                            // Switch to solid: use existing color or default to black
+                            let color = info.fill_color.flatten()
+                                .unwrap_or(ShapeColor::rgba(0, 0, 0, 255));
+                            let action = SetFillPaintAction::solid(
+                                layer_id, time, face_ids.clone(), Some(color),
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                        if ui.selectable_label(has_gradient, "Gradient").clicked() && !has_gradient {
+                            let grad = info.fill_gradient.clone().flatten()
+                                .unwrap_or_default();
+                            let action = SetFillPaintAction::gradient(
+                                layer_id, time, face_ids.clone(), Some(grad),
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                    }
+                });
+
+                // Solid fill color editor
+                if !fill_mixed && has_solid {
+                    if let Some(Some(color)) = info.fill_color {
+                        ui.horizontal(|ui| {
                             let mut rgba = [color.r, color.g, color.b, color.a];
                             if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
                                 let new_color = ShapeColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-                                let action = SetShapePropertiesAction::set_fill_color(
+                                let action = SetFillPaintAction::solid(
                                     layer_id, time, face_ids.clone(), Some(new_color),
                                 );
                                 shared.pending_actions.push(Box::new(action));
                             }
-                        }
-                        Some(None) => {
-                            ui.label("None");
-                        }
-                        None => {
-                            ui.label("--");
+                        });
+                    }
+                }
+
+                // Gradient fill editor
+                if !fill_mixed && has_gradient {
+                    if let Some(Some(mut grad)) = info.fill_gradient.clone() {
+                        if gradient_stop_editor(ui, &mut grad, &mut self.selected_shape_gradient_stop) {
+                            let action = SetFillPaintAction::gradient(
+                                layer_id, time, face_ids.clone(), Some(grad),
+                            );
+                            shared.pending_actions.push(Box::new(action));
                         }
                     }
-                });
+                }
 
                 // Stroke color
                 ui.horizontal(|ui| {

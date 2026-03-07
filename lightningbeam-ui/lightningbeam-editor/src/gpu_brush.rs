@@ -290,6 +290,491 @@ impl RasterTransformPipeline {
 }
 
 // ---------------------------------------------------------------------------
+// Displacement buffer (Warp / Liquify)
+// ---------------------------------------------------------------------------
+
+/// Per-pixel displacement map stored as a GPU buffer of `vec2f` values.
+///
+/// Each entry `disp[y * width + x]` stores `(dx, dy)` in canvas pixels.
+/// Used by both the Warp tool (bilinear grid warp) and the Liquify tool
+/// (brush-based freeform displacement).
+pub struct DisplacementBuffer {
+    pub buf:    wgpu::Buffer,
+    pub width:  u32,
+    pub height: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Warp-apply pipeline
+// ---------------------------------------------------------------------------
+
+/// CPU-side parameters uniform for `warp_apply.wgsl`.
+/// Must match the `Params` struct in the shader (32 bytes, 16-byte aligned).
+/// grid_cols == 0 → per-pixel displacement buffer mode (Liquify).
+/// grid_cols  > 0 → control-point grid mode (Warp); disp[] has grid_cols*grid_rows entries.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct WarpApplyParams {
+    pub src_w:     u32,
+    pub src_h:     u32,
+    pub dst_w:     u32,
+    pub dst_h:     u32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub _pad0:     u32,
+    pub _pad1:     u32,
+}
+
+/// Compute pipeline that reads a displacement buffer + source texture → warped output.
+/// Shared by the Warp tool and the Liquify tool's preview/commit pass.
+struct WarpApplyPipeline {
+    pipeline:  wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+}
+
+impl WarpApplyPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("warp_apply_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("panes/shaders/warp_apply.wgsl").into(),
+            ),
+        });
+
+        let bg_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("warp_apply_bgl"),
+                entries: &[
+                    // 0: params uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: source texture (anchor canvas, sampled)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled:   false,
+                        },
+                        count: None,
+                    },
+                    // 2: displacement buffer (read-only storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 3: destination texture (display canvas, write-only storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access:         wgpu::StorageTextureAccess::WriteOnly,
+                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+
+        let pipeline_layout = device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label:                Some("warp_apply_pl"),
+                bind_group_layouts:   &[&bg_layout],
+                push_constant_ranges: &[],
+            },
+        );
+
+        let pipeline = device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label:   Some("warp_apply_pipeline"),
+                layout:  Some(&pipeline_layout),
+                module:  &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+
+        Self { pipeline, bg_layout }
+    }
+
+    fn apply(
+        &self,
+        device:   &wgpu::Device,
+        queue:    &wgpu::Queue,
+        src_view: &wgpu::TextureView,
+        disp_buf: &wgpu::Buffer,
+        dst_view: &wgpu::TextureView,
+        params:   WarpApplyParams,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("warp_apply_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage:    wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("warp_apply_bg"),
+            layout:  &self.bg_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: disp_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(dst_view) },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("warp_apply_enc") },
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("warp_apply_pass"), timestamp_writes: None },
+            );
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(params.dst_w.div_ceil(8), params.dst_h.div_ceil(8), 1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Liquify-brush pipeline
+// ---------------------------------------------------------------------------
+
+/// CPU-side parameters uniform for `liquify_brush.wgsl`.
+/// Must match the `Params` struct in the shader (48 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LiquifyBrushParams {
+    pub cx:       f32,
+    pub cy:       f32,
+    pub radius:   f32,
+    pub strength: f32,
+    pub dx:       f32,
+    pub dy:       f32,
+    pub mode:     u32,
+    pub map_w:    u32,
+    pub map_h:    u32,
+    pub _pad0:    u32,
+    pub _pad1:    u32,
+    pub _pad2:    u32,
+}
+
+/// Compute pipeline that updates a displacement map from a single brush step.
+struct LiquifyBrushPipeline {
+    pipeline:  wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+}
+
+impl LiquifyBrushPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("liquify_brush_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("panes/shaders/liquify_brush.wgsl").into(),
+            ),
+        });
+
+        let bg_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("liquify_brush_bgl"),
+                entries: &[
+                    // 0: params uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: displacement buffer (read-write storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+
+        let pipeline_layout = device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label:                Some("liquify_brush_pl"),
+                bind_group_layouts:   &[&bg_layout],
+                push_constant_ranges: &[],
+            },
+        );
+
+        let pipeline = device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label:   Some("liquify_brush_pipeline"),
+                layout:  Some(&pipeline_layout),
+                module:  &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+
+        Self { pipeline, bg_layout }
+    }
+
+    fn update_displacement(
+        &self,
+        device:   &wgpu::Device,
+        queue:    &wgpu::Queue,
+        disp_buf: &wgpu::Buffer,
+        params:   LiquifyBrushParams,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("liquify_brush_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage:    wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("liquify_brush_bg"),
+            layout:  &self.bg_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: disp_buf.as_entire_binding() },
+            ],
+        });
+
+        let r = params.radius.ceil() as u32;
+        let wg_x = (2 * r + 1).div_ceil(8).max(1);
+        let wg_y = (2 * r + 1).div_ceil(8).max(1);
+
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("liquify_brush_enc") },
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("liquify_brush_pass"), timestamp_writes: None },
+            );
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Gradient-fill pipeline
+// ---------------------------------------------------------------------------
+
+/// One gradient stop on the GPU side.  Colors are linear straight-alpha [0..1].
+/// Must be 32 bytes (8 × f32) to match `GradientStop` in `gradient_fill.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuGradientStop {
+    pub position: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+    pub _pad: [f32; 3],
+}
+
+impl GpuGradientStop {
+    /// Construct from sRGB u8 bytes (as stored in `ShapeColor`).
+    /// RGB is converted to linear; alpha is kept linear (not gamma-encoded).
+    pub fn from_srgb_u8(position: f32, r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self {
+            position,
+            r: srgb_to_linear(r as f32 / 255.0),
+            g: srgb_to_linear(g as f32 / 255.0),
+            b: srgb_to_linear(b as f32 / 255.0),
+            a: a as f32 / 255.0,
+            _pad: [0.0; 3],
+        }
+    }
+}
+
+/// CPU-side parameters uniform for `gradient_fill.wgsl`.
+/// Must be 48 bytes (12 × u32/f32), 16-byte aligned.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GradientFillParams {
+    canvas_w:    u32,
+    canvas_h:    u32,
+    start_x:     f32,
+    start_y:     f32,
+    end_x:       f32,
+    end_y:       f32,
+    opacity:     f32,
+    extend_mode: u32,  // 0 = Pad, 1 = Reflect, 2 = Repeat
+    num_stops:   u32,
+    kind:        u32,  // 0 = Linear, 1 = Radial
+    _pad1:       u32,
+    _pad2:       u32,
+}
+
+/// Compute pipeline: composites a gradient over an anchor canvas → display canvas.
+struct GradientFillPipeline {
+    pipeline:  wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+}
+
+impl GradientFillPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("gradient_fill_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("panes/shaders/gradient_fill.wgsl").into(),
+            ),
+        });
+
+        let bg_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("gradient_fill_bgl"),
+                entries: &[
+                    // 0: params uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: anchor (source) canvas
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled:   false,
+                        },
+                        count: None,
+                    },
+                    // 2: gradient stops (read-only storage buffer)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 3: display (destination) canvas — write-only storage texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access:         wgpu::StorageTextureAccess::WriteOnly,
+                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+
+        let pipeline_layout = device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label:                Some("gradient_fill_pl"),
+                bind_group_layouts:   &[&bg_layout],
+                push_constant_ranges: &[],
+            },
+        );
+
+        let pipeline = device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label:               Some("gradient_fill_pipeline"),
+                layout:              Some(&pipeline_layout),
+                module:              &shader,
+                entry_point:         Some("main"),
+                compilation_options: Default::default(),
+                cache:               None,
+            },
+        );
+
+        Self { pipeline, bg_layout }
+    }
+
+    fn apply(
+        &self,
+        device:    &wgpu::Device,
+        queue:     &wgpu::Queue,
+        src_view:  &wgpu::TextureView,
+        stops_buf: &wgpu::Buffer,
+        dst_view:  &wgpu::TextureView,
+        params:    GradientFillParams,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("gradient_fill_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage:    wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("gradient_fill_bg"),
+            layout:  &self.bg_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: stops_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(dst_view) },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("gradient_fill_enc") },
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("gradient_fill_pass"), timestamp_writes: None },
+            );
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(params.canvas_w.div_ceil(8), params.canvas_h.div_ceil(8), 1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
+}
+
 // GpuBrushEngine
 // ---------------------------------------------------------------------------
 
@@ -301,8 +786,18 @@ pub struct GpuBrushEngine {
     /// Lazily created on first raster transform use.
     transform_pipeline: Option<RasterTransformPipeline>,
 
+    /// Lazily created on first warp/liquify use.
+    warp_apply_pipeline:    Option<WarpApplyPipeline>,
+    /// Lazily created on first liquify brush use.
+    liquify_brush_pipeline: Option<LiquifyBrushPipeline>,
+    /// Lazily created on first gradient fill use.
+    gradient_fill_pipeline: Option<GradientFillPipeline>,
+
     /// Canvas texture pairs keyed by keyframe UUID.
     pub canvases: HashMap<Uuid, CanvasPair>,
+
+    /// Displacement map buffers keyed by a caller-supplied UUID.
+    pub displacement_bufs: HashMap<Uuid, DisplacementBuffer>,
 }
 
 /// CPU-side parameters uniform for the compute shader.
@@ -404,8 +899,12 @@ impl GpuBrushEngine {
         Self {
             compute_pipeline,
             compute_bg_layout,
-            transform_pipeline: None,
-            canvases: HashMap::new(),
+            transform_pipeline:     None,
+            warp_apply_pipeline:    None,
+            liquify_brush_pipeline: None,
+            gradient_fill_pipeline: None,
+            canvases:           HashMap::new(),
+            displacement_bufs:  HashMap::new(),
         }
     }
 
@@ -801,6 +1300,211 @@ impl GpuBrushEngine {
             if let Some(float) = self.canvases.get_mut(float_id) {
                 float.swap();
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Displacement buffer management
+    // -----------------------------------------------------------------------
+
+    /// Create a zero-initialised displacement buffer of `width × height` vec2f entries.
+    /// Returns the UUID under which it is stored.
+    pub fn create_displacement_buf(
+        &mut self,
+        device: &wgpu::Device,
+        id:     Uuid,
+        width:  u32,
+        height: u32,
+    ) {
+        let byte_len = (width * height * 8) as u64; // 2 × f32 per pixel
+        let buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("displacement_buf"),
+            size:               byte_len,
+            usage:              wgpu::BufferUsages::STORAGE
+                              | wgpu::BufferUsages::COPY_DST
+                              | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        self.displacement_bufs.insert(id, DisplacementBuffer { buf, width, height });
+    }
+
+    /// Overwrite the displacement buffer contents with the provided data.
+    pub fn upload_displacement_buf(
+        &self,
+        queue:    &wgpu::Queue,
+        id:       &Uuid,
+        data:     &[[f32; 2]],
+    ) {
+        if let Some(db) = self.displacement_bufs.get(id) {
+            queue.write_buffer(&db.buf, 0, bytemuck::cast_slice(data));
+        }
+    }
+
+    /// Zero out a displacement buffer (reset all displacements to (0,0)).
+    pub fn clear_displacement_buf(&self, queue: &wgpu::Queue, id: &Uuid) {
+        if let Some(db) = self.displacement_bufs.get(id) {
+            let zeros = vec![0u8; (db.width * db.height * 8) as usize];
+            queue.write_buffer(&db.buf, 0, &zeros);
+        }
+    }
+
+    /// Remove a displacement buffer (e.g. when the warp/liquify operation ends).
+    pub fn remove_displacement_buf(&mut self, id: &Uuid) {
+        self.displacement_bufs.remove(id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Warp apply (shared by Warp and Liquify tools)
+    // -----------------------------------------------------------------------
+
+    /// Upload `disp_data` to the displacement buffer and then run the warp-apply
+    /// shader from `anchor_id` → `display_id`.  The display canvas is swapped after.
+    ///
+    /// If `disp_data` is `None` the buffer is not re-uploaded (used by Liquify which
+    /// updates the buffer in-place via `liquify_brush_step`).
+    /// Apply warp displacement to produce the display canvas.
+    ///
+    /// `disp_data`: if `Some`, upload this data to the displacement buffer before running.
+    /// `grid_cols/grid_rows`: if > 0, the disp buffer contains only that many vec2f entries
+    ///   (control-point grid mode).  The shader does bilinear interpolation per pixel.
+    ///   If 0, the buffer is a full per-pixel map (Liquify mode).
+    pub fn apply_warp(
+        &mut self,
+        device:     &wgpu::Device,
+        queue:      &wgpu::Queue,
+        anchor_id:  &Uuid,
+        disp_id:    &Uuid,
+        display_id: &Uuid,
+        disp_data:  Option<&[[f32; 2]]>,
+        grid_cols:  u32,
+        grid_rows:  u32,
+    ) {
+        // Upload new displacement data if provided.
+        if let Some(data) = disp_data {
+            if let Some(db) = self.displacement_bufs.get(disp_id) {
+                queue.write_buffer(&db.buf, 0, bytemuck::cast_slice(data));
+            }
+        }
+
+        let pipeline = self.warp_apply_pipeline
+            .get_or_insert_with(|| WarpApplyPipeline::new(device));
+
+        let dispatched = {
+            let anchor  = self.canvases.get(anchor_id);
+            let display = self.canvases.get(display_id);
+            let disp_b  = self.displacement_bufs.get(disp_id);
+            if let (Some(anchor), Some(display), Some(db)) = (anchor, display, disp_b) {
+                let params = WarpApplyParams {
+                    src_w: anchor.width,
+                    src_h: anchor.height,
+                    dst_w: display.width,
+                    dst_h: display.height,
+                    grid_cols,
+                    grid_rows,
+                    _pad0: 0,
+                    _pad1: 0,
+                };
+                pipeline.apply(device, queue, anchor.src_view(), &db.buf, display.dst_view(), params);
+                true
+            } else {
+                false
+            }
+        };
+
+        if dispatched {
+            if let Some(display) = self.canvases.get_mut(display_id) {
+                display.swap();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Liquify brush step
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Gradient fill
+    // -----------------------------------------------------------------------
+
+    /// Composite a gradient over the anchor canvas into the display canvas.
+    ///
+    /// - `anchor_id`:  canvas holding the original pixels (read-only each frame).
+    /// - `display_id`: canvas to write the gradient result into.
+    /// - `stops`:      gradient stops (linear straight-alpha, converted from sRGB by caller).
+    /// - `start`, `end`: gradient axis endpoints in canvas pixels.
+    /// - `opacity`:    overall tool opacity [0..1].
+    /// - `extend_mode`: 0 = Pad, 1 = Reflect, 2 = Repeat.
+    pub fn apply_gradient_fill(
+        &mut self,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        anchor_id:   &Uuid,
+        display_id:  &Uuid,
+        stops:       &[GpuGradientStop],
+        start:       (f32, f32),
+        end:         (f32, f32),
+        opacity:     f32,
+        extend_mode: u32,
+        kind:        u32,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let pipeline = self.gradient_fill_pipeline
+            .get_or_insert_with(|| GradientFillPipeline::new(device));
+
+        // Build the stops storage buffer.
+        let stops_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("gradient_stops_buf"),
+            contents: bytemuck::cast_slice(stops),
+            usage:    wgpu::BufferUsages::STORAGE,
+        });
+
+        let dispatched = {
+            let anchor  = self.canvases.get(anchor_id);
+            let display = self.canvases.get(display_id);
+            if let (Some(anchor), Some(display)) = (anchor, display) {
+                let params = GradientFillParams {
+                    canvas_w:    anchor.width,
+                    canvas_h:    anchor.height,
+                    start_x:     start.0,
+                    start_y:     start.1,
+                    end_x:       end.0,
+                    end_y:       end.1,
+                    opacity,
+                    extend_mode,
+                    num_stops:   stops.len() as u32,
+                    kind,
+                    _pad1: 0, _pad2: 0,
+                };
+                pipeline.apply(device, queue, anchor.src_view(), &stops_buf, display.dst_view(), params);
+                true
+            } else {
+                false
+            }
+        };
+
+        if dispatched {
+            if let Some(display) = self.canvases.get_mut(display_id) {
+                display.swap();
+            }
+        }
+    }
+
+    /// Dispatch the liquify-brush compute shader to update the displacement map.
+    pub fn liquify_brush_step(
+        &mut self,
+        device:  &wgpu::Device,
+        queue:   &wgpu::Queue,
+        disp_id: &Uuid,
+        params:  LiquifyBrushParams,
+    ) {
+        if !self.displacement_bufs.contains_key(disp_id) { return; }
+
+        let pipeline = self.liquify_brush_pipeline
+            .get_or_insert_with(|| LiquifyBrushPipeline::new(device));
+
+        if let Some(db) = self.displacement_bufs.get(disp_id) {
+            pipeline.update_displacement(device, queue, &db.buf, params);
         }
     }
 }

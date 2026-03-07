@@ -406,6 +406,12 @@ struct VelloRenderContext {
     pending_transform_dispatch: Option<PendingTransformDispatch>,
     /// When Some, override the float canvas blit with the display canvas during transform.
     transform_display: Option<TransformDisplayInfo>,
+    /// GPU ops for Warp/Liquify tools to dispatch in prepare().
+    pending_warp_ops: Vec<PendingWarpOp>,
+    /// When Some, override the layer's raster blit with the warp display canvas.
+    warp_display: Option<(uuid::Uuid, uuid::Uuid)>,  // (layer_id, display_canvas_id)
+    /// Pending GPU gradient fill dispatch for next prepare() frame.
+    pending_gradient_op: Option<PendingGradientOp>,
     /// Instance ID (for storing readback results in the global map).
     instance_id_for_readback: u64,
     /// The (layer_id, keyframe_id) of the raster layer with a live GPU canvas.
@@ -634,6 +640,113 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 }
             }
 
+            // --- Gradient fill GPU dispatch ---
+            if let Some(ref op) = self.ctx.pending_gradient_op {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // Ensure both canvases exist.
+                    gpu_brush.ensure_canvas(device, op.anchor_canvas_id, op.w, op.h);
+                    gpu_brush.ensure_canvas(device, op.display_canvas_id, op.w, op.h);
+                    // Upload anchor pixels on the first frame (drag start).
+                    if let Some(ref pixels) = op.anchor_pixels {
+                        if let Some(canvas) = gpu_brush.canvases.get(&op.anchor_canvas_id) {
+                            canvas.upload(queue, pixels);
+                        }
+                    }
+                    // Dispatch gradient fill shader.
+                    gpu_brush.apply_gradient_fill(
+                        device, queue,
+                        &op.anchor_canvas_id,
+                        &op.display_canvas_id,
+                        &op.stops,
+                        (op.start_x, op.start_y),
+                        (op.end_x,   op.end_y),
+                        op.opacity,
+                        op.extend_mode,
+                        op.kind,
+                    );
+                }
+            }
+
+            // --- Warp / Liquify GPU dispatch ---
+            if !self.ctx.pending_warp_ops.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    let mut final_commit_result: Option<WarpReadbackResult> = None;
+
+                    for op in self.ctx.pending_warp_ops.iter() {
+                        match op {
+                            PendingWarpOp::Init { anchor_canvas_id, display_canvas_id, disp_buf_id, w, h, anchor_pixels, is_liquify } => {
+                                let (w, h) = (*w, *h);
+                                // Always upload anchor_pixels: the GPU canvas may be stale
+                                // (e.g. merge-down updated kf.raw_pixels but left GPU canvas with old content).
+                                gpu_brush.ensure_canvas(device, *anchor_canvas_id, w, h);
+                                if let Some(canvas) = gpu_brush.canvases.get(anchor_canvas_id) {
+                                    canvas.upload(queue, anchor_pixels);
+                                }
+                                gpu_brush.ensure_canvas(device, *display_canvas_id, w, h);
+                                // Initialise displacement buffer and populate display canvas = anchor.
+                                if !gpu_brush.displacement_bufs.contains_key(disp_buf_id) {
+                                    if *is_liquify {
+                                        // Liquify needs a full per-pixel buffer.
+                                        gpu_brush.create_displacement_buf(device, *disp_buf_id, w, h);
+                                    } else {
+                                        // Warp uses a 1×1 grid buffer (zero = identity).
+                                        gpu_brush.create_displacement_buf(device, *disp_buf_id, 1, 1);
+                                    }
+                                    gpu_brush.clear_displacement_buf(queue, disp_buf_id);
+                                }
+                                // Apply identity warp so display canvas immediately shows the anchor.
+                                let (gc, gr) = if *is_liquify { (0, 0) } else { (1, 1) };
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, None, gc, gr);
+                            }
+                            PendingWarpOp::WarpApply { anchor_canvas_id, disp_buf_id, display_canvas_id, disp_data, grid_cols, grid_rows, final_commit, layer_id, time, is_float_warp, .. } => {
+                                // Resize displacement buffer if grid dimensions changed.
+                                let needs_resize = gpu_brush.displacement_bufs.get(disp_buf_id)
+                                    .map_or(true, |db| db.width != *grid_cols || db.height != *grid_rows);
+                                if needs_resize {
+                                    gpu_brush.remove_displacement_buf(disp_buf_id);
+                                    gpu_brush.create_displacement_buf(device, *disp_buf_id, *grid_cols, *grid_rows);
+                                }
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, disp_data.as_deref(), *grid_cols, *grid_rows);
+                                if *final_commit {
+                                    let after_pixels  = gpu_brush.readback_canvas(device, queue, *display_canvas_id);
+                                    let before_pixels = gpu_brush.readback_canvas(device, queue, *anchor_canvas_id);
+                                    if let (Some(after), Some(before)) = (after_pixels, before_pixels) {
+                                        let canvas = gpu_brush.canvases.get(display_canvas_id);
+                                        let (fw, fh) = canvas.map(|c| (c.width, c.height)).unwrap_or((0, 0));
+                                        final_commit_result = Some(WarpReadbackResult { layer_id: *layer_id, time: *time, before_pixels: before, after_pixels: after, width: fw, height: fh, display_canvas_id: *display_canvas_id, anchor_canvas_id: *anchor_canvas_id, is_float_warp: *is_float_warp });
+                                    }
+                                }
+                            }
+                            PendingWarpOp::LiquifyBrushStep { disp_buf_id, params } => {
+                                gpu_brush.liquify_brush_step(device, queue, disp_buf_id, *params);
+                            }
+                            PendingWarpOp::LiquifyApply { anchor_canvas_id, disp_buf_id, display_canvas_id, final_commit, layer_id, time, is_float_warp, .. } => {
+                                // Per-pixel mode: grid_cols = 0.
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, None, 0, 0);
+                                if *final_commit {
+                                    let after_pixels  = gpu_brush.readback_canvas(device, queue, *display_canvas_id);
+                                    let before_pixels = gpu_brush.readback_canvas(device, queue, *anchor_canvas_id);
+                                    if let (Some(after), Some(before)) = (after_pixels, before_pixels) {
+                                        let canvas = gpu_brush.canvases.get(display_canvas_id);
+                                        let (fw, fh) = canvas.map(|c| (c.width, c.height)).unwrap_or((0, 0));
+                                        final_commit_result = Some(WarpReadbackResult { layer_id: *layer_id, time: *time, before_pixels: before, after_pixels: after, width: fw, height: fh, display_canvas_id: *display_canvas_id, anchor_canvas_id: *anchor_canvas_id, is_float_warp: *is_float_warp });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(result) = final_commit_result {
+                        let results = WARP_READBACK_RESULTS.get_or_init(|| {
+                            Arc::new(Mutex::new(std::collections::HashMap::new()))
+                        });
+                        if let Ok(mut map) = results.lock() {
+                            map.insert(self.ctx.instance_id_for_readback, result);
+                        }
+                    }
+                }
+            }
+
             // Generate brush preview thumbnails on first use (one-time, blocking readback).
             if let Ok(mut previews) = self.ctx.brush_preview_pixels.try_lock() {
                 if previews.is_empty() {
@@ -836,6 +949,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     self.ctx.painting_canvas
                         .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
                         .map(|(_, kf_id)| kf_id)
+                        // Warp/Liquify: show display canvas in place of layer.
+                        .or_else(|| self.ctx.warp_display
+                            .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
+                            .map(|(_, display_id)| display_id))
                 };
 
                 if !rendered_layer.has_content && gpu_canvas_kf.is_none() {
@@ -2390,6 +2507,16 @@ pub struct StagePane {
     pending_transform_dispatch: Option<PendingTransformDispatch>,
     /// Accumulated state for the quick-select brush tool.
     quick_select_state: Option<QuickSelectState>,
+    /// Live state for the Warp tool.
+    warp_state: Option<WarpState>,
+    /// Live state for the Liquify tool.
+    liquify_state: Option<LiquifyState>,
+    /// Live state for the Gradient fill tool.
+    gradient_state: Option<GradientState>,
+    /// GPU gradient fill dispatch to run next prepare() frame.
+    pending_gradient_op: Option<PendingGradientOp>,
+    /// GPU ops for Warp/Liquify to dispatch in prepare().
+    pending_warp_ops: Vec<PendingWarpOp>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2415,6 +2542,144 @@ struct QuickSelectState {
     /// Last canvas-pixel position where a fill was run (for debouncing).
     last_pos: (i32, i32),
 }
+
+/// Live state for an ongoing raster Warp operation.
+struct WarpState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    /// Anchor canvas: existing keyframe GPU canvas (kf.id), read-only during warp.
+    anchor_canvas_id: uuid::Uuid,
+    /// Display canvas: warp-shader output shown in place of the layer.
+    display_canvas_id: uuid::Uuid,
+    /// Displacement map buffer (zero = no deformation).
+    disp_buf_id: uuid::Uuid,
+    anchor_w: u32,
+    anchor_h: u32,
+    grid_cols: u32,
+    grid_rows: u32,
+    /// Per-control-point state: [home_x, home_y, displaced_x, displaced_y].
+    /// Coordinates are in world space (canvas pixels, offset by float_offset if float warp).
+    control_points: Vec<[f32; 4]>,
+    /// Index of the control point being dragged (if any).
+    active_point: Option<usize>,
+    /// Index of the control point the cursor is currently over.
+    hovered_point: Option<usize>,
+    /// True when control points changed and a GPU re-apply is needed.
+    dirty: bool,
+    /// True once the first warp dispatch has been sent (display canvas has content).
+    warp_applied: bool,
+    /// True after Enter: waiting for final readback.
+    wants_commit: bool,
+    /// When warping a floating selection: its world-space top-left offset.
+    /// None = warping the full layer canvas.
+    float_offset: Option<(i32, i32)>,
+}
+
+/// Live state for an ongoing raster Liquify operation.
+struct LiquifyState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    /// Anchor canvas: existing keyframe GPU canvas (kf.id), read-only during liquify.
+    anchor_canvas_id: uuid::Uuid,
+    display_canvas_id: uuid::Uuid,
+    disp_buf_id: uuid::Uuid,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Last brush position (canvas pixels) for debouncing.
+    last_brush_pos: Option<(f32, f32)>,
+    /// True once the first brush step has been applied.
+    liquify_applied: bool,
+    /// True after Enter: waiting for final readback.
+    wants_commit: bool,
+    /// When liquifying a floating selection: its world-space top-left offset. None = full layer.
+    float_offset: Option<(i32, i32)>,
+}
+
+/// Live state for an ongoing raster Gradient fill drag.
+struct GradientState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    start: egui::Vec2,
+    end: egui::Vec2,
+    /// Snapshot of canvas pixels at drag start (used for CPU commit path).
+    before_pixels: Vec<u8>,
+    canvas_w: u32,
+    canvas_h: u32,
+    /// Anchor canvas: holds before_pixels (read-only by gradient shader each frame).
+    anchor_canvas_id: uuid::Uuid,
+    /// Display canvas: gradient shader writes here each frame; shown via painting_canvas or float path.
+    display_canvas_id: uuid::Uuid,
+    /// True when painting onto a floating selection instead of the layer canvas.
+    is_float: bool,
+    /// World-space top-left of the float in canvas pixels (None for non-float).
+    float_offset: Option<(f32, f32)>,
+}
+
+/// GPU ops queued by the Warp/Liquify handlers for `prepare()`.
+enum PendingWarpOp {
+    /// Upload control-point grid displacements and run warp-apply shader.
+    /// disp_data: one vec2 per control point (grid_cols * grid_rows entries).
+    /// None = reuse existing buffer (e.g. for final-commit re-apply).
+    WarpApply {
+        anchor_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        disp_data: Option<Vec<[f32; 2]>>,
+        grid_cols: u32,
+        grid_rows: u32,
+        w: u32, h: u32,
+        final_commit: bool,
+        layer_id: uuid::Uuid,
+        time: f64,
+        /// True when warping a floating selection.
+        is_float_warp: bool,
+    },
+    /// Update the displacement map from one brush step (Liquify tool).
+    LiquifyBrushStep {
+        disp_buf_id: uuid::Uuid,
+        params: crate::gpu_brush::LiquifyBrushParams,
+    },
+    /// Run warp-apply shader (Liquify tool — displacement already updated).
+    LiquifyApply {
+        anchor_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        w: u32, h: u32,
+        final_commit: bool,
+        layer_id: uuid::Uuid,
+        time: f64,
+        /// True when liquifying a floating selection.
+        is_float_warp: bool,
+    },
+    /// Initialise GPU resources for a new warp/liquify operation.
+    /// anchor_canvas_id = kf.id (reuses existing GPU canvas; ensure_canvas is a no-op if present).
+    /// anchor_pixels: uploaded to anchor canvas only if it was missing (e.g. after stroke commit).
+    /// is_liquify: if true, displacement buffer is full w×h (per-pixel); otherwise 1×1 (grid mode init).
+    Init {
+        anchor_canvas_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        w: u32, h: u32,
+        anchor_pixels: Vec<u8>,
+        is_liquify: bool,
+    },
+}
+
+/// Result stored by `prepare()` after a warp/liquify commit readback.
+struct WarpReadbackResult {
+    layer_id: uuid::Uuid,
+    time: f64,
+    before_pixels: Vec<u8>,
+    after_pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    display_canvas_id: uuid::Uuid,
+    anchor_canvas_id: uuid::Uuid,
+    /// True when warping a floating selection (don't write to kf.raw_pixels).
+    is_float_warp: bool,
+}
+
+static WARP_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, WarpReadbackResult>>>> = OnceLock::new();
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
 #[derive(Clone)]
@@ -2529,6 +2794,24 @@ struct PendingTransformDispatch {
     is_final_commit: bool,
 }
 
+/// Pending GPU dispatch for the gradient fill tool.
+struct PendingGradientOp {
+    anchor_canvas_id:  uuid::Uuid,
+    display_canvas_id: uuid::Uuid,
+    w: u32,
+    h: u32,
+    /// If Some: upload these sRGB-premultiplied pixels to the anchor canvas first.
+    anchor_pixels: Option<Vec<u8>>,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    opacity:     f32,
+    extend_mode: u32,
+    kind:        u32,  // 0 = Linear, 1 = Radial
+    stops: Vec<crate::gpu_brush::GpuGradientStop>,
+}
+
 /// Pixels read back from the transformed display canvas, stored per-instance.
 struct TransformReadbackResult {
     pixels: Vec<u8>,
@@ -2618,6 +2901,11 @@ impl StagePane {
             raster_transform_state: None,
             pending_transform_dispatch: None,
             quick_select_state: None,
+            warp_state: None,
+            liquify_state: None,
+            gradient_state: None,
+            pending_gradient_op: None,
+            pending_warp_ops: Vec::new(),
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -7372,6 +7660,890 @@ impl StagePane {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Warp tool
+    // -----------------------------------------------------------------------
+
+    fn handle_raster_warp_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::Tool;
+        use uuid::Uuid;
+
+        // Ensure we're on a raster layer.
+        let Some(layer_id) = *shared.active_layer_id else { return; };
+        let is_raster = shared.action_executor.document().get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let grid_cols = shared.raster_settings.warp_grid_cols.max(2);
+        let grid_rows = shared.raster_settings.warp_grid_rows.max(2);
+
+        // ---- Keyboard: Enter = commit, Escape = cancel ----
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if escape {
+            if let Some(ws) = self.warp_state.take() {
+                // Schedule cleanup of display canvas.
+                self.pending_canvas_removal = Some(ws.display_canvas_id);
+                self.painting_canvas = None;
+                let _ = (ws.anchor_canvas_id, ws.disp_buf_id);
+            }
+            return;
+        }
+
+        if enter {
+            if let Some(ref mut ws) = self.warp_state {
+                if !ws.wants_commit {
+                    ws.wants_commit = true;
+                    let disp_data = Self::extract_grid_disps(&ws.control_points);
+                    self.pending_warp_ops.push(PendingWarpOp::WarpApply {
+                        anchor_canvas_id:  ws.anchor_canvas_id,
+                        disp_buf_id:       ws.disp_buf_id,
+                        display_canvas_id: ws.display_canvas_id,
+                        disp_data:         Some(disp_data),
+                        grid_cols:         ws.grid_cols,
+                        grid_rows:         ws.grid_rows,
+                        w: ws.anchor_w, h: ws.anchor_h,
+                        final_commit: true,
+                        layer_id:     ws.layer_id,
+                        time:         ws.time,
+                        is_float_warp: ws.float_offset.is_some(),
+                    });
+                }
+            }
+            return;
+        }
+
+        // ---- Lazy init (first time Warp tool is active on this layer) ----
+        let time = *shared.playback_time;
+        let needs_init = self.warp_state.as_ref()
+            .map_or(true, |ws| ws.layer_id != layer_id);
+
+        if needs_init {
+            // Clean up old state if switching layers.
+            if let Some(old) = self.warp_state.take() {
+                self.pending_canvas_removal = Some(old.display_canvas_id);
+                self.painting_canvas = None;
+            }
+
+            // Determine anchor source: floating selection on this layer, or the keyframe.
+            let float_offset: Option<(i32, i32)>;
+            let anchor_canvas_id: uuid::Uuid;
+            let anchor_pixels: Vec<u8>;
+            let w: u32;
+            let h: u32;
+
+            if let Some(float_sel) = shared.selection.raster_floating.as_ref()
+                .filter(|f| f.layer_id == layer_id)
+            {
+                // Warp the floating selection.
+                float_offset    = Some((float_sel.x, float_sel.y));
+                anchor_canvas_id = float_sel.canvas_id;
+                w               = float_sel.width;
+                h               = float_sel.height;
+                anchor_pixels   = if float_sel.pixels.is_empty() {
+                    vec![0u8; (w * h * 4) as usize]
+                } else {
+                    float_sel.pixels.clone()
+                };
+            } else {
+                // Warp the full keyframe canvas.
+                float_offset = None;
+                let doc = shared.action_executor.document();
+                let (kf_id, kw, kh, raw_pix) = doc.get_layer(&layer_id)
+                    .and_then(|l| if let lightningbeam_core::layer::AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(time).map(|kf| {
+                            let expected = (kf.width * kf.height * 4) as usize;
+                            let mut pix = kf.raw_pixels.clone();
+                            if pix.len() != expected { pix.resize(expected, 0); }
+                            (kf.id, kf.width, kf.height, pix)
+                        })
+                    } else { None })
+                    .unwrap_or_else(|| {
+                        let dw = 1920u32; let dh = 1080u32;
+                        (Uuid::new_v4(), dw, dh, vec![0u8; (dw * dh * 4) as usize])
+                    });
+                anchor_canvas_id = kf_id;
+                w               = kw;
+                h               = kh;
+                anchor_pixels   = raw_pix;
+            }
+
+            let display_canvas_id = Uuid::new_v4();
+            let disp_buf_id       = Uuid::new_v4();
+
+            // Build evenly-spaced control point grid in world space.
+            // For a float, control points are offset by float_offset so they align with the float.
+            let (ox, oy) = float_offset
+                .map(|(x, y)| (x as f32, y as f32))
+                .unwrap_or((0.0, 0.0));
+            let num_pts = (grid_cols * grid_rows) as usize;
+            let mut control_points = Vec::with_capacity(num_pts);
+            for row in 0..grid_rows {
+                for col in 0..grid_cols {
+                    let hx = ox + col as f32 / (grid_cols - 1) as f32 * w as f32;
+                    let hy = oy + row as f32 / (grid_rows - 1) as f32 * h as f32;
+                    control_points.push([hx, hy, hx, hy]);
+                }
+            }
+
+            // Queue GPU init.
+            self.pending_warp_ops.push(PendingWarpOp::Init {
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                w, h,
+                anchor_pixels,
+                is_liquify: false,
+            });
+
+            self.warp_state = Some(WarpState {
+                layer_id,
+                time,
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                anchor_w: w,
+                anchor_h: h,
+                grid_cols,
+                grid_rows,
+                float_offset,
+                control_points,
+                active_point: None,
+                hovered_point: None,
+                dirty: false,
+                warp_applied: false,
+                wants_commit: false,
+            });
+        }
+
+        // Pre-check drag states before taking the warp_state borrow.
+        let drag_started = self.rsp_drag_started(response);
+        let dragged      = self.rsp_dragged(response);
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let drag_delta   = response.drag_delta() / self.zoom;
+
+        let ws = match self.warp_state.as_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        // Update painting_canvas each frame (in case it was cleared).
+        // NOTE: Can't write to self.painting_canvas here while ws borrows self.warp_state.
+        // Set painting_canvas after the ws block via a flag.
+
+        // ---- Draw grid overlay ----
+        // Use Order::Foreground so the grid renders on top of the GPU canvas paint callback.
+        let rect = response.rect;
+        let mut painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("warp_grid_overlay"),
+        ));
+        painter.set_clip_rect(rect);
+        let to_screen = |cx: f32, cy: f32| -> egui::Pos2 {
+            egui::pos2(
+                rect.min.x + self.pan_offset.x + cx * self.zoom,
+                rect.min.y + self.pan_offset.y + cy * self.zoom,
+            )
+        };
+        // Horizontal lines
+        for row in 0..ws.grid_rows {
+            for col in 0..ws.grid_cols - 1 {
+                let a = &ws.control_points[(row * ws.grid_cols + col) as usize];
+                let b = &ws.control_points[(row * ws.grid_cols + col + 1) as usize];
+                painter.line_segment([to_screen(a[2], a[3]), to_screen(b[2], b[3])],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(180, 180, 180, 180)));
+            }
+        }
+        // Vertical lines
+        for row in 0..ws.grid_rows - 1 {
+            for col in 0..ws.grid_cols {
+                let a = &ws.control_points[(row * ws.grid_cols + col) as usize];
+                let b = &ws.control_points[((row + 1) * ws.grid_cols + col) as usize];
+                painter.line_segment([to_screen(a[2], a[3]), to_screen(b[2], b[3])],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(180, 180, 180, 180)));
+            }
+        }
+
+        // ---- Hit-test control points (hover uses current pos; drag-start uses press_origin) ----
+        let hover_r = 10.0_f32;
+        let mouse_screen = egui::pos2(
+            rect.min.x + self.pan_offset.x + world_pos.x * self.zoom,
+            rect.min.y + self.pan_offset.y + world_pos.y * self.zoom,
+        );
+        let mut new_hover: Option<usize> = None;
+        for (i, pt) in ws.control_points.iter().enumerate() {
+            let screen_pt = to_screen(pt[2], pt[3]);
+            if screen_pt.distance(mouse_screen) < hover_r {
+                new_hover = Some(i);
+                break;
+            }
+        }
+        ws.hovered_point = new_hover;
+
+        // Draw control points
+        for (i, pt) in ws.control_points.iter().enumerate() {
+            let screen_pt = to_screen(pt[2], pt[3]);
+            let (size, color) = if ws.active_point == Some(i) {
+                (5.0, egui::Color32::WHITE)
+            } else if ws.hovered_point == Some(i) {
+                (4.0, egui::Color32::from_rgb(255, 220, 80))
+            } else {
+                (3.0, egui::Color32::from_rgba_unmultiplied(220, 220, 220, 200))
+            };
+            painter.rect_filled(egui::Rect::from_center_size(screen_pt, egui::Vec2::splat(size * 2.0)), 0.0, color);
+            painter.rect_stroke(egui::Rect::from_center_size(screen_pt, egui::Vec2::splat(size * 2.0)),
+                0.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)), egui::StrokeKind::Inside);
+        }
+
+        // ---- Drag handling ----
+        if drag_started {
+            // Use press_origin for hit-testing — drag_started fires after the threshold,
+            // so world_pos is already offset from where the user actually clicked.
+            let click_screen = ui.input(|i| i.pointer.press_origin())
+                .unwrap_or_else(|| egui::pos2(mouse_screen.x, mouse_screen.y));
+            ws.active_point = ws.control_points.iter().enumerate()
+                .find(|(_, pt)| to_screen(pt[2], pt[3]).distance(click_screen) < hover_r)
+                .map(|(i, _)| i);
+        }
+        if dragged {
+            if let Some(idx) = ws.active_point {
+                ws.control_points[idx][2] += drag_delta.x;
+                ws.control_points[idx][3] += drag_delta.y;
+                ws.dirty = true;
+            }
+        }
+        if drag_stopped {
+            ws.active_point = None;
+        }
+
+        // ---- Collect pending warp op data before releasing ws borrow ----
+        let pending_op = if ws.dirty && !ws.wants_commit {
+            ws.dirty = false;
+            ws.warp_applied = true;
+            let disp_data = Self::extract_grid_disps(&ws.control_points);
+            Some(PendingWarpOp::WarpApply {
+                anchor_canvas_id:  ws.anchor_canvas_id,
+                disp_buf_id:       ws.disp_buf_id,
+                display_canvas_id: ws.display_canvas_id,
+                disp_data:         Some(disp_data),
+                grid_cols:         ws.grid_cols,
+                grid_rows:         ws.grid_rows,
+                w: ws.anchor_w, h: ws.anchor_h,
+                final_commit: false,
+                layer_id:     ws.layer_id,
+                time:         ws.time,
+                is_float_warp: ws.float_offset.is_some(),
+            })
+        } else {
+            None
+        };
+        let (ws_layer_id, ws_display_id, ws_float_offset) = (ws.layer_id, ws.display_canvas_id, ws.float_offset);
+        drop(ws);  // release borrow of warp_state
+
+        // Display canvas is initialised by Init (zero-displacement apply), so it always
+        // has valid content. For full-layer warp, override the layer blit unconditionally.
+        // For float warp the override is done via transform_display in render_content().
+        if ws_float_offset.is_none() {
+            self.painting_canvas = Some((ws_layer_id, ws_display_id));
+        }
+        if let Some(op) = pending_op {
+            self.pending_warp_ops.push(op);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Compute a per-pixel displacement map from a warp control-point grid.
+    ///
+    /// For each pixel (x, y) we find its fractional grid position, then bilinearly
+    /// interpolate the displacements of the surrounding 4 grid points.
+    /// Extract per-control-point displacements (displaced - home) from the control point array.
+    /// Returns a tiny vec (grid_cols * grid_rows entries) uploaded to the GPU displacement buffer.
+    /// The shader does bilinear interpolation per pixel, so no per-pixel CPU work is needed.
+    fn extract_grid_disps(control_points: &[[f32; 4]]) -> Vec<[f32; 2]> {
+        // The warp shader is an inverse warp: output pixel (x,y) samples source at (x+d.x, y+d.y).
+        // So to make content follow the handle (forward warp), negate: d = home - displaced.
+        control_points.iter()
+            .map(|p| [p[0] - p[2], p[1] - p[3]])
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Liquify tool
+    // -----------------------------------------------------------------------
+
+    fn handle_raster_liquify_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use uuid::Uuid;
+
+        // Ensure we're on a raster layer.
+        let Some(layer_id) = *shared.active_layer_id else { return; };
+        let is_raster = shared.action_executor.document().get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let radius   = shared.raster_settings.liquify_radius;
+        let strength = shared.raster_settings.liquify_strength;
+        let mode     = shared.raster_settings.liquify_mode.as_u32();
+
+        // ---- Keyboard: Enter = commit, Escape = cancel ----
+        let enter  = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if escape {
+            if let Some(ls) = self.liquify_state.take() {
+                self.pending_canvas_removal = Some(ls.display_canvas_id);
+                self.painting_canvas = None;
+                let _ = (ls.anchor_canvas_id, ls.disp_buf_id);
+            }
+            return;
+        }
+
+        if enter {
+            if let Some(ref mut ls) = self.liquify_state {
+                if !ls.wants_commit {
+                    ls.wants_commit = true;
+                    self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                        anchor_canvas_id:  ls.anchor_canvas_id,
+                        disp_buf_id:       ls.disp_buf_id,
+                        display_canvas_id: ls.display_canvas_id,
+                        w: ls.anchor_w, h: ls.anchor_h,
+                        final_commit: true,
+                        layer_id:     ls.layer_id,
+                        time:         ls.time,
+                        is_float_warp: ls.float_offset.is_some(),
+                    });
+                }
+            }
+            return;
+        }
+
+        // ---- Draw brush cursor ----
+        let liq_rect  = response.rect;
+        let screen_cx = liq_rect.min.x + self.pan_offset.x + world_pos.x * self.zoom;
+        let screen_cy = liq_rect.min.y + self.pan_offset.y + world_pos.y * self.zoom;
+        let screen_r  = radius * self.zoom;
+        let painter   = ui.painter_at(liq_rect);
+        let time      = ui.input(|i| i.time) as f32;
+        let phase     = (time * 8.0).rem_euclid(8.0);
+
+        let pts: Vec<egui::Pos2> = (0..64).map(|i| {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            egui::pos2(screen_cx + a.cos() * screen_r,
+                       screen_cy + a.sin() * screen_r)
+        }).collect();
+        Self::draw_marching_ants(&painter, &pts, phase);
+
+        // ---- Lazy init ----
+        let playhead_time = *shared.playback_time;
+        let needs_init = self.liquify_state.as_ref()
+            .map_or(true, |ls| ls.layer_id != layer_id);
+
+        if needs_init {
+            if let Some(old) = self.liquify_state.take() {
+                self.pending_canvas_removal = Some(old.display_canvas_id);
+                self.painting_canvas = None;
+            }
+
+            // Determine anchor: floating selection on this layer, or the keyframe.
+            let float_offset: Option<(i32, i32)>;
+            let anchor_canvas_id: uuid::Uuid;
+            let anchor_pixels: Vec<u8>;
+            let w: u32;
+            let h: u32;
+
+            if let Some(float_sel) = shared.selection.raster_floating.as_ref()
+                .filter(|f| f.layer_id == layer_id)
+            {
+                float_offset     = Some((float_sel.x, float_sel.y));
+                anchor_canvas_id = float_sel.canvas_id;
+                w                = float_sel.width;
+                h                = float_sel.height;
+                anchor_pixels    = if float_sel.pixels.is_empty() {
+                    vec![0u8; (w * h * 4) as usize]
+                } else {
+                    float_sel.pixels.clone()
+                };
+            } else {
+                float_offset = None;
+                let doc = shared.action_executor.document();
+                let (kf_id, kw, kh, raw_pix) = doc.get_layer(&layer_id)
+                    .and_then(|l| if let lightningbeam_core::layer::AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(playhead_time).map(|kf| {
+                            let expected = (kf.width * kf.height * 4) as usize;
+                            let mut pix = kf.raw_pixels.clone();
+                            if pix.len() != expected { pix.resize(expected, 0); }
+                            (kf.id, kf.width, kf.height, pix)
+                        })
+                    } else { None })
+                    .unwrap_or_else(|| {
+                        let dw = 1920u32; let dh = 1080u32;
+                        (Uuid::new_v4(), dw, dh, vec![0u8; (dw * dh * 4) as usize])
+                    });
+                anchor_canvas_id = kf_id;
+                w                = kw;
+                h                = kh;
+                anchor_pixels    = raw_pix;
+            }
+
+            let display_canvas_id = Uuid::new_v4();
+            let disp_buf_id       = Uuid::new_v4();
+
+            self.pending_warp_ops.push(PendingWarpOp::Init {
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                w, h,
+                anchor_pixels,
+                is_liquify: true,
+            });
+
+            self.liquify_state = Some(LiquifyState {
+                layer_id,
+                time: playhead_time,
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                anchor_w: w,
+                anchor_h: h,
+                last_brush_pos: None,
+                liquify_applied: false,
+                wants_commit: false,
+                float_offset,
+            });
+        }
+
+        // Pre-check drag states before taking the liquify_state borrow.
+        let drag_started_l = self.rsp_drag_started(response);
+        let dragged_l      = self.rsp_dragged(response);
+        let drag_stopped_l = self.rsp_drag_stopped(response);
+
+        // Extract what we need from liquify_state and update it, then release borrow.
+        // Returns (layer_id, display_id, brush_op) where brush_op is Some if we should
+        // push GPU ops this frame.
+        let brush_op = {
+            let ls = match self.liquify_state.as_mut() {
+                Some(ls) => ls,
+                None => return,
+            };
+
+            let mut op: Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid, u32, u32, f64, f32, f32, f32, f32)> = None;
+
+            if drag_started_l {
+                ls.last_brush_pos = Some((world_pos.x, world_pos.y));
+                ls.liquify_applied = true;
+                op = Some((ls.anchor_canvas_id, ls.disp_buf_id, ls.display_canvas_id,
+                           ls.anchor_w, ls.anchor_h, ls.time,
+                           world_pos.x, world_pos.y, 0.0, 0.0));
+            } else if dragged_l {
+                if let Some((lx, ly)) = ls.last_brush_pos {
+                    let dx = world_pos.x - lx;
+                    let dy = world_pos.y - ly;
+                    let dist2 = dx * dx + dy * dy;
+                    let min_step = (radius / 4.0).max(1.0);
+                    if dist2 >= min_step * min_step {
+                        let len = dist2.sqrt().max(0.001);
+                        ls.last_brush_pos = Some((world_pos.x, world_pos.y));
+                        op = Some((ls.anchor_canvas_id, ls.disp_buf_id, ls.display_canvas_id,
+                                   ls.anchor_w, ls.anchor_h, ls.time,
+                                   world_pos.x, world_pos.y, dx / len, dy / len));
+                    }
+                }
+            }
+            if drag_stopped_l {
+                ls.last_brush_pos = None;
+            }
+            let is_float = ls.float_offset.is_some();
+            op.map(|o| (ls.layer_id, is_float, o))
+        };
+
+        // For full-layer liquify: override layer blit with display canvas.
+        // For float liquify: override the float blit via transform_display in render_content().
+        if let Some(ls) = self.liquify_state.as_ref() {
+            if ls.float_offset.is_none() {
+                self.painting_canvas = Some((ls.layer_id, ls.display_canvas_id));
+            }
+        }
+
+        if let Some((ls_layer_id, is_float_warp, (anchor_id, disp_buf, display_id, w, h, time, cx, cy, dx, dy))) = brush_op {
+            self.pending_warp_ops.push(PendingWarpOp::LiquifyBrushStep {
+                disp_buf_id: disp_buf,
+                params: crate::gpu_brush::LiquifyBrushParams {
+                    cx, cy, radius, strength,
+                    dx, dy, mode,
+                    map_w: w, map_h: h,
+                    _pad0: 0, _pad1: 0, _pad2: 0,
+                },
+            });
+            self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                anchor_canvas_id:  anchor_id,
+                disp_buf_id:       disp_buf,
+                display_canvas_id: display_id,
+                w, h,
+                final_commit: false,
+                layer_id: ls_layer_id,
+                time,
+                is_float_warp,
+            });
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn handle_raster_gradient_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::actions::RasterFillAction;
+        use lightningbeam_core::layer::AnyLayer;
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let drag_started = response.drag_started();
+        let dragged      = response.dragged();
+        let drag_stopped = response.drag_stopped();
+
+        // ── Drag started: snapshot pixels, create GPU canvases ───────────────
+        if drag_started {
+            // Determine whether we're painting on the floating selection or the layer.
+            // Float: gradient writes into float.canvas_id (shown by the float path).
+            // Layer: gradient writes into a new display canvas shown via painting_canvas.
+            let float_info = shared.selection.raster_floating.as_ref().map(|f| {
+                let pixels = if f.pixels.is_empty() {
+                    vec![0u8; (f.width * f.height * 4) as usize]
+                } else {
+                    f.pixels.clone()
+                };
+                (pixels, f.width, f.height, f.time, f.canvas_id, f.x as f32, f.y as f32, f.layer_id)
+            });
+
+            let layer_result = if float_info.is_none() {
+                let doc = shared.action_executor.document();
+                let r = if let Some(layer) = doc.get_layer(&active_layer_id) {
+                    if let AnyLayer::Raster(rl) = layer {
+                        let time = *shared.playback_time;
+                        if let Some(kf) = rl.keyframe_at(time) {
+                            let w = doc.width as u32;
+                            let h = doc.height as u32;
+                            let pixels = if kf.raw_pixels.is_empty() {
+                                vec![0u8; (w * h * 4) as usize]
+                            } else { kf.raw_pixels.clone() };
+                            Some((pixels, w, h, kf.time))
+                        } else { None }
+                    } else { None }
+                } else { None };
+                drop(doc);
+                r
+            } else { None };
+
+            // Unpack into a common set of fields.
+            let setup = if let Some((pixels, w, h, time, fid, fx, fy, flid)) = float_info {
+                Some((pixels, w, h, time, flid, true, Some(fid), Some((fx, fy))))
+            } else if let Some((pixels, w, h, time)) = layer_result {
+                Some((pixels, w, h, time, active_layer_id, false, None, None))
+            } else { None };
+
+            if let Some((before_pixels, canvas_w, canvas_h, kf_time,
+                         target_layer_id, is_float,
+                         existing_display_id, float_offset)) = setup
+            {
+                let anchor_canvas_id  = uuid::Uuid::new_v4();
+                let display_canvas_id = existing_display_id.unwrap_or_else(uuid::Uuid::new_v4);
+
+                // Convert world drag-start to canvas-local coords.
+                let (sx, sy) = if let Some((fx, fy)) = float_offset {
+                    (world_pos.x - fx, world_pos.y - fy)
+                } else {
+                    (world_pos.x, world_pos.y)
+                };
+
+                let gpu_stops = Self::gradient_to_gpu_stops(&shared.raster_settings.gradient);
+                let gradient  = &shared.raster_settings.gradient;
+
+                self.gradient_state = Some(GradientState {
+                    layer_id: target_layer_id,
+                    time: kf_time,
+                    start: world_pos,
+                    end:   world_pos,
+                    before_pixels: before_pixels.clone(),
+                    canvas_w,
+                    canvas_h,
+                    anchor_canvas_id,
+                    display_canvas_id,
+                    is_float,
+                    float_offset,
+                });
+
+                self.pending_gradient_op = Some(PendingGradientOp {
+                    anchor_canvas_id,
+                    display_canvas_id,
+                    w: canvas_w,
+                    h: canvas_h,
+                    anchor_pixels: Some(before_pixels),
+                    start_x: sx, start_y: sy,
+                    end_x:   sx, end_y:   sy,
+                    opacity:     shared.raster_settings.gradient_opacity,
+                    extend_mode: Self::gradient_extend_to_u32(gradient.extend),
+                    kind:        Self::gradient_kind_to_u32(gradient.kind),
+                    stops:       gpu_stops,
+                });
+
+                // For layer gradient show a separate display canvas via painting_canvas.
+                // For float gradient the float's own canvas_id IS display_canvas_id
+                // and is already shown by the float rendering path.
+                if !is_float {
+                    self.painting_canvas = Some((target_layer_id, display_canvas_id));
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // ── Dragged: update end point, queue GPU dispatch ─────────────────────
+        // Skip on the same frame as drag_started — that block already queued the initial
+        // GPU op with anchor_pixels = Some(...).  Overwriting it here would lose the upload.
+        if dragged && !drag_started {
+            if let Some(ref mut gs) = self.gradient_state {
+                gs.end = world_pos;
+            }
+            if let Some(ref gs) = self.gradient_state {
+                let gradient = &shared.raster_settings.gradient;
+                // Convert world coords to canvas-local (subtract float offset if needed).
+                let to_local = |v: egui::Vec2| -> (f32, f32) {
+                    if let Some((fx, fy)) = gs.float_offset {
+                        (v.x - fx, v.y - fy)
+                    } else {
+                        (v.x, v.y)
+                    }
+                };
+                let (sx, sy) = to_local(gs.start);
+                let (ex, ey) = to_local(gs.end);
+                self.pending_gradient_op = Some(PendingGradientOp {
+                    anchor_canvas_id:  gs.anchor_canvas_id,
+                    display_canvas_id: gs.display_canvas_id,
+                    w: gs.canvas_w,
+                    h: gs.canvas_h,
+                    anchor_pixels: None,  // already on GPU
+                    start_x: sx, start_y: sy,
+                    end_x:   ex, end_y:   ey,
+                    opacity:     shared.raster_settings.gradient_opacity,
+                    extend_mode: Self::gradient_extend_to_u32(gradient.extend),
+                    kind:        Self::gradient_kind_to_u32(gradient.kind),
+                    stops:       Self::gradient_to_gpu_stops(gradient),
+                });
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // ── Drag stopped: commit ──────────────────────────────────────────────
+        if drag_stopped {
+            if let Some(ref mut gs) = self.gradient_state {
+                gs.end = world_pos;
+            }
+            if let Some(ref gs) = self.gradient_state {
+                let after_pixels = Self::compute_gradient_pixels(gs, shared);
+                if gs.is_float {
+                    // Update the float's pixel buffer in place.
+                    // The float's GPU canvas (display_canvas_id) already shows the result.
+                    if let Some(ref mut float) = shared.selection.raster_floating {
+                        float.pixels = after_pixels;
+                    }
+                } else {
+                    let action = RasterFillAction::new(
+                        gs.layer_id, gs.time,
+                        gs.before_pixels.clone(), after_pixels,
+                        gs.canvas_w, gs.canvas_h,
+                    ).with_description("Gradient Fill");
+                    let _ = shared.action_executor.execute(Box::new(action));
+                }
+            }
+            if let Some(gs) = self.gradient_state.take() {
+                // Always remove the anchor canvas (temporary scratch).
+                // For layer gradient, also remove the display canvas.
+                // For float gradient, display_canvas_id IS the float's canvas — keep it.
+                if gs.is_float {
+                    self.pending_canvas_removal = Some(gs.anchor_canvas_id);
+                } else {
+                    self.pending_canvas_removal = Some(gs.display_canvas_id);
+                    // Anchor leaks here (pre-existing behaviour); acceptable for now.
+                }
+            }
+            self.painting_canvas = None;
+        }
+
+        // Keep painting_canvas pointing at the display canvas each frame (layer gradient only).
+        if let Some(ref gs) = self.gradient_state {
+            if !gs.is_float {
+                self.painting_canvas = Some((gs.layer_id, gs.display_canvas_id));
+            }
+        }
+
+        // Draw direction line overlay.
+        if let Some(ref gs) = self.gradient_state {
+            let zoom = self.zoom;
+            let pan  = self.pan_offset;
+            let world_to_screen = |v: egui::Vec2| egui::pos2(v.x * zoom + pan.x, v.y * zoom + pan.y);
+            let p0 = world_to_screen(gs.start);
+            let p1 = world_to_screen(gs.end);
+            let painter = ui.painter();
+            painter.line_segment(
+                [p0, p1],
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            painter.circle_filled(p0, 5.0, egui::Color32::WHITE);
+            painter.circle_filled(p1, 5.0, egui::Color32::WHITE);
+            painter.circle_stroke(p0, 5.0, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+            painter.circle_stroke(p1, 5.0, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+        }
+    }
+
+    fn gradient_extend_to_u32(extend: lightningbeam_core::gradient::GradientExtend) -> u32 {
+        use lightningbeam_core::gradient::GradientExtend;
+        match extend {
+            GradientExtend::Pad     => 0,
+            GradientExtend::Reflect => 1,
+            GradientExtend::Repeat  => 2,
+        }
+    }
+
+    fn gradient_kind_to_u32(kind: lightningbeam_core::gradient::GradientType) -> u32 {
+        use lightningbeam_core::gradient::GradientType;
+        match kind {
+            GradientType::Linear => 0,
+            GradientType::Radial => 1,
+        }
+    }
+
+    /// Convert gradient stops to GPU-ready form (sRGB u8 → linear f32).
+    fn gradient_to_gpu_stops(gradient: &lightningbeam_core::gradient::ShapeGradient) -> Vec<crate::gpu_brush::GpuGradientStop> {
+        gradient.stops.iter().map(|s| {
+            crate::gpu_brush::GpuGradientStop::from_srgb_u8(
+                s.position, s.color.r, s.color.g, s.color.b, s.color.a,
+            )
+        }).collect()
+    }
+
+    /// Compute gradient-filled pixel buffer (CPU), respecting active selection.
+    ///
+    /// All blending is done in linear premultiplied space to match the GPU shader.
+    fn compute_gradient_pixels(gs: &GradientState, shared: &SharedPaneState) -> Vec<u8> {
+        let w = gs.canvas_w;
+        let h = gs.canvas_h;
+        let gradient = &shared.raster_settings.gradient;
+        let opacity  = shared.raster_settings.gradient_opacity;
+
+        // Selection confinement (not applicable to float — the float IS the selection).
+        let sel = if gs.is_float { None } else { shared.selection.raster_selection.as_ref() };
+
+        // Convert world start/end to canvas-local coords (subtract float offset if any).
+        let (start_x, start_y) = if let Some((fx, fy)) = gs.float_offset {
+            (gs.start.x - fx, gs.start.y - fy)
+        } else {
+            (gs.start.x, gs.start.y)
+        };
+        let (end_x, end_y) = if let Some((fx, fy)) = gs.float_offset {
+            (gs.end.x - fx, gs.end.y - fy)
+        } else {
+            (gs.end.x, gs.end.y)
+        };
+
+        let dx = end_x - start_x;
+        let dy = end_y - start_y;
+        let len2 = dx * dx + dy * dy;
+        let is_radial = gradient.kind == lightningbeam_core::gradient::GradientType::Radial;
+
+        // sRGB ↔ linear helpers (match gpu_brush.rs).
+        let srgb_to_linear = |c: f32| -> f32 {
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let linear_to_srgb = |c: f32| -> f32 {
+            let c = c.clamp(0.0, 1.0);
+            if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+        };
+
+        let mut out = gs.before_pixels.clone();
+
+        for py in 0..h {
+            for px in 0..w {
+                let idx = ((py * w + px) * 4) as usize;
+
+                let cx_f = px as f32 + 0.5;
+                let cy_f = py as f32 + 0.5;
+                let t_raw = if is_radial {
+                    // Radial: center at start point, radius = |end-start|.
+                    let radius = len2.sqrt();
+                    if radius < 0.5 { 0.0f32 } else {
+                        let pdx = cx_f - start_x;
+                        let pdy = cy_f - start_y;
+                        (pdx * pdx + pdy * pdy).sqrt() / radius
+                    }
+                } else {
+                    // Linear: project pixel centre onto gradient axis.
+                    if len2 < 1.0 { 0.0f32 } else {
+                        let fx = cx_f - start_x;
+                        let fy = cy_f - start_y;
+                        (fx * dx + fy * dy) / len2
+                    }
+                };
+
+                let t = gradient.apply_extend(t_raw);
+                let [gr, gg, gb, ga] = gradient.eval(t);
+
+                // Selection confinement.
+                if let Some(s) = sel {
+                    if !s.contains_pixel(px as i32, py as i32) {
+                        continue;
+                    }
+                }
+
+                // Effective alpha: gradient alpha × tool opacity (straight-alpha [0,1]).
+                let a = ga as f32 / 255.0 * opacity;
+
+                // Convert gradient RGB from sRGB straight-alpha to linear straight-alpha.
+                let gr_lin = srgb_to_linear(gr as f32 / 255.0);
+                let gg_lin = srgb_to_linear(gg as f32 / 255.0);
+                let gb_lin = srgb_to_linear(gb as f32 / 255.0);
+
+                // Source pixel: sRGB premultiplied bytes → linear premultiplied floats.
+                // (upload() does the same conversion for the GPU anchor canvas.)
+                let src_r_lin = srgb_to_linear(out[idx]     as f32 / 255.0);
+                let src_g_lin = srgb_to_linear(out[idx + 1] as f32 / 255.0);
+                let src_b_lin = srgb_to_linear(out[idx + 2] as f32 / 255.0);
+                let src_a     = out[idx + 3] as f32 / 255.0;
+
+                // Alpha-over in linear premultiplied space (matches GPU shader exactly).
+                let out_a       = a + src_a * (1.0 - a);
+                let out_r_lin   = gr_lin * a + src_r_lin * (1.0 - a);
+                let out_g_lin   = gg_lin * a + src_g_lin * (1.0 - a);
+                let out_b_lin   = gb_lin * a + src_b_lin * (1.0 - a);
+
+                // Convert linear premultiplied → sRGB premultiplied bytes.
+                out[idx]     = (linear_to_srgb(out_r_lin) * 255.0 + 0.5) as u8;
+                out[idx + 1] = (linear_to_srgb(out_g_lin) * 255.0 + 0.5) as u8;
+                out[idx + 2] = (linear_to_srgb(out_b_lin) * 255.0 + 0.5) as u8;
+                out[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        out
+    }
+
+    /// Compute gradient pixels and queue upload to the preview GPU canvas for next prepare().
     fn handle_transform_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -8739,6 +9911,15 @@ impl StagePane {
                 Tool::RegionSelect => {
                     self.handle_region_select_tool(ui, &response, world_pos, shared);
                 }
+                Tool::Warp => {
+                    self.handle_raster_warp_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Liquify => {
+                    self.handle_raster_liquify_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Gradient => {
+                    self.handle_raster_gradient_tool(ui, &response, world_pos, shared);
+                }
                 _ => {
                     // Other tools not implemented yet
                 }
@@ -9431,6 +10612,45 @@ impl PaneRenderer for StagePane {
             }
         }
 
+        // Consume warp/liquify readback results: create RasterFillAction and clean up.
+        if let Ok(mut results) = WARP_READBACK_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock()
+        {
+            if let Some(rb) = results.remove(&self.instance_id) {
+                if rb.is_float_warp {
+                    // Float warp: update the floating selection's pixel data and GPU canvas.
+                    // Do NOT write to kf.raw_pixels (it belongs to the full-canvas keyframe).
+                    if let Some(float_sel) = shared.selection.raster_floating.as_mut() {
+                        float_sel.pixels    = rb.after_pixels;
+                        float_sel.canvas_id = rb.display_canvas_id;
+                    }
+                    // Release the old anchor canvas (float's original canvas_id, now replaced).
+                    self.pending_canvas_removal = Some(rb.anchor_canvas_id);
+                } else {
+                    use lightningbeam_core::actions::raster_fill::RasterFillAction;
+                    let action = RasterFillAction::new(
+                        rb.layer_id, rb.time,
+                        rb.before_pixels, rb.after_pixels,
+                        rb.width, rb.height,
+                    ).with_description("Warp");
+                    let _ = shared.action_executor.execute(Box::new(action));
+
+                    // Clean up display canvas (deferred: keep alive this frame to avoid flash).
+                    self.pending_canvas_removal = Some(rb.display_canvas_id);
+                }
+
+                self.painting_canvas = None;
+                // Clear tool state.
+                if let Some(ws) = self.warp_state.take() {
+                    let _ = (ws.anchor_canvas_id, ws.disp_buf_id);
+                }
+                if let Some(ls) = self.liquify_state.take() {
+                    let _ = (ls.anchor_canvas_id, ls.disp_buf_id);
+                }
+            }
+        }
+
         // Clear transform state if the float was committed externally (by another tool),
         // or if the user switched away from the Transform tool without finishing.
         {
@@ -9462,6 +10682,59 @@ impl PaneRenderer for StagePane {
                 } else if !self.raster_transform_state.as_ref().map_or(false, |ts| ts.wants_apply) {
                     // No pending dispatch — just clear.
                     self.raster_transform_state = None;
+                }
+            }
+        }
+
+        // Clear warp/liquify state if user switched away without committing.
+        {
+            use lightningbeam_core::tool::Tool;
+            let not_warp    = !matches!(*shared.selected_tool, Tool::Warp);
+            let not_liquify = !matches!(*shared.selected_tool, Tool::Liquify);
+
+            if not_warp && self.warp_state.is_some() {
+                if let Some(ws) = self.warp_state.take() {
+                    if ws.warp_applied && !ws.wants_commit {
+                        // Queue final commit so work isn't lost.
+                        let disp_data = Self::extract_grid_disps(&ws.control_points);
+                        self.pending_warp_ops.push(PendingWarpOp::WarpApply {
+                            anchor_canvas_id: ws.anchor_canvas_id,
+                            disp_buf_id: ws.disp_buf_id,
+                            display_canvas_id: ws.display_canvas_id,
+                            disp_data: Some(disp_data),
+                            grid_cols: ws.grid_cols,
+                            grid_rows: ws.grid_rows,
+                            w: ws.anchor_w, h: ws.anchor_h,
+                            final_commit: true,
+                            layer_id: ws.layer_id,
+                            time: ws.time,
+                            is_float_warp: ws.float_offset.is_some(),
+                        });
+                    } else {
+                        // No changes or already committing — just discard.
+                        self.pending_canvas_removal = Some(ws.display_canvas_id);
+                        self.painting_canvas = None;
+                    }
+                }
+            }
+
+            if not_liquify && self.liquify_state.is_some() {
+                if let Some(ls) = self.liquify_state.take() {
+                    if ls.liquify_applied && !ls.wants_commit {
+                        self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                            anchor_canvas_id: ls.anchor_canvas_id,
+                            disp_buf_id: ls.disp_buf_id,
+                            display_canvas_id: ls.display_canvas_id,
+                            w: ls.anchor_w, h: ls.anchor_h,
+                            final_commit: true,
+                            layer_id: ls.layer_id,
+                            time: ls.time,
+                            is_float_warp: ls.float_offset.is_some(),
+                        });
+                    } else {
+                        self.pending_canvas_removal = Some(ls.display_canvas_id);
+                        self.painting_canvas = None;
+                    }
                 }
             }
         }
@@ -9781,6 +11054,30 @@ impl PaneRenderer for StagePane {
                 }
             });
 
+        // Compute warp_display: show the warp/liquify display canvas in place of the layer
+        // (for full-layer warp) or as float blit override (for float warp via transform_display).
+        let warp_display = self.warp_state.as_ref()
+            .filter(|ws| ws.warp_applied && ws.float_offset.is_none())
+            .map(|ws| (ws.layer_id, ws.display_canvas_id))
+            .or_else(|| self.liquify_state.as_ref()
+                .filter(|ls| ls.liquify_applied && ls.float_offset.is_none())
+                .map(|ls| (ls.layer_id, ls.display_canvas_id)));
+
+        // For float warp/liquify: override the float blit with the display canvas.
+        let transform_display = transform_display.or_else(|| {
+            self.warp_state.as_ref()
+                .and_then(|ws| ws.float_offset.map(|(ox, oy)| TransformDisplayInfo {
+                    display_canvas_id: ws.display_canvas_id,
+                    x: ox, y: oy, w: ws.anchor_w, h: ws.anchor_h,
+                }))
+        }).or_else(|| {
+            self.liquify_state.as_ref()
+                .and_then(|ls| ls.float_offset.map(|(ox, oy)| TransformDisplayInfo {
+                    display_canvas_id: ls.display_canvas_id,
+                    x: ox, y: oy, w: ls.anchor_w, h: ls.anchor_h,
+                }))
+        });
+
         // Use egui's custom painting callback for Vello
         // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback { ctx: VelloRenderContext {
@@ -9811,6 +11108,9 @@ impl PaneRenderer for StagePane {
             pending_raster_dabs: self.pending_raster_dabs.take(),
             pending_transform_dispatch: self.pending_transform_dispatch.take(),
             transform_display,
+            pending_warp_ops: std::mem::take(&mut self.pending_warp_ops),
+            warp_display,
+            pending_gradient_op: self.pending_gradient_op.take(),
             instance_id_for_readback: self.instance_id,
             painting_canvas: self.painting_canvas,
             pending_canvas_removal: self.pending_canvas_removal.take(),

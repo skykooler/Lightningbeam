@@ -923,7 +923,25 @@ fn render_video_layer(
     }
 }
 
-/// Render a vector layer with all its clip instances and shape instances
+/// Compute start/end canvas points for a linear gradient across a bounding box.
+///
+/// The axis is centred on the bbox midpoint and oriented at `angle_deg` degrees
+/// (0 = left→right, 90 = top→bottom).  The axis extends ± half the bbox diagonal
+/// so the gradient covers the entire shape regardless of angle.
+fn gradient_bbox_endpoints(angle_deg: f32, bbox: kurbo::Rect) -> (kurbo::Point, kurbo::Point) {
+    let cx = bbox.center().x;
+    let cy = bbox.center().y;
+    let dx = bbox.width();
+    let dy = bbox.height();
+    // Use half the diagonal so the full gradient fits at any angle.
+    let half_len = (dx * dx + dy * dy).sqrt() * 0.5;
+    let rad = (angle_deg as f64).to_radians();
+    let (sin, cos) = (rad.sin(), rad.cos());
+    let start = kurbo::Point::new(cx - cos * half_len, cy - sin * half_len);
+    let end   = kurbo::Point::new(cx + cos * half_len, cy + sin * half_len);
+    (start, end)
+}
+
 /// Render a DCEL to a Vello scene.
 ///
 /// Walks faces for fills and edges for strokes.
@@ -942,7 +960,7 @@ pub fn render_dcel(
         if face.deleted || i == 0 {
             continue; // Skip unbounded face and deleted faces
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() {
+        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
             continue; // No fill to render
         }
 
@@ -963,7 +981,19 @@ pub fn render_dcel(
             }
         }
 
-        // Color fill
+        // Gradient fill (takes priority over solid colour fill)
+        if !filled {
+            if let Some(ref grad) = face.gradient_fill {
+                use kurbo::{Point, Rect};
+                let bbox: Rect = vello::kurbo::Shape::bounding_box(&path);
+                let (start, end) = gradient_bbox_endpoints(grad.angle, bbox);
+                let brush = grad.to_peniko_brush(start, end, opacity_f32);
+                scene.fill(fill_rule, base_transform, &brush, None, &path);
+                filled = true;
+            }
+        }
+
+        // Solid colour fill
         if !filled {
             if let Some(fill_color) = &face.fill_color {
                 let alpha = ((fill_color.a as f32 / 255.0) * opacity_f32 * 255.0) as u8;
