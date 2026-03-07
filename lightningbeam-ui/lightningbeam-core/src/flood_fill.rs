@@ -17,22 +17,112 @@ pub enum FillThresholdMode {
     Relative,
 }
 
-/// Pixel flood fill for the raster paint bucket tool.
+/// BFS / global scan flood fill mask.
 ///
-/// Operates on a flat RGBA `Vec<u8>` (4 bytes per pixel, row-major).
-/// Pixels are alpha-composited with `fill_color` — the existing canvas content
-/// shows through wherever `fill_color` has partial transparency or softness
-/// reduces its effective alpha.
+/// Returns a `Vec<Option<f32>>` of length `width × height`:
+/// - `Some(d)` — pixel is within the fill region; `d` is the color distance
+///   from its comparison color (0.0 at seed, up to `threshold` at the edge).
+/// - `None`    — pixel is outside the fill region.
 ///
 /// # Parameters
-/// - `pixels`     – raw RGBA buffer, modified in place
+/// - `pixels`      – raw RGBA buffer (read-only)
 /// - `width/height` – canvas dimensions
-/// - `seed_x/y`  – click coordinates (canvas pixel indices, 0-based)
-/// - `fill_color` – RGBA fill \[r, g, b, a\], 0–255 each
-/// - `threshold`  – max color distance (Euclidean RGBA) to include in fill (0–255·√4 ≈ 510)
-/// - `softness`   – how much of the threshold is a soft fade (0 = hard edge, 100 = full fade)
-/// - `mode`       – compare candidates to seed (Absolute) or to their BFS parent (Relative)
-/// - `selection`  – optional clip mask; pixels outside are never filled
+/// - `seed_x/y`   – click coordinates (canvas pixel indices, 0-based)
+/// - `threshold`   – max color distance to include
+/// - `mode`        – Absolute = compare to seed; Relative = compare to BFS parent
+/// - `contiguous`  – true = BFS from seed (connected region only);
+///                   false = scan every pixel against seed color globally
+/// - `selection`   – optional clip mask; pixels outside are never included
+pub fn raster_fill_mask(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    seed_x: i32,
+    seed_y: i32,
+    threshold: f32,
+    mode: FillThresholdMode,
+    contiguous: bool,
+    selection: Option<&crate::selection::RasterSelection>,
+) -> Vec<Option<f32>> {
+    use std::collections::VecDeque;
+
+    let w = width as i32;
+    let h = height as i32;
+    let n = (width * height) as usize;
+
+    let mut dist_map: Vec<Option<f32>> = vec![None; n];
+
+    if seed_x < 0 || seed_y < 0 || seed_x >= w || seed_y >= h {
+        return dist_map;
+    }
+
+    let seed_idx = (seed_y * w + seed_x) as usize;
+    let seed_color = [
+        pixels[seed_idx * 4],
+        pixels[seed_idx * 4 + 1],
+        pixels[seed_idx * 4 + 2],
+        pixels[seed_idx * 4 + 3],
+    ];
+
+    if contiguous {
+        // BFS: only connected pixels within threshold.
+        let mut parent_color: Vec<[u8; 4]> = vec![[0; 4]; n];
+        let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
+
+        dist_map[seed_idx] = Some(0.0);
+        parent_color[seed_idx] = seed_color;
+        queue.push_back((seed_x, seed_y));
+
+        let dirs: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
+
+        while let Some((cx, cy)) = queue.pop_front() {
+            let ci = (cy * w + cx) as usize;
+            let compare_color = match mode {
+                FillThresholdMode::Absolute => seed_color,
+                FillThresholdMode::Relative => parent_color[ci],
+            };
+            for (dx, dy) in dirs {
+                let nx = cx + dx;
+                let ny = cy + dy;
+                if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
+                let ni = (ny * w + nx) as usize;
+                if dist_map[ni].is_some() { continue; }
+                if let Some(sel) = selection {
+                    if !sel.contains_pixel(nx, ny) { continue; }
+                }
+                let npx = [pixels[ni*4], pixels[ni*4+1], pixels[ni*4+2], pixels[ni*4+3]];
+                let d = color_distance(npx, compare_color);
+                if d <= threshold {
+                    dist_map[ni] = Some(d);
+                    parent_color[ni] = npx;
+                    queue.push_back((nx, ny));
+                }
+            }
+        }
+    } else {
+        // Global scan: every pixel compared against seed color (Absolute mode).
+        for row in 0..h {
+            for col in 0..w {
+                if let Some(sel) = selection {
+                    if !sel.contains_pixel(col, row) { continue; }
+                }
+                let ni = (row * w + col) as usize;
+                let npx = [pixels[ni*4], pixels[ni*4+1], pixels[ni*4+2], pixels[ni*4+3]];
+                let d = color_distance(npx, seed_color);
+                if d <= threshold {
+                    dist_map[ni] = Some(d);
+                }
+            }
+        }
+    }
+
+    dist_map
+}
+
+/// Pixel flood fill for the raster paint bucket tool.
+///
+/// Calls [`raster_fill_mask`] then alpha-composites `fill_color` over each
+/// matched pixel.  `softness` controls a fade zone near the fill boundary.
 pub fn raster_flood_fill(
     pixels: &mut Vec<u8>,
     width: u32,
@@ -43,81 +133,20 @@ pub fn raster_flood_fill(
     threshold: f32,
     softness: f32,
     mode: FillThresholdMode,
+    contiguous: bool,
     selection: Option<&crate::selection::RasterSelection>,
 ) {
-    use std::collections::VecDeque;
-
-    let w = width as i32;
-    let h = height as i32;
+    let dist_map = raster_fill_mask(pixels, width, height, seed_x, seed_y,
+                                    threshold, mode, contiguous, selection);
     let n = (width * height) as usize;
 
-    if seed_x < 0 || seed_y < 0 || seed_x >= w || seed_y >= h { return; }
-
-    let seed_idx = (seed_y * w + seed_x) as usize;
-    let seed_color = [
-        pixels[seed_idx * 4],
-        pixels[seed_idx * 4 + 1],
-        pixels[seed_idx * 4 + 2],
-        pixels[seed_idx * 4 + 3],
-    ];
-
-    // dist_map[i] = Some(d) when pixel i is within the fill region with
-    // color-distance `d` from its comparison color.
-    let mut dist_map: Vec<Option<f32>> = vec![None; n];
-    let mut queue: VecDeque<(i32, i32)> = VecDeque::new();
-
-    // Track the pixel that each BFS node was reached from (for Relative mode).
-    // In Absolute mode this is ignored (we always compare to seed_color).
-    let mut parent_color: Vec<[u8; 4]> = vec![[0; 4]; n];
-
-    dist_map[seed_idx] = Some(0.0);
-    parent_color[seed_idx] = seed_color;
-    queue.push_back((seed_x, seed_y));
-
-    let dirs: [(i32, i32); 4] = [(0, -1), (0, 1), (-1, 0), (1, 0)];
-
-    while let Some((cx, cy)) = queue.pop_front() {
-        let ci = (cy * w + cx) as usize;
-
-        let compare_color = match mode {
-            FillThresholdMode::Absolute => seed_color,
-            FillThresholdMode::Relative => parent_color[ci],
-        };
-
-        for (dx, dy) in dirs {
-            let nx = cx + dx;
-            let ny = cy + dy;
-            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue; }
-            let ni = (ny * w + nx) as usize;
-            if dist_map[ni].is_some() { continue; }
-            if let Some(sel) = selection {
-                if !sel.contains_pixel(nx, ny) { continue; }
-            }
-            let npx = [
-                pixels[ni * 4],
-                pixels[ni * 4 + 1],
-                pixels[ni * 4 + 2],
-                pixels[ni * 4 + 3],
-            ];
-            let d = color_distance(npx, compare_color);
-            if d <= threshold {
-                dist_map[ni] = Some(d);
-                parent_color[ni] = npx;
-                queue.push_back((nx, ny));
-            }
-        }
-    }
-
-    // Write pass: alpha-composite fill_color over existing pixels.
     let fr = fill_color[0] as f32 / 255.0;
     let fg = fill_color[1] as f32 / 255.0;
     let fb = fill_color[2] as f32 / 255.0;
     let fa_base = fill_color[3] as f32 / 255.0;
 
-    // Softness defines what fraction of [0..threshold] uses full alpha vs fade.
-    // falloff_start_ratio: distance ratio at which the fade begins (0→full fade, 1→hard).
     let falloff_start = if softness <= 0.0 || threshold <= 0.0 {
-        1.0_f32 // hard edge: never start fading
+        1.0_f32
     } else {
         1.0 - softness / 100.0
     };
@@ -127,7 +156,7 @@ pub fn raster_flood_fill(
             let alpha = if threshold <= 0.0 {
                 fa_base
             } else {
-                let t = d / threshold; // 0.0 at seed, 1.0 at boundary
+                let t = d / threshold;
                 if t <= falloff_start {
                     fa_base
                 } else {
@@ -135,22 +164,19 @@ pub fn raster_flood_fill(
                     fa_base * (1.0 - frac)
                 }
             };
-
             if alpha <= 0.0 { continue; }
 
-            // Porter-Duff "src over dst" with straight alpha.
             let dst_r = pixels[i * 4    ] as f32 / 255.0;
             let dst_g = pixels[i * 4 + 1] as f32 / 255.0;
             let dst_b = pixels[i * 4 + 2] as f32 / 255.0;
             let dst_a = pixels[i * 4 + 3] as f32 / 255.0;
-
             let inv_a = 1.0 - alpha;
             let out_a = alpha + dst_a * inv_a;
             if out_a > 0.0 {
-                pixels[i * 4    ] = ((fr * alpha + dst_r * dst_a * inv_a) / out_a * 255.0).round() as u8;
-                pixels[i * 4 + 1] = ((fg * alpha + dst_g * dst_a * inv_a) / out_a * 255.0).round() as u8;
-                pixels[i * 4 + 2] = ((fb * alpha + dst_b * dst_a * inv_a) / out_a * 255.0).round() as u8;
-                pixels[i * 4 + 3] = (out_a * 255.0).round() as u8;
+                pixels[i*4  ] = ((fr * alpha + dst_r * dst_a * inv_a) / out_a * 255.0).round() as u8;
+                pixels[i*4+1] = ((fg * alpha + dst_g * dst_a * inv_a) / out_a * 255.0).round() as u8;
+                pixels[i*4+2] = ((fb * alpha + dst_b * dst_a * inv_a) / out_a * 255.0).round() as u8;
+                pixels[i*4+3] = (out_a * 255.0).round() as u8;
             }
         }
     }

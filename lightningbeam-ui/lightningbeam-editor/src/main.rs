@@ -1869,7 +1869,8 @@ impl EditorApp {
                 let cy = y0 + row;
                 let inside = match sel {
                     RasterSelection::Rect(..) => true,
-                    RasterSelection::Lasso(_) => sel.contains_pixel(cx as i32, cy as i32),
+                    RasterSelection::Lasso(_) | RasterSelection::Mask { .. } =>
+                        sel.contains_pixel(cx as i32, cy as i32),
                 };
                 if inside {
                     let src = ((cy * canvas_w + cx) * 4) as usize;

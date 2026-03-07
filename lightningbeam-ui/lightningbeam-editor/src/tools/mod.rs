@@ -77,6 +77,13 @@ pub struct RasterToolSettings {
     pub blur_sharpen_kernel: f32,
     /// 0 = blur, 1 = sharpen
     pub blur_sharpen_mode: u32,
+    // --- Magic wand (raster) ---
+    /// Color-distance threshold for magic wand selection (same scale as fill_threshold).
+    pub wand_threshold: f32,
+    /// Absolute = compare to seed pixel; Relative = compare to BFS parent.
+    pub wand_mode: FillThresholdMode,
+    /// true = BFS from click (contiguous region only); false = global color scan.
+    pub wand_contiguous: bool,
     // --- Flood fill (Paint Bucket, raster) ---
     /// Color-distance threshold (Euclidean RGBA, 0–510). Pixels within this
     /// distance of the comparison color are included in the fill.
@@ -139,6 +146,9 @@ impl Default for RasterToolSettings {
             blur_sharpen_strength: 0.5,
             blur_sharpen_kernel: 5.0,
             blur_sharpen_mode: 0,
+            wand_threshold: 15.0,
+            wand_mode: FillThresholdMode::Absolute,
+            wand_contiguous: true,
             fill_threshold: 15.0,
             fill_softness: 0.0,
             fill_threshold_mode: FillThresholdMode::Absolute,

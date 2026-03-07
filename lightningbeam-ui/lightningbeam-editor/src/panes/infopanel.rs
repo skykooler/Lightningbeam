@@ -184,7 +184,7 @@ impl InfopanelPane {
 
         let has_options = is_vector_tool || is_raster_paint_tool || is_raster_transform || matches!(
             tool,
-            Tool::PaintBucket | Tool::RegionSelect
+            Tool::PaintBucket | Tool::RegionSelect | Tool::MagicWand
         );
 
         if !has_options {
@@ -324,6 +324,34 @@ impl InfopanelPane {
                                 );
                             });
                         }
+                    }
+
+                    Tool::MagicWand => {
+                        use crate::tools::FillThresholdMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Threshold:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.wand_threshold,
+                                    0.0_f32..=255.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Absolute,
+                                "Absolute",
+                            );
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Relative,
+                                "Relative",
+                            );
+                        });
+                        ui.checkbox(&mut shared.raster_settings.wand_contiguous, "Contiguous");
                     }
 
                     Tool::Polygon => {

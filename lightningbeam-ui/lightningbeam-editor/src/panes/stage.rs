@@ -5501,6 +5501,13 @@ impl StagePane {
                                 RasterSelection::Rect(*x0 + dx, *y0 + dy, *x1 + dx, *y1 + dy),
                             RasterSelection::Lasso(pts) =>
                                 RasterSelection::Lasso(pts.iter().map(|(x, y)| (x + dx, y + dy)).collect()),
+                            RasterSelection::Mask { data, width, height, origin_x, origin_y } =>
+                                RasterSelection::Mask {
+                                    data: std::mem::take(data),
+                                    width: *width, height: *height,
+                                    origin_x: *origin_x + dx,
+                                    origin_y: *origin_y + dy,
+                                },
                         };
                     }
                     // Shift floating pixels if any.
@@ -5763,11 +5770,152 @@ impl StagePane {
             fill_color,
             threshold, softness,
             core_mode,
+            true, // paint bucket always fills contiguous region
             shared.selection.raster_selection.as_ref(),
         );
 
         let action = RasterFillAction::new(layer_id, time, buffer_before, buffer_after, width, height);
         let _ = shared.action_executor.execute(Box::new(action));
+    }
+
+    fn handle_magic_wand_tool(
+        &mut self,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::flood_fill::{raster_fill_mask, FillThresholdMode};
+        use lightningbeam_core::selection::RasterSelection;
+        use crate::tools::FillThresholdMode as EditorMode;
+
+        if !self.rsp_clicked(response) { return; }
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+
+        let is_raster = shared.action_executor.document()
+            .get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let time = *shared.playback_time;
+
+        // Ensure keyframe exists.
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+
+        let (pixels, width, height) = {
+            let doc = shared.action_executor.document();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                if let Some(kf) = rl.keyframe_at(time) {
+                    let expected = (kf.width * kf.height * 4) as usize;
+                    let buf = if kf.raw_pixels.len() == expected {
+                        kf.raw_pixels.clone()
+                    } else {
+                        vec![0u8; expected]
+                    };
+                    (buf, kf.width, kf.height)
+                } else { return; }
+            } else { return; }
+        };
+
+        let seed_x = world_pos.x as i32;
+        let seed_y = world_pos.y as i32;
+        if seed_x < 0 || seed_y < 0 || seed_x >= width as i32 || seed_y >= height as i32 {
+            return;
+        }
+
+        let threshold  = shared.raster_settings.wand_threshold;
+        let contiguous = shared.raster_settings.wand_contiguous;
+        let core_mode  = match shared.raster_settings.wand_mode {
+            EditorMode::Absolute => FillThresholdMode::Absolute,
+            EditorMode::Relative => FillThresholdMode::Relative,
+        };
+
+        // Use existing raster_selection as clip if present (so the wand only
+        // selects inside the current selection — Shift/Intersect not yet supported).
+        let dist_map = raster_fill_mask(
+            &pixels, width, height,
+            seed_x, seed_y,
+            threshold, core_mode, contiguous,
+            None, // ignore existing selection for wand — it defines a new one
+        );
+
+        let data: Vec<bool> = dist_map.iter().map(|d| d.is_some()).collect();
+
+        shared.selection.raster_selection = Some(RasterSelection::Mask {
+            data,
+            width,
+            height,
+            origin_x: 0,
+            origin_y: 0,
+        });
+        Self::lift_selection_to_float(shared);
+    }
+
+    /// Draw marching ants for a pixel mask selection.
+    ///
+    /// Animates horizontal edges leftward and vertical edges downward (position-based),
+    /// producing a coherent clockwise-like marching effect without contour tracing.
+    fn draw_marching_ants_mask(
+        painter: &egui::Painter,
+        rect_min: egui::Pos2,
+        data: &[bool],
+        width: u32, height: u32,
+        origin_x: i32, origin_y: i32,
+        zoom: f32, pan: egui::Vec2,
+        phase: f32,
+    ) {
+        let w = width as i32;
+        let h = height as i32;
+        let phase_i = phase as i32;
+
+        let to_screen = |cx: i32, cy: i32| egui::pos2(
+            rect_min.x + pan.x + cx as f32 * zoom,
+            rect_min.y + pan.y + cy as f32 * zoom,
+        );
+
+        // Horizontal edges: between (row-1) and (row). Animate along x axis.
+        for row in 0..=h {
+            for col in 0..w {
+                let above = row > 0   && data[((row-1) * w + col) as usize];
+                let below = row < h   && data[(row     * w + col) as usize];
+                if above == below { continue; }
+                let cx = origin_x + col;
+                let cy = origin_y + row;
+                let on = (cx - phase_i).rem_euclid(8) < 4;
+                let color = if on { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                painter.line_segment(
+                    [to_screen(cx, cy), to_screen(cx + 1, cy)],
+                    egui::Stroke::new(1.0, color),
+                );
+            }
+        }
+
+        // Vertical edges: between (col-1) and (col). Animate along y axis.
+        for col in 0..=w {
+            for row in 0..h {
+                let left  = col > 0 && data[(row * w + col - 1) as usize];
+                let right = col < w && data[(row * w + col    ) as usize];
+                if left == right { continue; }
+                let cx = origin_x + col;
+                let cy = origin_y + row;
+                let on = (cy - phase_i).rem_euclid(8) < 4;
+                let color = if on { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                painter.line_segment(
+                    [to_screen(cx, cy), to_screen(cx, cy + 1)],
+                    egui::Stroke::new(1.0, color),
+                );
+            }
+        }
     }
 
     /// Apply transform preview to objects based on current mouse position
@@ -8344,6 +8492,9 @@ impl StagePane {
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
                 }
+                Tool::MagicWand => {
+                    self.handle_magic_wand_tool(&response, world_pos, shared);
+                }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
                 }
@@ -8699,6 +8850,13 @@ impl StagePane {
                 }
                 RasterSelection::Lasso(pts) => {
                     Self::draw_marching_ants_lasso(&painter, rect.min, pts, zoom, pan, phase);
+                }
+                RasterSelection::Mask { data, width, height, origin_x, origin_y } => {
+                    Self::draw_marching_ants_mask(
+                        &painter, rect.min,
+                        data, *width, *height, *origin_x, *origin_y,
+                        zoom, pan, phase,
+                    );
                 }
             }
         }
