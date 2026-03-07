@@ -391,7 +391,7 @@ impl Tool {
                 Tool::PaintBucket, Tool::Gradient,
                 Tool::Rectangle, Tool::Ellipse, Tool::Polygon, Tool::Line, Tool::CustomShape,
                 // Selection
-                Tool::Select, Tool::SelectEllipse, Tool::SelectLasso,
+                Tool::Select, Tool::SelectLasso,
                 Tool::MagicWand, Tool::QuickSelect,
                 // Transform
                 Tool::Transform, Tool::Warp, Tool::Liquify,

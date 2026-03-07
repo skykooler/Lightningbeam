@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use vello::kurbo::Rect;
-use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality};
 use vello::Scene;
 
 /// Cache for decoded image data to avoid re-decoding every frame
@@ -363,7 +363,7 @@ fn render_raster_layer_to_scene(
         // decode the sRGB channels without premultiplying again.
         alpha_type: ImageAlphaType::AlphaPremultiplied,
     };
-    let brush = ImageBrush::new(image_data);
+    let brush = ImageBrush::new(image_data).with_quality(ImageQuality::Low);
     let canvas_rect = Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
     scene.fill(Fill::NonZero, base_transform, &brush, None, &canvas_rect);
 }

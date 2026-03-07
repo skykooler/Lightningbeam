@@ -96,6 +96,17 @@ pub struct RasterToolSettings {
     /// Whether to compare each pixel to the seed pixel (Absolute) or to its BFS
     /// parent pixel (Relative, spreads across gradients).
     pub fill_threshold_mode: FillThresholdMode,
+    // --- Marquee select shape ---
+    /// Whether the rectangular select tool draws a rect or an ellipse.
+    pub select_shape: SelectionShape,
+}
+
+/// Shape mode for the rectangular-select tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionShape {
+    #[default]
+    Rect,
+    Ellipse,
 }
 
 /// Threshold comparison mode for the raster flood fill.
@@ -156,6 +167,7 @@ impl Default for RasterToolSettings {
             fill_softness: 0.0,
             fill_threshold_mode: FillThresholdMode::Absolute,
             quick_select_radius: 20.0,
+            select_shape: SelectionShape::Rect,
         }
     }
 }

@@ -12,6 +12,7 @@ pub struct RasterFillAction {
     buffer_after: Vec<u8>,
     width: u32,
     height: u32,
+    name: String,
 }
 
 impl RasterFillAction {
@@ -23,7 +24,12 @@ impl RasterFillAction {
         width: u32,
         height: u32,
     ) -> Self {
-        Self { layer_id, time, buffer_before, buffer_after, width, height }
+        Self { layer_id, time, buffer_before, buffer_after, width, height, name: "Flood fill".to_string() }
+    }
+
+    pub fn with_description(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
     }
 }
 
@@ -53,6 +59,6 @@ impl Action for RasterFillAction {
     }
 
     fn description(&self) -> String {
-        "Flood fill".to_string()
+        self.name.clone()
     }
 }

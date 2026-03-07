@@ -1602,300 +1602,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     }
 
 
-                    // 3. Draw rectangle creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
-                        use vello::kurbo::Point;
-
-                        // Calculate rectangle bounds based on mode (same logic as in handler)
-                        let (width, height, position) = if centered {
-                            let dx = current_point.x - start_point.x;
-                            let dy = current_point.y - start_point.y;
-
-                            let (w, h) = if constrain_square {
-                                let size = dx.abs().max(dy.abs()) * 2.0;
-                                (size, size)
-                            } else {
-                                (dx.abs() * 2.0, dy.abs() * 2.0)
-                            };
-
-                            let pos = Point::new(start_point.x - w / 2.0, start_point.y - h / 2.0);
-                            (w, h, pos)
-                        } else {
-                            let mut min_x = start_point.x.min(current_point.x);
-                            let mut min_y = start_point.y.min(current_point.y);
-                            let mut max_x = start_point.x.max(current_point.x);
-                            let mut max_y = start_point.y.max(current_point.y);
-
-                            if constrain_square {
-                                let width = max_x - min_x;
-                                let height = max_y - min_y;
-                                let size = width.max(height);
-
-                                if current_point.x > start_point.x {
-                                    max_x = min_x + size;
-                                } else {
-                                    min_x = max_x - size;
-                                }
-
-                                if current_point.y > start_point.y {
-                                    max_y = min_y + size;
-                                } else {
-                                    min_y = max_y - size;
-                                }
-                            }
-
-                            (max_x - min_x, max_y - min_y, Point::new(min_x, min_y))
-                        };
-
-                        if width > 0.0 && height > 0.0 {
-                            let rect = KurboRect::new(0.0, 0.0, width, height);
-                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
-
-                            if self.ctx.fill_enabled {
-                                let fill_color = Color::from_rgba8(
-                                    self.ctx.fill_color.r(),
-                                    self.ctx.fill_color.g(),
-                                    self.ctx.fill_color.b(),
-                                    self.ctx.fill_color.a(),
-                                );
-                                scene.fill(
-                                    Fill::NonZero,
-                                    preview_transform,
-                                    fill_color,
-                                    None,
-                                    &rect,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                preview_transform,
-                                stroke_color,
-                                None,
-                                &rect,
-                            );
-                        }
-                    }
-
-                    // 4. Draw ellipse creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingEllipse { ref start_point, ref current_point, corner_mode, constrain_circle, .. } = self.ctx.tool_state {
-                        use vello::kurbo::{Point, Circle as KurboCircle, Ellipse};
-
-                        // Calculate ellipse parameters based on mode (same logic as in handler)
-                        let (rx, ry, position) = if corner_mode {
-                            let min_x = start_point.x.min(current_point.x);
-                            let min_y = start_point.y.min(current_point.y);
-                            let max_x = start_point.x.max(current_point.x);
-                            let max_y = start_point.y.max(current_point.y);
-
-                            let width = max_x - min_x;
-                            let height = max_y - min_y;
-
-                            let (rx, ry) = if constrain_circle {
-                                let radius = width.max(height) / 2.0;
-                                (radius, radius)
-                            } else {
-                                (width / 2.0, height / 2.0)
-                            };
-
-                            let position = Point::new(min_x + rx, min_y + ry);
-
-                            (rx, ry, position)
-                        } else {
-                            let dx = (current_point.x - start_point.x).abs();
-                            let dy = (current_point.y - start_point.y).abs();
-
-                            let (rx, ry) = if constrain_circle {
-                                let radius = (dx * dx + dy * dy).sqrt();
-                                (radius, radius)
-                            } else {
-                                (dx, dy)
-                            };
-
-                            (rx, ry, *start_point)
-                        };
-
-                        if rx > 0.0 && ry > 0.0 {
-                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
-
-                            let fill_color = Color::from_rgba8(
-                                self.ctx.fill_color.r(),
-                                self.ctx.fill_color.g(),
-                                self.ctx.fill_color.b(),
-                                self.ctx.fill_color.a(),
-                            );
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            if rx == ry {
-                                let circle = KurboCircle::new((0.0, 0.0), rx);
-                                if self.ctx.fill_enabled {
-                                    scene.fill(Fill::NonZero, preview_transform, fill_color, None, &circle);
-                                }
-                                scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &circle);
-                            } else {
-                                let ellipse = Ellipse::new((0.0, 0.0), (rx, ry), 0.0);
-                                if self.ctx.fill_enabled {
-                                    scene.fill(Fill::NonZero, preview_transform, fill_color, None, &ellipse);
-                                }
-                                scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &ellipse);
-                            }
-                        }
-                    }
-
-                    // 5. Draw line creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingLine { ref start_point, ref current_point, .. } = self.ctx.tool_state {
-                        use vello::kurbo::Line;
-
-                        // Calculate line length
-                        let dx = current_point.x - start_point.x;
-                        let dy = current_point.y - start_point.y;
-                        let length = (dx * dx + dy * dy).sqrt();
-
-                        if length > 0.0 {
-                            // Use actual stroke color for line preview
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            // Draw the line directly
-                            let line = Line::new(*start_point, *current_point);
-                            scene.stroke(
-                                &Stroke::new(2.0),
-                                overlay_transform,
-                                stroke_color,
-                                None,
-                                &line,
-                            );
-                        }
-                    }
-
-                    // 6. Draw polygon creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingPolygon { ref center, ref current_point, num_sides, .. } = self.ctx.tool_state {
-                        use vello::kurbo::{BezPath, Point};
-                        use std::f64::consts::PI;
-
-                        // Calculate radius
-                        let dx = current_point.x - center.x;
-                        let dy = current_point.y - center.y;
-                        let radius = (dx * dx + dy * dy).sqrt();
-
-                        if radius > 5.0 && num_sides >= 3 {
-                            let preview_transform = overlay_transform * Affine::translate((center.x, center.y));
-
-                            // Use actual fill color (same as final shape)
-                            let fill_color = Color::from_rgba8(
-                                self.ctx.fill_color.r(),
-                                self.ctx.fill_color.g(),
-                                self.ctx.fill_color.b(),
-                                self.ctx.fill_color.a(),
-                            );
-
-                            // Create the polygon path inline
-                            let mut path = BezPath::new();
-                            let angle_step = 2.0 * PI / num_sides as f64;
-                            let start_angle = -PI / 2.0;
-
-                            // First vertex
-                            let first_x = radius * start_angle.cos();
-                            let first_y = radius * start_angle.sin();
-                            path.move_to(Point::new(first_x, first_y));
-
-                            // Add remaining vertices
-                            for i in 1..num_sides {
-                                let angle = start_angle + angle_step * i as f64;
-                                let x = radius * angle.cos();
-                                let y = radius * angle.sin();
-                                path.line_to(Point::new(x, y));
-                            }
-
-                            path.close_path();
-
-                            if self.ctx.fill_enabled {
-                                scene.fill(
-                                    Fill::NonZero,
-                                    preview_transform,
-                                    fill_color,
-                                    None,
-                                    &path,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                preview_transform,
-                                stroke_color,
-                                None,
-                                &path,
-                            );
-                        }
-                    }
-
-                    // 7. Draw path drawing preview
-                    if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.ctx.tool_state {
-                        use vello::kurbo::BezPath;
-
-                        if points.len() >= 2 {
-                            // Build a simple line path from the raw points for preview
-                            let mut preview_path = BezPath::new();
-                            preview_path.move_to(points[0]);
-                            for point in &points[1..] {
-                                preview_path.line_to(*point);
-                            }
-
-                            // Draw fill if enabled
-                            if self.ctx.fill_enabled {
-                                let fill_color = Color::from_rgba8(
-                                    self.ctx.fill_color.r(),
-                                    self.ctx.fill_color.g(),
-                                    self.ctx.fill_color.b(),
-                                    self.ctx.fill_color.a(),
-                                );
-                                scene.fill(
-                                    Fill::NonZero,
-                                    overlay_transform,
-                                    fill_color,
-                                    None,
-                                    &preview_path,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                overlay_transform,
-                                stroke_color,
-                                None,
-                                &preview_path,
-                            );
-                        }
-                    }
-
                     // 8. Vector editing preview: DCEL edits are applied live to the document,
                     // so the normal DCEL render path draws the current state. No separate
                     // preview rendering is needed.
@@ -2244,6 +1950,145 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
                     }
                     }
+                }
+            }
+        }
+
+        // Shape / path creation previews — drawn regardless of layer type so raster layers
+        // also see the live outline during drag.
+        {
+            use vello::peniko::{Color, Fill};
+            use vello::kurbo::{Rect as KurboRect, Stroke};
+
+            // Rectangle preview
+            if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
+                use vello::kurbo::Point;
+                let (width, height, position) = if centered {
+                    let dx = current_point.x - start_point.x;
+                    let dy = current_point.y - start_point.y;
+                    let (w, h) = if constrain_square {
+                        let size = dx.abs().max(dy.abs()) * 2.0;
+                        (size, size)
+                    } else {
+                        (dx.abs() * 2.0, dy.abs() * 2.0)
+                    };
+                    let pos = Point::new(start_point.x - w / 2.0, start_point.y - h / 2.0);
+                    (w, h, pos)
+                } else {
+                    let mut min_x = start_point.x.min(current_point.x);
+                    let mut min_y = start_point.y.min(current_point.y);
+                    let mut max_x = start_point.x.max(current_point.x);
+                    let mut max_y = start_point.y.max(current_point.y);
+                    if constrain_square {
+                        let size = (max_x - min_x).max(max_y - min_y);
+                        if current_point.x > start_point.x { max_x = min_x + size; } else { min_x = max_x - size; }
+                        if current_point.y > start_point.y { max_y = min_y + size; } else { min_y = max_y - size; }
+                    }
+                    (max_x - min_x, max_y - min_y, Point::new(min_x, min_y))
+                };
+                if width > 0.0 && height > 0.0 {
+                    let rect = KurboRect::new(0.0, 0.0, width, height);
+                    let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, preview_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &rect);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &rect);
+                }
+            }
+
+            // Ellipse preview
+            if let lightningbeam_core::tool::ToolState::CreatingEllipse { ref start_point, ref current_point, corner_mode, constrain_circle, .. } = self.ctx.tool_state {
+                use vello::kurbo::{Point, Circle as KurboCircle, Ellipse};
+                let (rx, ry, position) = if corner_mode {
+                    let min_x = start_point.x.min(current_point.x);
+                    let min_y = start_point.y.min(current_point.y);
+                    let max_x = start_point.x.max(current_point.x);
+                    let max_y = start_point.y.max(current_point.y);
+                    let (rx, ry) = if constrain_circle {
+                        let r = (max_x - min_x).max(max_y - min_y) / 2.0;
+                        (r, r)
+                    } else { ((max_x - min_x) / 2.0, (max_y - min_y) / 2.0) };
+                    (rx, ry, Point::new(min_x + rx, min_y + ry))
+                } else {
+                    let dx = (current_point.x - start_point.x).abs();
+                    let dy = (current_point.y - start_point.y).abs();
+                    let (rx, ry) = if constrain_circle {
+                        let r = (dx * dx + dy * dy).sqrt(); (r, r)
+                    } else { (dx, dy) };
+                    (rx, ry, *start_point)
+                };
+                if rx > 0.0 && ry > 0.0 {
+                    let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
+                    let fc = self.ctx.fill_color;
+                    let fill_color = Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a());
+                    let sc = self.ctx.stroke_color;
+                    let stroke_color = Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a());
+                    if rx == ry {
+                        let circle = KurboCircle::new((0.0, 0.0), rx);
+                        if self.ctx.fill_enabled { scene.fill(Fill::NonZero, preview_transform, fill_color, None, &circle); }
+                        scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &circle);
+                    } else {
+                        let ellipse = Ellipse::new((0.0, 0.0), (rx, ry), 0.0);
+                        if self.ctx.fill_enabled { scene.fill(Fill::NonZero, preview_transform, fill_color, None, &ellipse); }
+                        scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &ellipse);
+                    }
+                }
+            }
+
+            // Line preview
+            if let lightningbeam_core::tool::ToolState::CreatingLine { ref start_point, ref current_point, .. } = self.ctx.tool_state {
+                use vello::kurbo::Line;
+                let dx = current_point.x - start_point.x;
+                let dy = current_point.y - start_point.y;
+                if (dx * dx + dy * dy).sqrt() > 0.0 {
+                    let sc = self.ctx.stroke_color;
+                    let line = Line::new(*start_point, *current_point);
+                    scene.stroke(&Stroke::new(2.0), overlay_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &line);
+                }
+            }
+
+            // Polygon preview
+            if let lightningbeam_core::tool::ToolState::CreatingPolygon { ref center, ref current_point, num_sides, .. } = self.ctx.tool_state {
+                use vello::kurbo::{BezPath, Point};
+                use std::f64::consts::PI;
+                let dx = current_point.x - center.x;
+                let dy = current_point.y - center.y;
+                let radius = (dx * dx + dy * dy).sqrt();
+                if radius > 5.0 && num_sides >= 3 {
+                    let preview_transform = overlay_transform * Affine::translate((center.x, center.y));
+                    let angle_step = 2.0 * PI / num_sides as f64;
+                    let start_angle = -PI / 2.0;
+                    let mut path = BezPath::new();
+                    path.move_to(Point::new(radius * start_angle.cos(), radius * start_angle.sin()));
+                    for i in 1..num_sides {
+                        let angle = start_angle + angle_step * i as f64;
+                        path.line_to(Point::new(radius * angle.cos(), radius * angle.sin()));
+                    }
+                    path.close_path();
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, preview_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &path);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &path);
+                }
+            }
+
+            // Freehand path preview
+            if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.ctx.tool_state {
+                use vello::kurbo::BezPath;
+                if points.len() >= 2 {
+                    let mut preview_path = BezPath::new();
+                    preview_path.move_to(points[0]);
+                    for point in &points[1..] { preview_path.line_to(*point); }
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, overlay_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &preview_path);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), overlay_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &preview_path);
                 }
             }
         }
@@ -3854,21 +3699,18 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
-
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
@@ -3945,28 +3787,43 @@ impl StagePane {
 
                 // Only create shape if rectangle has non-zero size
                 if width > 1.0 && height > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
-
-                    let path = Self::create_rectangle_path(min_x, min_y, max_x, max_y);
-
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let fc = *shared.fill_color;
+                        let fill_en = *shared.fill_enabled;
+                        let thickness = *shared.stroke_width as f32;
+                        // Subtract 0.5 to align with Vello's pixel-center convention
+                        // (ImageBrush displays pixel (px,py) centered at world (px+0.5, py+0.5))
+                        let (x0, y0, x1, y1) = (min_x as f32 - 0.5, min_y as f32 - 0.5, max_x as f32 - 0.5, max_y as f32 - 0.5);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        let fill_rgba = fill_en.then(|| [fc.r(), fc.g(), fc.b(), fc.a()]);
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw rectangle", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_rect(
+                                pixels, w, h, x0, y0, x1, y1,
+                                Some(stroke_rgba), fill_rgba, thickness,
+                            );
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add rectangle");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
+                        let path = Self::create_rectangle_path(min_x, min_y, max_x, max_y);
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add rectangle");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
                 }
@@ -3987,21 +3844,18 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
-
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
@@ -4069,28 +3923,42 @@ impl StagePane {
 
                 // Only create shape if ellipse has non-zero size
                 if rx > 1.0 && ry > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
-
-                    let path = Self::create_ellipse_path(position.x, position.y, rx, ry);
-
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let fc = *shared.fill_color;
+                        let fill_en = *shared.fill_enabled;
+                        let thickness = *shared.stroke_width as f32;
+                        let (cx, cy) = (position.x as f32 - 0.5, position.y as f32 - 0.5);
+                        let (erx, ery) = (rx as f32, ry as f32);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        let fill_rgba = fill_en.then(|| [fc.r(), fc.g(), fc.b(), fc.a()]);
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw ellipse", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_ellipse(
+                                pixels, w, h, cx, cy, erx, ery,
+                                Some(stroke_rgba), fill_rgba, thickness,
+                            );
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add ellipse");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
+                        let path = Self::create_ellipse_path(position.x, position.y, rx, ry);
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add ellipse");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
                 }
@@ -4103,7 +3971,7 @@ impl StagePane {
         ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
-        _shift_held: bool,
+        shift_held: bool,
         _ctrl_held: bool,
         shared: &mut SharedPaneState,
     ) {
@@ -4111,23 +3979,36 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
+        let mut point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
+
+        // Shift: snap to 45° angle increments (raster; also applied to vector for consistency).
+        if shift_held {
+            if let ToolState::CreatingLine { start_point, .. } = shared.tool_state {
+                let dx = point.x - start_point.x;
+                let dy = point.y - start_point.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let angle = (dy as f32).atan2(dx as f32);
+                let snapped = (angle / (std::f32::consts::PI / 4.0)).round()
+                    * (std::f32::consts::PI / 4.0);
+                point = Point::new(
+                    start_point.x + len * snapped.cos() as f64,
+                    start_point.y + len * snapped.sin() as f64,
+                );
+            }
         }
-
-        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating line
         if self.rsp_drag_started(response) || self.rsp_clicked(response) {
@@ -4150,30 +4031,38 @@ impl StagePane {
         // Mouse up: create the line shape
         if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingLine { .. })) {
             if let ToolState::CreatingLine { start_point, current_point } = shared.tool_state.clone() {
-                // Calculate line length to ensure it's not too small
                 let dx = current_point.x - start_point.x;
                 let dy = current_point.y - start_point.y;
                 let length = (dx * dx + dy * dy).sqrt();
 
-                // Only create shape if line has reasonable length
                 if length > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let thickness = *shared.stroke_width as f32;
+                        let (ax, ay) = (start_point.x as f32 - 0.5, start_point.y as f32 - 0.5);
+                        let (bx, by) = (current_point.x as f32 - 0.5, current_point.y as f32 - 0.5);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw line", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_line(
+                                pixels, w, h, ax, ay, bx, by, stroke_rgba, thickness,
+                            );
+                        });
+                    } else {
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let path = Self::create_line_path(start_point, current_point);
-
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        None, // no fill for lines
-                        false, // not closed
-                    ).with_description("Add line");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
-                    // Clear tool state to stop preview rendering
+                        let path = Self::create_line_path(start_point, current_point);
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            None, // no fill for lines
+                            false, // not closed
+                        ).with_description("Add line");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     *shared.tool_state = ToolState::Idle;
                 }
             }
@@ -4193,7 +4082,6 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
@@ -4204,11 +4092,13 @@ impl StagePane {
             None => return,
         };
 
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
+        let is_raster = matches!(active_layer, AnyLayer::Raster(_));
+        let is_vector = matches!(active_layer, AnyLayer::Vector(_));
+        if !is_raster && !is_vector {
             return;
         }
 
+        let num_sides = *shared.polygon_sides;
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating polygon (center point)
@@ -4216,7 +4106,7 @@ impl StagePane {
             *shared.tool_state = ToolState::CreatingPolygon {
                 center: point,
                 current_point: point,
-                num_sides: 5,  // Default to 5 sides (pentagon)
+                num_sides,
             };
         }
 
@@ -4241,27 +4131,55 @@ impl StagePane {
 
                 // Only create shape if polygon has reasonable size
                 if radius > 5.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
+                    if is_raster {
+                        use lightningbeam_core::raster_draw;
+                        use std::f64::consts::TAU;
 
-                    let path = Self::create_polygon_path(center, num_sides, radius);
+                        let cx = center.x as f32 - 0.5;
+                        let cy = center.y as f32 - 0.5;
+                        let r = radius as f32;
+                        let n = num_sides as usize;
+                        let vertices: Vec<(f32, f32)> = (0..n).map(|i| {
+                            let angle = (i as f64 / n as f64) * TAU - std::f64::consts::FRAC_PI_2;
+                            (cx + r * angle.cos() as f32, cy + r * angle.sin() as f32)
+                        }).collect();
 
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                        let stroke_color = shared.stroke_color.to_array();
+                        let stroke_rgba = [stroke_color[0], stroke_color[1], stroke_color[2], stroke_color[3]];
+                        let fill_rgba = if *shared.fill_enabled {
+                            let fc = shared.fill_color.to_array();
+                            Some([fc[0], fc[1], fc[2], fc[3]])
+                        } else {
+                            None
+                        };
+                        let thickness = *shared.stroke_width as f32;
+
+                        let _ = Self::apply_raster_pixel_edit(shared, active_layer_id, "Add polygon", |pixels, w, h| {
+                            raster_draw::draw_polygon(pixels, w, h, &vertices, Some(stroke_rgba), fill_rgba, thickness);
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add polygon");
-                    let _ = shared.action_executor.execute(Box::new(action));
+                        let path = Self::create_polygon_path(center, num_sides, radius);
+
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add polygon");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -5456,6 +5374,88 @@ impl StagePane {
     }
 
     /// Rectangular marquee selection tool for raster layers.
+    /// Snapshot the active raster keyframe pixels, pass them to `draw_fn` to
+    /// modify the buffer, then apply the result as an undoable `RasterFillAction`.
+    ///
+    /// Returns `false` if the layer or keyframe is not available.
+    fn apply_raster_pixel_edit<F>(
+        shared: &mut SharedPaneState,
+        layer_id: uuid::Uuid,
+        description: &'static str,
+        draw_fn: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut [u8], u32, u32),
+    {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterFillAction;
+
+        let time = *shared.playback_time;
+        // Canvas dimensions (to create keyframe if needed).
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        // Ensure a keyframe exists at the current time.
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+        // Snapshot the pixel buffer before drawing.
+        let (buffer_before, w, h) = {
+            let doc = shared.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(AnyLayer::Raster(rl)) => match rl.keyframe_at(time) {
+                    Some(kf) => {
+                        let expected = (kf.width * kf.height * 4) as usize;
+                        let buf = if kf.raw_pixels.len() == expected {
+                            kf.raw_pixels.clone()
+                        } else {
+                            vec![0u8; expected]
+                        };
+                        (buf, kf.width, kf.height)
+                    }
+                    None => return false,
+                },
+                _ => return false,
+            }
+        };
+        let mut buffer_after = buffer_before.clone();
+        draw_fn(&mut buffer_after, w, h);
+        let action = RasterFillAction::new(layer_id, time, buffer_before, buffer_after, w, h)
+            .with_description(description);
+        let _ = shared.action_executor.execute(Box::new(action));
+        true
+    }
+
+    /// Build a per-pixel boolean mask for an ellipse inscribed in the given
+    /// axis-aligned bounding box. Used by the elliptical marquee mode.
+    fn make_ellipse_mask(x0: i32, y0: i32, x1: i32, y1: i32) -> lightningbeam_core::selection::RasterSelection {
+        use lightningbeam_core::selection::RasterSelection;
+        let w = (x1 - x0) as u32;
+        let h = (y1 - y0) as u32;
+        if w == 0 || h == 0 {
+            return RasterSelection::Mask { data: vec![], width: 0, height: 0, origin_x: x0, origin_y: y0 };
+        }
+        // Center in local pixel space. Add 0.5 to radii so the ellipse
+        // touches every edge pixel without cutting them off.
+        let cx = (w as f32 - 1.0) / 2.0;
+        let cy = (h as f32 - 1.0) / 2.0;
+        let rx = cx + 0.5;
+        let ry = cy + 0.5;
+        let mut data = vec![false; (w * h) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let dx = (col as f32 - cx) / rx;
+                let dy = (row as f32 - cy) / ry;
+                data[(row * w + col) as usize] = dx * dx + dy * dy <= 1.0;
+            }
+        }
+        RasterSelection::Mask { data, width: w, height: h, origin_x: x0, origin_y: y0 }
+    }
+
     fn handle_raster_select_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -5466,6 +5466,7 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::selection::RasterSelection;
         use lightningbeam_core::tool::ToolState;
+        use crate::tools::SelectionShape;
 
         let Some(layer_id) = *shared.active_layer_id else { return };
         let doc = shared.action_executor.document();
@@ -5473,6 +5474,7 @@ impl StagePane {
             if let AnyLayer::Raster(rl) = l { rl.keyframe_at(*shared.playback_time) } else { None }
         }) else { return };
         let (canvas_w, canvas_h) = (kf.width as i32, kf.height as i32);
+        let ellipse = shared.raster_settings.select_shape == SelectionShape::Ellipse;
 
         if self.rsp_drag_started(response) {
             let (px, py) = (world_pos.x as i32, world_pos.y as i32);
@@ -5504,7 +5506,11 @@ impl StagePane {
                     *current = (px, py);
                     let (x0, x1) = (start.0.min(px).max(0), start.0.max(px).min(canvas_w));
                     let (y0, y1) = (start.1.min(py).max(0), start.1.max(py).min(canvas_h));
-                    shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                    shared.selection.raster_selection = Some(if ellipse {
+                        Self::make_ellipse_mask(x0, y0, x1, y1)
+                    } else {
+                        RasterSelection::Rect(x0, y0, x1, y1)
+                    });
                 }
                 ToolState::MovingRasterSelection { ref mut last } => {
                     let (dx, dy) = (px - last.0, py - last.1);
@@ -5541,7 +5547,11 @@ impl StagePane {
                     let (x0, x1) = (start.0.min(current.0).max(0), start.0.max(current.0).min(canvas_w));
                     let (y0, y1) = (start.1.min(current.1).max(0), start.1.max(current.1).min(canvas_h));
                     if x1 > x0 && y1 > y0 {
-                        shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                        shared.selection.raster_selection = Some(if ellipse {
+                            Self::make_ellipse_mask(x0, y0, x1, y1)
+                        } else {
+                            RasterSelection::Rect(x0, y0, x1, y1)
+                        });
                         Self::lift_selection_to_float(shared);
                     } else {
                         shared.selection.raster_selection = None;

@@ -182,7 +182,13 @@ impl InfopanelPane {
             && matches!(tool, Tool::Transform)
             && shared.selection.raster_floating.is_some();
 
-        let has_options = is_vector_tool || is_raster_paint_tool || is_raster_transform || matches!(
+        let is_raster_select = active_is_raster && matches!(tool, Tool::Select);
+        let is_raster_shape = active_is_raster && matches!(
+            tool,
+            Tool::Rectangle | Tool::Ellipse | Tool::Line | Tool::Polygon
+        );
+        let has_options = is_vector_tool || is_raster_paint_tool || is_raster_transform
+            || is_raster_select || is_raster_shape || matches!(
             tool,
             Tool::PaintBucket | Tool::RegionSelect | Tool::MagicWand | Tool::QuickSelect
         );
@@ -324,6 +330,23 @@ impl InfopanelPane {
                                 );
                             });
                         }
+                    }
+
+                    Tool::Select if is_raster_select => {
+                        use crate::tools::SelectionShape;
+                        ui.horizontal(|ui| {
+                            ui.label("Shape:");
+                            ui.selectable_value(
+                                &mut shared.raster_settings.select_shape,
+                                SelectionShape::Rect,
+                                "Rectangle",
+                            );
+                            ui.selectable_value(
+                                &mut shared.raster_settings.select_shape,
+                                SelectionShape::Ellipse,
+                                "Ellipse",
+                            );
+                        });
                     }
 
                     Tool::MagicWand => {
