@@ -140,6 +140,156 @@ impl CanvasPair {
 }
 
 // ---------------------------------------------------------------------------
+// Raster affine-transform pipeline
+// ---------------------------------------------------------------------------
+
+/// CPU-side parameters for the raster transform compute shader.
+/// Must match the `Params` struct in `raster_transform.wgsl` (48 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RasterTransformGpuParams {
+    pub a00: f32, pub a01: f32,  // row 0 of 2×2 inverse affine matrix
+    pub a10: f32, pub a11: f32,  // row 1
+    pub b0:  f32, pub b1:  f32,  // translation (source pixel offset at output (0,0))
+    pub src_w: u32, pub src_h: u32,
+    pub dst_w: u32, pub dst_h: u32,
+    pub _pad0: u32, pub _pad1: u32,
+}
+
+/// Compute pipeline for GPU-accelerated affine resampling of raster floats.
+/// Created lazily on first transform use.
+struct RasterTransformPipeline {
+    pipeline:        wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl RasterTransformPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("raster_transform_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("panes/shaders/raster_transform.wgsl").into(),
+            ),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("raster_transform_bgl"),
+                entries: &[
+                    // 0: params uniform
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 1: source texture (anchor canvas, sampled)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled:   false,
+                        },
+                        count: None,
+                    },
+                    // 2: destination texture (float canvas dst, write-only storage)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access:         wgpu::StorageTextureAccess::WriteOnly,
+                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            },
+        );
+
+        let pipeline_layout = device.create_pipeline_layout(
+            &wgpu::PipelineLayoutDescriptor {
+                label:                Some("raster_transform_pl"),
+                bind_group_layouts:   &[&bind_group_layout],
+                push_constant_ranges: &[],
+            },
+        );
+
+        let pipeline = device.create_compute_pipeline(
+            &wgpu::ComputePipelineDescriptor {
+                label:   Some("raster_transform_pipeline"),
+                layout:  Some(&pipeline_layout),
+                module:  &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+
+        Self { pipeline, bind_group_layout }
+    }
+
+    /// Dispatch the transform shader: reads from `src_view`, writes to `dst_view`.
+    /// The caller must call `dst_canvas.swap()` after this returns.
+    fn render(
+        &self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        src_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+        params:   RasterTransformGpuParams,
+    ) {
+        use wgpu::util::DeviceExt;
+
+        let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("raster_transform_params"),
+            contents: bytemuck::bytes_of(&params),
+            usage:    wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("raster_transform_bg"),
+            layout:  &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding:  0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  1,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding:  2,
+                    resource: wgpu::BindingResource::TextureView(dst_view),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("raster_transform_enc") },
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("raster_transform_pass"), timestamp_writes: None },
+            );
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let wg_x = params.dst_w.div_ceil(8);
+            let wg_y = params.dst_h.div_ceil(8);
+            pass.dispatch_workgroups(wg_x, wg_y, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GpuBrushEngine
 // ---------------------------------------------------------------------------
 
@@ -147,6 +297,9 @@ impl CanvasPair {
 pub struct GpuBrushEngine {
     compute_pipeline:   wgpu::ComputePipeline,
     compute_bg_layout:  wgpu::BindGroupLayout,
+
+    /// Lazily created on first raster transform use.
+    transform_pipeline: Option<RasterTransformPipeline>,
 
     /// Canvas texture pairs keyed by keyframe UUID.
     pub canvases: HashMap<Uuid, CanvasPair>,
@@ -251,6 +404,7 @@ impl GpuBrushEngine {
         Self {
             compute_pipeline,
             compute_bg_layout,
+            transform_pipeline: None,
             canvases: HashMap::new(),
         }
     }
@@ -609,6 +763,45 @@ impl GpuBrushEngine {
     /// Remove the canvas pair for a keyframe (e.g. when the layer is deleted).
     pub fn remove_canvas(&mut self, keyframe_id: &Uuid) {
         self.canvases.remove(keyframe_id);
+    }
+
+    /// Dispatch the affine-resample transform shader from `anchor_id` → `float_id`.
+    ///
+    /// Reads from the anchor canvas's source view, writes into the float canvas's
+    /// destination view, then swaps the float canvas so the result becomes the new source.
+    ///
+    /// `float_id` must already have been resized to `params.dst_w × params.dst_h` via
+    /// `ensure_canvas` before calling this.
+    pub fn render_transform(
+        &mut self,
+        device:     &wgpu::Device,
+        queue:      &wgpu::Queue,
+        anchor_id:  &Uuid,
+        float_id:   &Uuid,
+        params:     RasterTransformGpuParams,
+    ) {
+        // Lazily create the transform pipeline.
+        let pipeline = self.transform_pipeline
+            .get_or_insert_with(|| RasterTransformPipeline::new(device));
+
+        // Borrow src_view and dst_view within a block so the borrows end before
+        // we call swap() on the float canvas.
+        let dispatched = {
+            let anchor = self.canvases.get(anchor_id);
+            let float  = self.canvases.get(float_id);
+            if let (Some(anchor), Some(float)) = (anchor, float) {
+                pipeline.render(device, queue, anchor.src_view(), float.dst_view(), params);
+                true
+            } else {
+                false
+            }
+        };
+
+        if dispatched {
+            if let Some(float) = self.canvases.get_mut(float_id) {
+                float.swap();
+            }
+        }
     }
 }
 

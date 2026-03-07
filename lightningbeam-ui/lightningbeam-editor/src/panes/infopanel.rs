@@ -178,7 +178,11 @@ impl InfopanelPane {
             Tool::Select | Tool::BezierEdit | Tool::Draw | Tool::Rectangle
             | Tool::Ellipse | Tool::Line | Tool::Polygon
         );
-        let has_options = is_vector_tool || is_raster_paint_tool || matches!(
+        let is_raster_transform = active_is_raster
+            && matches!(tool, Tool::Transform)
+            && shared.selection.raster_floating.is_some();
+
+        let has_options = is_vector_tool || is_raster_paint_tool || is_raster_transform || matches!(
             tool,
             Tool::PaintBucket | Tool::RegionSelect
         );
@@ -187,9 +191,11 @@ impl InfopanelPane {
             return;
         }
 
-        let header_label = raster_tool_def
-            .map(|d| d.header_label())
-            .unwrap_or("Tool Options");
+        let header_label = if is_raster_transform {
+            "Raster Transform"
+        } else {
+            raster_tool_def.map(|d| d.header_label()).unwrap_or("Tool Options")
+        };
 
         egui::CollapsingHeader::new(header_label)
             .id_salt(("tool_options", path))
@@ -201,6 +207,15 @@ impl InfopanelPane {
                 if is_vector_tool {
                     ui.checkbox(shared.snap_enabled, "Snap to Geometry");
                     ui.add_space(2.0);
+                }
+
+                // Raster transform tool hint.
+                if is_raster_transform {
+                    ui.label("Drag handles to move, scale, or rotate.");
+                    ui.add_space(4.0);
+                    ui.label("Enter — apply    Esc — cancel");
+                    ui.add_space(4.0);
+                    return;
                 }
 
                 // Raster paint tool: delegate to per-tool impl.

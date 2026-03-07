@@ -402,6 +402,10 @@ struct VelloRenderContext {
     webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
     /// GPU brush dabs to dispatch in this frame's prepare() call.
     pending_raster_dabs: Option<PendingRasterDabs>,
+    /// GPU affine-resample dispatch for the raster transform tool.
+    pending_transform_dispatch: Option<PendingTransformDispatch>,
+    /// When Some, override the float canvas blit with the display canvas during transform.
+    transform_display: Option<TransformDisplayInfo>,
     /// Instance ID (for storing readback results in the global map).
     instance_id_for_readback: u64,
     /// The (layer_id, keyframe_id) of the raster layer with a live GPU canvas.
@@ -581,6 +585,50 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // this frame (painting_canvas is still Some).  render_content
                             // will clear painting_canvas and set pending_canvas_removal,
                             // so the texture is freed at the top of the next prepare().
+                        }
+                    }
+                }
+            }
+
+            // --- Raster transform dispatch ---
+            // Runs after dab dispatch; uploads anchor pixels and runs the affine-resample
+            // shader from anchor → display canvas.
+            if let Some(ref dispatch) = self.ctx.pending_transform_dispatch {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // Ensure anchor canvas at original dimensions.
+                    gpu_brush.ensure_canvas(device, dispatch.anchor_canvas_id, dispatch.anchor_w, dispatch.anchor_h);
+                    if let Some(canvas) = gpu_brush.canvases.get(&dispatch.anchor_canvas_id) {
+                        canvas.upload(queue, &dispatch.anchor_pixels);
+                    }
+                    // Ensure display canvas at new (transformed) dimensions.
+                    gpu_brush.ensure_canvas(device, dispatch.display_canvas_id, dispatch.new_w, dispatch.new_h);
+                    // Dispatch the affine-resample shader.
+                    let params = crate::gpu_brush::RasterTransformGpuParams {
+                        a00: dispatch.a00, a01: dispatch.a01,
+                        a10: dispatch.a10, a11: dispatch.a11,
+                        b0:  dispatch.b0,  b1:  dispatch.b1,
+                        src_w: dispatch.anchor_w, src_h: dispatch.anchor_h,
+                        dst_w: dispatch.new_w,    dst_h: dispatch.new_h,
+                        _pad0: 0, _pad1: 0,
+                    };
+                    gpu_brush.render_transform(device, queue, &dispatch.anchor_canvas_id, &dispatch.display_canvas_id, params);
+
+                    // Final commit: readback the display canvas so render_content() can swap it in as the new float.
+                    if dispatch.is_final_commit {
+                        if let Some(pixels) = gpu_brush.readback_canvas(device, queue, dispatch.display_canvas_id) {
+                            let results = TRANSFORM_READBACK_RESULTS.get_or_init(|| {
+                                Arc::new(Mutex::new(std::collections::HashMap::new()))
+                            });
+                            if let Ok(mut map) = results.lock() {
+                                map.insert(self.ctx.instance_id_for_readback, TransformReadbackResult {
+                                    pixels,
+                                    width:  dispatch.new_w,
+                                    height: dispatch.new_h,
+                                    x: dispatch.new_x,
+                                    y: dispatch.new_y,
+                                    display_canvas_id: dispatch.display_canvas_id,
+                                });
+                            }
                         }
                     }
                 }
@@ -1050,26 +1098,31 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             }
 
             // Blit the float GPU canvas on top of all composited layers.
+            // During transform: blit the display canvas (compute shader output) instead of the float.
             // The float_mask_view clips to the selection shape (None = full float visible).
-            if let Some(ref float_sel) = self.ctx.selection.raster_floating {
-                let float_canvas_id = float_sel.canvas_id;
-                let float_x = float_sel.x;
-                let float_y = float_sel.y;
-                let float_w = float_sel.width;
-                let float_h = float_sel.height;
+            let blit_params = if let Some(ref td) = self.ctx.transform_display {
+                // During transform: show the display canvas (compute shader output) instead of float.
+                Some((td.display_canvas_id, td.x, td.y, td.w, td.h))
+            } else if let Some(ref float_sel) = self.ctx.selection.raster_floating {
+                // Regular float blit.
+                Some((float_sel.canvas_id, float_sel.x, float_sel.y, float_sel.width, float_sel.height))
+            } else {
+                None
+            };
+            if let Some((blit_canvas_id, blit_x, blit_y, blit_w, blit_h)) = blit_params {
                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                    if let Some(canvas) = gpu_brush.canvases.get(&float_canvas_id) {
+                    if let Some(canvas) = gpu_brush.canvases.get(&blit_canvas_id) {
                         let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
                         if let (Some(fhdr_view), Some(hdr_view)) = (
                             buffer_pool.get_view(float_hdr_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
                             let fcamera = crate::gpu_brush::CameraParams {
-                                pan_x:      self.ctx.pan_offset.x + float_x as f32 * self.ctx.zoom,
-                                pan_y:      self.ctx.pan_offset.y + float_y as f32 * self.ctx.zoom,
+                                pan_x:      self.ctx.pan_offset.x + blit_x as f32 * self.ctx.zoom,
+                                pan_y:      self.ctx.pan_offset.y + blit_y as f32 * self.ctx.zoom,
                                 zoom:       self.ctx.zoom,
-                                canvas_w:   float_w as f32,
-                                canvas_h:   float_h as f32,
+                                canvas_w:   blit_w as f32,
+                                canvas_h:   blit_h as f32,
                                 viewport_w: width as f32,
                                 viewport_h: height as f32,
                                 _pad: 0.0,
@@ -2486,6 +2539,10 @@ pub struct StagePane {
     /// Clone stamp: (source_world - drag_start_world) computed at stroke start.
     /// Constant for the entire stroke; cleared when the stroke ends.
     clone_stroke_offset: Option<(f32, f32)>,
+    /// Live state for the raster transform tool (scale/rotate/move float).
+    raster_transform_state: Option<RasterTransformState>,
+    /// GPU transform work to dispatch in prepare().
+    pending_transform_dispatch: Option<PendingTransformDispatch>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2543,6 +2600,94 @@ struct PendingRasterDabs {
     /// the undo action.
     wants_final_readback: bool,
 }
+
+/// Which transform handle the user is interacting with.
+#[derive(Clone, Copy, PartialEq)]
+enum RasterTransformHandle {
+    Move,
+    Corner { right: bool, bottom: bool },
+    EdgeH  { bottom: bool },
+    EdgeV  { right: bool  },
+    Rotate,
+    Origin,  // the pivot point, draggable
+}
+
+/// Live state for an ongoing raster transform operation.
+struct RasterTransformState {
+    /// canvas_id of the float when this state was created. If different → stale, reinit.
+    float_canvas_id: uuid::Uuid,
+    /// Anchor: original pixels, never written during transform.
+    anchor_canvas_id: uuid::Uuid,
+    /// sRGB-encoded pixel data for the anchor canvas (re-uploaded each dispatch).
+    anchor_pixels: Vec<u8>,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Display canvas: compute shader output, shown in place of float during transform.
+    display_canvas_id: uuid::Uuid,
+    /// Center of the transformed bounding box in canvas (world) coords.
+    cx: f32, cy: f32,
+    scale_x: f32, scale_y: f32,
+    /// Rotation in radians.
+    angle: f32,
+    /// Pivot point for rotate/scale (defaults to center).
+    origin_x: f32, origin_y: f32,
+    /// Which handle is being dragged, if any.
+    active_handle: Option<RasterTransformHandle>,
+    /// Which handle the cursor is currently over (for visual feedback).
+    hovered_handle: Option<RasterTransformHandle>,
+    /// World position where the current drag started.
+    drag_start_world: egui::Vec2,
+    /// Snapped values captured at drag start.
+    snap_cx: f32, snap_cy: f32,
+    snap_sx: f32, snap_sy: f32,
+    snap_angle: f32,
+    snap_origin_x: f32, snap_origin_y: f32,
+    /// True once at least one GPU transform dispatch has been queued.
+    transform_applied: bool,
+    /// True after Enter: waiting for the final readback before clearing state.
+    wants_apply: bool,
+}
+
+/// GPU work queued by `handle_raster_transform_tool` for `prepare()`.
+struct PendingTransformDispatch {
+    anchor_canvas_id: uuid::Uuid,
+    /// Anchor pixels — re-uploaded each dispatch to keep the anchor immutable.
+    anchor_pixels: Vec<u8>,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Display canvas: compute shader output (was float_canvas_id).
+    display_canvas_id: uuid::Uuid,
+    /// AABB of the transformed output (for readback result positioning).
+    new_x: i32, new_y: i32,
+    /// Output canvas dimensions (may differ from anchor if scaled/rotated).
+    new_w: u32,
+    new_h: u32,
+    /// Inverse affine coefficients: src_pixel = A * out_pixel + b.
+    a00: f32, a01: f32,
+    a10: f32, a11: f32,
+    b0: f32, b1: f32,
+    /// If true, readback the display canvas after dispatch and store in TRANSFORM_READBACK_RESULTS.
+    is_final_commit: bool,
+}
+
+/// Pixels read back from the transformed display canvas, stored per-instance.
+struct TransformReadbackResult {
+    pixels: Vec<u8>,
+    width:  u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    display_canvas_id: uuid::Uuid,
+}
+
+/// Sent from StagePane to VelloCallback to override float blit with display canvas.
+struct TransformDisplayInfo {
+    display_canvas_id: uuid::Uuid,
+    x: i32, y: i32,
+    w: u32, h: u32,
+}
+
+static TRANSFORM_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, TransformReadbackResult>>>> = OnceLock::new();
 
 /// Result stored by `prepare()` after a stroke-end readback.
 struct RasterReadbackResult {
@@ -2611,6 +2756,8 @@ impl StagePane {
             painting_float: false,
             raster_last_compute_time: 0.0,
             clone_stroke_offset: None,
+            raster_transform_state: None,
+            pending_transform_dispatch: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -6206,6 +6353,560 @@ impl StagePane {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Raster transform tool
+    // -------------------------------------------------------------------------
+
+    /// CPU computation for raster transform: output AABB and inverse affine matrix.
+    ///
+    /// Returns `(new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1)` where
+    /// the inverse affine maps output pixel (ox, oy) → source pixel (sx, sy):
+    ///   sx = a00*ox + a01*oy + b0
+    ///   sy = a10*ox + a11*oy + b1
+    fn compute_transform_params(
+        orig_w: u32, orig_h: u32,
+        cx: f32, cy: f32,
+        scale_x: f32, scale_y: f32,
+        angle: f32,
+    ) -> (u32, u32, i32, i32, f32, f32, f32, f32, f32, f32) {
+        let hw = scale_x * orig_w as f32 / 2.0;
+        let hh = scale_y * orig_h as f32 / 2.0;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        // Rotate corners of scaled rect around (cx, cy)
+        let local = [(-hw, -hh), (hw, -hh), (-hw, hh), (hw, hh)];
+        let rotated: [(f32, f32); 4] = local.map(|(lx, ly)| {
+            (cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a)
+        });
+
+        // AABB of rotated corners
+        let min_x = rotated.iter().map(|p| p.0).fold(f32::INFINITY,     f32::min).floor();
+        let min_y = rotated.iter().map(|p| p.1).fold(f32::INFINITY,     f32::min).floor();
+        let max_x = rotated.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max).ceil();
+        let max_y = rotated.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max).ceil();
+        let new_x = min_x as i32;
+        let new_y = min_y as i32;
+        let new_w = ((max_x - min_x).max(1.0)) as u32;
+        let new_h = ((max_y - min_y).max(1.0)) as u32;
+
+        // Inverse affine: R^-1 * S^-1
+        // Forward: dst = cx + R * S * (src_center_offset)
+        // Inverse: src_pixel = (src_w/2, src_h/2) + S^-1 * R^-1 * (out_pixel - cx, out_pixel_y - cy)
+        // with out_pixel center accounted for by baking +0.5 into b (CPU side).
+        let a00 =  cos_a / scale_x;
+        let a01 =  sin_a / scale_x;
+        let a10 = -sin_a / scale_y;
+        let a11 =  cos_a / scale_y;
+
+        // b accounts for the center offset and the new AABB origin.
+        // For output pixel (ox, oy) at its center (ox + 0.5, oy + 0.5) in output canvas coords,
+        // the source pixel is:
+        //   (src_w/2, src_h/2) + A^-1 * ((new_x + ox + 0.5) - cx, (new_y + oy + 0.5) - cy)
+        // We bake (new_x + 0.5 - cx, new_y + 0.5 - cy) into b so the shader just uses ox/oy directly.
+        let off_x = new_x as f32 + 0.5 - cx;
+        let off_y = new_y as f32 + 0.5 - cy;
+        let b0 = orig_w as f32 / 2.0 + a00 * off_x + a01 * off_y;
+        let b1 = orig_h as f32 / 2.0 + a10 * off_x + a11 * off_y;
+
+        (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1)
+    }
+
+    fn handle_raster_transform_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        // If float was cleared, clear transform state.
+        if shared.selection.raster_floating.is_none() {
+            self.raster_transform_state = None;
+            return;
+        }
+        let float_canvas_id = shared.selection.raster_floating.as_ref().unwrap().canvas_id;
+
+        // If the float changed (new selection made), clear and reinit state.
+        if let Some(ref ts) = self.raster_transform_state {
+            if ts.float_canvas_id != float_canvas_id {
+                self.raster_transform_state = None;
+            }
+        }
+
+        // --- Lazy init ---
+        if self.raster_transform_state.is_none() {
+            let float = shared.selection.raster_floating.as_ref().unwrap();
+            let expected_len = (float.width * float.height * 4) as usize;
+            let anchor_pixels = if float.pixels.len() == expected_len {
+                float.pixels.clone()
+            } else {
+                vec![0u8; expected_len]
+            };
+            let cx = float.x as f32 + float.width  as f32 / 2.0;
+            let cy = float.y as f32 + float.height as f32 / 2.0;
+            self.raster_transform_state = Some(RasterTransformState {
+                float_canvas_id:   float.canvas_id,
+                anchor_canvas_id:  uuid::Uuid::new_v4(),
+                anchor_pixels,
+                anchor_w: float.width,
+                anchor_h: float.height,
+                display_canvas_id: uuid::Uuid::new_v4(),
+                cx, cy,
+                scale_x: 1.0, scale_y: 1.0, angle: 0.0,
+                origin_x: cx, origin_y: cy,
+                active_handle: None, hovered_handle: None,
+                drag_start_world: world_pos,
+                snap_cx: cx, snap_cy: cy,
+                snap_sx: 1.0, snap_sy: 1.0, snap_angle: 0.0,
+                snap_origin_x: cx, snap_origin_y: cy,
+                transform_applied: true,
+                wants_apply: false,
+            });
+            // Queue an identity dispatch immediately so the display canvas is populated
+            // from frame 1. Without this, Move-only drags don't update the image because
+            // transform_applied would stay false (no scale/rotate → no needs_dispatch).
+            let init_dispatch = {
+                let ts = self.raster_transform_state.as_ref().unwrap();
+                let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                    Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, 1.0, 1.0, 0.0);
+                PendingTransformDispatch {
+                    anchor_canvas_id:  ts.anchor_canvas_id,
+                    anchor_pixels:     ts.anchor_pixels.clone(),
+                    anchor_w:          ts.anchor_w,
+                    anchor_h:          ts.anchor_h,
+                    display_canvas_id: ts.display_canvas_id,
+                    new_x, new_y, new_w, new_h,
+                    a00, a01, a10, a11, b0, b1,
+                    is_final_commit: false,
+                }
+            };
+            self.pending_transform_dispatch = Some(init_dispatch);
+        }
+
+        // Early return while waiting for a final readback (wants_apply set, readback pending).
+        if self.raster_transform_state.as_ref().map_or(false, |ts| ts.wants_apply) {
+            return;
+        }
+
+        // --- Keyboard shortcuts ---
+        // Enter: queue final dispatch + readback, keep state alive until readback completes.
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let dispatch = self.raster_transform_state.as_ref().and_then(|ts| {
+                if ts.transform_applied {
+                    let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                        Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                    Some(PendingTransformDispatch {
+                        anchor_canvas_id: ts.anchor_canvas_id,
+                        anchor_pixels:    ts.anchor_pixels.clone(),
+                        anchor_w: ts.anchor_w, anchor_h: ts.anchor_h,
+                        display_canvas_id: ts.display_canvas_id,
+                        new_x, new_y, new_w, new_h,
+                        a00, a01, a10, a11, b0, b1,
+                        is_final_commit: true,
+                    })
+                } else {
+                    None
+                }
+            });
+            if let Some(d) = dispatch {
+                self.pending_transform_dispatch = Some(d);
+                // Keep state alive (wants_apply = true) until readback completes.
+                self.raster_transform_state.as_mut().unwrap().wants_apply = true;
+            } else {
+                // No transform was applied — just clear state.
+                self.raster_transform_state = None;
+            }
+            return;
+        }
+
+        // Escape: float canvas is unchanged — just clear state.
+        // The anchor/display canvases are orphaned; they'll be freed when the GPU engine
+        // is next queried (the canvases are small and short-lived).
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.raster_transform_state = None;
+            return;
+        }
+
+        // Read drag states before the mutable borrow of raster_transform_state.
+        let drag_started = self.rsp_drag_started(response);
+        let dragged      = self.rsp_dragged(response);
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let shift        = ui.input(|i| i.modifiers.shift);
+
+        // Collect pending dispatch from the inner block to assign after the borrow ends.
+        let pending_dispatch;
+        {
+            let ts = self.raster_transform_state.as_mut().unwrap();
+
+            // --- Compute handle positions in world space ---
+            let hw = ts.scale_x * ts.anchor_w as f32 / 2.0;
+            let hh = ts.scale_y * ts.anchor_h as f32 / 2.0;
+            let cos_a = ts.angle.cos();
+            let sin_a = ts.angle.sin();
+            let zoom  = self.zoom;
+
+            // Local offset → world position
+            let to_world = |lx: f32, ly: f32| -> egui::Vec2 {
+                egui::vec2(ts.cx + lx * cos_a - ly * sin_a, ts.cy + lx * sin_a + ly * cos_a)
+            };
+
+            // Rotate handle: above top-center, 24 screen-pixels outside bbox.
+            let rotate_offset = 24.0 / zoom;
+            let rotate_handle = to_world(0.0, -hh - rotate_offset);
+
+            let handles: [(RasterTransformHandle, egui::Vec2); 10] = [
+                (RasterTransformHandle::Corner { right: false, bottom: false }, to_world(-hw, -hh)),
+                (RasterTransformHandle::Corner { right: true,  bottom: false }, to_world( hw, -hh)),
+                (RasterTransformHandle::Corner { right: false, bottom: true  }, to_world(-hw,  hh)),
+                (RasterTransformHandle::Corner { right: true,  bottom: true  }, to_world( hw,  hh)),
+                (RasterTransformHandle::EdgeH  { bottom: false }, to_world(0.0, -hh)),
+                (RasterTransformHandle::EdgeH  { bottom: true  }, to_world(0.0,  hh)),
+                (RasterTransformHandle::EdgeV  { right: false  }, to_world(-hw, 0.0)),
+                (RasterTransformHandle::EdgeV  { right: true   }, to_world( hw, 0.0)),
+                (RasterTransformHandle::Rotate,                   rotate_handle),
+                (RasterTransformHandle::Origin,                   egui::vec2(ts.origin_x, ts.origin_y)),
+            ];
+
+            let hit_r_world = 8.0 / zoom;
+            let hovered = handles.iter()
+                .find(|(_, wp)| (world_pos - *wp).length() <= hit_r_world)
+                .map(|(h, _)| *h);
+
+            // Inside bbox → Move handle (if no specific handle hit)
+            let in_bbox = {
+                let dx = world_pos.x - ts.cx;
+                let dy = world_pos.y - ts.cy;
+                let local_x =  dx * cos_a + dy * sin_a;
+                let local_y = -dx * sin_a + dy * cos_a;
+                local_x.abs() <= hw && local_y.abs() <= hh
+            };
+            let hovered = hovered.or_else(|| if in_bbox { Some(RasterTransformHandle::Move) } else { None });
+
+            // Store hovered handle for visual feedback in the draw function.
+            ts.hovered_handle = if ts.active_handle.is_none() { hovered } else { ts.active_handle };
+
+            // Set cursor icon based on hovered/active handle.
+            if let Some(h) = ts.active_handle.or(ts.hovered_handle) {
+                let cursor = match h {
+                    RasterTransformHandle::Move   => egui::CursorIcon::Grab,
+                    RasterTransformHandle::Origin => egui::CursorIcon::Crosshair,
+                    RasterTransformHandle::Corner { right, bottom } => {
+                        if right == bottom { egui::CursorIcon::ResizeNwSe }
+                        else               { egui::CursorIcon::ResizeNeSw }
+                    }
+                    RasterTransformHandle::EdgeH { .. } => egui::CursorIcon::ResizeVertical,
+                    RasterTransformHandle::EdgeV { .. } => egui::CursorIcon::ResizeHorizontal,
+                    RasterTransformHandle::Rotate       => egui::CursorIcon::AllScroll,
+                };
+                ui.ctx().set_cursor_icon(cursor);
+            }
+
+            // --- Drag start: use press_origin for hit testing (drag fires after threshold) ---
+            if drag_started {
+                let click_world = ui.input(|i| i.pointer.press_origin())
+                    .map(|sp| {
+                        let canvas_pos = sp - response.rect.min.to_vec2();
+                        egui::vec2(
+                            (canvas_pos.x - self.pan_offset.x) / self.zoom,
+                            (canvas_pos.y - self.pan_offset.y) / self.zoom,
+                        )
+                    })
+                    .unwrap_or(world_pos);
+
+                // Recompute hovered handle at click_world position.
+                let click_hovered = handles.iter()
+                    .find(|(_, wp)| (click_world - *wp).length() <= hit_r_world)
+                    .map(|(h, _)| *h);
+                let click_in_bbox = {
+                    let dx = click_world.x - ts.cx;
+                    let dy = click_world.y - ts.cy;
+                    let local_x =  dx * cos_a + dy * sin_a;
+                    let local_y = -dx * sin_a + dy * cos_a;
+                    local_x.abs() <= hw && local_y.abs() <= hh
+                };
+                let click_handle = click_hovered.or_else(|| if click_in_bbox { Some(RasterTransformHandle::Move) } else { None });
+
+                ts.active_handle     = click_handle;
+                ts.drag_start_world  = click_world;
+                ts.snap_cx           = ts.cx;
+                ts.snap_cy           = ts.cy;
+                ts.snap_sx           = ts.scale_x;
+                ts.snap_sy           = ts.scale_y;
+                ts.snap_angle        = ts.angle;
+                ts.snap_origin_x     = ts.origin_x;
+                ts.snap_origin_y     = ts.origin_y;
+            }
+
+            // --- Drag ---
+            let mut needs_dispatch = false;
+            if dragged {
+                if let Some(handle) = ts.active_handle {
+                    let delta      = world_pos - ts.drag_start_world;
+                    let snap_hw    = ts.snap_sx * ts.anchor_w as f32 / 2.0;
+                    let snap_hh    = ts.snap_sy * ts.anchor_h as f32 / 2.0;
+                    let local_dx   =  delta.x * cos_a + delta.y * sin_a;
+                    let local_dy   = -delta.x * sin_a + delta.y * cos_a;
+
+                    match handle {
+                        RasterTransformHandle::Move => {
+                            ts.cx = ts.snap_cx + delta.x;
+                            ts.cy = ts.snap_cy + delta.y;
+                            ts.origin_x = ts.snap_origin_x + delta.x;
+                            ts.origin_y = ts.snap_origin_y + delta.y;
+                            // Pure move: display canvas keeps same pixels, position updated via compute_transform_params.
+                        }
+                        RasterTransformHandle::Origin => {
+                            ts.origin_x = ts.snap_origin_x + delta.x;
+                            ts.origin_y = ts.snap_origin_y + delta.y;
+                            // No GPU dispatch needed for origin move alone.
+                        }
+                        RasterTransformHandle::Corner { right, bottom } => {
+                            let sign_x = if right  { 1.0_f32 } else { -1.0 };
+                            let sign_y = if bottom { 1.0_f32 } else { -1.0 };
+                            // Divide by 2: dragged corner = new_cx ± new_hw, and
+                            // new_cx = wfx ± new_hw, so corner = wfx ± 2*new_hw.
+                            // To make the corner move 1:1 with mouse, new_hw grows by delta/2.
+                            // Signed clamp: allow negative scale (flip) but prevent exactly 0
+                            // which would make the inverse affine matrix singular.
+                            let raw_hw = snap_hw + sign_x * local_dx / 2.0;
+                            let new_hw = if raw_hw.abs() < 0.001 { if raw_hw <= 0.0 { -0.001 } else { 0.001 } } else { raw_hw };
+                            let new_hh = if shift {
+                                // Preserve aspect ratio; sign follows new_hw.
+                                new_hw * (ts.anchor_h as f32 / ts.anchor_w as f32).max(0.001)
+                            } else {
+                                let raw_hh = snap_hh + sign_y * local_dy / 2.0;
+                                if raw_hh.abs() < 0.001 { if raw_hh <= 0.0 { -0.001 } else { 0.001 } } else { raw_hh }
+                            };
+                            ts.scale_x = new_hw / (ts.anchor_w as f32 / 2.0).max(0.001);
+                            ts.scale_y = new_hh / (ts.anchor_h as f32 / 2.0).max(0.001);
+                            // Fixed corner world pos (opposite corner, from snap state).
+                            let wfx = ts.snap_cx - sign_x * snap_hw * cos_a + sign_y * snap_hh * sin_a;
+                            let wfy = ts.snap_cy - sign_x * snap_hw * sin_a - sign_y * snap_hh * cos_a;
+                            // New center: fixed corner + rotated new half-extents.
+                            ts.cx = wfx + sign_x * new_hw * cos_a - sign_y * new_hh * sin_a;
+                            ts.cy = wfy + sign_x * new_hw * sin_a + sign_y * new_hh * cos_a;
+                            // Maintain origin's relative position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_x = if snap_hw > 0.0 { o_local_x / snap_hw } else { 0.0 };
+                            let o_norm_y = if snap_hh > 0.0 { o_local_y / snap_hh } else { 0.0 };
+                            let no_x = o_norm_x * new_hw;
+                            let no_y = o_norm_y * new_hh;
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::EdgeH { bottom } => {
+                            let sign_y = if bottom { 1.0_f32 } else { -1.0 };
+                            let raw_hh = snap_hh + sign_y * local_dy / 2.0;
+                            let new_hh = if raw_hh.abs() < 0.001 { if raw_hh <= 0.0 { -0.001 } else { 0.001 } } else { raw_hh };
+                            ts.scale_y = new_hh / (ts.anchor_h as f32 / 2.0).max(0.001);
+                            // Fixed edge world position (opposite edge center).
+                            let wfx = ts.snap_cx + sign_y * snap_hh * sin_a;
+                            let wfy = ts.snap_cy - sign_y * snap_hh * cos_a;
+                            ts.cx = wfx - sign_y * new_hh * sin_a;
+                            ts.cy = wfy + sign_y * new_hh * cos_a;
+                            // Maintain origin's relative Y position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_y = if snap_hh > 0.0 { o_local_y / snap_hh } else { 0.0 };
+                            let no_x = o_local_x; // X local coord unchanged by EdgeH
+                            let no_y = o_norm_y * new_hh;
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::EdgeV { right } => {
+                            let sign_x = if right { 1.0_f32 } else { -1.0 };
+                            let raw_hw = snap_hw + sign_x * local_dx / 2.0;
+                            let new_hw = if raw_hw.abs() < 0.001 { if raw_hw <= 0.0 { -0.001 } else { 0.001 } } else { raw_hw };
+                            ts.scale_x = new_hw / (ts.anchor_w as f32 / 2.0).max(0.001);
+                            // Fixed edge world position (opposite edge center).
+                            let wfx = ts.snap_cx - sign_x * snap_hw * cos_a;
+                            let wfy = ts.snap_cy - sign_x * snap_hw * sin_a;
+                            ts.cx = wfx + sign_x * new_hw * cos_a;
+                            ts.cy = wfy + sign_x * new_hw * sin_a;
+                            // Maintain origin's relative X position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_x = if snap_hw > 0.0 { o_local_x / snap_hw } else { 0.0 };
+                            let no_x = o_norm_x * new_hw;
+                            let no_y = o_local_y; // Y local coord unchanged by EdgeV
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::Rotate => {
+                            // Rotate around origin (not center).
+                            let v_start = ts.drag_start_world - egui::vec2(ts.origin_x, ts.origin_y);
+                            let v_now   = world_pos           - egui::vec2(ts.origin_x, ts.origin_y);
+                            let a_start = v_start.y.atan2(v_start.x);
+                            let a_now   = v_now.y.atan2(v_now.x);
+                            let d_angle = a_now - a_start;
+                            ts.angle = ts.snap_angle + d_angle;
+                            // Also rotate cx/cy around the origin.
+                            let ox  = ts.snap_origin_x;
+                            let oy  = ts.snap_origin_y;
+                            let dcx = ts.snap_cx - ox;
+                            let dcy = ts.snap_cy - oy;
+                            let (cos_d, sin_d) = (d_angle.cos(), d_angle.sin());
+                            ts.cx = ox + dcx * cos_d - dcy * sin_d;
+                            ts.cy = oy + dcx * sin_d + dcy * cos_d;
+                            needs_dispatch = true;
+                        }
+                    }
+                }
+            }
+
+            // Build pending dispatch before the borrow ends (avoid partial move issues).
+            if needs_dispatch && dragged {
+                let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                    Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                ts.transform_applied = true;
+                let anchor_canvas_id  = ts.anchor_canvas_id;
+                let anchor_pixels     = ts.anchor_pixels.clone();
+                let anchor_w          = ts.anchor_w;
+                let anchor_h          = ts.anchor_h;
+                let display_canvas_id = ts.display_canvas_id;
+                pending_dispatch = Some(PendingTransformDispatch {
+                    anchor_canvas_id, anchor_pixels, anchor_w, anchor_h,
+                    display_canvas_id, new_x, new_y, new_w, new_h,
+                    a00, a01, a10, a11, b0, b1,
+                    is_final_commit: false,
+                });
+            } else {
+                pending_dispatch = None;
+            }
+
+            // --- Drag stop ---
+            if drag_stopped {
+                ts.active_handle = None;
+            }
+        }
+
+        if let Some(p) = pending_dispatch {
+            self.pending_transform_dispatch = Some(p);
+        }
+
+        // Handle drawing is deferred to render_raster_transform_overlays(), called
+        // from render_content() AFTER the VelloCallback is registered, so the handles
+        // appear on top of the Vello scene rather than underneath it.
+    }
+
+    fn draw_raster_transform_handles_static(
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        ts: &RasterTransformState,
+        zoom: f32,
+        pan: egui::Vec2,
+    ) {
+        let painter = ui.painter_at(rect);
+
+        // World → screen
+        let w2s = |wx: f32, wy: f32| -> egui::Pos2 {
+            egui::pos2(
+                wx * zoom + pan.x + rect.min.x,
+                wy * zoom + pan.y + rect.min.y,
+            )
+        };
+
+        let hw = ts.scale_x * ts.anchor_w as f32 / 2.0;
+        let hh = ts.scale_y * ts.anchor_h as f32 / 2.0;
+        let cos_a = ts.angle.cos();
+        let sin_a = ts.angle.sin();
+        let to_world = |lx: f32, ly: f32| -> (f32, f32) {
+            (ts.cx + lx * cos_a - ly * sin_a, ts.cy + lx * sin_a + ly * cos_a)
+        };
+
+        // Draw bounding box outline (4 edges between corners)
+        let corners_local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)];
+        let corners_screen: Vec<egui::Pos2> = corners_local.iter()
+            .map(|&(lx, ly)| { let (wx, wy) = to_world(lx, ly); w2s(wx, wy) })
+            .collect();
+        let outline_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
+        let shadow_color  = egui::Color32::from_rgba_unmultiplied(0,   0,   0,   120);
+        for i in 0..4 {
+            let a = corners_screen[i];
+            let b = corners_screen[(i + 1) % 4];
+            painter.line_segment([a, b], egui::Stroke::new(2.0, shadow_color));
+            painter.line_segment([a, b], egui::Stroke::new(1.0, outline_color));
+        }
+
+        // Colors
+        let handle_normal  = egui::Color32::WHITE;
+        let handle_hovered = egui::Color32::from_rgb(100, 180, 255); // light blue
+        let handle_active  = egui::Color32::from_rgb(30,  120, 255); // bright blue
+
+        let handle_color = |h: RasterTransformHandle| -> egui::Color32 {
+            if ts.active_handle == Some(h) { handle_active }
+            else if ts.hovered_handle == Some(h) { handle_hovered }
+            else { handle_normal }
+        };
+
+        // Draw corner + edge handles (paired with their handle enum variant)
+        let handle_pairs: [(RasterTransformHandle, (f32, f32)); 8] = [
+            (RasterTransformHandle::Corner { right: false, bottom: false }, to_world(-hw, -hh)),
+            (RasterTransformHandle::Corner { right: true,  bottom: false }, to_world( hw, -hh)),
+            (RasterTransformHandle::Corner { right: false, bottom: true  }, to_world(-hw,  hh)),
+            (RasterTransformHandle::Corner { right: true,  bottom: true  }, to_world( hw,  hh)),
+            (RasterTransformHandle::EdgeH  { bottom: false }, to_world(0.0, -hh)),
+            (RasterTransformHandle::EdgeH  { bottom: true  }, to_world(0.0,  hh)),
+            (RasterTransformHandle::EdgeV  { right: false  }, to_world(-hw, 0.0)),
+            (RasterTransformHandle::EdgeV  { right: true   }, to_world( hw, 0.0)),
+        ];
+        for (handle, (wx, wy)) in handle_pairs {
+            let sp = w2s(wx, wy);
+            let is_hover = ts.hovered_handle == Some(handle) || ts.active_handle == Some(handle);
+            let size = if is_hover { 10.0 } else { 8.0 };
+            let inner = if is_hover {  8.0 } else { 6.0 };
+            painter.rect_filled(
+                egui::Rect::from_center_size(sp, egui::vec2(size, size)),
+                0.0,
+                shadow_color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(sp, egui::vec2(inner, inner)),
+                0.0,
+                handle_color(handle),
+            );
+        }
+
+        // Draw rotate handle (circle above top-center)
+        let rotate_offset = 24.0 / zoom;
+        let (rwx, rwy) = to_world(0.0, -hh - rotate_offset);
+        let rsp = w2s(rwx, rwy);
+        // Line from top-center to rotate handle
+        let (tcx, tcy) = to_world(0.0, -hh);
+        painter.line_segment([w2s(tcx, tcy), rsp], egui::Stroke::new(1.0, outline_color));
+        let rot_hov = ts.hovered_handle == Some(RasterTransformHandle::Rotate)
+            || ts.active_handle  == Some(RasterTransformHandle::Rotate);
+        let rot_color = if ts.active_handle  == Some(RasterTransformHandle::Rotate) { handle_active }
+            else if ts.hovered_handle == Some(RasterTransformHandle::Rotate) { handle_hovered }
+            else { handle_normal };
+        let rot_r = if rot_hov { 7.0 } else { 5.0 };
+        painter.circle_filled(rsp, rot_r, rot_color);
+        painter.circle_stroke(rsp, rot_r, egui::Stroke::new(1.5, shadow_color));
+
+        // Draw origin handle (pivot point for rotate/scale) — a small crosshair circle.
+        // origin_x/origin_y are already in world coords, use w2s directly.
+        let origin_sp = w2s(ts.origin_x, ts.origin_y);
+        let orig_color = if ts.hovered_handle == Some(RasterTransformHandle::Origin)
+            || ts.active_handle == Some(RasterTransformHandle::Origin) { handle_hovered } else { handle_normal };
+        painter.circle_filled(origin_sp, 5.0, orig_color);
+        painter.circle_stroke(origin_sp, 5.0, egui::Stroke::new(1.5, shadow_color));
+        let arm = 6.0;
+        painter.line_segment([origin_sp - egui::vec2(arm, 0.0), origin_sp + egui::vec2(arm, 0.0)],
+            egui::Stroke::new(1.0, shadow_color));
+        painter.line_segment([origin_sp - egui::vec2(0.0, arm), origin_sp + egui::vec2(0.0, arm)],
+            egui::Stroke::new(1.0, shadow_color));
+    }
+
     /// Apply an affine transform to selected DCEL vertices and their connected edge control points.
     /// Reads original positions from `original_dcel` and writes transformed positions to `dcel`.
     fn apply_dcel_transform(
@@ -6242,6 +6943,15 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
+
+        // Raster floating selection on a raster layer → raster transform path.
+        if let Some(active_id) = *shared.active_layer_id {
+            let is_raster = shared.action_executor.document().get_layer(&active_id)
+                .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+            if is_raster && shared.selection.raster_floating.is_some() {
+                return self.handle_raster_transform_tool(ui, response, world_pos, shared);
+            }
+        }
 
         // Check if we have an active layer
         let active_layer_id = match *shared.active_layer_id {
@@ -7896,6 +8606,9 @@ impl StagePane {
     ) {
         use lightningbeam_core::selection::RasterSelection;
 
+        // Don't show marching ants during raster transform — the handles show the bbox outline.
+        if self.raster_transform_state.is_some() { return; }
+
         let has_sel = shared.selection.raster_selection.is_some();
         if !has_sel { return; }
 
@@ -8233,6 +8946,71 @@ impl PaneRenderer for StagePane {
             }
         }
 
+        // Consume transform readback results: swap display canvas in as the new float canvas.
+        if let Ok(mut results) = TRANSFORM_READBACK_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock()
+        {
+            if let Some(rb) = results.remove(&self.instance_id) {
+                if let Some(ref mut float) = shared.selection.raster_floating {
+                    self.pending_canvas_removal = Some(float.canvas_id);
+                    float.canvas_id = rb.display_canvas_id;
+                    float.pixels    = rb.pixels;
+                    float.width     = rb.width;
+                    float.height    = rb.height;
+                    float.x         = rb.x;
+                    float.y         = rb.y;
+                }
+                // Update the selection border to match the new (transformed) float bounds,
+                // so marching ants appear around the result after switching tools / Enter.
+                // This also replaces the stale pre-transform rect so commit masking is correct.
+                shared.selection.raster_selection = Some(
+                    lightningbeam_core::selection::RasterSelection::Rect(
+                        rb.x, rb.y,
+                        rb.x + rb.width  as i32,
+                        rb.y + rb.height as i32,
+                    )
+                );
+                // Readback complete — clear transform state.
+                self.raster_transform_state = None;
+            }
+        }
+
+        // Clear transform state if the float was committed externally (by another tool),
+        // or if the user switched away from the Transform tool without finishing.
+        {
+            use lightningbeam_core::tool::Tool;
+            let float_gone  = shared.selection.raster_floating.is_none();
+            let not_transform = !matches!(*shared.selected_tool, Tool::Transform);
+            if (float_gone || not_transform) && self.raster_transform_state.is_some() {
+                // If a transform was applied but not yet committed, queue the final dispatch now.
+                let needs_dispatch = self.raster_transform_state.as_ref()
+                    .map_or(false, |ts| ts.transform_applied && !ts.wants_apply);
+                if needs_dispatch {
+                    let dispatch = {
+                        let ts = self.raster_transform_state.as_ref().unwrap();
+                        let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                            Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                        PendingTransformDispatch {
+                            anchor_canvas_id: ts.anchor_canvas_id,
+                            anchor_pixels:    ts.anchor_pixels.clone(),
+                            anchor_w: ts.anchor_w, anchor_h: ts.anchor_h,
+                            display_canvas_id: ts.display_canvas_id,
+                            new_x, new_y, new_w, new_h,
+                            a00, a01, a10, a11, b0, b1,
+                            is_final_commit: true,
+                        }
+                    };
+                    self.pending_transform_dispatch = Some(dispatch);
+                    self.raster_transform_state.as_mut().unwrap().wants_apply = true;
+                    // Don't clear state yet — wait for readback (handles stay visible 1 frame).
+                } else if !self.raster_transform_state.as_ref().map_or(false, |ts| ts.wants_apply) {
+                    // No pending dispatch — just clear.
+                    self.raster_transform_state = None;
+                }
+            }
+        }
+
         // Handle input for pan/zoom and tool controls
         self.handle_input(ui, rect, shared);
 
@@ -8533,6 +9311,21 @@ impl PaneRenderer for StagePane {
                 vello::kurbo::Point::new(local.x as f64, local.y as f64)
             });
 
+        // Compute transform_display for the VelloCallback.
+        // Only override the float blit once the display canvas has actual content
+        // (transform_applied = true). Before the first drag, show the regular float canvas.
+        let transform_display = self.raster_transform_state.as_ref()
+            .filter(|ts| ts.transform_applied)
+            .map(|ts| {
+                let (new_w, new_h, new_x, new_y, ..) = Self::compute_transform_params(
+                    ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle,
+                );
+                TransformDisplayInfo {
+                    display_canvas_id: ts.display_canvas_id,
+                    x: new_x, y: new_y, w: new_w, h: new_h,
+                }
+            });
+
         // Use egui's custom painting callback for Vello
         // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback { ctx: VelloRenderContext {
@@ -8561,6 +9354,8 @@ impl PaneRenderer for StagePane {
             mouse_world_pos,
             webcam_frame: shared.webcam_frame.clone(),
             pending_raster_dabs: self.pending_raster_dabs.take(),
+            pending_transform_dispatch: self.pending_transform_dispatch.take(),
+            transform_display,
             instance_id_for_readback: self.instance_id,
             painting_canvas: self.painting_canvas,
             pending_canvas_removal: self.pending_canvas_removal.take(),
@@ -8648,6 +9443,13 @@ impl PaneRenderer for StagePane {
 
         // Raster selection overlays: marching ants + floating selection texture
         self.render_raster_selection_overlays(ui, rect, shared);
+
+        // Raster transform handles (drawn after Vello scene so they appear on top)
+        if let Some(ref ts) = self.raster_transform_state {
+            let zoom = self.zoom;
+            let pan  = self.pan_offset;
+            Self::draw_raster_transform_handles_static(ui, rect, ts, zoom, pan);
+        }
 
         // Render snap indicator (works for all tools, not just Select/BezierEdit)
         self.render_snap_indicator(ui, rect, shared);
