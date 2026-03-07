@@ -2543,6 +2543,8 @@ pub struct StagePane {
     raster_transform_state: Option<RasterTransformState>,
     /// GPU transform work to dispatch in prepare().
     pending_transform_dispatch: Option<PendingTransformDispatch>,
+    /// Accumulated state for the quick-select brush tool.
+    quick_select_state: Option<QuickSelectState>,
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2555,6 +2557,18 @@ pub struct ReplayDragState {
     pub drag_started: bool,
     pub dragged: bool,
     pub drag_stopped: bool,
+}
+
+/// Accumulated state for the Quick Select brush-based selection tool.
+struct QuickSelectState {
+    /// Per-pixel OR'd selection mask (width × height).
+    mask: Vec<bool>,
+    /// RGBA snapshot of the canvas at drag start (read-only for all fills).
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    /// Last canvas-pixel position where a fill was run (for debouncing).
+    last_pos: (i32, i32),
 }
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
@@ -2758,6 +2772,7 @@ impl StagePane {
             clone_stroke_offset: None,
             raster_transform_state: None,
             pending_transform_dispatch: None,
+            quick_select_state: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -5861,6 +5876,169 @@ impl StagePane {
         Self::lift_selection_to_float(shared);
     }
 
+    fn handle_quick_select_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::selection::RasterSelection;
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+
+        let is_raster = shared.action_executor.document()
+            .get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let time = *shared.playback_time;
+        let radius = shared.raster_settings.quick_select_radius;
+        let threshold = shared.raster_settings.wand_threshold;
+
+        if self.rsp_drag_started(response) {
+            // Commit any existing float selection before starting a new one.
+            Self::commit_raster_floating_now(shared);
+
+            // Ensure the keyframe exists.
+            let (doc_w, doc_h) = {
+                let doc = shared.action_executor.document();
+                (doc.width as u32, doc.height as u32)
+            };
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    rl.ensure_keyframe_at(time, doc_w, doc_h);
+                }
+            }
+
+            // Snapshot canvas pixels.
+            let (pixels, width, height) = {
+                let doc = shared.action_executor.document();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                    if let Some(kf) = rl.keyframe_at(time) {
+                        let expected = (kf.width * kf.height * 4) as usize;
+                        let buf = if kf.raw_pixels.len() == expected {
+                            kf.raw_pixels.clone()
+                        } else {
+                            vec![0u8; expected]
+                        };
+                        (buf, kf.width, kf.height)
+                    } else { return; }
+                } else { return; }
+            };
+
+            let seed_x = world_pos.x as i32;
+            let seed_y = world_pos.y as i32;
+            let mask = vec![false; (width * height) as usize];
+
+            let mut qs = QuickSelectState {
+                mask,
+                pixels,
+                width,
+                height,
+                last_pos: (seed_x - (radius as i32 * 2), seed_y), // force first fill
+            };
+
+            // Run the initial fill at the starting position.
+            let mode = match shared.raster_settings.wand_mode {
+                crate::tools::FillThresholdMode::Absolute =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Absolute,
+                crate::tools::FillThresholdMode::Relative =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Relative,
+            };
+            Self::quick_select_fill_point(&mut qs, seed_x, seed_y, threshold, mode, radius);
+
+            shared.selection.raster_selection = Some(RasterSelection::Mask {
+                data: qs.mask.clone(),
+                width: qs.width,
+                height: qs.height,
+                origin_x: 0,
+                origin_y: 0,
+            });
+
+            self.quick_select_state = Some(qs);
+        }
+
+        if self.rsp_dragged(response) {
+            let mode = match shared.raster_settings.wand_mode {
+                crate::tools::FillThresholdMode::Absolute =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Absolute,
+                crate::tools::FillThresholdMode::Relative =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Relative,
+            };
+
+            if let Some(ref mut qs) = self.quick_select_state {
+                let sx = world_pos.x as i32;
+                let sy = world_pos.y as i32;
+                let dx = sx - qs.last_pos.0;
+                let dy = sy - qs.last_pos.1;
+                let min_move = (radius / 2.0).max(1.0) as i32;
+                if dx * dx + dy * dy >= min_move * min_move {
+                    Self::quick_select_fill_point(qs, sx, sy, threshold, mode, radius);
+                }
+                // Always sync raster_selection from the current mask so the
+                // marching ants update every frame (same pattern as marquee select).
+                shared.selection.raster_selection = Some(RasterSelection::Mask {
+                    data: qs.mask.clone(),
+                    width: qs.width,
+                    height: qs.height,
+                    origin_x: 0,
+                    origin_y: 0,
+                });
+            }
+        }
+
+        if self.rsp_drag_stopped(response) {
+            if self.quick_select_state.is_some() {
+                Self::lift_selection_to_float(shared);
+                self.quick_select_state = None;
+            }
+        }
+    }
+
+    /// Run a single flood-fill from `(seed_x, seed_y)` clipped to a local region
+    /// and OR the result into `qs.mask`.
+    fn quick_select_fill_point(
+        qs: &mut QuickSelectState,
+        seed_x: i32, seed_y: i32,
+        threshold: f32,
+        mode: lightningbeam_core::flood_fill::FillThresholdMode,
+        radius: f32,
+    ) {
+        use lightningbeam_core::flood_fill::raster_fill_mask;
+        use lightningbeam_core::selection::RasterSelection;
+
+        if seed_x < 0 || seed_y < 0
+            || seed_x >= qs.width as i32
+            || seed_y >= qs.height as i32
+        {
+            return;
+        }
+
+        let expand = (radius * 3.0) as i32;
+        let clip_x0 = (seed_x - expand).max(0);
+        let clip_y0 = (seed_y - expand).max(0);
+        let clip_x1 = (seed_x + expand).min(qs.width as i32);
+        let clip_y1 = (seed_y + expand).min(qs.height as i32);
+        let clip = RasterSelection::Rect(clip_x0, clip_y0, clip_x1, clip_y1);
+
+        let dist_map = raster_fill_mask(
+            &qs.pixels, qs.width, qs.height,
+            seed_x, seed_y,
+            threshold, mode, true, // contiguous = true
+            Some(&clip),
+        );
+
+        for (i, d) in dist_map.iter().enumerate() {
+            if d.is_some() {
+                qs.mask[i] = true;
+            }
+        }
+        qs.last_pos = (seed_x, seed_y);
+    }
+
     /// Draw marching ants for a pixel mask selection.
     ///
     /// Animates horizontal edges leftward and vertical edges downward (position-based),
@@ -5876,44 +6054,79 @@ impl StagePane {
     ) {
         let w = width as i32;
         let h = height as i32;
-        let phase_i = phase as i32;
+
+        // Phase in screen pixels: 4px on, 4px off cycling every 8 screen pixels.
+        // One canvas pixel = zoom screen pixels; scale phase accordingly.
+        let screen_phase = phase; // already in screen pixels (matches draw_marching_ants)
+        let cycle_canvas = 8.0 / zoom.max(0.01); // canvas-pixel length of a full 8-screen-px cycle
+        let half_cycle_canvas = cycle_canvas / 2.0;
 
         let to_screen = |cx: i32, cy: i32| egui::pos2(
             rect_min.x + pan.x + cx as f32 * zoom,
             rect_min.y + pan.y + cy as f32 * zoom,
         );
 
-        // Horizontal edges: between (row-1) and (row). Animate along x axis.
-        for row in 0..=h {
+        // Pre-scan: compute tight bounding box of set pixels so we don't iterate
+        // the full canvas every frame (critical perf for large canvases with small masks).
+        let mut min_row = h;
+        let mut max_row = -1i32;
+        let mut min_col = w;
+        let mut max_col = -1i32;
+        for row in 0..h {
             for col in 0..w {
+                if data[(row * w + col) as usize] {
+                    if row < min_row { min_row = row; }
+                    if row > max_row { max_row = row; }
+                    if col < min_col { min_col = col; }
+                    if col > max_col { max_col = col; }
+                }
+            }
+        }
+        if max_row < 0 { return; } // Empty mask — nothing to draw.
+        let r0 = (min_row - 1).max(0);
+        let r1 = (max_row + 1).min(h - 1);
+        let c0 = (min_col - 1).max(0);
+        let c1 = (max_col + 1).min(w - 1);
+
+        // Horizontal edges: between (row-1) and (row). Animate along x axis.
+        // Use screen-space phase so the dash pattern looks correct at any zoom.
+        for row in r0..=(r1 + 1) {
+            for col in c0..=c1 {
                 let above = row > 0   && data[((row-1) * w + col) as usize];
                 let below = row < h   && data[(row     * w + col) as usize];
                 if above == below { continue; }
                 let cx = origin_x + col;
                 let cy = origin_y + row;
-                let on = (cx - phase_i).rem_euclid(8) < 4;
-                let color = if on { egui::Color32::WHITE } else { egui::Color32::BLACK };
-                painter.line_segment(
-                    [to_screen(cx, cy), to_screen(cx + 1, cy)],
-                    egui::Stroke::new(1.0, color),
-                );
+                // canvas-pixel position along the edge, converted to screen pixels for phase
+                let cx_screen = cx as f32 * zoom;
+                let on = (cx_screen - screen_phase).rem_euclid(8.0) < 4.0;
+                // Also check next pixel to handle partial overlap of the 4-px window
+                let _ = half_cycle_canvas; // suppress unused warning
+                if on {
+                    let p0 = to_screen(cx, cy);
+                    let p1 = to_screen(cx + 1, cy);
+                    painter.line_segment([p0, p1], egui::Stroke::new(2.5, egui::Color32::WHITE));
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.5, egui::Color32::BLACK));
+                }
             }
         }
 
         // Vertical edges: between (col-1) and (col). Animate along y axis.
-        for col in 0..=w {
-            for row in 0..h {
+        for col in c0..=(c1 + 1) {
+            for row in r0..=r1 {
                 let left  = col > 0 && data[(row * w + col - 1) as usize];
                 let right = col < w && data[(row * w + col    ) as usize];
                 if left == right { continue; }
                 let cx = origin_x + col;
                 let cy = origin_y + row;
-                let on = (cy - phase_i).rem_euclid(8) < 4;
-                let color = if on { egui::Color32::WHITE } else { egui::Color32::BLACK };
-                painter.line_segment(
-                    [to_screen(cx, cy), to_screen(cx, cy + 1)],
-                    egui::Stroke::new(1.0, color),
-                );
+                let cy_screen = cy as f32 * zoom;
+                let on = (cy_screen - screen_phase).rem_euclid(8.0) < 4.0;
+                if on {
+                    let p0 = to_screen(cx, cy);
+                    let p1 = to_screen(cx, cy + 1);
+                    painter.line_segment([p0, p1], egui::Stroke::new(2.5, egui::Color32::WHITE));
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.5, egui::Color32::BLACK));
+                }
             }
         }
     }
@@ -8495,6 +8708,9 @@ impl StagePane {
                 Tool::MagicWand => {
                     self.handle_magic_wand_tool(&response, world_pos, shared);
                 }
+                Tool::QuickSelect => {
+                    self.handle_quick_select_tool(ui, &response, world_pos, shared);
+                }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
                 }
@@ -8978,7 +9194,10 @@ impl StagePane {
         use lightningbeam_core::tool::Tool;
 
         // Compute semi-axes (world pixels) and dab rotation angle.
-        let (a_world, b_world, dab_angle_rad) = if let Some(def) = crate::tools::raster_tool_def(shared.selected_tool) {
+        let (a_world, b_world, dab_angle_rad) = if matches!(*shared.selected_tool, Tool::QuickSelect) {
+            let r = shared.raster_settings.quick_select_radius;
+            (r, r, 0.0_f32)
+        } else if let Some(def) = crate::tools::raster_tool_def(shared.selected_tool) {
             let r = def.cursor_radius(shared.raster_settings);
             // For the standard paint brush, also account for elliptical shape.
             if matches!(*shared.selected_tool,
@@ -9744,6 +9963,7 @@ impl PaneRenderer for StagePane {
                     | Tool::Erase | Tool::Smudge
                     | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
                     | Tool::DodgeBurn | Tool::Sponge | Tool::BlurSharpen
+                    | Tool::QuickSelect
                 ) && shared.active_layer_id.and_then(|id| {
                     shared.action_executor.document().get_layer(&id)
                 }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));

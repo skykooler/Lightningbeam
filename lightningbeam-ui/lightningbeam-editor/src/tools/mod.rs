@@ -84,6 +84,9 @@ pub struct RasterToolSettings {
     pub wand_mode: FillThresholdMode,
     /// true = BFS from click (contiguous region only); false = global color scan.
     pub wand_contiguous: bool,
+    // --- Quick Select ---
+    /// Brush radius in canvas pixels for the quick-select tool.
+    pub quick_select_radius: f32,
     // --- Flood fill (Paint Bucket, raster) ---
     /// Color-distance threshold (Euclidean RGBA, 0–510). Pixels within this
     /// distance of the comparison color are included in the fill.
@@ -152,6 +155,7 @@ impl Default for RasterToolSettings {
             fill_threshold: 15.0,
             fill_softness: 0.0,
             fill_threshold_mode: FillThresholdMode::Absolute,
+            quick_select_radius: 20.0,
         }
     }
 }
