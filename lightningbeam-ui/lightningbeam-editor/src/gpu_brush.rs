@@ -775,6 +775,71 @@ impl GradientFillPipeline {
     }
 }
 
+// ── AlphaCompositePipeline ───────────────────────────────────────────────────
+
+/// Compute pipeline: composites the scratch buffer C over the source A → output B.
+///
+/// Binding layout (see `alpha_composite.wgsl`):
+///   0 = tex_a (texture_2d<f32>, Rgba8Unorm, sampled, not filterable)
+///   1 = tex_c (texture_2d<f32>, Rgba8Unorm, sampled, not filterable)
+///   2 = tex_b (texture_storage_2d<rgba8unorm, write>)
+struct AlphaCompositePipeline {
+    pipeline:  wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+}
+
+impl AlphaCompositePipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("alpha_composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("panes/shaders/alpha_composite.wgsl").into(),
+            ),
+        });
+        let sampled_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled:   false,
+            },
+            count: None,
+        };
+        let bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:   Some("alpha_composite_bgl"),
+            entries: &[
+                sampled_entry(0), // tex_a
+                sampled_entry(1), // tex_c
+                wgpu::BindGroupLayoutEntry {
+                    binding:    2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access:         wgpu::StorageTextureAccess::WriteOnly,
+                        format:         wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label:                Some("alpha_composite_layout"),
+            bind_group_layouts:   &[&bg_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label:               Some("alpha_composite_pipeline"),
+            layout:              Some(&layout),
+            module:              &shader,
+            entry_point:         Some("main"),
+            compilation_options: Default::default(),
+            cache:               None,
+        });
+        Self { pipeline, bg_layout }
+    }
+}
+
 // GpuBrushEngine
 // ---------------------------------------------------------------------------
 
@@ -792,12 +857,21 @@ pub struct GpuBrushEngine {
     liquify_brush_pipeline: Option<LiquifyBrushPipeline>,
     /// Lazily created on first gradient fill use.
     gradient_fill_pipeline: Option<GradientFillPipeline>,
+    /// Lazily created on first unified-tool composite dispatch.
+    composite_pipeline: Option<AlphaCompositePipeline>,
 
     /// Canvas texture pairs keyed by keyframe UUID.
     pub canvases: HashMap<Uuid, CanvasPair>,
 
     /// Displacement map buffers keyed by a caller-supplied UUID.
     pub displacement_bufs: HashMap<Uuid, DisplacementBuffer>,
+
+    /// Persistent `Rgba8Unorm` textures for idle raster layers.
+    ///
+    /// Keyed by keyframe UUID (same ID space as `canvases`).  Entries are uploaded
+    /// once when `RasterKeyframe::texture_dirty` is set, then reused every frame.
+    /// Separate from `canvases` so tool teardown never accidentally removes them.
+    pub raster_layer_cache: HashMap<Uuid, CanvasPair>,
 }
 
 /// CPU-side parameters uniform for the compute shader.
@@ -903,8 +977,10 @@ impl GpuBrushEngine {
             warp_apply_pipeline:    None,
             liquify_brush_pipeline: None,
             gradient_fill_pipeline: None,
+            composite_pipeline: None,
             canvases:           HashMap::new(),
             displacement_bufs:  HashMap::new(),
+            raster_layer_cache: HashMap::new(),
         }
     }
 
@@ -1262,6 +1338,126 @@ impl GpuBrushEngine {
     /// Remove the canvas pair for a keyframe (e.g. when the layer is deleted).
     pub fn remove_canvas(&mut self, keyframe_id: &Uuid) {
         self.canvases.remove(keyframe_id);
+    }
+
+    // ── Raster-layer texture cache ────────────────────────────────────────────
+
+    /// Ensure a cached display texture exists for `kf_id`.
+    ///
+    /// If `dirty` is `true` (or no entry exists), the canvas is (re)created and
+    /// `pixels` is uploaded.  Call with `dirty = false` when only checking for
+    /// existence without re-uploading.
+    ///
+    /// `pixels` must be sRGB-premultiplied RGBA with length `w * h * 4`.
+    /// Panics in debug builds if the length does not match.
+    pub fn ensure_layer_texture(
+        &mut self,
+        device:  &wgpu::Device,
+        queue:   &wgpu::Queue,
+        kf_id:   Uuid,
+        pixels:  &[u8],
+        w:       u32,
+        h:       u32,
+        dirty:   bool,
+    ) {
+        debug_assert_eq!(
+            pixels.len(),
+            (w * h * 4) as usize,
+            "ensure_layer_texture: pixel buffer length mismatch (got {}, expected {})",
+            pixels.len(),
+            w * h * 4,
+        );
+        let needs_new = dirty || self.raster_layer_cache.get(&kf_id)
+            .map_or(true, |c| c.width != w || c.height != h);
+        if needs_new {
+            let canvas = CanvasPair::new(device, w, h);
+            if !pixels.is_empty() {
+                canvas.upload(queue, pixels);
+            }
+            self.raster_layer_cache.insert(kf_id, canvas);
+        }
+    }
+
+    /// Get the cached display texture for a raster layer keyframe.
+    pub fn get_layer_texture(&self, kf_id: &Uuid) -> Option<&CanvasPair> {
+        self.raster_layer_cache.get(kf_id)
+    }
+
+    /// Remove the cached texture for a raster layer keyframe (e.g. when deleted).
+    pub fn remove_layer_texture(&mut self, kf_id: &Uuid) {
+        self.raster_layer_cache.remove(kf_id);
+    }
+
+    /// Composite the accumulated-dab scratch buffer C over the source A, writing the
+    /// result into B:  `B = C + A × (1 − C.a)` (Porter-Duff src-over).
+    ///
+    /// All three canvases must already exist in `self.canvases` (created by
+    /// [`ensure_canvas`] from the [`WorkspaceInitPacket`] in `prepare()`).
+    ///
+    /// After dispatch, B's ping-pong index is swapped so `B.src_view()` holds the
+    /// composite result and the compositor can blit it.
+    pub fn composite_a_c_to_b(
+        &mut self,
+        device:  &wgpu::Device,
+        queue:   &wgpu::Queue,
+        a_id:    Uuid,
+        c_id:    Uuid,
+        b_id:    Uuid,
+        width:   u32,
+        height:  u32,
+    ) {
+        // Init pipeline lazily.
+        if self.composite_pipeline.is_none() {
+            self.composite_pipeline = Some(AlphaCompositePipeline::new(device));
+        }
+
+        // Build bind group and command buffer (all immutable borrows of self).
+        let cmd_buf = {
+            let pipeline = self.composite_pipeline.as_ref().unwrap();
+            let Some(a) = self.canvases.get(&a_id) else { return; };
+            let Some(c) = self.canvases.get(&c_id) else { return; };
+            let Some(b) = self.canvases.get(&b_id) else { return; };
+
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:   Some("alpha_composite_bg"),
+                layout:  &pipeline.bg_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding:  0,
+                        resource: wgpu::BindingResource::TextureView(a.src_view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  1,
+                        resource: wgpu::BindingResource::TextureView(c.src_view()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  2,
+                        resource: wgpu::BindingResource::TextureView(b.dst_view()),
+                    },
+                ],
+            });
+
+            let mut enc = device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("alpha_composite_enc") },
+            );
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label:            Some("alpha_composite"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline.pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups((width + 7) / 8, (height + 7) / 8, 1);
+            }
+            enc.finish()
+        }; // Immutable borrows (pipeline, a, c, b) released here.
+
+        queue.submit(std::iter::once(cmd_buf));
+
+        // Swap B: src now holds the composite result.
+        if let Some(b) = self.canvases.get_mut(&b_id) {
+            b.swap();
+        }
     }
 
     /// Dispatch the affine-resample transform shader from `anchor_id` → `float_id`.

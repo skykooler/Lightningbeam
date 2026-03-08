@@ -427,6 +427,30 @@ struct VelloRenderContext {
     /// the infopanel converts the pixel data to egui TextureHandles.
     /// Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
     brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
+
+    // ── New unified raster tool rendering ─────────────────────────────────────
+
+    /// When `Some`, the compositor blits B (the tool output canvas) at the layer
+    /// or float slot described here, instead of the Vello scene / idle raster texture.
+    active_tool_render: Option<crate::raster_tool::ActiveToolRender>,
+    /// Canvas UUIDs to remove from `GpuBrushEngine` at the top of the next `prepare()`.
+    /// Replaced the single `pending_canvas_removal` field.
+    pending_canvas_removals: Vec<uuid::Uuid>,
+    /// First-frame canvas initialization for the active raster tool workspace.
+    /// `prepare()` creates A/B/C canvases and uploads source pixels on the same frame
+    /// the tool starts (mousedown).  Cleared after one consume.
+    pending_workspace_init: Option<crate::raster_tool::WorkspaceInitPacket>,
+    /// GPU work extracted from the active `RasterTool` this frame via
+    /// `take_pending_gpu_work()`.  Executed in `prepare()` before compositing.
+    pending_tool_gpu_work: Option<Box<dyn crate::raster_tool::PendingGpuWork>>,
+    /// Raster layer keyframe UUIDs whose `raster_layer_cache` entry should be
+    /// removed at the top of `prepare()` so the fresh `raw_pixels` are re-uploaded.
+    /// Populated by the pre-callback dirty-keyframe scan (for undo/redo) and by
+    /// stroke/fill/warp commit handlers.
+    pending_layer_cache_removals: Vec<uuid::Uuid>,
+    /// When `Some`, readback this B-canvas into `RASTER_READBACK_RESULTS` after
+    /// dispatching GPU tool work.  Set on mouseup by the unified raster tool commit path.
+    pending_tool_readback_b: Option<uuid::Uuid>,
 }
 
 /// Callback for Vello rendering within egui
@@ -500,6 +524,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             camera_transform
         };
 
+        // Timing instrumentation: track where frame budget is spent.
+        // Prints to stderr when any section exceeds 2 ms, or total > 8 ms.
+        let _t_prepare_start = std::time::Instant::now();
+
         // Choose rendering path based on HDR compositing flag
         let mut scene = if USE_HDR_COMPOSITING {
             // HDR Compositing Pipeline: render each layer separately for proper opacity
@@ -515,6 +543,75 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(kf_id) = self.ctx.pending_canvas_removal {
                 if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
                     gpu_brush.remove_canvas(&kf_id);
+                }
+            }
+            // Process the bulk-removal list (A/B/C canvases from finished tool ops).
+            // The Vec was moved into this callback by StagePane via std::mem::take,
+            // so it is already gone from StagePane; no drain needed.
+            if !self.ctx.pending_canvas_removals.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    for id in &self.ctx.pending_canvas_removals {
+                        gpu_brush.remove_canvas(id);
+                    }
+                }
+            }
+            // Invalidate raster_layer_cache entries whose raw_pixels changed (undo/redo,
+            // stroke commit, fill commit, etc.).  Removing the entry here causes the
+            // raster-cache section below to re-upload the fresh pixels on the same frame.
+            if !self.ctx.pending_layer_cache_removals.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    for id in &self.ctx.pending_layer_cache_removals {
+                        gpu_brush.remove_layer_texture(id);
+                    }
+                }
+            }
+            let _t_after_removals = std::time::Instant::now();
+
+            // First-frame canvas initialization for the unified raster tool workspace.
+            // Creates A (source), B (output) and C (scratch) canvases; uploads pixels to A.
+            // B and C start zero-initialized (transparent).
+            if let Some(ref init) = self.ctx.pending_workspace_init {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // A canvas: source pixels.
+                    gpu_brush.ensure_canvas(device, init.a_canvas_id, init.width, init.height);
+                    if let Some(canvas) = gpu_brush.canvases.get(&init.a_canvas_id) {
+                        canvas.upload(queue, &init.a_pixels);
+                    }
+                    // B canvas: output (zero-initialized by GPU allocation).
+                    gpu_brush.ensure_canvas(device, init.b_canvas_id, init.width, init.height);
+                    // C canvas: scratch (zero-initialized by GPU allocation).
+                    gpu_brush.ensure_canvas(device, init.c_canvas_id, init.width, init.height);
+                }
+            }
+
+            // Unified raster tool GPU dispatch (dab shaders, composite pass, etc.).
+            if let Some(ref work) = self.ctx.pending_tool_gpu_work {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    work.execute(device, queue, &mut *gpu_brush);
+                }
+            }
+
+            // Unified tool B-canvas readback on mouseup (commit path).
+            // Triggered when the active RasterTool's finish() returns true.
+            if let Some(b_id) = self.ctx.pending_tool_readback_b {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    let dims = gpu_brush.canvases.get(&b_id).map(|c| (c.width, c.height));
+                    if let Some((w, h)) = dims {
+                        if let Some(pixels) = gpu_brush.readback_canvas(device, queue, b_id) {
+                            let results = RASTER_READBACK_RESULTS.get_or_init(|| {
+                                Arc::new(Mutex::new(std::collections::HashMap::new()))
+                            });
+                            if let Ok(mut map) = results.lock() {
+                                map.insert(self.ctx.instance_id_for_readback, RasterReadbackResult {
+                                    layer_id: uuid::Uuid::nil(), // unused; routing via pending_undo_before
+                                    time: 0.0,
+                                    canvas_width: w,
+                                    canvas_height: h,
+                                    pixels,
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
@@ -791,6 +888,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 }
             }
 
+            let _t_after_gpu_dispatches = std::time::Instant::now();
+
             let mut image_cache = shared.image_cache.lock().unwrap();
 
             let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
@@ -801,6 +900,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 self.ctx.webcam_frame.as_ref(),
             );
             drop(image_cache);
+            let _t_after_scene_build = std::time::Instant::now();
 
             // Get buffer pool for layer rendering
             let mut buffer_pool = shared.buffer_pool.lock().unwrap();
@@ -937,25 +1037,95 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Now render and composite each layer incrementally
             for rendered_layer in &composite_result.layers {
-                // Check if this raster layer has a live GPU canvas that should be
-                // blitted every frame, even when no new dabs arrived this frame.
-                // `painting_canvas` persists for the entire stroke duration.
-                // When painting into float (B), the GPU canvas is B's canvas — don't
-                // use it to replace the Vello scene for the layer (A must still render
-                // via Vello).
-                let gpu_canvas_kf: Option<uuid::Uuid> = if self.ctx.painting_float {
-                    None
-                } else {
-                    self.ctx.painting_canvas
-                        .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
-                        .map(|(_, kf_id)| kf_id)
-                        // Warp/Liquify: show display canvas in place of layer.
-                        .or_else(|| self.ctx.warp_display
+                // Determine which GPU canvas (if any) to blit for this layer.
+                //
+                // Priority order:
+                // 1. Active tool B canvas (new unified tool render).
+                // 2. Legacy painting_canvas (old per-tool render path, kept during migration).
+                // 3. Warp/Liquify display canvas.
+                // 4. Raster layer texture cache (idle raster layers — bypasses Vello).
+                // 5. None → fall through to Vello scene rendering.
+                //
+                // When painting_float is true, the active tool is working on the float,
+                // so the layer itself should still render normally (via Vello or cache).
+                let gpu_canvas_kf: Option<uuid::Uuid> = {
+                    // 1. New unified tool render: B canvas replaces this layer.
+                    let from_tool = self.ctx.active_tool_render.as_ref()
+                        .filter(|tr| tr.layer_id == Some(rendered_layer.layer_id))
+                        .map(|tr| tr.b_canvas_id);
+
+                    // 2. Legacy painting_canvas (old stroke path).
+                    let from_legacy = if self.ctx.painting_float {
+                        None
+                    } else {
+                        self.ctx.painting_canvas
                             .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
-                            .map(|(_, display_id)| display_id))
+                            .map(|(_, kf_id)| kf_id)
+                    };
+
+                    // 3. Warp/Liquify display canvas.
+                    let from_warp = self.ctx.warp_display
+                        .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
+                        .map(|(_, display_id)| display_id);
+
+                    from_tool.or(from_legacy).or(from_warp)
                 };
 
-                if !rendered_layer.has_content && gpu_canvas_kf.is_none() {
+                // 4. Raster layer texture cache: for idle raster layers (no active tool canvas).
+                // Upload raw_pixels to the cache if texture_dirty; then use the cache entry.
+                let raster_cache_kf: Option<uuid::Uuid> = if gpu_canvas_kf.is_none() {
+                    // Find the active keyframe for this raster layer.
+                    let doc = &self.ctx.document;
+                    let raster_kf_id = doc.get_layer(&rendered_layer.layer_id)
+                        .and_then(|l| match l {
+                            lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                                rl.keyframe_at(self.ctx.playback_time)
+                            }
+                            _ => None,
+                        })
+                        .map(|kf| kf.id);
+
+                    if let Some(kf_id) = raster_kf_id {
+                        if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                            // Check if we have pixels to upload.
+                            let kf_data = doc.get_layer(&rendered_layer.layer_id)
+                                .and_then(|l| match l {
+                                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                                        rl.keyframe_at(self.ctx.playback_time)
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(kf) = kf_data {
+                                if !kf.raw_pixels.is_empty() {
+                                    // Pass dirty=false: the cache entry was already removed
+                                    // above via pending_layer_cache_removals when raw_pixels
+                                    // changed (undo/redo, stroke commit, etc.).  A cache miss
+                                    // triggers upload; a cache hit skips the expensive sRGB
+                                    // conversion + GPU write that was firing every frame.
+                                    gpu_brush.ensure_layer_texture(
+                                        device, queue, kf_id,
+                                        &kf.raw_pixels,
+                                        kf.width, kf.height,
+                                        false,
+                                    );
+                                    Some(kf_id)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none() {
                     continue;
                 }
 
@@ -971,13 +1141,17 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             &instance_resources.hdr_texture_view,
                         ) {
                             // GPU canvas blit path: if a live GPU canvas exists for this
-                            // raster layer, blit it directly into the HDR buffer (premultiplied
-                            // linear → Rgba16Float), bypassing the sRGB intermediate entirely.
+                            // raster layer (active tool B canvas, legacy painting_canvas, or
+                            // raster layer texture cache), blit it directly into the HDR buffer
+                            // (premultiplied linear → Rgba16Float), bypassing Vello entirely.
                             // Vello path: render to sRGB buffer → srgb_to_linear → HDR buffer.
-                            let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf {
+                            let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
                                 let mut used = false;
                                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                                    if let Some(canvas) = gpu_brush.canvases.get(&kf_id) {
+                                    // Try tool canvases first, then the layer texture cache.
+                                    let canvas = gpu_brush.canvases.get(&kf_id)
+                                        .or_else(|| gpu_brush.raster_layer_cache.get(&kf_id));
+                                    if let Some(canvas) = canvas {
                                         let camera = crate::gpu_brush::CameraParams {
                                             pan_x:      self.ctx.pan_offset.x,
                                             pan_y:      self.ctx.pan_offset.y,
@@ -1220,6 +1394,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             let blit_params = if let Some(ref td) = self.ctx.transform_display {
                 // During transform: show the display canvas (compute shader output) instead of float.
                 Some((td.display_canvas_id, td.x, td.y, td.w, td.h))
+            } else if let Some(ref tr) = self.ctx.active_tool_render.as_ref().filter(|tr| tr.layer_id.is_none()) {
+                // Unified raster tool active on the float: show B canvas instead of float's own canvas.
+                Some((tr.b_canvas_id, tr.x, tr.y, tr.width, tr.height))
             } else if let Some(ref float_sel) = self.ctx.selection.raster_floating {
                 // Regular float blit.
                 Some((float_sel.canvas_id, float_sel.x, float_sel.y, float_sel.width, float_sel.height))
@@ -1267,6 +1444,17 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Advance frame counter for buffer cleanup
             buffer_pool.next_frame();
             drop(buffer_pool);
+
+            // --- Frame timing report ---
+            let _t_end = std::time::Instant::now();
+            let total_ms = (_t_end - _t_prepare_start).as_secs_f64() * 1000.0;
+            let removals_ms = (_t_after_removals - _t_prepare_start).as_secs_f64() * 1000.0;
+            let gpu_dispatches_ms = (_t_after_gpu_dispatches - _t_after_removals).as_secs_f64() * 1000.0;
+            let scene_build_ms = (_t_after_scene_build - _t_after_gpu_dispatches).as_secs_f64() * 1000.0;
+            let composite_ms = (_t_end - _t_after_scene_build).as_secs_f64() * 1000.0;
+            crate::debug_overlay::update_prepare_timing(
+                total_ms, removals_ms, gpu_dispatches_ms, scene_build_ms, composite_ms,
+            );
 
             // For drag preview and other overlays, we still need a scene
             // Create an empty scene - the composited result is already in hdr_texture
@@ -2517,6 +2705,27 @@ pub struct StagePane {
     pending_gradient_op: Option<PendingGradientOp>,
     /// GPU ops for Warp/Liquify to dispatch in prepare().
     pending_warp_ops: Vec<PendingWarpOp>,
+
+    // ── New unified raster tool state ─────────────────────────────────────────
+    /// The active `RasterTool` implementation plus its GPU workspace.
+    /// Set on mousedown; cleared (and workspace queued for removal) on commit/cancel.
+    active_raster_tool: Option<(Box<dyn crate::raster_tool::RasterTool>, crate::raster_tool::RasterWorkspace)>,
+    /// Canvas UUIDs to remove from `GpuBrushEngine` at the top of the next `prepare()`.
+    /// Drains into `VelloRenderContext::pending_canvas_removals` each frame.
+    pending_canvas_removals: Vec<uuid::Uuid>,
+    /// First-frame canvas init packet for the active raster tool.  Forwarded to
+    /// `VelloRenderContext` on the mousedown frame; cleared after one forwarding.
+    pending_workspace_init: Option<crate::raster_tool::WorkspaceInitPacket>,
+    /// Keyframe UUIDs whose `raster_layer_cache` entry must be removed so fresh
+    /// `raw_pixels` are re-uploaded.  Drained into `VelloRenderContext` each frame.
+    pending_layer_cache_removals: Vec<uuid::Uuid>,
+    /// True when the unified raster tool has finished (mouseup) and is waiting for
+    /// the GPU readback result.  Cleared in render_content() after the result arrives.
+    active_tool_awaiting_readback: bool,
+    /// B-canvas UUID to readback into RASTER_READBACK_RESULTS on the next prepare().
+    /// Set on mouseup when `tool.finish()` returns true; forwarded to VelloRenderContext.
+    pending_tool_readback_b: Option<uuid::Uuid>,
+
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2906,6 +3115,12 @@ impl StagePane {
             gradient_state: None,
             pending_gradient_op: None,
             pending_warp_ops: Vec::new(),
+            active_raster_tool: None,
+            pending_canvas_removals: Vec::new(),
+            pending_workspace_init: None,
+            pending_layer_cache_removals: Vec::new(),
+            active_tool_awaiting_readback: false,
+            pending_tool_readback_b: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -5145,6 +5360,268 @@ impl StagePane {
             }
         }
         mask
+    }
+
+    /// Allocate the three A/B/C GPU canvases and build a [`crate::raster_tool::RasterWorkspace`]
+    /// for a new raster tool operation.
+    ///
+    /// Called on **mousedown** before any tool-specific code runs.  The returned
+    /// [`crate::raster_tool::WorkspaceInitPacket`] must be stored in `self.pending_workspace_init`
+    /// so that [`VelloCallback::prepare`] can create the GPU textures on the first frame.
+    ///
+    /// - If a floating selection is active, the workspace targets it (Float path).
+    /// - Otherwise, any lingering float is committed first, then the active raster
+    ///   layer's keyframe becomes the workspace source (Layer path).
+    ///
+    /// Returns `None` when there is no raster target (no active layer, or the active
+    /// layer is not a raster layer).
+    fn begin_raster_workspace(
+        shared: &mut SharedPaneState,
+    ) -> Option<(crate::raster_tool::RasterWorkspace, crate::raster_tool::WorkspaceInitPacket)> {
+        use crate::raster_tool::{WorkspaceInitPacket, WorkspaceSource, RasterWorkspace};
+        use lightningbeam_core::layer::AnyLayer;
+
+        if let Some(ref float) = shared.selection.raster_floating {
+            // ── Float-active path ─────────────────────────────────────────
+            // Paint onto the floating selection's existing GPU canvas (A).
+            // Do NOT commit the float; it remains active.
+            let pixels = if float.pixels.is_empty() {
+                vec![0u8; (float.width * float.height * 4) as usize]
+            } else {
+                float.pixels.clone()
+            };
+            let (w, h, x, y) = (float.width, float.height, float.x, float.y);
+
+            let a_id = uuid::Uuid::new_v4();
+            let b_id = uuid::Uuid::new_v4();
+            let c_id = uuid::Uuid::new_v4();
+
+            let ws = RasterWorkspace {
+                a_canvas_id: a_id,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                mask_texture: None,
+                width: w,
+                height: h,
+                x,
+                y,
+                source: WorkspaceSource::Float,
+                before_pixels: pixels.clone(),
+            };
+            let init = WorkspaceInitPacket {
+                a_canvas_id: a_id,
+                a_pixels: pixels,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                width: w,
+                height: h,
+            };
+            Some((ws, init))
+        } else {
+            // ── Layer-active path ─────────────────────────────────────────
+            // Commit any lingering float so buffer_before reflects the fully-composited canvas.
+            Self::commit_raster_floating_now(shared);
+
+            let layer_id = (*shared.active_layer_id)?;
+            let time = *shared.playback_time;
+
+            let (doc_w, doc_h) = {
+                let doc = shared.action_executor.document();
+                (doc.width as u32, doc.height as u32)
+            };
+
+            // Ensure the keyframe exists before reading its ID.
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    rl.ensure_keyframe_at(time, doc_w, doc_h);
+                } else {
+                    return None; // not a raster layer
+                }
+            }
+
+            // Read keyframe id and pixels.
+            let (kf_id, w, h, pixels) = {
+                let doc = shared.action_executor.document();
+                let AnyLayer::Raster(rl) = doc.get_layer(&layer_id)? else { return None };
+                let kf = rl.keyframe_at(time)?;
+                let pixels = if kf.raw_pixels.is_empty() {
+                    vec![0u8; (kf.width * kf.height * 4) as usize]
+                } else {
+                    kf.raw_pixels.clone()
+                };
+                (kf.id, kf.width, kf.height, pixels)
+            };
+
+            let a_id = uuid::Uuid::new_v4();
+            let b_id = uuid::Uuid::new_v4();
+            let c_id = uuid::Uuid::new_v4();
+
+            let ws = RasterWorkspace {
+                a_canvas_id: a_id,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                mask_texture: None,
+                width: w,
+                height: h,
+                x: 0,
+                y: 0,
+                source: WorkspaceSource::Layer {
+                    layer_id,
+                    time,
+                    kf_id,
+                    canvas_w: doc_w,
+                    canvas_h: doc_h,
+                },
+                before_pixels: pixels.clone(),
+            };
+            let init = WorkspaceInitPacket {
+                a_canvas_id: a_id,
+                a_pixels: pixels,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                width: w,
+                height: h,
+            };
+            Some((ws, init))
+        }
+    }
+
+    /// Unified raster stroke handler using the [`crate::raster_tool::RasterTool`] trait.
+    ///
+    /// Handles all paint-style brush tools (Paint, Pencil, Airbrush, Eraser, etc.).
+    /// - **mousedown**: calls `begin_raster_workspace()` + instantiates `BrushRasterTool`.
+    /// - **drag**: calls `tool.update()` each frame.
+    /// - **mouseup**: calls `tool.finish()`, schedules GPU B-canvas readback if committed.
+    fn handle_unified_raster_stroke_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        def: &'static dyn crate::tools::RasterToolDef,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::raster_layer::RasterBlendMode;
+        use crate::raster_tool::{BrushRasterTool, RasterTool, WorkspaceSource};
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Only operate on raster layers
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let blend_mode = def.blend_mode();
+
+        // ----------------------------------------------------------------
+        // Mouse down: initialise the workspace and start the tool
+        // ----------------------------------------------------------------
+        let stroke_start = (self.rsp_primary_pressed(ui) && response.hovered()
+                            && self.active_raster_tool.is_none())
+                        || (self.rsp_clicked(response) && self.active_raster_tool.is_none());
+        if stroke_start {
+            // Build brush settings from the tool definition.
+            let bp = def.brush_params(shared.raster_settings);
+            let (mut b, radius, opacity, hardness, spacing) =
+                (bp.base_settings, bp.radius, bp.opacity, bp.hardness, bp.spacing);
+            b.radius_log      = radius.ln() - b.pressure_radius_gain * 0.5;
+            b.hardness        = hardness;
+            b.opaque          = opacity;
+            b.dabs_per_radius = spacing;
+            if matches!(blend_mode, RasterBlendMode::Smudge) {
+                b.dabs_per_actual_radius = 0.0;
+                b.smudge_radius_log = shared.raster_settings.smudge_strength;
+            }
+            if matches!(blend_mode, RasterBlendMode::BlurSharpen) {
+                b.dabs_per_actual_radius = 0.0;
+            }
+            let color = if matches!(blend_mode, RasterBlendMode::Erase) {
+                [1.0f32, 1.0, 1.0, 1.0]
+            } else {
+                let c = if shared.raster_settings.brush_use_fg {
+                    *shared.stroke_color
+                } else {
+                    *shared.fill_color
+                };
+                let s2l = |v: u8| -> f32 {
+                    let f = v as f32 / 255.0;
+                    if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+                };
+                [s2l(c.r()), s2l(c.g()), s2l(c.b()), c.a() as f32 / 255.0]
+            };
+
+            if let Some((ws, init)) = Self::begin_raster_workspace(shared) {
+                let mut tool = Box::new(BrushRasterTool::new(color, b, blend_mode));
+                self.raster_last_compute_time = ui.input(|i| i.time);
+                tool.begin(&ws, world_pos, 0.0, shared.raster_settings);
+                self.pending_workspace_init = Some(init);
+                *shared.tool_state = ToolState::DrawingRasterStroke { points: vec![] };
+                self.active_raster_tool = Some((tool, ws));
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Per-frame update: fires every frame while stroke is active so
+        // time-based brushes (airbrush) accumulate dabs even when stationary.
+        // ----------------------------------------------------------------
+        if self.active_raster_tool.is_some()
+            && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. })
+            && !stroke_start
+        {
+            let current_time = ui.input(|i| i.time);
+            let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+            self.raster_last_compute_time = current_time;
+            if let Some((ref mut tool, ref ws)) = self.active_raster_tool {
+                tool.update(ws, world_pos, dt, shared.raster_settings);
+            }
+        }
+
+        // Keep egui repainting while a stroke is in progress.
+        if matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            ui.ctx().request_repaint();
+        }
+
+        // ----------------------------------------------------------------
+        // Mouse up: finish the tool, trigger readback if needed
+        // ----------------------------------------------------------------
+        let stroke_end = self.rsp_drag_stopped(response)
+            || (self.rsp_any_released(ui)
+                && self.active_raster_tool.is_some()
+                && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }));
+        if stroke_end {
+            *shared.tool_state = ToolState::Idle;
+            if self.active_raster_tool.is_some() {
+                let needs_commit = {
+                    let (ref mut tool, ref ws) = self.active_raster_tool.as_mut().unwrap();
+                    tool.finish(ws)
+                };
+                if needs_commit {
+                    let ws = &self.active_raster_tool.as_ref().unwrap().1;
+                    self.painting_float = matches!(ws.source, WorkspaceSource::Float);
+                    let (undo_layer_id, undo_time) = match &ws.source {
+                        WorkspaceSource::Layer { layer_id, time, .. } => (*layer_id, *time),
+                        WorkspaceSource::Float => (uuid::Uuid::nil(), 0.0),
+                    };
+                    self.pending_undo_before = Some((
+                        undo_layer_id, undo_time, ws.width, ws.height,
+                        ws.before_pixels.clone(),
+                    ));
+                    self.pending_tool_readback_b = Some(ws.b_canvas_id);
+                    self.active_tool_awaiting_readback = true;
+                    // Keep active_raster_tool alive until render_content() consumes the result.
+                } else {
+                    // No commit (no dabs were placed); discard immediately.
+                    if let Some((_, ws)) = self.active_raster_tool.take() {
+                        self.pending_canvas_removals.extend(ws.canvas_ids());
+                    }
+                }
+            }
+        }
     }
 
     fn lift_selection_to_float(shared: &mut SharedPaneState) {
@@ -9875,7 +10352,7 @@ impl StagePane {
                         shared.action_executor.document().get_layer(&id)
                     }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
                     if is_raster {
-                        self.handle_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
+                        self.handle_unified_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
                     } else {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
@@ -10512,6 +10989,9 @@ impl PaneRenderer for StagePane {
                                 }
                             }
                             float.pixels = pixels;
+                            // Invalidate the float's GPU canvas so the lazy-init
+                            // in prepare() re-uploads the fresh pixels next frame.
+                            self.pending_canvas_removals.push(float.canvas_id);
                         }
                     }
                     self.stroke_clip_selection = None;
@@ -10558,6 +11038,14 @@ impl PaneRenderer for StagePane {
                     // one-frame flash of the stale Vello scene.
                     if let Some((_, kf_id)) = self.painting_canvas.take() {
                         self.pending_canvas_removal = Some(kf_id);
+                    }
+                }
+                // Unified tool cleanup: clear active_raster_tool and queue A/B/C for removal.
+                // Runs after both the float and layer branches.
+                if self.active_tool_awaiting_readback {
+                    self.active_tool_awaiting_readback = false;
+                    if let Some((_, ws)) = self.active_raster_tool.take() {
+                        self.pending_canvas_removals.extend(ws.canvas_ids());
                     }
                 }
             }
@@ -11078,6 +11566,26 @@ impl PaneRenderer for StagePane {
                 }))
         });
 
+        // Scan for raster keyframes whose texture_dirty flag was set since last frame
+        // (e.g. by undo/redo or a stroke action execute/rollback). Must run BEFORE
+        // document_arc() is called below so that Arc::make_mut does not clone the document.
+        {
+            let doc = shared.action_executor.document_mut();
+            fn collect_dirty(layers: &mut [lightningbeam_core::layer::AnyLayer], out: &mut Vec<uuid::Uuid>) {
+                for layer in layers.iter_mut() {
+                    if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                        for kf in &mut rl.keyframes {
+                            if kf.texture_dirty {
+                                out.push(kf.id);
+                                kf.texture_dirty = false;
+                            }
+                        }
+                    }
+                }
+            }
+            collect_dirty(&mut doc.root.children, &mut self.pending_layer_cache_removals);
+        }
+
         // Use egui's custom painting callback for Vello
         // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback { ctx: VelloRenderContext {
@@ -11116,6 +11624,23 @@ impl PaneRenderer for StagePane {
             pending_canvas_removal: self.pending_canvas_removal.take(),
             painting_float: self.painting_float,
             brush_preview_pixels: shared.brush_preview_pixels.clone(),
+            active_tool_render: self.active_raster_tool.as_ref().map(|(_, ws)| {
+                crate::raster_tool::ActiveToolRender {
+                    b_canvas_id: ws.b_canvas_id,
+                    x: ws.x, y: ws.y,
+                    width: ws.width, height: ws.height,
+                    layer_id: match &ws.source {
+                        crate::raster_tool::WorkspaceSource::Layer { layer_id, .. } => Some(*layer_id),
+                        crate::raster_tool::WorkspaceSource::Float => None,
+                    },
+                }
+            }),
+            pending_canvas_removals: std::mem::take(&mut self.pending_canvas_removals),
+            pending_workspace_init: self.pending_workspace_init.take(),
+            pending_tool_gpu_work: self.active_raster_tool.as_mut()
+                .and_then(|(tool, _)| tool.take_pending_gpu_work()),
+            pending_layer_cache_removals: std::mem::take(&mut self.pending_layer_cache_removals),
+            pending_tool_readback_b: self.pending_tool_readback_b.take(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(

@@ -139,6 +139,7 @@ impl RasterKeyframe {
             stroke_log: Vec::new(),
             tween_after: TweenType::Hold,
             raw_pixels: Vec::new(),
+            texture_dirty: true,
         }
     }
 }

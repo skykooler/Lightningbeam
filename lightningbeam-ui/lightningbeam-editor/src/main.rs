@@ -28,6 +28,8 @@ mod waveform_gpu;
 mod cqt_gpu;
 mod gpu_brush;
 
+mod raster_tool;
+
 mod config;
 use config::AppConfig;
 
@@ -953,6 +955,9 @@ impl EditorApp {
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
         #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);
+
+        // Disable egui's built-in Ctrl+Plus/Minus zoom — we handle zoom ourselves.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         // Load application config
         let config = AppConfig::load();
@@ -4453,16 +4458,9 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
 
-        // Disable egui's built-in Ctrl+Plus/Minus zoom behavior
-        // We handle zoom ourselves for the Stage pane
-        ctx.options_mut(|o| {
-            o.zoom_with_keyboard = false;
-        });
-
         // Force continuous repaint if we have pending waveform updates
         // This ensures thumbnails update immediately when waveform data arrives
         if !self.audio_pools_with_new_waveforms.is_empty() {
-            println!("🔄 [UPDATE] Pending waveform updates for pools: {:?}", self.audio_pools_with_new_waveforms);
             ctx.request_repaint();
         }
 

@@ -43,6 +43,7 @@ impl Action for RasterFillAction {
         };
         let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
         kf.raw_pixels = self.buffer_after.clone();
+        kf.texture_dirty = true;
         Ok(())
     }
 
@@ -55,6 +56,7 @@ impl Action for RasterFillAction {
         };
         let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
         kf.raw_pixels = self.buffer_before.clone();
+        kf.texture_dirty = true;
         Ok(())
     }
 
