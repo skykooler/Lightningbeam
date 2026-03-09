@@ -5,12 +5,13 @@
 
 pub mod audio_exporter;
 pub mod dialog;
+pub mod image_exporter;
 pub mod video_exporter;
 pub mod readback_pipeline;
 pub mod perf_metrics;
 pub mod cpu_yuv_converter;
 
-use lightningbeam_core::export::{AudioExportSettings, VideoExportSettings, ExportProgress};
+use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
 use lightningbeam_core::document::Document;
 use lightningbeam_core::renderer::ImageCache;
 use lightningbeam_core::video::VideoManager;
@@ -66,6 +67,25 @@ pub struct VideoExportState {
     perf_metrics: Option<perf_metrics::ExportMetrics>,
 }
 
+/// State for a single-frame image export (runs on the GPU render thread, one frame per update).
+pub struct ImageExportState {
+    pub settings: ImageExportSettings,
+    pub output_path: PathBuf,
+    /// Resolved pixel dimensions (after applying any width/height overrides).
+    pub width: u32,
+    pub height: u32,
+    /// True once rendering has been submitted; the next call reads back and encodes.
+    pub rendered: bool,
+    /// GPU resources allocated on the first render call.
+    pub gpu_resources: Option<video_exporter::ExportGpuResources>,
+    /// Output RGBA texture — kept separate from gpu_resources to avoid split-borrow issues.
+    pub output_texture: Option<wgpu::Texture>,
+    /// View for output_texture.
+    pub output_texture_view: Option<wgpu::TextureView>,
+    /// Staging buffer for synchronous GPU→CPU readback.
+    pub staging_buffer: Option<wgpu::Buffer>,
+}
+
 /// Export orchestrator that manages the export process
 pub struct ExportOrchestrator {
     /// Channel for receiving progress updates (video or audio-only export)
@@ -82,6 +102,9 @@ pub struct ExportOrchestrator {
 
     /// Parallel audio+video export state
     parallel_export: Option<ParallelExportState>,
+
+    /// Single-frame image export state
+    image_state: Option<ImageExportState>,
 }
 
 /// State for parallel audio+video export
@@ -115,6 +138,7 @@ impl ExportOrchestrator {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             video_state: None,
             parallel_export: None,
+            image_state: None,
         }
     }
 
@@ -446,17 +470,175 @@ impl ExportOrchestrator {
 
     /// Check if an export is in progress
     pub fn is_exporting(&self) -> bool {
-        // Check parallel export first
-        if self.parallel_export.is_some() {
-            return true;
-        }
-
-        // Check single export
+        if self.parallel_export.is_some() { return true; }
+        if self.image_state.is_some()     { return true; }
         if let Some(handle) = &self.thread_handle {
             !handle.is_finished()
         } else {
             false
         }
+    }
+
+    /// Enqueue a single-frame image export.  Call `render_image_frame()` from the
+    /// egui update loop (where the wgpu device/queue are available) to complete it.
+    pub fn start_image_export(
+        &mut self,
+        settings: ImageExportSettings,
+        output_path: PathBuf,
+        doc_width: u32,
+        doc_height: u32,
+    ) {
+        self.cancel_flag.store(false, Ordering::Relaxed);
+        let width  = settings.width.unwrap_or(doc_width).max(1);
+        let height = settings.height.unwrap_or(doc_height).max(1);
+        self.image_state = Some(ImageExportState {
+            settings,
+            output_path,
+            width,
+            height,
+            rendered: false,
+            gpu_resources: None,
+            output_texture: None,
+            output_texture_view: None,
+            staging_buffer: None,
+        });
+    }
+
+    /// Drive the single-frame image export.  Returns `Ok(true)` when done (success or
+    /// cancelled), `Ok(false)` if another call is needed next frame.
+    pub fn render_image_frame(
+        &mut self,
+        document: &mut Document,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        image_cache: &mut ImageCache,
+        video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+    ) -> Result<bool, String> {
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            self.image_state = None;
+            return Ok(true);
+        }
+
+        let state = match self.image_state.as_mut() {
+            Some(s) => s,
+            None    => return Ok(true),
+        };
+
+        if !state.rendered {
+            // ── First call: render the frame to the GPU output texture ────────
+            let w = state.width;
+            let h = state.height;
+
+            if state.gpu_resources.is_none() {
+                state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, w, h));
+            }
+            if state.output_texture.is_none() {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label:              Some("image_export_output"),
+                    size:               wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count:    1,
+                    sample_count:       1,
+                    dimension:          wgpu::TextureDimension::D2,
+                    format:             wgpu::TextureFormat::Rgba8Unorm,
+                    usage:              wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats:       &[],
+                });
+                state.output_texture_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+                state.output_texture = Some(tex);
+            }
+
+            // Borrow separately to avoid a split-borrow conflict (gpu mutably, view immutably).
+            let gpu = state.gpu_resources.as_mut().unwrap();
+            let output_view = state.output_texture_view.as_ref().unwrap();
+
+            let mut encoder = video_exporter::render_frame_to_gpu_rgba(
+                document,
+                state.settings.time,
+                w, h,
+                device, queue, renderer, image_cache, video_manager,
+                gpu,
+                output_view,
+            )?;
+            queue.submit(Some(encoder.finish()));
+
+            // Create a staging buffer for synchronous readback.
+            // wgpu requires bytes_per_row to be a multiple of 256.
+            let align        = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let bytes_per_row = (w * 4 + align - 1) / align * align;
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label:              Some("image_export_staging"),
+                size:               (bytes_per_row * h) as u64,
+                usage:              wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+
+            let mut copy_enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("image_export_copy"),
+            });
+            let output_tex = state.output_texture.as_ref().unwrap();
+            copy_enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture:   output_tex,
+                    mip_level: 0,
+                    origin:    wgpu::Origin3d::ZERO,
+                    aspect:    wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset:         0,
+                        bytes_per_row:  Some(bytes_per_row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            queue.submit(Some(copy_enc.finish()));
+
+            state.staging_buffer = Some(staging);
+            state.rendered       = true;
+            return Ok(false); // Come back next frame to read the result.
+        }
+
+        // ── Second call: map the staging buffer, encode, and save ─────────────
+        let staging = match state.staging_buffer.as_ref() {
+            Some(b) => b,
+            None    => { self.image_state = None; return Ok(true); }
+        };
+
+        // Map synchronously.
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+        let w = state.width;
+        let h = state.height;
+        let align        = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = (w * 4 + align - 1) / align * align;
+
+        let pixels: Vec<u8> = {
+            let mapped = slice.get_mapped_range();
+            // Strip row padding: copy only w*4 bytes from each bytes_per_row-wide row.
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let start = (row * bytes_per_row) as usize;
+                out.extend_from_slice(&mapped[start..start + (w * 4) as usize]);
+            }
+            out
+        };
+        staging.unmap();
+
+        let result = image_exporter::save_rgba_image(
+            &pixels, w, h,
+            state.settings.format,
+            state.settings.quality,
+            state.settings.allow_transparency,
+            &state.output_path,
+        );
+
+        self.image_state = None;
+        result.map(|_| true)
     }
 
     /// Wait for the export to complete

@@ -11803,9 +11803,17 @@ impl PaneRenderer for StagePane {
                     shared.action_executor.document().get_layer(&id)
                 }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
 
-                if is_raster_paint {
+                // Only override the cursor when no higher-order layer (e.g. a modal dialog)
+                // is covering the canvas at this position.
+                let canvas_is_topmost = ui.ctx()
+                    .layer_id_at(pos)
+                    .map_or(true, |l| l == ui.layer_id());
+
+                if is_raster_paint && canvas_is_topmost {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                     self.draw_brush_cursor(ui, rect, pos, shared);
+                } else if is_raster_paint {
+                    // A modal is covering the canvas — let the system cursor show normally.
                 } else {
                     crate::custom_cursor::set(
                         ui.ctx(),

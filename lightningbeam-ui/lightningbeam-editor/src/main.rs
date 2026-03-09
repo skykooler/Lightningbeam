@@ -2869,14 +2869,42 @@ impl EditorApp {
             }
             MenuAction::Export => {
                 println!("Menu: Export");
-                // Open export dialog with calculated timeline endpoint
                 let timeline_endpoint = self.action_executor.document().calculate_timeline_endpoint();
-                // Derive project name from the .beam file path, falling back to document name
                 let project_name = self.current_file_path.as_ref()
                     .and_then(|p| p.file_stem())
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.action_executor.document().name.clone());
-                self.export_dialog.open(timeline_endpoint, &project_name);
+
+                // Build document hint for smart export-type defaulting.
+                let hint = {
+                    use lightningbeam_core::layer::AnyLayer;
+                    use export::dialog::DocumentHint;
+                    fn scan(layers: &[AnyLayer], hint: &mut DocumentHint) {
+                        for l in layers {
+                            match l {
+                                AnyLayer::Video(_)  => hint.has_video  = true,
+                                AnyLayer::Audio(_)  => hint.has_audio  = true,
+                                AnyLayer::Raster(_) => hint.has_raster = true,
+                                AnyLayer::Vector(_) | AnyLayer::Effect(_) => hint.has_vector = true,
+                                AnyLayer::Group(g)  => scan(&g.children, hint),
+                            }
+                        }
+                    }
+                    let doc = self.action_executor.document();
+                    let mut h = DocumentHint {
+                        has_video:    false,
+                        has_audio:    false,
+                        has_raster:   false,
+                        has_vector:   false,
+                        current_time: doc.current_time,
+                        doc_width:    doc.width  as u32,
+                        doc_height:   doc.height as u32,
+                    };
+                    scan(&doc.root.children, &mut h);
+                    h
+                };
+
+                self.export_dialog.open(timeline_endpoint, &project_name, &hint);
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
@@ -5180,6 +5208,17 @@ impl eframe::App for EditorApp {
 
             let export_started = if let Some(orchestrator) = &mut self.export_orchestrator {
                 match export_result {
+                    ExportResult::Image(settings, output_path) => {
+                        println!("🖼 [MAIN] Starting image export: {}", output_path.display());
+                        let doc = self.action_executor.document();
+                        orchestrator.start_image_export(
+                            settings,
+                            output_path,
+                            doc.width  as u32,
+                            doc.height as u32,
+                        );
+                        false // image export is silent (no progress dialog)
+                    }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
 
@@ -5290,6 +5329,7 @@ impl eframe::App for EditorApp {
                     let mut temp_image_cache = lightningbeam_core::renderer::ImageCache::new();
 
                     if let Some(renderer) = &mut temp_renderer {
+                        // Drive incremental video export.
                         if let Ok(has_more) = orchestrator.render_next_video_frame(
                             self.action_executor.document_mut(),
                             device,
@@ -5299,9 +5339,22 @@ impl eframe::App for EditorApp {
                             &self.video_manager,
                         ) {
                             if has_more {
-                                // More frames to render - request repaint for next frame
                                 ctx.request_repaint();
                             }
+                        }
+
+                        // Drive single-frame image export (two-frame async: render then readback).
+                        match orchestrator.render_image_frame(
+                            self.action_executor.document_mut(),
+                            device,
+                            queue,
+                            renderer,
+                            &mut temp_image_cache,
+                            &self.video_manager,
+                        ) {
+                            Ok(false) => { ctx.request_repaint(); } // readback pending
+                            Ok(true)  => {}                          // done or cancelled
+                            Err(e)    => { eprintln!("Image export failed: {e}"); }
                         }
                     }
                 }

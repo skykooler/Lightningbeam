@@ -3,13 +3,29 @@
 //! Provides a user interface for configuring and starting audio/video exports.
 
 use eframe::egui;
-use lightningbeam_core::export::{AudioExportSettings, AudioFormat, VideoExportSettings, VideoCodec, VideoQuality};
+use lightningbeam_core::export::{
+    AudioExportSettings, AudioFormat,
+    ImageExportSettings, ImageFormat,
+    VideoExportSettings, VideoCodec, VideoQuality,
+};
 use std::path::PathBuf;
+
+/// Hint about document content, used to pick a smart default export type.
+pub struct DocumentHint {
+    pub has_video: bool,
+    pub has_audio: bool,
+    pub has_raster: bool,
+    pub has_vector: bool,
+    pub current_time: f64,
+    pub doc_width: u32,
+    pub doc_height: u32,
+}
 
 /// Export type selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportType {
     Audio,
+    Image,
     Video,
 }
 
@@ -17,6 +33,7 @@ pub enum ExportType {
 #[derive(Debug, Clone)]
 pub enum ExportResult {
     AudioOnly(AudioExportSettings, PathBuf),
+    Image(ImageExportSettings, PathBuf),
     VideoOnly(VideoExportSettings, PathBuf),
     VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
 }
@@ -31,6 +48,9 @@ pub struct ExportDialog {
 
     /// Audio export settings
     pub audio_settings: AudioExportSettings,
+
+    /// Image export settings
+    pub image_settings: ImageExportSettings,
 
     /// Video export settings
     pub video_settings: VideoExportSettings,
@@ -55,6 +75,12 @@ pub struct ExportDialog {
 
     /// Output directory
     pub output_dir: PathBuf,
+
+    /// Project name from the last `open()` call — used to detect file switches.
+    current_project: String,
+
+    /// Export type used the last time the user actually clicked Export for `current_project`.
+    last_export_type: Option<ExportType>,
 }
 
 impl Default for ExportDialog {
@@ -71,6 +97,7 @@ impl Default for ExportDialog {
             open: false,
             export_type: ExportType::Audio,
             audio_settings: AudioExportSettings::standard_mp3(),
+            image_settings: ImageExportSettings::default(),
             video_settings: VideoExportSettings::default(),
             include_audio: true,
             output_path: None,
@@ -78,23 +105,52 @@ impl Default for ExportDialog {
             show_advanced: false,
             selected_video_preset: 0,
             output_filename: String::new(),
+            current_project: String::new(),
+            last_export_type: None,
             output_dir: music_dir,
         }
     }
 }
 
 impl ExportDialog {
-    /// Open the dialog with default settings
-    pub fn open(&mut self, timeline_duration: f64, project_name: &str) {
+    /// Open the dialog with default settings, using `hint` to pick a smart default tab.
+    pub fn open(&mut self, timeline_duration: f64, project_name: &str, hint: &DocumentHint) {
         self.open = true;
         self.audio_settings.end_time = timeline_duration;
         self.video_settings.end_time = timeline_duration;
+        self.image_settings.time     = hint.current_time;
+        // Propagate document dimensions as defaults (None means "use doc size").
+        self.image_settings.width  = None;
+        self.image_settings.height = None;
         self.error_message = None;
 
-        // Pre-populate filename from project name if not already set
+        // Determine export type: prefer the type used last time for this file,
+        // then fall back to document-content hints.
+        let same_project = self.current_project == project_name;
+        self.export_type = if same_project && self.last_export_type.is_some() {
+            self.last_export_type.unwrap()
+        } else {
+            let only_audio  = hint.has_audio  && !hint.has_video && !hint.has_raster && !hint.has_vector;
+            let only_raster = hint.has_raster && !hint.has_video && !hint.has_audio  && !hint.has_vector;
+            if hint.has_video        { ExportType::Video }
+            else if only_audio       { ExportType::Audio }
+            else if only_raster      { ExportType::Image }
+            else                     { self.export_type  } // keep current as fallback
+        };
+        self.current_project = project_name.to_owned();
+
+        // Pre-populate filename from project name if not already set.
         if self.output_filename.is_empty() || !self.output_filename.contains(project_name) {
-            let ext = self.audio_settings.format.extension();
-            self.output_filename = format!("{}.{}", project_name, ext);
+            self.output_filename = format!("{}.{}", project_name, self.current_extension());
+        }
+    }
+
+    /// Extension for the currently selected export type.
+    fn current_extension(&self) -> &'static str {
+        match self.export_type {
+            ExportType::Audio => self.audio_settings.format.extension(),
+            ExportType::Image => self.image_settings.format.extension(),
+            ExportType::Video => self.video_settings.codec.container_format(),
         }
     }
 
@@ -106,10 +162,7 @@ impl ExportDialog {
 
     /// Update the filename extension to match the current format
     fn update_filename_extension(&mut self) {
-        let ext = match self.export_type {
-            ExportType::Audio => self.audio_settings.format.extension(),
-            ExportType::Video => self.video_settings.codec.container_format(),
-        };
+        let ext = self.current_extension();
         // Replace extension in filename
         if let Some(dot_pos) = self.output_filename.rfind('.') {
             self.output_filename.truncate(dot_pos + 1);
@@ -138,6 +191,7 @@ impl ExportDialog {
 
         let window_title = match self.export_type {
             ExportType::Audio => "Export Audio",
+            ExportType::Image => "Export Image",
             ExportType::Video => "Export Video",
         };
 
@@ -156,11 +210,14 @@ impl ExportDialog {
 
                 // Export type selection (tabs)
                 ui.horizontal(|ui| {
-                    if ui.selectable_value(&mut self.export_type, ExportType::Audio, "Audio").clicked() {
-                        self.update_filename_extension();
-                    }
-                    if ui.selectable_value(&mut self.export_type, ExportType::Video, "Video").clicked() {
-                        self.update_filename_extension();
+                    for (variant, label) in [
+                        (ExportType::Audio, "Audio"),
+                        (ExportType::Image, "Image"),
+                        (ExportType::Video, "Video"),
+                    ] {
+                        if ui.selectable_value(&mut self.export_type, variant, label).clicked() {
+                            self.update_filename_extension();
+                        }
                     }
                 });
 
@@ -171,6 +228,7 @@ impl ExportDialog {
                 // Basic settings
                 match self.export_type {
                     ExportType::Audio => self.render_audio_basic(ui),
+                    ExportType::Image => self.render_image_settings(ui),
                     ExportType::Video => self.render_video_basic(ui),
                 }
 
@@ -188,6 +246,7 @@ impl ExportDialog {
                     ui.add_space(8.0);
                     match self.export_type {
                         ExportType::Audio => self.render_audio_advanced(ui),
+                        ExportType::Image => self.render_image_advanced(ui),
                         ExportType::Video => self.render_video_advanced(ui),
                     }
                 }
@@ -257,6 +316,62 @@ impl ExportDialog {
                     }
                 }
             }
+        });
+    }
+
+    /// Render basic image export settings (format, quality, transparency).
+    fn render_image_settings(&mut self, ui: &mut egui::Ui) {
+        // Format
+        ui.horizontal(|ui| {
+            ui.label("Format:");
+            let prev = self.image_settings.format;
+            egui::ComboBox::from_id_salt("image_format")
+                .selected_text(self.image_settings.format.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.image_settings.format, ImageFormat::Png,  "PNG");
+                    ui.selectable_value(&mut self.image_settings.format, ImageFormat::Jpeg, "JPEG");
+                    ui.selectable_value(&mut self.image_settings.format, ImageFormat::WebP, "WebP");
+                });
+            if self.image_settings.format != prev {
+                self.update_filename_extension();
+            }
+        });
+
+        // Quality (JPEG / WebP only)
+        if self.image_settings.format.has_quality() {
+            ui.horizontal(|ui| {
+                ui.label("Quality:");
+                ui.add(egui::Slider::new(&mut self.image_settings.quality, 1..=100));
+            });
+        }
+
+        // Transparency (PNG / WebP only — JPEG has no alpha)
+        if self.image_settings.format != ImageFormat::Jpeg {
+            ui.checkbox(&mut self.image_settings.allow_transparency, "Allow transparency");
+        }
+    }
+
+    /// Render advanced image export settings (time, resolution override).
+    fn render_image_advanced(&mut self, ui: &mut egui::Ui) {
+        // Time (which frame to export)
+        ui.horizontal(|ui| {
+            ui.label("Time:");
+            ui.add(egui::DragValue::new(&mut self.image_settings.time)
+                .speed(0.01)
+                .range(0.0..=f64::MAX)
+                .suffix(" s"));
+        });
+
+        // Resolution override (None = use document size; 0 means "use doc size")
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            let mut w = self.image_settings.width.unwrap_or(0);
+            let mut h = self.image_settings.height.unwrap_or(0);
+            let changed_w = ui.add(egui::DragValue::new(&mut w).range(0..=u32::MAX).prefix("W ")).changed();
+            let changed_h = ui.add(egui::DragValue::new(&mut h).range(0..=u32::MAX).prefix("H ")).changed();
+            if changed_w { self.image_settings.width  = if w == 0 { None } else { Some(w) }; }
+            if changed_h { self.image_settings.height = if h == 0 { None } else { Some(h) }; }
+            ui.weak("(0 = document size)");
         });
     }
 
@@ -419,6 +534,7 @@ impl ExportDialog {
     fn render_time_range(&mut self, ui: &mut egui::Ui) {
         let (start_time, end_time) = match self.export_type {
             ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
+            ExportType::Image => return, // image uses a single time field, not a range
             ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
         };
 
@@ -440,26 +556,35 @@ impl ExportDialog {
         ui.label(format!("Duration: {:.2} seconds", duration));
     }
 
-    /// Render output file selection UI
+    /// Render output file selection UI — single OS save-file dialog.
     fn render_output_selection(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            // Show the current path (truncated if long).
+            let full_path = self.build_output_path();
+            let path_str = full_path.display().to_string();
             ui.label("Save to:");
-            let dir_text = self.output_dir.display().to_string();
-            ui.label(&dir_text);
-            if ui.button("Change...").clicked() {
-                if let Some(dir) = rfd::FileDialog::new()
-                    .set_directory(&self.output_dir)
-                    .pick_folder()
-                {
-                    self.output_dir = dir;
-                }
-            }
+            ui.add(egui::Label::new(
+                egui::RichText::new(&path_str).weak()
+            ).truncate());
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Filename:");
-            ui.text_edit_singleline(&mut self.output_filename);
-        });
+        if ui.button("Choose location...").clicked() {
+            let ext = self.current_extension();
+            let mut dialog = rfd::FileDialog::new()
+                .set_directory(&self.output_dir)
+                .set_file_name(&self.output_filename)
+                .add_filter(ext.to_uppercase(), &[ext]);
+            if let Some(path) = dialog.save_file() {
+                if let Some(dir) = path.parent() {
+                    self.output_dir = dir.to_path_buf();
+                }
+                if let Some(name) = path.file_name() {
+                    self.output_filename = name.to_string_lossy().into_owned();
+                    // Ensure the extension matches the selected format.
+                    self.update_filename_extension();
+                }
+            }
+        }
     }
 
     /// Handle export button click
@@ -471,7 +596,17 @@ impl ExportDialog {
 
         let output_path = self.output_path.clone().unwrap();
 
+        // Remember this export type for next time this file is opened.
+        self.last_export_type = Some(self.export_type);
+
         let result = match self.export_type {
+            ExportType::Image => {
+                if let Err(err) = self.image_settings.validate() {
+                    self.error_message = Some(err);
+                    return None;
+                }
+                Some(ExportResult::Image(self.image_settings.clone(), output_path))
+            }
             ExportType::Audio => {
                 // Validate audio settings
                 if let Err(err) = self.audio_settings.validate() {
