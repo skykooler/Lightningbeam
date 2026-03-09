@@ -4292,6 +4292,11 @@ impl StagePane {
             }
         }
 
+        // Store the extracted DCEL as the clipboard-ready vector subgraph.
+        // This allows clipboard_copy_selection to serialize it without needing
+        // to re-extract geometry from the live DCEL.
+        shared.selection.vector_subgraph = Some(selected_dcel.clone());
+
         // Store region selection state with extracted DCEL
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
             region_path,

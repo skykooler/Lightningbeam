@@ -8,7 +8,7 @@
 //! different intersection positions for the same crossing.
 
 use super::{
-    subsegment_cubic, Dcel, EdgeId, FaceId, HalfEdgeId, VertexId,
+    subsegment_cubic, Dcel, EdgeId, FaceId, VertexId,
 };
 use crate::curve_intersections::find_curve_intersections;
 use crate::shape::{ShapeColor, StrokeStyle};
@@ -379,6 +379,13 @@ impl Dcel {
         }
 
         // 2. Check against all other edges
+        //
+        // Collect (seg_t_on_edge_id, vertex, point, other_tail) for each
+        // intersection so that we can also split edge_id after processing all
+        // other edges.  `other_tail` is the sub-edge of the other edge that
+        // starts at `vertex` (going forward) — used for sector-based face repair.
+        let mut edge_id_splits: Vec<(f64, VertexId, Point, EdgeId)> = Vec::new();
+
         let edge_count = self.edges.len();
         for other_idx in 0..edge_count {
             if self.edges[other_idx].deleted {
@@ -417,11 +424,11 @@ impl Dcel {
                 continue;
             }
 
-            // Sort by edge_t descending — split from end first
+            // Sort by edge_t descending — split other_id from end first
             hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
             let mut head_end = 1.0_f64;
-            for (_seg_t, original_edge_t, point) in hits {
+            for (seg_t, original_edge_t, point) in hits {
                 let remapped_t = (original_edge_t / head_end)
                     .clamp(ENDPOINT_T_MARGIN, 1.0 - ENDPOINT_T_MARGIN);
 
@@ -431,7 +438,62 @@ impl Dcel {
                 self.snap_edge_endpoints_to_vertex(new_edge, vertex);
 
                 created.push((vertex, new_edge));
+                // Record this intersection for splitting edge_id below.
+                // `new_edge` is other_tail: the sub-edge of other_id going
+                // forward from vertex, used for sector-based face repair.
+                edge_id_splits.push((seg_t, vertex, point, new_edge));
                 head_end = original_edge_t;
+            }
+        }
+
+        // 3. Split edge_id at every intersection point found above.
+        //
+        // We reuse the vertices already created for the other-edge splits so
+        // the two sides of each crossing share exactly one vertex.
+        //
+        // After all splits, each crossing vertex has 4 outgoing half-edges
+        // whose angular ordering was not maintained by the mechanical splices.
+        // Call rebuild_vertex_fan + repair_face_cycles_at_vertex to fix this
+        // (same pattern as the self-intersection case above).
+        if !edge_id_splits.is_empty() {
+            // Sort by seg_t descending — split edge_id from end first so
+            // edge_id always remains the head piece [0 .. current_split_t].
+            edge_id_splits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+            // Collect (vertex, editing_tail, other_tail) for sector-based repair.
+            // editing_tail = sub-edge of edge_id going forward from vertex.
+            // other_tail   = sub-edge of the other edge going forward from vertex.
+            let mut touched_info: Vec<(VertexId, EdgeId, EdgeId)> = Vec::new();
+
+            let mut head_end = 1.0_f64;
+            for (original_seg_t, vertex, point, other_tail) in edge_id_splits {
+                if self.edges[edge_id.idx()].deleted {
+                    break;
+                }
+                let remapped_t = (original_seg_t / head_end)
+                    .clamp(ENDPOINT_T_MARGIN, 1.0 - ENDPOINT_T_MARGIN);
+
+                let (_, editing_tail) = self.split_edge_at_vertex(edge_id, remapped_t, vertex);
+                // Snap both pieces to the exact intersection point.
+                self.vertices[vertex.idx()].position = point;
+                self.snap_edge_endpoints_to_vertex(edge_id, vertex);
+                self.snap_edge_endpoints_to_vertex(editing_tail, vertex);
+
+                created.push((vertex, editing_tail));
+                // Only the first crossing for each vertex is repaired; extra
+                // crossings at the same vertex are uncommon and fall back to
+                // the basic fan rebuild inside repair_crossing_vertex.
+                if !touched_info.iter().any(|&(v, _, _)| v == vertex) {
+                    touched_info.push((vertex, editing_tail, other_tail));
+                }
+                head_end = original_seg_t;
+            }
+
+            // Use sector-based face assignment: for each crossing vertex,
+            // rebuild the angular fan and assign faces using the tangent
+            // cross-product rule (editing face wins the overlap region).
+            for (v, editing_tail, other_tail) in touched_info {
+                self.repair_crossing_vertex(v, editing_tail, other_tail);
             }
         }
 

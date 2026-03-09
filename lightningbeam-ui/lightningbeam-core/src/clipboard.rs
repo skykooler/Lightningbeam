@@ -123,13 +123,13 @@ pub enum ClipboardContent {
 
     /// Selected DCEL geometry from a vector layer.
     ///
-    /// Currently a stub — `data` is opaque bytes whose format is TBD in Phase 2
-    /// once DCEL serialization is implemented.  Copy/paste of vector shapes does
-    /// nothing until then.  Secondary formats (`image/svg+xml`, `image/png`) are
-    /// also deferred to Phase 2.
+    /// `dcel_json` is the serialized subgraph (serde_json of [`crate::dcel2::Dcel`]).
+    /// `svg_xml` is an SVG rendering of the same geometry for cross-app paste.
     VectorGeometry {
-        /// Opaque DCEL subgraph bytes (format TBD, Phase 2).
-        data: Vec<u8>,
+        /// JSON-serialized DCEL subgraph.
+        dcel_json: String,
+        /// SVG representation for cross-app paste (e.g. into Inkscape).
+        svg_xml: String,
     },
 
     /// MIDI notes from the piano roll.
@@ -225,11 +225,14 @@ impl ClipboardContent {
             }
 
             // ── VectorGeometry ──────────────────────────────────────────────
-            // TODO (Phase 2): remap DCEL vertex/edge UUIDs once DCEL serialization
-            // is defined.
-            ClipboardContent::VectorGeometry { data } => {
-                (ClipboardContent::VectorGeometry { data: data.clone() }, id_map)
-            }
+            // DCEL uses integer indices (not UUIDs), so no remapping is needed.
+            ClipboardContent::VectorGeometry { dcel_json, svg_xml } => (
+                ClipboardContent::VectorGeometry {
+                    dcel_json: dcel_json.clone(),
+                    svg_xml: svg_xml.clone(),
+                },
+                id_map,
+            ),
 
             // ── MidiNotes ───────────────────────────────────────────────────
             ClipboardContent::MidiNotes { notes } => {
@@ -540,13 +543,17 @@ impl ClipboardManager {
     pub fn copy(&mut self, content: ClipboardContent) {
         let json = serde_json::to_string(&content).unwrap_or_default();
 
-        // Build platform entries (custom MIME always present; PNG secondary for raster).
+        // Build platform entries (custom MIME always present; secondary formats for
+        // specific content types: PNG for raster, SVG for vector geometry).
         let mut entries: Vec<(&str, Vec<u8>)> =
             vec![(LIGHTNINGBEAM_MIME, json.as_bytes().to_vec())];
         if let ClipboardContent::RasterPixels { pixels, width, height } = &content {
             if let Some(png) = encode_raster_as_png(pixels, *width, *height) {
                 entries.push(("image/png", png));
             }
+        }
+        if let ClipboardContent::VectorGeometry { svg_xml, .. } = &content {
+            entries.push(("image/svg+xml", svg_xml.as_bytes().to_vec()));
         }
 
         clipboard_platform::set(

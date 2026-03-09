@@ -431,7 +431,7 @@ impl Dcel {
     }
 
     /// Set the face of every half-edge in the cycle starting at `start`.
-    fn assign_cycle_face(&mut self, start: HalfEdgeId, face: FaceId) {
+    pub(crate) fn assign_cycle_face(&mut self, start: HalfEdgeId, face: FaceId) {
         self.half_edges[start.idx()].face = face;
         let mut cur = self.half_edges[start.idx()].next;
         let mut steps = 0;
@@ -906,6 +906,106 @@ impl Dcel {
         }
 
         new_faces
+    }
+
+    /// Repair face assignments at a vertex where `editing_tail` (a sub-edge of
+    /// the edge being dragged) and `other_tail` (a sub-edge of the other edge)
+    /// meet after a crossing split.
+    ///
+    /// The face to the LEFT of each tail's forward direction is used to classify
+    /// sectors at `vertex`. "Editing face wins" on overlap: sectors to the left
+    /// of the editing edge's tangent get `face_a`; remaining sectors to the left
+    /// of the other edge's tangent get `face_b`; all others are exterior (F0).
+    ///
+    /// Steps:
+    /// 1. Read face/tangent for each tail's forward half-edge (before they change).
+    /// 2. `rebuild_vertex_fan` — sort all outgoing half-edges CCW.
+    /// 3. For each angular sector, compute the face from tangent cross products.
+    /// 4. `assign_cycle_face(twin(outgoing[i]), sector_face[i])` for each sector.
+    /// 5. If a face appears in two sectors, the second sector gets a new sub-face
+    ///    with the same fill colour.
+    pub fn repair_crossing_vertex(
+        &mut self,
+        vertex: VertexId,
+        editing_tail: EdgeId,
+        other_tail: EdgeId,
+    ) {
+        use std::collections::HashMap;
+
+        // Read face and tangent direction BEFORE any relinking.
+        // editing_tail.half_edges[0] is the forward HE starting at vertex;
+        // face_a = face to the LEFT of the editing edge's forward direction.
+        let he_a = self.edges[editing_tail.idx()].half_edges[0];
+        let face_a = self.half_edges[he_a.idx()].face;
+        let angle_a = self.outgoing_angle(he_a);
+        let ta = (angle_a.cos(), angle_a.sin());
+
+        let he_b = self.edges[other_tail.idx()].half_edges[0];
+        let face_b = self.half_edges[he_b.idx()].face;
+        let angle_b = self.outgoing_angle(he_b);
+        let tb = (angle_b.cos(), angle_b.sin());
+
+        // Sort outgoing half-edges CCW.
+        self.rebuild_vertex_fan(vertex);
+
+        let outgoing = self.vertex_outgoing(vertex);
+        let n = outgoing.len();
+        if n < 2 {
+            return;
+        }
+
+        // Assign face to each angular sector.
+        // Sector i lies between outgoing[i] and outgoing[(i+1)%n] (CCW).
+        // After rebuild_vertex_fan, twin(outgoing[i]).next = outgoing[(i+1)%n],
+        // so the cycle starting at twin(outgoing[i]) borders sector i.
+        let mut face_first_cycle: HashMap<u32, HalfEdgeId> = HashMap::new();
+
+        for i in 0..n {
+            let he_i = outgoing[i];
+            let he_next = outgoing[(i + 1) % n];
+
+            // Midpoint direction of the CCW angular gap between outgoing[i] and outgoing[i+1].
+            let ai = self.outgoing_angle(he_i);
+            let an = self.outgoing_angle(he_next);
+            let mut delta = an - ai;
+            if delta <= 0.0 {
+                delta += 2.0 * std::f64::consts::PI;
+            }
+            let mid_angle = ai + delta / 2.0;
+            let d = (mid_angle.cos(), mid_angle.sin());
+
+            // cross(t, d) > 0  ⟺  d is to the LEFT of t  ⟺  inside that edge's face.
+            let cross_a = ta.0 * d.1 - ta.1 * d.0;
+            let cross_b = tb.0 * d.1 - tb.1 * d.0;
+
+            let sector_face = if cross_a > 0.0 {
+                face_a // editing face wins; also covers the overlap region
+            } else if cross_b > 0.0 {
+                face_b
+            } else {
+                FaceId(0) // exterior
+            };
+
+            let twin_i = self.half_edges[he_i.idx()].twin;
+
+            if sector_face.0 == 0 {
+                self.assign_cycle_face(twin_i, FaceId(0));
+            } else if face_first_cycle.contains_key(&sector_face.0) {
+                // Second occurrence: create a new sub-face with the same fill.
+                let nf = self.alloc_face();
+                let src = sector_face;
+                self.faces[nf.idx()].fill_color = self.faces[src.idx()].fill_color;
+                self.faces[nf.idx()].image_fill = self.faces[src.idx()].image_fill;
+                self.faces[nf.idx()].fill_rule = self.faces[src.idx()].fill_rule;
+                self.faces[nf.idx()].outer_half_edge = twin_i;
+                self.assign_cycle_face(twin_i, nf);
+            } else {
+                face_first_cycle.insert(sector_face.0, twin_i);
+                self.assign_cycle_face(twin_i, sector_face);
+                // Keep outer_half_edge valid for the original face.
+                self.faces[sector_face.idx()].outer_half_edge = twin_i;
+            }
+        }
     }
 
     /// Merge vertex `v_remove` into `v_keep`. Both must be at the same position

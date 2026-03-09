@@ -11,6 +11,9 @@ pub mod topology;
 pub mod query;
 pub mod stroke;
 pub mod region;
+pub mod import;
+
+pub use import::extract_faces_for_edges;
 
 use crate::shape::{FillRule, ShapeColor, StrokeStyle};
 use kurbo::{CubicBez, Point};

@@ -47,6 +47,7 @@ pub(crate) mod clipboard_platform;
 pub mod region_select;
 pub mod dcel2;
 pub use dcel2 as dcel;
+pub mod svg_export;
 pub mod snap;
 pub mod webcam;
 pub mod raster_layer;

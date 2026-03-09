@@ -159,6 +159,14 @@ pub struct Selection {
     /// Transient UI state — not persisted.
     #[serde(skip)]
     pub raster_floating: Option<RasterFloatingSelection>,
+
+    /// Standalone DCEL subgraph ready for clipboard operations.
+    ///
+    /// Set when a region selection is committed (contains the extracted geometry).
+    /// Cleared when the selection is cleared. Used by clipboard_copy_selection
+    /// to avoid re-extracting the geometry from the live DCEL.
+    #[serde(skip)]
+    pub vector_subgraph: Option<Dcel>,
 }
 
 impl Selection {
@@ -171,6 +179,7 @@ impl Selection {
             selected_clip_instances: Vec::new(),
             raster_selection: None,
             raster_floating: None,
+            vector_subgraph: None,
         }
     }
 
@@ -313,6 +322,7 @@ impl Selection {
         self.selected_vertices.clear();
         self.selected_edges.clear();
         self.selected_faces.clear();
+        self.vector_subgraph = None;
     }
 
     /// Check if any DCEL elements are selected.
@@ -406,6 +416,7 @@ impl Selection {
         self.selected_clip_instances.clear();
         self.raster_selection = None;
         self.raster_floating = None;
+        self.vector_subgraph = None;
     }
 
     /// Check if selection is empty
