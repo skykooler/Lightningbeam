@@ -549,7 +549,7 @@ fn render_background(document: &Document, scene: &mut Scene, base_transform: Aff
 
     // Draw checkerboard behind transparent backgrounds (UI-only; skip in export)
     if draw_checkerboard && bg.a < 255 {
-        use vello::peniko::{Blob, Color, Extend, ImageAlphaType, ImageData, ImageQuality};
+        use vello::peniko::{Blob, Extend, ImageAlphaType, ImageData, ImageQuality};
         // 2x2 pixel checkerboard pattern: light/dark alternating
         let light: [u8; 4] = [204, 204, 204, 255];
         let dark: [u8; 4] = [170, 170, 170, 255];
@@ -1091,7 +1091,7 @@ pub fn render_dcel(
         // Gradient fill (takes priority over solid colour fill)
         if !filled {
             if let Some(ref grad) = face.gradient_fill {
-                use kurbo::{Point, Rect};
+                use kurbo::Rect;
                 let bbox: Rect = vello::kurbo::Shape::bounding_box(&path);
                 let (start, end) = gradient_bbox_endpoints(grad.angle, bbox);
                 let brush = grad.to_peniko_brush(start, end, opacity_f32);

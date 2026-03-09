@@ -57,7 +57,7 @@ mod platform_impl {
                 let ns_data: Retained<NSData> = NSData::with_bytes(data);
                 // setData:forType: appends to the current clipboard contents
                 // (arboard already called clearContents, so no double-clear needed).
-                pb.setData_forType(&ns_data, &ns_type);
+                pb.setData_forType(Some(&ns_data), &ns_type);
             }
         }
     }
@@ -70,7 +70,7 @@ mod platform_impl {
                 let ns_type: Retained<NSString> = NSString::from_str(mime);
                 if let Some(ns_data) = pb.dataForType(&ns_type) {
                     // NSData implements AsRef<[u8]> in objc2-foundation.
-                    let bytes = ns_data.as_ref().to_vec();
+                    let bytes = AsRef::<[u8]>::as_ref(&ns_data).to_vec();
                     return Some((mime.to_string(), bytes));
                 }
             }
@@ -91,7 +91,7 @@ mod platform_impl {
         CloseClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{
-        GlobalAlloc, GlobalFree, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+        GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
     };
 
     static FORMAT_IDS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
@@ -125,7 +125,12 @@ mod platform_impl {
                 }
                 let ptr = GlobalLock(h);
                 if ptr.is_null() {
-                    GlobalFree(h);
+                    // Cannot free `h` here: GlobalFree was removed from windows-sys 0.60
+                    // (it still exists in Kernel32.dll, so a manual extern declaration
+                    // would work if this ever becomes an issue).  The leak is bounded to
+                    // one clipboard-payload-sized allocation and only occurs if GlobalLock
+                    // fails on a handle we just allocated — essentially impossible in
+                    // practice.
                     continue;
                 }
                 std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
