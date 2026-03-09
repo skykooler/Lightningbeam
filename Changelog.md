@@ -1,3 +1,27 @@
+# 1.0.2-alpha:
+Changes:
+- All vector shapes on a layer go into a unified shape rather than separate shapes
+- Keyboard shortcuts are now user-configurable
+- Added webcam support in video editor
+- Background can now be transparent
+- Video thumbnails are now displayed on the clip
+- Virtual keyboard, piano roll and node editor now have a quick switcher
+- Add electric guitar preset
+- Layers can now be grouped
+- Layers can be reordered by dragging
+- Added VU meters to audio layers and mix
+- Added raster image editing
+- Added brush, airbrush, dodge/burn, sponge, pattern stamp, healing brush, clone stamp, blur/sharpen, magic wand and quick select tools
+- Added support for MyPaint .myb brushes
+- UI now uses CSS styling to support future user styles
+- Added image export
+
+Bugfixes:
+- Toolbar now only shows tools that can be used on the current layer
+- Fix NAM model loading
+- Fix menu width and mouse following
+- Export dialog now remembers the previous export filename
+
 # 1.0.1-alpha:
 Changes:
 - Added real-time amp simulation via NAM
